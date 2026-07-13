@@ -15,7 +15,7 @@ Baseline date: 2026-07-13 (Asia/Shanghai)
 | Target server | Read-only SSH succeeded as `root`; hostname is `VM-0-6-ubuntu` | Confirmed 2026-07-13 |
 | Runtime services | `odoo19.service` and `sudo-pi-agent-bridge.service` reported active | Confirmed 2026-07-13 |
 | Server V2 | `/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v2`, owned by `odoo:odoo`; package metadata says `0.1.0`; no Git metadata | Confirmed, untraceable source |
-| Server V3 | `/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v3` does not exist | Confirmed absent |
+| Server V3 | Independent root now exists; immutable `0.1.0.dev1-9b270a1e2e0e` candidate is externally anchored and not routed | Installed candidate, rejected by runtime identity gate |
 | Pi Bridge V2 copy | A second complete V2 tree exists under `/mnt/odoo/odoo19/custom/services/pi-agent-bridge/odoo_accounting_agent_cli_v2` | Confirmed duplicate |
 | V2 copy equality | Active source-tree aggregate hashes differ; `commands/backend.py` also differs while both packages report `0.1.0` | Confirmed version collision |
 | Odoo module | Active `sudo_ai_bot` manifest reports `1.2.0`; manifest SHA-256 is `640ddb271cf04067bc5be68de7d7fb8620e9c19a308417295650b3811279d96b` | Confirmed |
@@ -105,6 +105,13 @@ execution receipt.
 - V2 remains unchanged and independently runnable.
 - V3 may consume audited V2 logic only through a documented import/port record;
   copied code must retain provenance and tests.
+
+The first independently deployed candidate, `0.1.0.dev1`, verified its package,
+manifest, commit, ownership, and V2 isolation, but source-mode CLI execution
+reported `version unknown`. It was not linked as current and no Pi/Odoo routing
+was changed. `0.1.0.dev2` adds an externally anchored runtime identity command;
+the failed candidate remains immutable evidence rather than being patched in
+place.
 
 ## Phase-one exit gate
 

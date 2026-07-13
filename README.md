@@ -27,6 +27,7 @@ return a simulated Odoo success.
 ```text
 odoo-accounting-cli-v3 registry list
 odoo-accounting-cli-v3 registry get --capability-id acct.gl.trial_balance.v1
+odoo-accounting-cli-v3 release identity
 odoo-accounting-cli-v3 operation prepare --request-json '{...}'
 ```
 

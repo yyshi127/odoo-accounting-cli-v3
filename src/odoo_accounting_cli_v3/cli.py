@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from importlib import resources
 from pathlib import Path
@@ -12,6 +13,7 @@ import click
 
 from . import __version__
 from .registry import Capability, load_registry, registry_digest, validate_registry
+from .release import ReleaseError, verify_manifest
 
 
 def _json(value: Any) -> str:
@@ -73,6 +75,68 @@ def _load_capabilities() -> tuple[Capability, ...]:
         message="The validated capability registry is not present in this installation.",
         exit_code=4,
     )
+
+
+def _load_release_identity(root: Path | None = None) -> dict[str, Any]:
+    release_root = root or Path(__file__).resolve().parents[2]
+    manifest_path = release_root / "RELEASE-MANIFEST.json"
+    anchor_path = (
+        release_root.parent.parent
+        / "trusted-artifacts"
+        / f"{release_root.name}.json"
+    )
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise CliFailure(
+            command="release.identity",
+            code="release_identity_unavailable",
+            message="The release manifest or external deployment anchor is unavailable.",
+            exit_code=5,
+        ) from exc
+    expected_anchor_fields = {
+        "commit",
+        "manifest_sha256",
+        "package_sha256",
+        "release",
+    }
+    if (
+        not isinstance(anchor, dict)
+        or set(anchor) != expected_anchor_fields
+        or anchor["release"] != release_root.name
+        or anchor["commit"] != manifest.get("commit")
+        or re.fullmatch(r"[0-9a-f]{64}", anchor.get("package_sha256", "")) is None
+    ):
+        raise CliFailure(
+            command="release.identity",
+            code="release_identity_mismatch",
+            message="The deployment anchor does not match this release.",
+            exit_code=5,
+        )
+    try:
+        verify_manifest(
+            release_root,
+            manifest,
+            expected_manifest_sha256=anchor["manifest_sha256"],
+        )
+        capabilities = load_registry(release_root / "registry" / "capabilities.json")
+    except (OSError, ValueError, ReleaseError) as exc:
+        raise CliFailure(
+            command="release.identity",
+            code="release_verification_failed",
+            message="The installed release failed integrity verification.",
+            exit_code=5,
+        ) from exc
+    return {
+        "commit": manifest["commit"],
+        "manifest_sha256": manifest["manifest_sha256"],
+        "package_sha256": anchor["package_sha256"],
+        "registry_digest": registry_digest(capabilities),
+        "release": anchor["release"],
+        "verified": True,
+        "version": manifest["version"],
+    }
 
 
 def _read_request(command: str, request_json: str | None) -> dict[str, Any]:
@@ -139,6 +203,16 @@ def main() -> None:
 @main.group("registry")
 def registry_group() -> None:
     """Inspect the validated local capability registry."""
+
+
+@main.group("release")
+def release_group() -> None:
+    """Inspect the externally anchored release identity."""
+
+
+@release_group.command("identity")
+def release_identity() -> None:
+    _success("release.identity", _load_release_identity())
 
 
 @registry_group.command("list")

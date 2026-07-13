@@ -181,11 +181,12 @@ The presence of test files or commands is not a passing result. Actual runs must
 be recorded in immutable evidence tied to a release; this plan intentionally
 does not pre-fill pass marks.
 
-At the time this plan was formalized:
+At the current local development checkpoint:
 
 - contract/control, receipt, release, and trial-balance unit tests exist;
-- the installable V3 executable and its installed-CLI subprocess suite are not
-  yet evidenced here;
+- the installable V3 executable, JSON registry commands, fail-closed operation
+  commands, and installed-CLI subprocess suite pass locally; release-bound
+  server identity and real-Odoo evidence remain separate gates;
 - the V3 trial-balance adapter has not yet produced a release-bound real-Odoo
   receipt recorded here;
 - no sandbox write lifecycle has been authorized or recorded; and
