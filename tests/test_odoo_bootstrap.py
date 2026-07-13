@@ -142,6 +142,8 @@ def signed_context(**changes):
         "company_id": 7,
         "allowed_company_ids": frozenset({7, 8}),
         "environment": "test",
+        "capability_id": "acct.gl.trial_balance.v1",
+        "parameters": parameters(),
         "issued_at": NOW - timedelta(seconds=5),
         "expires_at": NOW + timedelta(minutes=4),
         "key_id": AUTH_KEY_ID,
@@ -210,6 +212,12 @@ class OdooBootstrapTest(unittest.TestCase):
         context = signed_context(database_name="odoo_sg")
         with self.assertRaisesRegex(OdooBootstrapError, "does not match"):
             self.execute(request_document(context))
+
+    def test_first_use_parameter_tampering_is_rejected_before_odoo_binding(self):
+        request = request_document()
+        request["parameters"]["date_to"] = "2026-11-30"
+        with self.assertRaisesRegex(OdooBootstrapError, "content digest mismatch"):
+            self.execute(request)
 
     def test_superuser_and_excess_company_scope_are_rejected(self):
         with self.assertRaisesRegex(OdooBootstrapError, "superuser"):

@@ -189,11 +189,15 @@ At the current local development checkpoint:
   commands, and local console-script subprocess suite pass; a clean
   artifact-installed environment with source-tree imports removed remains a
   separate gate, as do server identity and real-Odoo execution;
-- the dev2 V3 trial-balance adapter produced a retained, release-bound direct
-  Odoo read receipt and independent financial-oracle match; the dev3 installed
-  CLI, persistent replay, and explicit signature-wire-protocol run is still a
-  separate pending gate;
-- 143 local tests currently pass and four target-Linux gates are intentionally
+- dev2 produced a retained direct Odoo read receipt; dev3 produced a complete
+  installed-CLI receipt matching the independent `136193.63` debit/credit
+  oracle, passed target-Linux resource gates, and rejected cross-process replay,
+  but was deliberately rejected for promotion after review found that its auth
+  signature did not bind capability ID plus parameters before first use;
+- dev4 adds the signed request-content digest; its exact artifact must repeat
+  the target Linux, real Odoo, ACL/company/database, tamper, replay, and Pi gates
+  before any enablement;
+- 146 local tests currently pass and four target-Linux gates are intentionally
   skipped off target, including persistent replay/idempotency,
   strict signature metadata, Odoo bootstrap, runner, receipt, and registry
   cases; this is development evidence, not real-Odoo or production promotion;

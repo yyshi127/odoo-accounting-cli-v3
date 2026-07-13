@@ -11,6 +11,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from odoo_accounting_cli_v3 import __version__
+from odoo_accounting_cli_v3.auth import authentication_request_digest
 from odoo_accounting_cli_v3.cli import main
 from odoo_accounting_cli_v3.odoo.runner import OdooRunnerError, RuntimeConfig
 from odoo_accounting_cli_v3.receipts import create_read_receipt
@@ -31,14 +32,30 @@ REGISTRY_DIGEST = registry_digest(
 
 def request_document() -> dict:
     now = datetime.now(timezone.utc)
+    capability_id = "acct.gl.trial_balance.v1"
+    parameters = {
+        "company_id": 7,
+        "date_from": "2026-01-01",
+        "date_to": "2026-12-31",
+        "opening_basis": "ledger_cumulative",
+        "currency_id": 12,
+        "account_id": None,
+        "include_off_balance": False,
+        "include_zero": False,
+        "limit": 100,
+        "offset": 0,
+    }
     return {
-        "capability_id": "acct.gl.trial_balance.v1",
+        "capability_id": capability_id,
         "context": {
             "allowed_company_ids": [7],
             "audience": "odoo-accounting-cli-v3",
             "auth_expires_at": (now + timedelta(minutes=4)).isoformat(),
             "auth_issued_at": (now - timedelta(seconds=1)).isoformat(),
             "auth_key_id": AUTH_KEY_ID,
+            "auth_request_digest": authentication_request_digest(
+                capability_id, parameters
+            ),
             "auth_signature": "a" * 64,
             "auth_signature_purpose": "auth_context_v1",
             "auth_signature_version": 1,
@@ -51,18 +68,7 @@ def request_document() -> dict:
             "principal": "pi:user-42",
             "user_id": 42,
         },
-        "parameters": {
-            "company_id": 7,
-            "date_from": "2026-01-01",
-            "date_to": "2026-12-31",
-            "opening_basis": "ledger_cumulative",
-            "currency_id": 12,
-            "account_id": None,
-            "include_off_balance": False,
-            "include_zero": False,
-            "limit": 100,
-            "offset": 0,
-        },
+        "parameters": parameters,
     }
 
 

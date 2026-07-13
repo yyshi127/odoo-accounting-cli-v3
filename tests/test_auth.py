@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from odoo_accounting_cli_v3.auth import (
     AuthenticationError,
     MAX_CONTEXT_TTL,
+    authentication_request_digest,
     context_payload,
     sign_request_context,
     verify_request_context,
@@ -17,6 +18,8 @@ from odoo_accounting_cli_v3.operations import canonical_json
 SECRET = b"test-only-auth-secret-32-bytes!!"
 KEY_ID = "auth-key-2026-07"
 NOW = datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc)
+CAPABILITY_ID = "acct.gl.trial_balance.v1"
+PARAMETERS = {"company_id": 7, "date_from": "2026-01-01", "date_to": "2026-12-31"}
 
 
 def signed_context(*, secret=SECRET):
@@ -30,6 +33,8 @@ def signed_context(*, secret=SECRET):
         company_id=7,
         allowed_company_ids=frozenset({7, 8}),
         environment="test",
+        capability_id=CAPABILITY_ID,
+        parameters=PARAMETERS,
         issued_at=NOW - timedelta(seconds=5),
         expires_at=NOW + timedelta(minutes=4),
         key_id=KEY_ID,
@@ -47,6 +52,10 @@ class AuthenticationTest(unittest.TestCase):
         self.assertEqual(context.auth_signature_version, 1)
         self.assertEqual(context.auth_signature_purpose, "auth_context_v1")
         self.assertEqual(context.auth_key_id, KEY_ID)
+        self.assertEqual(
+            context.auth_request_digest,
+            authentication_request_digest(CAPABILITY_ID, PARAMETERS),
+        )
         self.assertTrue(
             verify_request_context(
                 context, now=NOW, secret=SECRET, expected_key_id=KEY_ID
@@ -78,7 +87,8 @@ class AuthenticationTest(unittest.TestCase):
                 odoo_instance_id="odoo19@tokyo2", database_name="odoo_test",
                 database_uuid="11111111-1111-4111-8111-111111111111",
                 user_id=42, company_id=7, allowed_company_ids=frozenset({7}),
-                environment="test", issued_at=NOW,
+                environment="test", capability_id=CAPABILITY_ID,
+                parameters=PARAMETERS, issued_at=NOW,
                 expires_at=NOW + timedelta(minutes=1), key_id="", secret=SECRET,
             )
         with self.assertRaisesRegex(AuthenticationError, "expected key ID is required"):
@@ -132,9 +142,18 @@ class AuthenticationTest(unittest.TestCase):
                 odoo_instance_id="odoo19@tokyo2", database_name="odoo_test",
                 database_uuid=context.database_uuid, user_id=42, company_id=7,
                 allowed_company_ids=frozenset({7}), environment="test",
+                capability_id=CAPABILITY_ID, parameters=PARAMETERS,
                 issued_at=NOW, expires_at=NOW + MAX_CONTEXT_TTL + timedelta(seconds=1),
                 key_id=KEY_ID,
                 secret=SECRET,
+            )
+
+    def test_request_content_digest_is_signed(self) -> None:
+        context = signed_context()
+        tampered = replace(context, auth_request_digest="c" * 64)
+        with self.assertRaisesRegex(AuthenticationError, "signature mismatch"):
+            verify_request_context(
+                tampered, now=NOW, secret=SECRET, expected_key_id=KEY_ID
             )
 
 

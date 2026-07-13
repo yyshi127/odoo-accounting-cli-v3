@@ -13,6 +13,7 @@ from typing import Any, NoReturn
 import click
 
 from . import __version__
+from .auth import authentication_request_digest
 from .contracts import ContractError, validate_value
 from .odoo.runner import (
     OdooRunnerError,
@@ -187,6 +188,10 @@ def _assert_verified_read_result(
         )
     try:
         capability_id = request["capability_id"]
+        if context["auth_request_digest"] != authentication_request_digest(
+            capability_id, request["parameters"]
+        ):
+            raise ValueError("authenticated request content digest mismatch")
         capabilities = load_registry(config.release_root / "registry" / "capabilities.json")
         capability = next(item for item in capabilities if item.id == capability_id)
         validate_value(result, capability.data["output_schema"])

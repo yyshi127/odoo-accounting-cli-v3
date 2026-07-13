@@ -32,6 +32,7 @@ class RequestContext:
     auth_signature_version: int
     auth_signature_purpose: str
     auth_key_id: str
+    auth_request_digest: str
     auth_signature: str
     principal: str
     odoo_instance_id: str
@@ -66,6 +67,11 @@ class RequestContext:
             raise GatewayError("authentication signature purpose is invalid")
         if not isinstance(self.auth_key_id, str) or not self.auth_key_id.strip():
             raise GatewayError("authentication key ID is required")
+        if (
+            not isinstance(self.auth_request_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", self.auth_request_digest) is None
+        ):
+            raise GatewayError("authentication request digest must be a lowercase SHA-256 digest")
         if not isinstance(self.auth_signature, str) or re.fullmatch(r"[0-9a-f]{64}", self.auth_signature) is None:
             raise GatewayError("authentication signature must be a lowercase SHA-256 HMAC")
         if not isinstance(self.principal, str) or not self.principal.strip():

@@ -6,10 +6,13 @@ import json
 import sys
 from pathlib import Path
 
-from odoo_accounting_cli_v3.release import ReleaseError, verify_manifest
-
 
 def main() -> int:
+    # Verification must not create __pycache__ inside the immutable tree it is
+    # checking; otherwise the verifier would invalidate its own file-set gate.
+    sys.dont_write_bytecode = True
+    from odoo_accounting_cli_v3.release import ReleaseError, verify_manifest
+
     if len(sys.argv) != 3:
         print(
             "usage: verify_release.py EXTRACTED_RELEASE_DIR EXPECTED_MANIFEST_SHA256",

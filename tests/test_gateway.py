@@ -36,6 +36,7 @@ def context(user_id: int = 42, company_id: int = 7, database_uuid: str = DATABAS
         auth_signature_version=1,
         auth_signature_purpose="auth_context_v1",
         auth_key_id=AUTH_KEY_ID,
+        auth_request_digest="b" * 64,
         auth_signature="a" * 64,
         principal=f"pi:test-user-{user_id}",
         odoo_instance_id="odoo19@tokyo2",
@@ -116,6 +117,7 @@ class GatewayTest(unittest.TestCase):
             ("auth_signature_version", 2, "version"),
             ("auth_signature_purpose", "read_receipt_v1", "purpose"),
             ("auth_key_id", "", "key ID"),
+            ("auth_request_digest", "not-a-digest", "request digest"),
         ):
             with self.subTest(field=field):
                 values = context().__dict__.copy()

@@ -54,6 +54,7 @@ def context(**changes):
         "auth_signature_version": 1,
         "auth_signature_purpose": "auth_context_v1",
         "auth_key_id": "test-auth-2026-07",
+        "auth_request_digest": "b" * 64,
         "auth_signature": "a" * 64,
         "principal": "pi:user-42",
         "odoo_instance_id": "odoo19@tokyo2",

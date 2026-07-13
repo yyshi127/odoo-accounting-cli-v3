@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
-from ..auth import verify_request_context
+from ..auth import authentication_request_digest, verify_request_context
 from ..gateway import CapabilityGateway, RequestContext
 from ..operations import canonical_json
 from ..registry import Capability
@@ -25,6 +26,7 @@ CONTEXT_FIELDS = {
     "auth_expires_at",
     "auth_issued_at",
     "auth_key_id",
+    "auth_request_digest",
     "auth_signature",
     "auth_signature_purpose",
     "auth_signature_version",
@@ -71,6 +73,7 @@ def request_context_from_mapping(value: Any) -> RequestContext:
         auth_signature_version=value["auth_signature_version"],
         auth_signature_purpose=value["auth_signature_purpose"],
         auth_key_id=value["auth_key_id"],
+        auth_request_digest=value["auth_request_digest"],
         auth_signature=value["auth_signature"],
         principal=value["principal"],
         odoo_instance_id=value["odoo_instance_id"],
@@ -181,6 +184,13 @@ def execute_read_from_odoo_shell(
         secret=auth_secret,
         expected_key_id=auth_key_id,
     )
+    expected_content_digest = authentication_request_digest(
+        capability_id, parameters
+    )
+    if not hmac.compare_digest(
+        context.auth_request_digest, expected_content_digest
+    ):
+        raise OdooBootstrapError("signed request content digest mismatch")
     bound_env = bind_non_superuser_environment(
         root_env,
         context,

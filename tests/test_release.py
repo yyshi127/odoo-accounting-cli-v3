@@ -1,3 +1,8 @@
+import json
+import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,6 +11,7 @@ from odoo_accounting_cli_v3.release import ReleaseError, ReleaseIdentity, source
 
 
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseTest(unittest.TestCase):
@@ -84,6 +90,45 @@ class ReleaseTest(unittest.TestCase):
             forged = source_manifest(root, [source], ReleaseIdentity("1.2.3", COMMIT))
             with self.assertRaisesRegex(ReleaseError, "external trust anchor"):
                 verify_manifest(root, forged, expected_manifest_sha256=anchor)
+
+    def test_verifier_does_not_invalidate_release_with_bytecode(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package = root / "src" / "odoo_accounting_cli_v3"
+            tools = root / "tools"
+            package.mkdir(parents=True)
+            tools.mkdir()
+            sources = []
+            for relative in (
+                Path("src/odoo_accounting_cli_v3/__init__.py"),
+                Path("src/odoo_accounting_cli_v3/release.py"),
+                Path("tools/verify_release.py"),
+            ):
+                destination = root / relative
+                shutil.copy2(PROJECT_ROOT / relative, destination)
+                sources.append(destination)
+            manifest = source_manifest(
+                root, sources, ReleaseIdentity("1.2.3", COMMIT)
+            )
+            (root / "RELEASE-MANIFEST.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            environment = {**os.environ, "PYTHONPATH": str(root / "src")}
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(tools / "verify_release.py"),
+                    str(root),
+                    manifest["manifest_sha256"],
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+                env=environment,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(list(root.rglob("__pycache__")), [])
 
 
 if __name__ == "__main__":

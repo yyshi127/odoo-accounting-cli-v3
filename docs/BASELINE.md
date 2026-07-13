@@ -15,7 +15,7 @@ Baseline date: 2026-07-13 (Asia/Shanghai)
 | Target server | Read-only SSH succeeded as `root`; hostname is `VM-0-6-ubuntu` | Confirmed 2026-07-13 |
 | Runtime services | `odoo19.service` and `sudo-pi-agent-bridge.service` reported active | Confirmed 2026-07-13 |
 | Server V2 | `/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v2`, owned by `odoo:odoo`; package metadata says `0.1.0`; no Git metadata | Confirmed, untraceable source |
-| Server V3 | Independent retained candidates `0.1.0.dev1-9b270a1e2e0e` and `0.1.0.dev2-38ee674974ec` exist under the earlier `/mnt` evidence root; neither is routed | dev1 rejected by runtime identity gate; dev2 verified as read-only evidence |
+| Server V3 | Retained dev1/dev2 candidates exist under the earlier `/mnt` evidence root; immutable `0.1.0.dev3-eff74ae179c2` is externally anchored under the independent `/opt` root and is not routed | dev1 rejected by runtime identity; dev2 direct-read evidence; dev3 real CLI read passed but exposed a first-use content-binding design gap |
 | Pi Bridge V2 copy | A second complete V2 tree exists under `/mnt/odoo/odoo19/custom/services/pi-agent-bridge/odoo_accounting_agent_cli_v2` | Confirmed duplicate |
 | V2 copy equality | Active source-tree aggregate hashes differ; `commands/backend.py` also differs while both packages report `0.1.0` | Confirmed version collision |
 | Odoo module | Active `sudo_ai_bot` manifest reports `1.2.0`; manifest SHA-256 is `640ddb271cf04067bc5be68de7d7fb8620e9c19a308417295650b3811279d96b` | Confirmed |
@@ -114,6 +114,17 @@ reported `version unknown`. It was not linked as current and no Pi/Odoo routing
 was changed. `0.1.0.dev2` adds an externally anchored runtime identity command;
 the failed candidate remains immutable evidence rather than being patched in
 place.
+
+The independently deployed dev3 test candidate reported one consistent commit,
+package, manifest, and registry identity from `/opt`, passed four real Linux
+runner gates, and returned a signed Odoo trial-balance receipt for `odoo_test`,
+company 1, user 2. The full ledger contained 15 rows; period debit and credit
+both equaled `136193.63` and the difference was `0.00`. Cross-process replay of
+the same token was rejected. During the next negative-test review, the auth
+context was found not to bind capability ID plus parameters before first use.
+Dev3 is therefore retained as diagnostic evidence only, remains staged rather
+than enabled, and must not be routed to Pi. Dev4 adds that missing signed content
+digest and must repeat all real-Odoo and attack gates.
 
 ## Phase-one exit gate
 

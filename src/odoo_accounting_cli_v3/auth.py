@@ -35,6 +35,7 @@ def context_payload(context: RequestContext) -> dict[str, object]:
         "auth_expires_at": context.auth_expires_at.astimezone(timezone.utc).isoformat(),
         "auth_issued_at": context.auth_issued_at.astimezone(timezone.utc).isoformat(),
         "auth_key_id": context.auth_key_id,
+        "auth_request_digest": context.auth_request_digest,
         "auth_signature_purpose": context.auth_signature_purpose,
         "auth_signature_version": context.auth_signature_version,
         "auth_token_id": context.auth_token_id,
@@ -52,6 +53,22 @@ def _signature_payload(context: RequestContext) -> dict[str, object]:
     return context_payload(context)
 
 
+def authentication_request_digest(
+    capability_id: str, parameters: dict[str, object]
+) -> str:
+    if not isinstance(capability_id, str) or not capability_id.strip():
+        raise AuthenticationError("authentication capability ID is required")
+    if not isinstance(parameters, dict):
+        raise AuthenticationError("authentication request parameters must be an object")
+    try:
+        payload = canonical_json(
+            {"capability_id": capability_id, "parameters": parameters}
+        )
+    except (TypeError, ValueError) as exc:
+        raise AuthenticationError("authentication request content is invalid") from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
 def sign_request_context(
     *,
     auth_token_id: str,
@@ -63,6 +80,8 @@ def sign_request_context(
     company_id: int,
     allowed_company_ids: frozenset[int],
     environment: str,
+    capability_id: str,
+    parameters: dict[str, object],
     issued_at: datetime,
     expires_at: datetime,
     key_id: str,
@@ -82,6 +101,7 @@ def sign_request_context(
         auth_signature_version=SIGNATURE_VERSION,
         auth_signature_purpose=AUTH_CONTEXT_PURPOSE,
         auth_key_id=key_id,
+        auth_request_digest=authentication_request_digest(capability_id, parameters),
         auth_signature="0" * 64,
         principal=principal,
         odoo_instance_id=odoo_instance_id,

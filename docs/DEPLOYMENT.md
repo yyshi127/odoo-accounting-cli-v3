@@ -65,8 +65,9 @@ extracting it.
    `/opt/odoo-accounting-cli-v3/releases/` on the same filesystem.
 2. Extract exactly one verified archive there. Reject absolute paths, `..`,
    links, devices, sockets, unexpected owners, and extra files.
-3. Run `tools/verify_release.py` against the extracted tree and the expected
-   manifest digest.
+3. With bytecode disabled (`PYTHONDONTWRITEBYTECODE=1` and Python `-B`), run
+   `tools/verify_release.py` against the extracted tree and the expected
+   manifest digest. Verification must not create files in the candidate.
 4. Make the entire candidate root-owned and non-writable by group/world. The
    final release directory itself must be root-owned and immutable to the Odoo
    service identity.
