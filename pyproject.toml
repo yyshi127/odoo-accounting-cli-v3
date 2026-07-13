@@ -7,13 +7,19 @@ name = "odoo-accounting-cli-v3"
 dynamic = ["version"]
 description = "Controlled Odoo 19 accounting capability gateway for Pi Agent"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["click>=8.1,<9"]
+
+[project.scripts]
+odoo-accounting-cli-v3 = "odoo_accounting_cli_v3.cli:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/odoo_accounting_cli_v3"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"registry/capabilities.json" = "odoo_accounting_cli_v3/data/capabilities.json"
 
 [tool.hatch.version]
 path = "VERSION"

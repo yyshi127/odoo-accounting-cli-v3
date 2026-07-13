@@ -10,14 +10,21 @@ from odoo_accounting_cli_v3.release import ReleaseError, verify_manifest
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: verify_release.py EXTRACTED_RELEASE_DIR", file=sys.stderr)
+    if len(sys.argv) != 3:
+        print(
+            "usage: verify_release.py EXTRACTED_RELEASE_DIR EXPECTED_MANIFEST_SHA256",
+            file=sys.stderr,
+        )
         return 2
     root = Path(sys.argv[1]).resolve()
     manifest_path = root / "RELEASE-MANIFEST.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        verify_manifest(root, manifest)
+        verify_manifest(
+            root,
+            manifest,
+            expected_manifest_sha256=sys.argv[2],
+        )
     except (OSError, ValueError, ReleaseError) as exc:
         print(f"release verification failed: {exc}", file=sys.stderr)
         return 1

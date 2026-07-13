@@ -10,7 +10,12 @@ import sys
 import tarfile
 from pathlib import Path
 
-from odoo_accounting_cli_v3.release import ReleaseError, ReleaseIdentity, source_manifest
+from odoo_accounting_cli_v3.release import (
+    ReleaseError,
+    ReleaseIdentity,
+    sha256_file,
+    source_manifest,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,7 +63,16 @@ def build() -> Path:
                 info.uname = info.gname = "root"
                 info.mtime = 0
                 archive.addfile(info, io.BytesIO(manifest_bytes))
-    print(output)
+    print(
+        json.dumps(
+            {
+                "manifest_sha256": manifest["manifest_sha256"],
+                "package": str(output),
+                "package_sha256": sha256_file(output),
+            },
+            sort_keys=True,
+        )
+    )
     return output
 
 

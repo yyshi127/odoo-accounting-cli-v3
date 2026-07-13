@@ -21,6 +21,8 @@ Baseline date: 2026-07-13 (Asia/Shanghai)
 | Odoo module | Active `sudo_ai_bot` manifest reports `1.2.0`; manifest SHA-256 is `640ddb271cf04067bc5be68de7d7fb8620e9c19a308417295650b3811279d96b` | Confirmed |
 | Production writes | No authorization was provided | Prohibited |
 | Sandbox database | No dedicated sandbox identity or connection evidence is available | Not verified |
+| Odoo test database identity | `odoo_test`, UUID `19b09656-d10f-11f0-9065-00163e54a5ad` | Confirmed read-only |
+| Read test principal | Odoo user 2, active non-superuser runtime, company 1 allowed, accounting read/user/manager groups present | Confirmed read-only |
 
 ## Local artifact hashes
 
@@ -54,6 +56,47 @@ The server V2 directory contains many in-place backup trees and generated
 artifacts. These are evidence inputs only and must not be copied wholesale into
 V3. Reuse decisions require per-module provenance, focused tests, and review.
 
+## V2 live read-only baseline
+
+Read-only commands were executed on `odoo_test`, company 1, with an explicit
+single-company scope and no write-capable command:
+
+| Command | Result | Evidence summary |
+|---|---|---|
+| `gl trial-balance --date-from 2026-01-01 --date-to 2026-07-13 --company-id 1 --limit 5` | `ok=true` | Real `account.move.line/account.account` query, CNY, 14 total accounts, paginated |
+| `ar open-items --date-from 2026-01-01 --date-to 2026-07-13 --company-id 1 --limit 5` | `ok=true` | Five real posted receivable lines returned with move-line IDs and residuals |
+| `ap unpaid-bills --company-id 1 --database odoo_test --limit 5` | `ok=true` | 81 unpaid bills summarized; five real bill IDs returned |
+
+These results prove the three V2 read paths can query the current Odoo 19 test
+database. They do not yet prove financial correctness, complete pagination,
+user ACL behavior, or V3 readiness. In particular, V2's trial-balance summary
+was obtained from a limited page and must not be accepted as a full balanced
+trial balance without an independent gold-standard reconciliation.
+
+V2 exposes 248 collectable unit tests. Collection is evidence of test presence,
+not test success, and no write-oriented test was executed during this audit.
+
+An independent SQL/ORM oracle for `odoo_test`, company 1, posted entries, and
+the inclusive 2026 calendar-year period found 2,341 move lines across 12 active
+accounts. Full-period debit and credit both equal `136193.63`; the difference is
+`0.00`. Odoo 19 `_read_group` result shape was verified directly. This oracle is
+the first V3 trial-balance standard answer; it is not yet a release-bound V3
+execution receipt.
+
+## Pi/Odoo bridge baseline
+
+- Pi Bridge package metadata says `1.0.0` and depends on Pi coding agent
+  `^0.80.6`, while its live health endpoint reports Pi Agent `0.78.1`.
+- The bridge exposes only five Odoo tools: context, skill list/execute, report
+  list/export. It has no V3 query/prepare/preview/approve/status/verify/recover
+  tool surface.
+- The Odoo tool controller uses a service token but accepts caller-supplied user
+  and company IDs. Its current implementation does not demonstrate that the
+  selected company belongs to the selected user's allowed companies. V3 must
+  not inherit this trust boundary.
+- Odoo's accounting bridge exposes 22 named read-only V2 mappings but commonly
+  forwards only positional strings; it is not a strict V3 parameter contract.
+
 ## Boundary decision
 
 - Local V3 source root: `odoo-accounting-cli-v3/`
@@ -65,7 +108,9 @@ V3. Reuse decisions require per-module provenance, focused tests, and review.
 
 ## Phase-one exit gate
 
-The read-only baseline is not complete until server evidence records the running
-Odoo module, V2 CLI, Pi Bridge, service definitions, configuration paths, Git or
-package metadata, file hashes, database names, company scopes, and sandbox
-identity. No production write test is part of this gate.
+The read-only inventory baseline is complete for the running Odoo service, V2
+CLI, Pi Bridge, relevant service/configuration paths, package metadata, divergent
+file identities, database names, a test database UUID, and a non-superuser
+accounting principal. The dedicated write-sandbox identity remains unconfirmed;
+this keeps every write gate closed but does not block the read-only V3 vertical
+slice. No production write test was authorized or performed.
