@@ -18,6 +18,19 @@ class ReceiptError(ValueError):
 
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_READ_RECEIPT_AGE = timedelta(minutes=5)
+READ_RECEIPT_PURPOSE = "read_receipt_v1"
+SIGNATURE_VERSION = 1
+MIN_HMAC_SECRET_BYTES = 32
+
+
+def _require_hmac_secret(secret: object) -> bytes:
+    if not isinstance(secret, bytes) or len(secret) < MIN_HMAC_SECRET_BYTES:
+        raise ReceiptError("read receipt HMAC secret must be bytes of at least 32 bytes")
+    return secret
+
+
+def _signature_payload(unsigned: dict[str, Any]) -> dict[str, Any]:
+    return unsigned
 
 
 def _digest(value: Any) -> str:
@@ -80,8 +93,10 @@ def create_read_receipt(
     release_digest: str,
     record_count: int,
     observed_at: datetime,
+    key_id: str,
     secret: bytes,
 ) -> dict[str, Any]:
+    secret = _require_hmac_secret(secret)
     if (
         not isinstance(receipt_id, str)
         or not receipt_id
@@ -89,10 +104,10 @@ def create_read_receipt(
         or not auth_token_id
         or not capability_id
         or not principal
-        or not isinstance(secret, bytes)
-        or not secret
     ):
-        raise ReceiptError("receipt identity, capability, principal, and signing secret are required")
+        raise ReceiptError("receipt identity, capability, and principal are required")
+    if not isinstance(key_id, str) or not key_id.strip():
+        raise ReceiptError("read receipt key ID is required")
     if (
         isinstance(company_id, bool)
         or not isinstance(company_id, int)
@@ -136,10 +151,15 @@ def create_read_receipt(
         "release_digest": release_digest,
         "record_count": record_count,
         "observed_at": observed_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "signature_version": SIGNATURE_VERSION,
+        "signature_purpose": READ_RECEIPT_PURPOSE,
+        "signature_key_id": key_id,
     }
     return {
         **unsigned,
-        "signature": hmac.new(secret, canonical_json(unsigned), hashlib.sha256).hexdigest(),
+        "signature": hmac.new(
+            secret, canonical_json(_signature_payload(unsigned)), hashlib.sha256
+        ).hexdigest(),
     }
 
 
@@ -160,9 +180,13 @@ def verify_read_receipt(
     release_digest: str,
     expected_record_count: int,
     now: datetime,
-    consume_receipt: Callable[[str, str], bool],
+    consume_receipt: Callable[[str, str, datetime, datetime], bool],
+    expected_key_id: str,
     secret: bytes,
 ) -> None:
+    secret = _require_hmac_secret(secret)
+    if not isinstance(expected_key_id, str) or not expected_key_id.strip():
+        raise ReceiptError("read receipt expected key ID is required")
     expected_fields = {
         "capability_id",
         "company_id",
@@ -177,20 +201,27 @@ def verify_read_receipt(
         "request_digest",
         "result_digest",
         "signature",
+        "signature_key_id",
+        "signature_purpose",
+        "signature_version",
         "user_id",
     }
     if not isinstance(receipt, dict) or set(receipt) != expected_fields:
         raise ReceiptError("read receipt fields are invalid")
     if (
-        not isinstance(secret, bytes)
-        or not secret
-        or not _aware(now)
+        not _aware(now)
         or not callable(consume_receipt)
         or isinstance(expected_record_count, bool)
         or not isinstance(expected_record_count, int)
         or expected_record_count < 0
     ):
         raise ReceiptError("read receipt verification context is invalid")
+    if type(receipt["signature_version"]) is not int or receipt["signature_version"] != SIGNATURE_VERSION:
+        raise ReceiptError("read receipt signature version mismatch")
+    if receipt["signature_purpose"] != READ_RECEIPT_PURPOSE:
+        raise ReceiptError("read receipt signature purpose mismatch")
+    if receipt["signature_key_id"] != expected_key_id:
+        raise ReceiptError("read receipt signature key ID mismatch")
     if (
         not isinstance(receipt["id"], str)
         or not receipt["id"]
@@ -242,8 +273,12 @@ def verify_read_receipt(
     if not isinstance(signature, str) or not SHA256.fullmatch(signature):
         raise ReceiptError("read receipt signature is invalid")
     unsigned = {key: value for key, value in receipt.items() if key != "signature"}
-    expected_signature = hmac.new(secret, canonical_json(unsigned), hashlib.sha256).hexdigest()
+    expected_signature = hmac.new(
+        secret, canonical_json(_signature_payload(unsigned)), hashlib.sha256
+    ).hexdigest()
     if not hmac.compare_digest(expected_signature, signature):
         raise ReceiptError("read receipt signature mismatch")
-    if not consume_receipt(receipt["id"], receipt["request_digest"]):
+    if not consume_receipt(
+        receipt["id"], receipt["request_digest"], observed_at, now
+    ):
         raise ReceiptError("read receipt was already consumed")

@@ -60,6 +60,7 @@ def test_registry_get_returns_exact_capability() -> None:
     assert result.returncode == 0
     payload = json.loads(result.stdout)
     assert payload["data"]["capability"]["id"] == capability_id
+    assert payload["data"]["capability"]["staged_environments"] == ["test"]
     assert payload["data"]["capability"]["enabled_environments"] == []
 
 

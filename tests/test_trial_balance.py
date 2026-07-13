@@ -135,6 +135,9 @@ class TrialBalanceTest(unittest.TestCase):
             "release_digest": "d" * 64,
             "record_count": 3,
             "observed_at": "2026-07-13T07:00:00Z",
+            "signature_version": 1,
+            "signature_purpose": "read_receipt_v1",
+            "signature_key_id": "test-receipt-2026-07",
             "signature": "e" * 64,
         }
         registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))

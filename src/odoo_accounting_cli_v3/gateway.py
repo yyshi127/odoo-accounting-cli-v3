@@ -19,12 +19,19 @@ class GatewayError(ValueError):
     pass
 
 
+AUTH_SIGNATURE_VERSION = 1
+AUTH_SIGNATURE_PURPOSE = "auth_context_v1"
+
+
 @dataclass(frozen=True)
 class RequestContext:
     audience: str
     auth_token_id: str
     auth_issued_at: datetime
     auth_expires_at: datetime
+    auth_signature_version: int
+    auth_signature_purpose: str
+    auth_key_id: str
     auth_signature: str
     principal: str
     odoo_instance_id: str
@@ -50,6 +57,15 @@ class RequestContext:
             or self.auth_expires_at <= self.auth_issued_at
         ):
             raise GatewayError("authentication timestamps must be timezone-aware and increasing")
+        if (
+            type(self.auth_signature_version) is not int
+            or self.auth_signature_version != AUTH_SIGNATURE_VERSION
+        ):
+            raise GatewayError("authentication signature version is unsupported")
+        if self.auth_signature_purpose != AUTH_SIGNATURE_PURPOSE:
+            raise GatewayError("authentication signature purpose is invalid")
+        if not isinstance(self.auth_key_id, str) or not self.auth_key_id.strip():
+            raise GatewayError("authentication key ID is required")
         if not isinstance(self.auth_signature, str) or re.fullmatch(r"[0-9a-f]{64}", self.auth_signature) is None:
             raise GatewayError("authentication signature must be a lowercase SHA-256 HMAC")
         if not isinstance(self.principal, str) or not self.principal.strip():
@@ -110,6 +126,7 @@ class CapabilityGateway:
             [RequestContext, Capability, dict[str, Any], dict[str, Any], str, str], None
         ]
         | None = None,
+        availability_channel: str = "enabled",
     ) -> None:
         capability_list = tuple(capabilities)
         if re.fullmatch(r"[0-9a-f]{64}", release_digest) is None:
@@ -121,6 +138,9 @@ class CapabilityGateway:
         self._acl_check = acl_check
         if (read_executor is None) != (read_receipt_verifier is None):
             raise GatewayError("read executor and receipt verifier must be configured together")
+        if availability_channel not in {"enabled", "staged"}:
+            raise GatewayError("capability availability channel is invalid")
+        self._availability_channel = availability_channel
         self._read_executor = read_executor
         self._read_receipt_verifier = read_receipt_verifier
         self._operations: dict[str, Operation] = {}
@@ -136,7 +156,12 @@ class CapabilityGateway:
             capability = self._capabilities[capability_id]
         except KeyError as exc:
             raise GatewayError("unknown capability") from exc
-        if context.environment not in capability.data["enabled_environments"]:
+        environment_field = (
+            "enabled_environments"
+            if self._availability_channel == "enabled"
+            else "staged_environments"
+        )
+        if context.environment not in capability.data.get(environment_field, []):
             raise GatewayError("capability is not enabled in this environment")
         return capability
 
@@ -170,7 +195,13 @@ class CapabilityGateway:
         visible = []
         for capability in self._capabilities.values():
             if (
-                context.environment in capability.data["enabled_environments"]
+                context.environment
+                in capability.data.get(
+                    "enabled_environments"
+                    if self._availability_channel == "enabled"
+                    else "staged_environments",
+                    [],
+                )
                 and self._acl_check(context, capability, None)
             ):
                 visible.append(capability.data.copy())

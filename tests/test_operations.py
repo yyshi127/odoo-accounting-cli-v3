@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -13,6 +15,7 @@ from odoo_accounting_cli_v3.operations import (
     TrustedResultRejected,
     approve_operation,
     begin_execution,
+    canonical_json,
     complete_operation,
     record_execution_result,
     sign_approval,
@@ -21,7 +24,14 @@ from odoo_accounting_cli_v3.operations import (
 )
 
 
-SECRET = b"test-only-secret"
+APPROVAL_SECRET = b"a" * 32
+EXECUTION_SECRET = b"e" * 32
+VERIFICATION_SECRET = b"v" * 32
+SECRET = APPROVAL_SECRET
+EXECUTION_KEY_ID = "execution-key-v1"
+VERIFICATION_KEY_ID = "verification-key-v1"
+EXECUTION_ISSUERS = frozenset({"odoo-adapter"})
+VERIFICATION_ISSUERS = frozenset({"odoo-verifier"})
 NOW = datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc)
 DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
 REGISTRY_DIGEST = "c" * 64
@@ -69,7 +79,79 @@ def valid_approval(operation: Operation, nonce: str = "nonce-1"):
     )
 
 
+def executing_operation() -> Operation:
+    operation = awaiting_operation()
+    approval = valid_approval(operation)
+    operation = approve_operation(
+        operation,
+        approval,
+        now=NOW,
+        secret=APPROVAL_SECRET,
+        is_approver_authorized=AUTHORIZED,
+        consume_nonce=lambda *_: True,
+        approval_ttl_seconds=900,
+        expected_revision=2,
+    )
+    return begin_execution(
+        operation,
+        approval,
+        now=NOW,
+        secret=APPROVAL_SECRET,
+        is_approver_authorized=AUTHORIZED,
+        approval_ttl_seconds=900,
+        expected_revision=3,
+    )
+
+
 class OperationTest(unittest.TestCase):
+    def test_approval_signature_is_purpose_bound(self) -> None:
+        operation = awaiting_operation()
+        approval = valid_approval(operation)
+        self.assertEqual(approval.payload()["purpose"], "approval_v1")
+        self.assertEqual(approval.payload()["version"], 1)
+        wrong_payload = {**approval.payload(), "purpose": "execution_result_v1"}
+        wrong_signature = hmac.new(
+            APPROVAL_SECRET, canonical_json(wrong_payload), hashlib.sha256
+        ).hexdigest()
+        with self.assertRaisesRegex(ApprovalRejected, "signature mismatch"):
+            approve_operation(
+                operation,
+                replace(approval, signature=wrong_signature),
+                now=NOW,
+                secret=APPROVAL_SECRET,
+                is_approver_authorized=AUTHORIZED,
+                consume_nonce=lambda *_: True,
+                approval_ttl_seconds=900,
+                expected_revision=2,
+            )
+
+    def test_approval_secret_must_be_32_byte_bytes(self) -> None:
+        operation = awaiting_operation()
+        approval = valid_approval(operation)
+        for invalid in (b"short", "x" * 32, b""):
+            with self.subTest(secret=invalid):
+                with self.assertRaisesRegex(ApprovalRejected, "at least 32 bytes"):
+                    sign_approval(
+                        operation=operation,
+                        approver_user_id=99,
+                        nonce="invalid-secret",
+                        issued_at=NOW,
+                        expires_at=NOW + timedelta(minutes=1),
+                        approval_ttl_seconds=900,
+                        secret=invalid,
+                    )
+                with self.assertRaisesRegex(ApprovalRejected, "at least 32 bytes"):
+                    approve_operation(
+                        operation,
+                        approval,
+                        now=NOW,
+                        secret=invalid,
+                        is_approver_authorized=AUTHORIZED,
+                        consume_nonce=lambda *_: True,
+                        approval_ttl_seconds=900,
+                        expected_revision=2,
+                    )
+
     def test_digest_is_stable_across_parameter_order(self) -> None:
         first = awaiting_operation()
         second = Operation.prepare(
@@ -366,21 +448,27 @@ class OperationTest(unittest.TestCase):
             operation.transition(State.VERIFYING, expected_revision=4)
 
         execution = sign_execution_result(
-            operation=operation, issuer="odoo-adapter", succeeded=True,
-            evidence_digest="a" * 64, issued_at=NOW, secret=SECRET,
+            operation=operation, issuer="odoo-adapter", key_id=EXECUTION_KEY_ID,
+            succeeded=True, evidence_digest="a" * 64, issued_at=NOW,
+            secret=EXECUTION_SECRET,
         )
         operation = record_execution_result(
-            operation, execution, now=NOW, secret=SECRET, expected_revision=4,
+            operation, execution, now=NOW, secret=EXECUTION_SECRET,
+            expected_key_id=EXECUTION_KEY_ID, allowed_issuers=EXECUTION_ISSUERS,
+            expected_revision=4,
         )
         with self.assertRaisesRegex(OperationError, "requires complete_operation"):
             operation.transition(State.COMPLETED, expected_revision=5)
 
         verification = sign_verification_result(
-            operation=operation, issuer="odoo-verifier", succeeded=True,
-            evidence_digest="b" * 64, issued_at=NOW, secret=SECRET,
+            operation=operation, issuer="odoo-verifier", key_id=VERIFICATION_KEY_ID,
+            succeeded=True, evidence_digest="b" * 64, issued_at=NOW,
+            secret=VERIFICATION_SECRET,
         )
         operation = complete_operation(
-            operation, verification, now=NOW, secret=SECRET, expected_revision=5,
+            operation, verification, now=NOW, secret=VERIFICATION_SECRET,
+            expected_key_id=VERIFICATION_KEY_ID,
+            allowed_issuers=VERIFICATION_ISSUERS, expected_revision=5,
         )
         self.assertEqual(operation.state, State.COMPLETED)
         self.assertEqual(operation.execution_result_digest, "a" * 64)
@@ -402,15 +490,153 @@ class OperationTest(unittest.TestCase):
         )
         result = replace(
             sign_execution_result(
-                operation=operation, issuer="odoo-adapter", succeeded=True,
-                evidence_digest="a" * 64, issued_at=NOW, secret=SECRET,
+                operation=operation, issuer="odoo-adapter", key_id=EXECUTION_KEY_ID,
+                succeeded=True, evidence_digest="a" * 64, issued_at=NOW,
+                secret=EXECUTION_SECRET,
             ),
             evidence_digest="b" * 64,
         )
         with self.assertRaisesRegex(TrustedResultRejected, "signature mismatch"):
             record_execution_result(
-                operation, result, now=NOW, secret=SECRET, expected_revision=4,
+                operation, result, now=NOW, secret=EXECUTION_SECRET,
+                expected_key_id=EXECUTION_KEY_ID,
+                allowed_issuers=EXECUTION_ISSUERS, expected_revision=4,
             )
+        with self.assertRaisesRegex(TrustedResultRejected, "content is invalid"):
+            record_execution_result(
+                operation,
+                replace(result, evidence_digest="a" * 64, signature=None),
+                now=NOW,
+                secret=EXECUTION_SECRET,
+                expected_key_id=EXECUTION_KEY_ID,
+                allowed_issuers=EXECUTION_ISSUERS,
+                expected_revision=4,
+            )
+
+    def test_result_signatures_are_purpose_and_role_bound(self) -> None:
+        operation = executing_operation()
+        execution = sign_execution_result(
+            operation=operation,
+            issuer="odoo-adapter",
+            key_id=EXECUTION_KEY_ID,
+            succeeded=True,
+            evidence_digest="a" * 64,
+            issued_at=NOW,
+            secret=EXECUTION_SECRET,
+        )
+        self.assertEqual(execution.payload()["purpose"], "execution_result_v1")
+        self.assertEqual(execution.payload()["version"], 1)
+        wrong_payload = {**execution.payload(), "purpose": "verification_result_v1"}
+        wrong_signature = hmac.new(
+            EXECUTION_SECRET, canonical_json(wrong_payload), hashlib.sha256
+        ).hexdigest()
+        with self.assertRaisesRegex(TrustedResultRejected, "signature mismatch"):
+            record_execution_result(
+                operation,
+                replace(execution, signature=wrong_signature),
+                now=NOW,
+                secret=EXECUTION_SECRET,
+                expected_key_id=EXECUTION_KEY_ID,
+                allowed_issuers=EXECUTION_ISSUERS,
+                expected_revision=4,
+            )
+        operation = record_execution_result(
+            operation,
+            execution,
+            now=NOW,
+            secret=EXECUTION_SECRET,
+            expected_key_id=EXECUTION_KEY_ID,
+            allowed_issuers=EXECUTION_ISSUERS,
+            expected_revision=4,
+        )
+        verification = sign_verification_result(
+            operation=operation,
+            issuer="odoo-verifier",
+            key_id=VERIFICATION_KEY_ID,
+            succeeded=True,
+            evidence_digest="b" * 64,
+            issued_at=NOW,
+            secret=VERIFICATION_SECRET,
+        )
+        self.assertEqual(verification.payload()["purpose"], "verification_result_v1")
+        self.assertEqual(verification.payload()["version"], 1)
+
+        with self.assertRaisesRegex(TrustedResultRejected, "key ID mismatch"):
+            complete_operation(
+                operation,
+                verification,
+                now=NOW,
+                secret=VERIFICATION_SECRET,
+                expected_key_id=EXECUTION_KEY_ID,
+                allowed_issuers=VERIFICATION_ISSUERS,
+                expected_revision=5,
+            )
+        with self.assertRaisesRegex(TrustedResultRejected, "signature mismatch"):
+            complete_operation(
+                operation,
+                verification,
+                now=NOW,
+                secret=EXECUTION_SECRET,
+                expected_key_id=VERIFICATION_KEY_ID,
+                allowed_issuers=VERIFICATION_ISSUERS,
+                expected_revision=5,
+            )
+
+    def test_unauthorized_result_issuer_is_rejected(self) -> None:
+        operation = executing_operation()
+        result = sign_execution_result(
+            operation=operation,
+            issuer="untrusted-adapter",
+            key_id=EXECUTION_KEY_ID,
+            succeeded=True,
+            evidence_digest="a" * 64,
+            issued_at=NOW,
+            secret=EXECUTION_SECRET,
+        )
+        with self.assertRaisesRegex(TrustedResultRejected, "issuer is not authorized"):
+            record_execution_result(
+                operation,
+                result,
+                now=NOW,
+                secret=EXECUTION_SECRET,
+                expected_key_id=EXECUTION_KEY_ID,
+                allowed_issuers=EXECUTION_ISSUERS,
+                expected_revision=4,
+            )
+
+    def test_result_secret_must_be_32_byte_bytes(self) -> None:
+        operation = executing_operation()
+        valid = sign_execution_result(
+            operation=operation,
+            issuer="odoo-adapter",
+            key_id=EXECUTION_KEY_ID,
+            succeeded=True,
+            evidence_digest="a" * 64,
+            issued_at=NOW,
+            secret=EXECUTION_SECRET,
+        )
+        for invalid in (b"short", "x" * 32, b""):
+            with self.subTest(secret=invalid):
+                with self.assertRaisesRegex(TrustedResultRejected, "at least 32 bytes"):
+                    sign_execution_result(
+                        operation=operation,
+                        issuer="odoo-adapter",
+                        key_id=EXECUTION_KEY_ID,
+                        succeeded=True,
+                        evidence_digest="a" * 64,
+                        issued_at=NOW,
+                        secret=invalid,
+                    )
+                with self.assertRaisesRegex(TrustedResultRejected, "at least 32 bytes"):
+                    record_execution_result(
+                        operation,
+                        valid,
+                        now=NOW,
+                        secret=invalid,
+                        expected_key_id=EXECUTION_KEY_ID,
+                        allowed_issuers=EXECUTION_ISSUERS,
+                        expected_revision=4,
+                    )
 
 
 if __name__ == "__main__":

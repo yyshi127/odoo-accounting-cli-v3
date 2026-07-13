@@ -1,11 +1,15 @@
 import copy
+import hashlib
+import hmac
 import unittest
 from datetime import datetime, timedelta, timezone
 
 from odoo_accounting_cli_v3.receipts import ReceiptError, create_read_receipt, verify_read_receipt
+from odoo_accounting_cli_v3.operations import canonical_json
 
 
-SECRET = b"test-only-receipt-secret"
+SECRET = b"test-only-receipt-secret-32-byte"
+KEY_ID = "read-receipt-key-2026-07"
 NOW = datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc)
 BINDINGS = {
     "capability_id": "acct.gl.trial_balance.v1",
@@ -28,12 +32,23 @@ def signed_receipt(result_body, *, observed_at=NOW, record_count=1, receipt_id="
         result_body=result_body,
         record_count=record_count,
         observed_at=observed_at,
+        key_id=KEY_ID,
         secret=SECRET,
         **BINDINGS,
     )
 
 
-def verify(receipt, body, *, expected_record_count=1, now=NOW, consume_receipt=None, **changes):
+def verify(
+    receipt,
+    body,
+    *,
+    expected_record_count=1,
+    now=NOW,
+    consume_receipt=None,
+    expected_key_id=KEY_ID,
+    secret=SECRET,
+    **changes,
+):
     bindings = {**BINDINGS, **changes}
     verify_read_receipt(
         receipt,
@@ -41,7 +56,8 @@ def verify(receipt, body, *, expected_record_count=1, now=NOW, consume_receipt=N
         expected_record_count=expected_record_count,
         now=now,
         consume_receipt=consume_receipt or (lambda *_: True),
-        secret=SECRET,
+        expected_key_id=expected_key_id,
+        secret=secret,
         **bindings,
     )
 
@@ -49,7 +65,73 @@ def verify(receipt, body, *, expected_record_count=1, now=NOW, consume_receipt=N
 class ReceiptTest(unittest.TestCase):
     def test_signed_read_receipt_verifies(self) -> None:
         body = {"lines": [{"account_id": 1}]}
-        verify(signed_receipt(body), body)
+        receipt = signed_receipt(body)
+        unsigned = {key: value for key, value in receipt.items() if key != "signature"}
+        expected = hmac.new(
+            SECRET, canonical_json(unsigned), hashlib.sha256
+        ).hexdigest()
+        self.assertEqual(receipt["signature"], expected)
+        self.assertEqual(receipt["signature_version"], 1)
+        self.assertEqual(receipt["signature_purpose"], "read_receipt_v1")
+        self.assertEqual(receipt["signature_key_id"], KEY_ID)
+        verify(receipt, body)
+
+    def test_read_receipt_protocol_fields_are_verified_before_signature(self) -> None:
+        body = {"lines": [{"account_id": 1}]}
+        receipt = signed_receipt(body)
+        for field, value, message in (
+            ("signature_version", 2, "version mismatch"),
+            ("signature_purpose", "auth_context_v1", "purpose mismatch"),
+            ("signature_key_id", "read-receipt-key-retired", "key ID mismatch"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ReceiptError, message):
+                    verify({**receipt, field: value}, body)
+
+    def test_receipt_key_id_is_required_and_expected_key_is_enforced(self) -> None:
+        body = {"lines": [{"account_id": 1}]}
+        with self.assertRaisesRegex(ReceiptError, "key ID is required"):
+            create_read_receipt(
+                receipt_id="missing-key", result_body=body, record_count=1,
+                observed_at=NOW, key_id="", secret=SECRET, **BINDINGS,
+            )
+        with self.assertRaisesRegex(ReceiptError, "expected key ID is required"):
+            verify_read_receipt(
+                signed_receipt(body), result_body=body, expected_record_count=1,
+                now=NOW, consume_receipt=lambda *_: True, expected_key_id="",
+                secret=SECRET, **BINDINGS,
+            )
+        with self.assertRaisesRegex(ReceiptError, "key ID mismatch"):
+            verify_read_receipt(
+                signed_receipt(body), result_body=body, expected_record_count=1,
+                now=NOW, consume_receipt=lambda *_: True,
+                expected_key_id="read-receipt-key-retired", secret=SECRET,
+                **BINDINGS,
+            )
+        with self.assertRaisesRegex(ReceiptError, "signature mismatch"):
+            verify(
+                {**signed_receipt(body), "signature_key_id": "read-receipt-key-next"},
+                body,
+                expected_key_id="read-receipt-key-next",
+            )
+
+    def test_receipt_secret_must_be_32_byte_bytes(self) -> None:
+        body = {"lines": [{"account_id": 1}]}
+        receipt = signed_receipt(body)
+        for invalid in (b"short", "x" * 32, b""):
+            with self.subTest(secret=invalid):
+                with self.assertRaisesRegex(ReceiptError, "at least 32 bytes"):
+                    verify(receipt, body, secret=invalid)
+                with self.assertRaisesRegex(ReceiptError, "at least 32 bytes"):
+                    create_read_receipt(
+                        receipt_id="invalid-secret",
+                        result_body=body,
+                        record_count=1,
+                        observed_at=NOW,
+                        key_id=KEY_ID,
+                        secret=invalid,
+                        **BINDINGS,
+                    )
 
     def test_fabricated_or_tampered_receipt_is_rejected(self) -> None:
         body = {"lines": [{"account_id": 1}]}
@@ -82,7 +164,10 @@ class ReceiptTest(unittest.TestCase):
 
         consumed = set()
 
-        def consume(receipt_id, request_digest):
+        observed = []
+
+        def consume(receipt_id, request_digest, observed_at, verified_at):
+            observed.append((observed_at, verified_at))
             key = (receipt_id, request_digest)
             if key in consumed:
                 return False
@@ -91,6 +176,7 @@ class ReceiptTest(unittest.TestCase):
 
         receipt = signed_receipt(body, receipt_id="one-time")
         verify(receipt, body, consume_receipt=consume)
+        self.assertEqual(observed, [(NOW, NOW)])
         with self.assertRaisesRegex(ReceiptError, "already consumed"):
             verify(receipt, body, consume_receipt=consume)
 

@@ -16,7 +16,13 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 ACCESS = {"read", "write"}
 RISKS = {"low", "medium", "high", "critical"}
 COMPANY_SCOPES = {"bound_company", "allowed_companies", "explicit_single_company"}
-EVIDENCE_LEVELS = {"declared", "contract_tested", "sandbox_verified", "production_verified"}
+EVIDENCE_LEVELS = {
+    "declared",
+    "contract_tested",
+    "test_verified",
+    "sandbox_verified",
+    "production_verified",
+}
 EVIDENCE_KINDS = {
     "accounting_oracle",
     "contract",
@@ -64,6 +70,7 @@ REQUIRED_FIELDS = {
     "evidence",
     "enabled_environments",
 }
+OPTIONAL_FIELDS = {"staged_environments"}
 
 
 class RegistryError(ValueError):
@@ -182,6 +189,32 @@ def _validate_evidence(item: dict[str, Any], location: str) -> None:
                 raise RegistryError(f"{receipt_location}.{field} must be lowercase SHA-256")
 
     environments = set(item["enabled_environments"])
+    staged_environments = set(item.get("staged_environments", []))
+    if staged_environments:
+        if item["evidence"]["level"] == "declared":
+            raise RegistryError(
+                f"{location} cannot stage execution without contract-tested evidence"
+            )
+        if staged_environments & environments:
+            raise RegistryError(
+                f"{location} cannot be staged and enabled in the same environment"
+            )
+    if "test" in environments:
+        if evidence["level"] not in {
+            "test_verified",
+            "sandbox_verified",
+            "production_verified",
+        }:
+            raise RegistryError(
+                f"{location} cannot enable test without test_verified evidence"
+            )
+        required = (
+            PRODUCTION_WRITE_EVIDENCE
+            if item["access"] == "write"
+            else PRODUCTION_READ_EVIDENCE
+        )
+        if not required.issubset(kinds):
+            raise RegistryError(f"{location} test enablement evidence is incomplete")
     if "sandbox" in environments:
         if evidence["level"] not in {"sandbox_verified", "production_verified"}:
             raise RegistryError(f"{location} cannot enable sandbox without sandbox_verified evidence")
@@ -314,7 +347,7 @@ def validate_registry(document: Any) -> tuple[Capability, ...]:
         location = f"capabilities[{index}]"
         item = _require_object(raw, location)
         missing = REQUIRED_FIELDS - set(item)
-        extra = set(item) - REQUIRED_FIELDS
+        extra = set(item) - REQUIRED_FIELDS - OPTIONAL_FIELDS
         if missing or extra:
             raise RegistryError(f"{location} fields invalid; missing={sorted(missing)}, extra={sorted(extra)}")
         capability_id = item["id"]
@@ -348,6 +381,13 @@ def validate_registry(document: Any) -> tuple[Capability, ...]:
             or any(env not in {"test", "sandbox", "production"} for env in environments)
         ):
             raise RegistryError(f"{location}.enabled_environments is invalid")
+        staged_environments = item.get("staged_environments", [])
+        if (
+            not isinstance(staged_environments, list)
+            or len(set(staged_environments)) != len(staged_environments)
+            or any(env not in {"test", "sandbox"} for env in staged_environments)
+        ):
+            raise RegistryError(f"{location}.staged_environments is invalid")
         _validate_policy_metadata(item, location)
         _validate_evidence(item, location)
         capabilities.append(Capability.from_dict(item))

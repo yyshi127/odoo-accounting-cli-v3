@@ -18,8 +18,10 @@ from odoo_accounting_cli_v3.registry import validate_registry
 
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
 NOW = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
-AUTH_SECRET = b"test-only-auth-secret"
-RECEIPT_SECRET = b"test-only-receipt-secret"
+AUTH_SECRET = b"test-only-auth-secret-32-bytes!!"
+RECEIPT_SECRET = b"test-only-receipt-secret-32-byte"
+AUTH_KEY_ID = "test-auth-2026-07"
+RECEIPT_KEY_ID = "test-receipt-2026-07"
 DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
 
 
@@ -108,7 +110,8 @@ def enabled_capabilities():
     item = next(
         item for item in document["capabilities"] if item["id"] == "acct.gl.trial_balance.v1"
     )
-    item["enabled_environments"] = ["test"]
+    item["staged_environments"] = ["test"]
+    item["enabled_environments"] = []
     document["capabilities"] = [item]
     return validate_registry(document)
 
@@ -141,6 +144,7 @@ def signed_context(**changes):
         "environment": "test",
         "issued_at": NOW - timedelta(seconds=5),
         "expires_at": NOW + timedelta(minutes=4),
+        "key_id": AUTH_KEY_ID,
         "secret": AUTH_SECRET,
     }
     values.update(changes)
@@ -180,12 +184,15 @@ class OdooBootstrapTest(unittest.TestCase):
             request or request_document(),
             capabilities=enabled_capabilities(),
             auth_secret=AUTH_SECRET,
+            auth_key_id=AUTH_KEY_ID,
             consume_auth_token=consume_auth_token or (lambda *_: True),
             receipt_secret=RECEIPT_SECRET,
+            receipt_key_id=RECEIPT_KEY_ID,
             consume_receipt=lambda *_: True,
             release_digest="d" * 64,
             odoo_instance_id="odoo19@tokyo2",
             environment="test",
+            capability_channel="staged",
             now=NOW,
             environment_factory=environment_factory,
             executor_factory=executor_factory,
@@ -217,6 +224,20 @@ class OdooBootstrapTest(unittest.TestCase):
     def test_replayed_authentication_token_is_rejected_before_read(self):
         with self.assertRaisesRegex(GatewayError, "authentication failed"):
             self.execute(consume_auth_token=lambda *_: False)
+
+    def test_authentication_consumer_receives_signed_expiry_and_verification_time(self):
+        calls = []
+
+        def consume(token_id, request_digest, expires_at, verified_at):
+            calls.append((token_id, request_digest, expires_at, verified_at))
+            return True
+
+        self.execute(consume_auth_token=consume)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "token-1")
+        self.assertEqual(len(calls[0][1]), 64)
+        self.assertEqual(calls[0][2], NOW + timedelta(minutes=4))
+        self.assertEqual(calls[0][3], NOW)
 
     def test_json_wrapper_rejects_duplicate_keys(self):
         with self.assertRaisesRegex(OdooBootstrapError, "duplicate JSON key"):

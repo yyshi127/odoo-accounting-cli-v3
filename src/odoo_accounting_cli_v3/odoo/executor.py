@@ -28,7 +28,8 @@ class OdooReadExecutor:
         database_name: str,
         database_uuid: str,
         receipt_secret: bytes,
-        consume_receipt: Callable[[str, str], bool],
+        receipt_key_id: str,
+        consume_receipt: Callable[[str, str, datetime, datetime], bool],
         now: Callable[[], datetime] | None = None,
         receipt_id_factory: Callable[[], str] | None = None,
         trial_balance_backend_factory: Callable[[Any, int, frozenset[int]], TrialBalanceBackend]
@@ -38,6 +39,8 @@ class OdooReadExecutor:
             not odoo_instance_id
             or not database_name
             or not receipt_secret
+            or not isinstance(receipt_key_id, str)
+            or not receipt_key_id.strip()
             or not callable(consume_receipt)
         ):
             raise OdooExecutionError(
@@ -48,6 +51,7 @@ class OdooReadExecutor:
         self._database_name = database_name
         self._database_uuid = str(uuid.UUID(database_uuid))
         self._receipt_secret = receipt_secret
+        self._receipt_key_id = receipt_key_id
         self._consume_receipt = consume_receipt
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._receipt_id_factory = receipt_id_factory or (lambda: str(uuid.uuid4()))
@@ -100,6 +104,7 @@ class OdooReadExecutor:
             release_digest=release_digest,
             record_count=body["page"]["total_count"],
             observed_at=self._now(),
+            key_id=self._receipt_key_id,
             secret=self._receipt_secret,
         )
         return {**body, "receipt": receipt}
@@ -132,5 +137,6 @@ class OdooReadExecutor:
             expected_record_count=body["page"]["total_count"],
             now=self._now(),
             consume_receipt=self._consume_receipt,
+            expected_key_id=self._receipt_key_id,
             secret=self._receipt_secret,
         )

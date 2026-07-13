@@ -63,6 +63,11 @@ ALLOWED_TRANSITIONS: dict[State, frozenset[State]] = {
 }
 
 MAX_APPROVAL_TTL = timedelta(minutes=15)
+MIN_HMAC_SECRET_BYTES = 32
+SIGNATURE_VERSION = 1
+APPROVAL_PURPOSE = "approval_v1"
+EXECUTION_RESULT_PURPOSE = "execution_result_v1"
+VERIFICATION_RESULT_PURPOSE = "verification_result_v1"
 
 _GUARDED_TARGETS: dict[State, str] = {
     State.APPROVED: "approve_operation",
@@ -304,7 +309,9 @@ class Approval:
             "operation_digest": self.operation_digest,
             "operation_id": self.operation_id,
             "operation_revision": self.operation_revision,
+            "purpose": APPROVAL_PURPOSE,
             "user_id": self.user_id,
+            "version": SIGNATURE_VERSION,
         }
 
 
@@ -321,6 +328,7 @@ class TrustedResult:
     operation_revision: int
     company_id: int
     issuer: str
+    key_id: str
     succeeded: bool
     evidence_digest: str
     prior_evidence_digest: str | None
@@ -328,17 +336,25 @@ class TrustedResult:
     signature: str
 
     def payload(self) -> dict[str, Any]:
+        purpose = (
+            EXECUTION_RESULT_PURPOSE
+            if self.kind == ResultKind.EXECUTION
+            else VERIFICATION_RESULT_PURPOSE
+        )
         return {
             "company_id": self.company_id,
             "evidence_digest": self.evidence_digest,
             "issued_at": self.issued_at.astimezone(timezone.utc).isoformat(),
             "issuer": self.issuer,
+            "key_id": self.key_id,
             "kind": self.kind,
             "operation_digest": self.operation_digest,
             "operation_id": self.operation_id,
             "operation_revision": self.operation_revision,
             "prior_evidence_digest": self.prior_evidence_digest,
+            "purpose": purpose,
             "succeeded": self.succeeded,
+            "version": SIGNATURE_VERSION,
         }
 
 
@@ -358,6 +374,10 @@ def _is_sha256(value: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _is_strong_hmac_secret(value: object) -> bool:
+    return isinstance(value, bytes) and len(value) >= MIN_HMAC_SECRET_BYTES
 
 
 def _validate_approval_ttl(approval: Approval, approval_ttl_seconds: int) -> None:
@@ -385,10 +405,10 @@ def sign_approval(
     operation.assert_integrity()
     if operation.state != State.AWAITING_APPROVAL:
         raise ApprovalRejected("operation is not awaiting approval")
+    if not _is_strong_hmac_secret(secret):
+        raise ApprovalRejected("approval HMAC secret must be bytes of at least 32 bytes")
     if (
-        not isinstance(secret, bytes)
-        or not secret
-        or not isinstance(nonce, str)
+        not isinstance(nonce, str)
         or not nonce
         or isinstance(approver_user_id, bool)
         or not isinstance(approver_user_id, int)
@@ -437,10 +457,10 @@ def approve_operation(
         raise ApprovalRejected("operation is not awaiting approval") from exc
     if not _is_aware(now):
         raise ApprovalRejected("current time must be timezone-aware")
+    if not _is_strong_hmac_secret(secret):
+        raise ApprovalRejected("approval HMAC secret must be bytes of at least 32 bytes")
     if (
-        not isinstance(secret, bytes)
-        or not secret
-        or not isinstance(approval.nonce, str)
+        not isinstance(approval.nonce, str)
         or not approval.nonce
         or isinstance(approval.approver_user_id, bool)
         or not isinstance(approval.approver_user_id, int)
@@ -502,6 +522,8 @@ def begin_execution(
     operation._check_transition(State.EXECUTING, expected_revision=expected_revision)
     if not _is_aware(now):
         raise ApprovalRejected("current time must be timezone-aware")
+    if not _is_strong_hmac_secret(secret):
+        raise ApprovalRejected("approval HMAC secret must be bytes of at least 32 bytes")
     if not isinstance(approval.nonce, str) or not approval.nonce:
         raise ApprovalRejected("approval nonce is invalid")
     if (
@@ -529,8 +551,6 @@ def begin_execution(
     )
     if not stored_binding or not approval_binding:
         raise ApprovalRejected("approved operation binding mismatch")
-    if not isinstance(secret, bytes) or not secret:
-        raise ApprovalRejected("approval secret is required")
     expected = hmac.new(secret, canonical_json(approval.payload()), hashlib.sha256).hexdigest()
     if not isinstance(approval.signature, str) or not hmac.compare_digest(
         expected, approval.signature
@@ -551,6 +571,7 @@ def _sign_result(
     operation: Operation,
     kind: ResultKind,
     issuer: str,
+    key_id: str,
     succeeded: bool,
     evidence_digest: str,
     issued_at: datetime,
@@ -562,8 +583,15 @@ def _sign_result(
         raise TrustedResultRejected(
             f"operation is not ready for a {kind} result"
         )
-    if not isinstance(secret, bytes) or not secret or not isinstance(issuer, str) or not issuer.strip():
-        raise TrustedResultRejected("result issuer and secret are required")
+    if not _is_strong_hmac_secret(secret):
+        raise TrustedResultRejected("result HMAC secret must be bytes of at least 32 bytes")
+    if (
+        not isinstance(issuer, str)
+        or not issuer.strip()
+        or not isinstance(key_id, str)
+        or not key_id.strip()
+    ):
+        raise TrustedResultRejected("result issuer and key ID are required")
     if type(succeeded) is not bool:
         raise TrustedResultRejected("result succeeded flag must be boolean")
     if not _is_sha256(evidence_digest):
@@ -584,6 +612,7 @@ def _sign_result(
         operation_revision=operation.revision,
         company_id=operation.company_id,
         issuer=issuer,
+        key_id=key_id,
         succeeded=succeeded,
         evidence_digest=evidence_digest,
         prior_evidence_digest=prior_digest,
@@ -598,6 +627,7 @@ def sign_execution_result(
     *,
     operation: Operation,
     issuer: str,
+    key_id: str,
     succeeded: bool,
     evidence_digest: str,
     issued_at: datetime,
@@ -607,6 +637,7 @@ def sign_execution_result(
         operation=operation,
         kind=ResultKind.EXECUTION,
         issuer=issuer,
+        key_id=key_id,
         succeeded=succeeded,
         evidence_digest=evidence_digest,
         issued_at=issued_at,
@@ -618,6 +649,7 @@ def sign_verification_result(
     *,
     operation: Operation,
     issuer: str,
+    key_id: str,
     succeeded: bool,
     evidence_digest: str,
     issued_at: datetime,
@@ -627,6 +659,7 @@ def sign_verification_result(
         operation=operation,
         kind=ResultKind.VERIFICATION,
         issuer=issuer,
+        key_id=key_id,
         succeeded=succeeded,
         evidence_digest=evidence_digest,
         issued_at=issued_at,
@@ -641,11 +674,21 @@ def _verify_result(
     kind: ResultKind,
     now: datetime,
     secret: bytes,
+    expected_key_id: str,
+    allowed_issuers: frozenset[str],
 ) -> None:
     if not _is_aware(now):
         raise TrustedResultRejected("current time must be timezone-aware")
-    if not isinstance(secret, bytes) or not secret:
-        raise TrustedResultRejected("trusted result secret is required")
+    if not _is_strong_hmac_secret(secret):
+        raise TrustedResultRejected("result HMAC secret must be bytes of at least 32 bytes")
+    if not isinstance(expected_key_id, str) or not expected_key_id.strip():
+        raise TrustedResultRejected("trusted result expected key ID is required")
+    if (
+        not isinstance(allowed_issuers, frozenset)
+        or not allowed_issuers
+        or any(not isinstance(issuer, str) or not issuer.strip() for issuer in allowed_issuers)
+    ):
+        raise TrustedResultRejected("trusted result issuer allowlist is invalid")
     bindings = (
         result.kind == kind
         and result.operation_id == operation.operation_id
@@ -666,10 +709,18 @@ def _verify_result(
     if (
         not isinstance(result.issuer, str)
         or not result.issuer.strip()
+        or not isinstance(result.key_id, str)
+        or not result.key_id.strip()
         or type(result.succeeded) is not bool
         or not _is_sha256(result.evidence_digest)
+        or not isinstance(result.signature, str)
+        or not _is_sha256(result.signature)
     ):
         raise TrustedResultRejected("trusted result content is invalid")
+    if result.key_id != expected_key_id:
+        raise TrustedResultRejected("trusted result key ID mismatch")
+    if result.issuer not in allowed_issuers:
+        raise TrustedResultRejected("trusted result issuer is not authorized")
     if not _is_aware(result.issued_at) or result.issued_at > now:
         raise TrustedResultRejected("trusted result timestamp is invalid")
     expected = hmac.new(secret, canonical_json(result.payload()), hashlib.sha256).hexdigest()
@@ -683,6 +734,8 @@ def record_execution_result(
     *,
     now: datetime,
     secret: bytes,
+    expected_key_id: str,
+    allowed_issuers: frozenset[str],
     expected_revision: int,
 ) -> Operation:
     target = State.VERIFYING if result.succeeded else State.FAILED
@@ -693,6 +746,8 @@ def record_execution_result(
         kind=ResultKind.EXECUTION,
         now=now,
         secret=secret,
+        expected_key_id=expected_key_id,
+        allowed_issuers=allowed_issuers,
     )
     return operation._apply_transition(
         target, execution_result_digest=result.evidence_digest
@@ -705,6 +760,8 @@ def complete_operation(
     *,
     now: datetime,
     secret: bytes,
+    expected_key_id: str,
+    allowed_issuers: frozenset[str],
     expected_revision: int,
 ) -> Operation:
     target = State.COMPLETED if result.succeeded else State.FAILED
@@ -715,6 +772,8 @@ def complete_operation(
         kind=ResultKind.VERIFICATION,
         now=now,
         secret=secret,
+        expected_key_id=expected_key_id,
+        allowed_issuers=allowed_issuers,
     )
     return operation._apply_transition(
         target, verification_result_digest=result.evidence_digest

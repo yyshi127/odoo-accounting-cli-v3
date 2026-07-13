@@ -3,8 +3,8 @@
 Production-oriented accounting capability gateway for Odoo 19 and Pi Agent.
 
 V3 is built and released independently from V2. Its authoritative source is
-this repository; the intended server release root is
-`/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v3/releases/`.
+this repository; the trusted server release root is
+`/opt/odoo-accounting-cli-v3/releases/`.
 V2 remains installed and runnable during side-by-side verification.
 
 ## Source boundary
@@ -13,21 +13,24 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-The initial baseline is intentionally non-operational: no write capability is
-enabled until it has passed the required sandbox, approval, idempotency,
-verification, and recovery gates.
+Only the trial-balance read is a staged execution candidate for the dedicated
+test environment. Staging is separate from enablement: no capability is yet
+marked enabled or routed through Pi. No write capability is staged or enabled;
+sandbox and production remain closed until their approval, idempotency,
+verification, recovery, and evidence gates pass.
 
 ## CLI boundary
 
-The installable `odoo-accounting-cli-v3` command currently provides validated
-registry inspection. The standard operation lifecycle commands are present but
-fail closed until the durable authenticated gateway is configured. They never
-return a simulated Odoo success.
+The installable `odoo-accounting-cli-v3` command provides registry inspection
+and an authenticated Odoo read boundary. The standard write-operation lifecycle
+commands are present but fail closed. They never return a simulated Odoo
+success.
 
 ```text
 odoo-accounting-cli-v3 registry list
 odoo-accounting-cli-v3 registry get --capability-id acct.gl.trial_balance.v1
 odoo-accounting-cli-v3 release identity
+odoo-accounting-cli-v3 read --runtime-config /absolute/root-managed/runtime.json --request-json '{...}'
 odoo-accounting-cli-v3 operation prepare --request-json '{...}'
 ```
 
@@ -45,4 +48,5 @@ python tools/check_source_boundary.py
 ```
 
 The acceptance gates and current evidence limits are in `tests/TEST.md` and
-`docs/BASELINE.md`.
+`docs/BASELINE.md`. Deployment, upgrade, promotion, and rollback are defined in
+`docs/DEPLOYMENT.md`.

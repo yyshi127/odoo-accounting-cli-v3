@@ -35,8 +35,43 @@ class RegistryTest(unittest.TestCase):
                 self.assertIs(item["approval"]["required"], True)
                 self.assertIs(item["idempotency"]["required"], True)
 
-    def test_no_capability_is_enabled_without_evidence(self) -> None:
-        self.assertTrue(all(not item["enabled_environments"] for item in self.document["capabilities"]))
+    def test_only_trial_balance_read_is_staged_in_test(self) -> None:
+        staged = [
+            item
+            for item in self.document["capabilities"]
+            if item.get("staged_environments")
+        ]
+        self.assertEqual([item["id"] for item in staged], ["acct.gl.trial_balance.v1"])
+        self.assertEqual(staged[0]["staged_environments"], ["test"])
+        self.assertEqual(staged[0]["enabled_environments"], [])
+        self.assertEqual(staged[0]["evidence"]["level"], "contract_tested")
+        self.assertTrue(
+            all(not item["enabled_environments"] for item in self.document["capabilities"])
+        )
+        self.assertTrue(
+            all(
+                not item["enabled_environments"]
+                for item in self.document["capabilities"]
+                if item["access"] == "write"
+            )
+        )
+
+    def test_staging_and_enablement_are_separate_evidence_gates(self) -> None:
+        declared = copy.deepcopy(self.document)
+        declared["capabilities"][0]["staged_environments"] = ["test"]
+        with self.assertRaisesRegex(RegistryError, "contract-tested"):
+            validate_registry(declared)
+
+        incomplete = copy.deepcopy(self.document)
+        trial_balance = next(
+            item
+            for item in incomplete["capabilities"]
+            if item["id"] == "acct.gl.trial_balance.v1"
+        )
+        trial_balance["staged_environments"] = []
+        trial_balance["enabled_environments"] = ["test"]
+        with self.assertRaisesRegex(RegistryError, "test_verified"):
+            validate_registry(incomplete)
 
     def test_duplicate_id_is_rejected(self) -> None:
         invalid = copy.deepcopy(self.document)

@@ -14,12 +14,15 @@ REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities
 RELEASE_DIGEST = "d" * 64
 DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
 RECEIPT_SECRET = b"test-only-gateway-receipt-secret"
+AUTH_KEY_ID = "auth-key-2026-07"
+RECEIPT_KEY_ID = "read-receipt-key-2026-07"
 
 
 def enabled_capabilities():
     document = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     for item in document["capabilities"]:
-        item["enabled_environments"] = ["test"]
+        item["staged_environments"] = ["test"]
+        item["enabled_environments"] = []
         item["evidence"]["level"] = "contract_tested"
     return validate_registry(document)
 
@@ -30,6 +33,9 @@ def context(user_id: int = 42, company_id: int = 7, database_uuid: str = DATABAS
         auth_token_id=f"token-{user_id}-{company_id}",
         auth_issued_at=datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc),
         auth_expires_at=datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc) + timedelta(minutes=5),
+        auth_signature_version=1,
+        auth_signature_purpose="auth_context_v1",
+        auth_key_id=AUTH_KEY_ID,
         auth_signature="a" * 64,
         principal=f"pi:test-user-{user_id}",
         odoo_instance_id="odoo19@tokyo2",
@@ -105,12 +111,25 @@ class GatewayTest(unittest.TestCase):
         with self.assertRaisesRegex(GatewayError, "timestamps"):
             RequestContext(**values)
 
+    def test_context_rejects_invalid_signature_protocol_fields(self):
+        for field, value, message in (
+            ("auth_signature_version", 2, "version"),
+            ("auth_signature_purpose", "read_receipt_v1", "purpose"),
+            ("auth_key_id", "", "key ID"),
+        ):
+            with self.subTest(field=field):
+                values = context().__dict__.copy()
+                values[field] = value
+                with self.assertRaisesRegex(GatewayError, message):
+                    RequestContext(**values)
+
     def setUp(self) -> None:
         self.gateway = CapabilityGateway(
             enabled_capabilities(),
             release_digest=RELEASE_DIGEST,
             authenticate_context=lambda _context: True,
             acl_check=lambda _context, _capability, _parameters: True,
+            availability_channel="staged",
         )
 
     def test_full_parameters_survive_prepare_and_preview(self) -> None:
@@ -185,6 +204,7 @@ class GatewayTest(unittest.TestCase):
             enabled_capabilities(), release_digest=RELEASE_DIGEST,
             authenticate_context=lambda _context: True,
             acl_check=lambda _context, _capability, _parameters: False,
+            availability_channel="staged",
         )
         with self.assertRaisesRegex(GatewayError, "ACL"):
             gateway.get_capability(context(), "acct.gl.trial_balance.v1")
@@ -198,22 +218,27 @@ class GatewayTest(unittest.TestCase):
         with self.assertRaisesRegex(GatewayError, "outside"):
             self.gateway.status(context(user_id=43), "op-bound")
 
-    def test_disabled_capability_is_not_visible_or_callable(self) -> None:
+    def test_only_test_enabled_capability_is_visible_or_callable(self) -> None:
         document = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
         gateway = CapabilityGateway(
             validate_registry(document), release_digest=RELEASE_DIGEST,
             authenticate_context=lambda _context: True,
             acl_check=lambda _context, _capability, _parameters: True,
+            availability_channel="staged",
         )
-        self.assertEqual(gateway.list_capabilities(context()), [])
+        self.assertEqual(
+            [item["id"] for item in gateway.list_capabilities(context())],
+            ["acct.gl.trial_balance.v1"],
+        )
         with self.assertRaisesRegex(GatewayError, "not enabled"):
-            gateway.get_capability(context(), "acct.gl.trial_balance.v1")
+            gateway.get_capability(context(), "acct.invoice.customer_create.v1")
 
     def test_unauthenticated_context_is_rejected(self) -> None:
         gateway = CapabilityGateway(
             enabled_capabilities(), release_digest=RELEASE_DIGEST,
             authenticate_context=lambda _context: False,
             acl_check=lambda _context, _capability, _parameters: True,
+            availability_channel="staged",
         )
         with self.assertRaisesRegex(GatewayError, "authentication failed"):
             gateway.list_capabilities(context())
@@ -254,6 +279,7 @@ class GatewayTest(unittest.TestCase):
                 release_digest=release_sha,
                 record_count=1,
                 observed_at=datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc),
+                key_id=RECEIPT_KEY_ID,
                 secret=RECEIPT_SECRET,
             )
             return {**body, "receipt": receipt}
@@ -277,6 +303,7 @@ class GatewayTest(unittest.TestCase):
                 expected_record_count=body["page"]["total_count"],
                 now=datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc),
                 consume_receipt=lambda *_: True,
+                expected_key_id=RECEIPT_KEY_ID,
                 secret=RECEIPT_SECRET,
             )
 
@@ -286,6 +313,7 @@ class GatewayTest(unittest.TestCase):
             acl_check=lambda _context, _capability, _parameters: True,
             read_executor=execute,
             read_receipt_verifier=verify,
+            availability_channel="staged",
         )
         requested = trial_balance_parameters()
         result = gateway.read(context(), "acct.gl.trial_balance.v1", requested)
@@ -303,6 +331,9 @@ class GatewayTest(unittest.TestCase):
                 "request_digest": "a" * 64, "result_digest": "b" * 64,
                 "registry_digest": "c" * 64, "release_digest": RELEASE_DIGEST,
                 "record_count": 1, "observed_at": "2026-07-13T07:00:00Z",
+                "signature_version": 1,
+                "signature_purpose": "read_receipt_v1",
+                "signature_key_id": RECEIPT_KEY_ID,
                 "signature": "e" * 64,
             }
             return {**body, "receipt": receipt}
@@ -320,7 +351,9 @@ class GatewayTest(unittest.TestCase):
                 release_digest=release_sha,
                 expected_record_count=body["page"]["total_count"],
                 now=datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc),
-                consume_receipt=lambda *_: True, secret=RECEIPT_SECRET,
+                consume_receipt=lambda *_: True,
+                expected_key_id=RECEIPT_KEY_ID,
+                secret=RECEIPT_SECRET,
             )
 
         gateway = CapabilityGateway(
@@ -328,6 +361,7 @@ class GatewayTest(unittest.TestCase):
             authenticate_context=lambda _context: True,
             acl_check=lambda _context, _capability, _parameters: True,
             read_executor=execute, read_receipt_verifier=verify,
+            availability_channel="staged",
         )
         with self.assertRaises(ReceiptError):
             gateway.read(context(), "acct.gl.trial_balance.v1", trial_balance_parameters())

@@ -12,6 +12,7 @@ from odoo_accounting_cli_v3.registry import validate_registry
 
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
 NOW = datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc)
+RECEIPT_KEY_ID = "test-receipt-2026-07"
 
 
 class Cursor:
@@ -50,6 +51,9 @@ def context(**changes):
         "auth_token_id": "token-1",
         "auth_issued_at": NOW - timedelta(seconds=5),
         "auth_expires_at": NOW + timedelta(minutes=4),
+        "auth_signature_version": 1,
+        "auth_signature_purpose": "auth_context_v1",
+        "auth_key_id": "test-auth-2026-07",
         "auth_signature": "a" * 64,
         "principal": "pi:user-42",
         "odoo_instance_id": "odoo19@tokyo2",
@@ -84,7 +88,7 @@ class OdooReadExecutorTest(unittest.TestCase):
     def executor(self):
         consumed = set()
 
-        def consume(receipt_id, request_digest):
+        def consume(receipt_id, request_digest, _observed_at, _verified_at):
             key = (receipt_id, request_digest)
             if key in consumed:
                 return False
@@ -96,7 +100,8 @@ class OdooReadExecutorTest(unittest.TestCase):
             odoo_instance_id="odoo19@tokyo2",
             database_name="odoo_test",
             database_uuid="11111111-1111-4111-8111-111111111111",
-            receipt_secret=b"test-only-receipt-secret",
+            receipt_secret=b"test-only-receipt-secret-32-byte",
+            receipt_key_id=RECEIPT_KEY_ID,
             consume_receipt=consume,
             now=lambda: NOW,
             receipt_id_factory=lambda: "receipt-1",

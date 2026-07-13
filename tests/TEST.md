@@ -17,7 +17,8 @@ where practical, then record actual execution evidence separately.
 - Production-accounting writes are not authorized.
 - The observed database named `codex_sgf_test_20260713_01` is not a write sandbox
   until its purpose, owner, reset method, and allowed companies are confirmed.
-- All registered capabilities currently have no enabled environment.
+- Only `acct.gl.trial_balance.v1` is staged for the isolated `test`
+  environment; no capability is enabled and no write capability is staged.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -185,10 +186,17 @@ At the current local development checkpoint:
 
 - contract/control, receipt, release, and trial-balance unit tests exist;
 - the installable V3 executable, JSON registry commands, fail-closed operation
-  commands, and installed-CLI subprocess suite pass locally; release-bound
-  server identity and real-Odoo evidence remain separate gates;
-- the V3 trial-balance adapter has not yet produced a release-bound real-Odoo
-  receipt recorded here;
+  commands, and local console-script subprocess suite pass; a clean
+  artifact-installed environment with source-tree imports removed remains a
+  separate gate, as do server identity and real-Odoo execution;
+- the dev2 V3 trial-balance adapter produced a retained, release-bound direct
+  Odoo read receipt and independent financial-oracle match; the dev3 installed
+  CLI, persistent replay, and explicit signature-wire-protocol run is still a
+  separate pending gate;
+- 143 local tests currently pass and four target-Linux gates are intentionally
+  skipped off target, including persistent replay/idempotency,
+  strict signature metadata, Odoo bootstrap, runner, receipt, and registry
+  cases; this is development evidence, not real-Odoo or production promotion;
 - no sandbox write lifecycle has been authorized or recorded; and
 - no production write is authorized.
 

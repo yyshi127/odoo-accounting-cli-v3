@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
 from typing import Any, NoReturn
@@ -12,6 +13,15 @@ from typing import Any, NoReturn
 import click
 
 from . import __version__
+from .contracts import ContractError, validate_value
+from .odoo.runner import (
+    OdooRunnerError,
+    RuntimeConfig,
+    load_runtime_config,
+    load_runtime_secrets,
+    run_odoo_shell,
+)
+from .receipts import ReceiptError, verify_read_receipt
 from .registry import Capability, load_registry, registry_digest, validate_registry
 from .release import ReleaseError, verify_manifest
 
@@ -77,7 +87,9 @@ def _load_capabilities() -> tuple[Capability, ...]:
     )
 
 
-def _load_release_identity(root: Path | None = None) -> dict[str, Any]:
+def _load_release_identity(
+    root: Path | None = None, *, command: str = "release.identity"
+) -> dict[str, Any]:
     release_root = root or Path(__file__).resolve().parents[2]
     manifest_path = release_root / "RELEASE-MANIFEST.json"
     anchor_path = (
@@ -90,7 +102,7 @@ def _load_release_identity(root: Path | None = None) -> dict[str, Any]:
         anchor = json.loads(anchor_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise CliFailure(
-            command="release.identity",
+            command=command,
             code="release_identity_unavailable",
             message="The release manifest or external deployment anchor is unavailable.",
             exit_code=5,
@@ -106,10 +118,11 @@ def _load_release_identity(root: Path | None = None) -> dict[str, Any]:
         or set(anchor) != expected_anchor_fields
         or anchor["release"] != release_root.name
         or anchor["commit"] != manifest.get("commit")
-        or re.fullmatch(r"[0-9a-f]{64}", anchor.get("package_sha256", "")) is None
+        or not isinstance(anchor.get("package_sha256"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", anchor["package_sha256"]) is None
     ):
         raise CliFailure(
-            command="release.identity",
+            command=command,
             code="release_identity_mismatch",
             message="The deployment anchor does not match this release.",
             exit_code=5,
@@ -123,7 +136,7 @@ def _load_release_identity(root: Path | None = None) -> dict[str, Any]:
         capabilities = load_registry(release_root / "registry" / "capabilities.json")
     except (OSError, ValueError, ReleaseError) as exc:
         raise CliFailure(
-            command="release.identity",
+            command=command,
             code="release_verification_failed",
             message="The installed release failed integrity verification.",
             exit_code=5,
@@ -137,6 +150,86 @@ def _load_release_identity(root: Path | None = None) -> dict[str, Any]:
         "verified": True,
         "version": manifest["version"],
     }
+
+
+def _assert_runtime_release(config: RuntimeConfig, identity: dict[str, Any]) -> None:
+    source_release = Path(__file__).resolve().parents[2]
+    if source_release != config.release_root.resolve():
+        raise CliFailure(
+            command="read",
+            code="runtime_release_mismatch",
+            message="The CLI process and configured Odoo runner are not from the same release.",
+            exit_code=5,
+        )
+    if identity.get("version") != __version__:
+        raise CliFailure(
+            command="read",
+            code="runtime_release_mismatch",
+            message="The CLI version does not match the configured verified release.",
+            exit_code=5,
+        )
+
+
+def _assert_verified_read_result(
+    request: dict[str, Any],
+    result: dict[str, Any],
+    config: RuntimeConfig,
+    identity: dict[str, Any],
+) -> None:
+    context = request.get("context")
+    receipt = result.get("receipt") if isinstance(result, dict) else None
+    if not isinstance(context, dict) or not isinstance(receipt, dict):
+        raise CliFailure(
+            command="read",
+            code="verified_receipt_missing",
+            message="Odoo did not return a verified read receipt.",
+            exit_code=6,
+        )
+    try:
+        capability_id = request["capability_id"]
+        capabilities = load_registry(config.release_root / "registry" / "capabilities.json")
+        capability = next(item for item in capabilities if item.id == capability_id)
+        validate_value(result, capability.data["output_schema"])
+        body = {key: value for key, value in result.items() if key != "receipt"}
+        _auth_secret, receipt_secret = load_runtime_secrets(config)
+        verify_read_receipt(
+            receipt,
+            capability_id=capability_id,
+            parameters=request["parameters"],
+            result_body=body,
+            auth_token_id=context["auth_token_id"],
+            principal=context["principal"],
+            odoo_instance_id=config.instance_id,
+            database_name=config.database_name,
+            database_uuid=config.database_uuid,
+            company_id=context["company_id"],
+            user_id=context["user_id"],
+            registry_digest=identity["registry_digest"],
+            release_digest=identity["manifest_sha256"],
+            expected_record_count=body["page"]["total_count"],
+            now=datetime.now(timezone.utc),
+            consume_receipt=lambda *_args: True,
+            expected_key_id=config.receipt_key_id,
+            secret=receipt_secret,
+        )
+    except (
+        ContractError,
+        KeyError,
+        OdooRunnerError,
+        ReceiptError,
+        StopIteration,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise CliFailure(
+            command="read",
+            code="verified_receipt_mismatch",
+            message=(
+                "The Odoo read result or receipt does not match the request, "
+                "strict capability contract, signature, and verified runtime."
+            ),
+            exit_code=6,
+        ) from exc
 
 
 def _read_request(command: str, request_json: str | None) -> dict[str, Any]:
@@ -250,6 +343,68 @@ def registry_get(capability_id: str) -> None:
         {
             "capability": capability.data,
             "registry_digest": registry_digest(capabilities),
+        },
+    )
+
+
+@main.command("read")
+@click.option(
+    "--runtime-config",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Absolute path to the root-managed Odoo runtime configuration.",
+)
+@click.option(
+    "--timeout-seconds",
+    type=click.FloatRange(min=0, min_open=True),
+    default=30.0,
+    show_default=True,
+)
+@click.option(
+    "--request-json",
+    help="Complete request as a JSON object; if omitted, read it from standard input.",
+)
+def read_capability(
+    runtime_config: Path,
+    timeout_seconds: float,
+    request_json: str | None,
+) -> None:
+    """Execute one enabled, authenticated read capability in Odoo."""
+
+    request = _read_request("read", request_json)
+    try:
+        config = load_runtime_config(runtime_config)
+    except OdooRunnerError as exc:
+        raise CliFailure(
+            command="read",
+            code="runtime_configuration_rejected",
+            message="The root-managed Odoo runtime configuration was rejected.",
+            exit_code=5,
+        ) from exc
+    identity = _load_release_identity(config.release_root, command="read")
+    _assert_runtime_release(config, identity)
+    try:
+        result = run_odoo_shell(
+            config,
+            request,
+            release_digest=identity["manifest_sha256"],
+            timeout_seconds=timeout_seconds,
+        )
+    except OdooRunnerError as exc:
+        raise CliFailure(
+            command="read",
+            code="odoo_read_failed",
+            message="The authenticated Odoo read did not produce a verified result.",
+            exit_code=6,
+        ) from exc
+    _assert_verified_read_result(request, result, config, identity)
+    _success(
+        "read",
+        {
+            "capability_id": request.get("capability_id"),
+            "release_identity": identity,
+            "result": result,
+            "runtime": config.runtime_identity,
         },
     )
 

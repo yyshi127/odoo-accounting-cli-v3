@@ -24,7 +24,10 @@ CONTEXT_FIELDS = {
     "audience",
     "auth_expires_at",
     "auth_issued_at",
+    "auth_key_id",
     "auth_signature",
+    "auth_signature_purpose",
+    "auth_signature_version",
     "auth_token_id",
     "company_id",
     "database_name",
@@ -65,6 +68,9 @@ def request_context_from_mapping(value: Any) -> RequestContext:
         auth_token_id=value["auth_token_id"],
         auth_issued_at=_parse_datetime(value["auth_issued_at"], "auth_issued_at"),
         auth_expires_at=_parse_datetime(value["auth_expires_at"], "auth_expires_at"),
+        auth_signature_version=value["auth_signature_version"],
+        auth_signature_purpose=value["auth_signature_purpose"],
+        auth_key_id=value["auth_key_id"],
         auth_signature=value["auth_signature"],
         principal=value["principal"],
         odoo_instance_id=value["odoo_instance_id"],
@@ -141,12 +147,15 @@ def execute_read_from_odoo_shell(
     *,
     capabilities: Iterable[Capability],
     auth_secret: bytes,
-    consume_auth_token: Callable[[str, str], bool],
+    auth_key_id: str,
+    consume_auth_token: Callable[[str, str, datetime, datetime], bool],
     receipt_secret: bytes,
-    consume_receipt: Callable[[str, str], bool],
+    receipt_key_id: str,
+    consume_receipt: Callable[[str, str, datetime, datetime], bool],
     release_digest: str,
     odoo_instance_id: str,
     environment: str,
+    capability_channel: str = "enabled",
     now: datetime | None = None,
     environment_factory: Callable[[Any, int, dict[str, Any]], Any] | None = None,
     executor_factory: Callable[..., OdooReadExecutor] = OdooReadExecutor,
@@ -166,7 +175,12 @@ def execute_read_from_odoo_shell(
         or context.environment != environment
     ):
         raise OdooBootstrapError("signed request does not match the Odoo runtime")
-    verify_request_context(context, now=observed_at, secret=auth_secret)
+    verify_request_context(
+        context,
+        now=observed_at,
+        secret=auth_secret,
+        expected_key_id=auth_key_id,
+    )
     bound_env = bind_non_superuser_environment(
         root_env,
         context,
@@ -180,9 +194,19 @@ def execute_read_from_odoo_shell(
         nonlocal request_consumed
         if candidate != context:
             return False
-        verify_request_context(candidate, now=observed_at, secret=auth_secret)
+        verify_request_context(
+            candidate,
+            now=observed_at,
+            secret=auth_secret,
+            expected_key_id=auth_key_id,
+        )
         if not request_consumed:
-            if not consume_auth_token(candidate.auth_token_id, request_digest):
+            if not consume_auth_token(
+                candidate.auth_token_id,
+                request_digest,
+                candidate.auth_expires_at,
+                observed_at,
+            ):
                 return False
             request_consumed = True
         return True
@@ -203,6 +227,7 @@ def execute_read_from_odoo_shell(
         database_name=actual_database_name,
         database_uuid=actual_database_uuid,
         receipt_secret=receipt_secret,
+        receipt_key_id=receipt_key_id,
         consume_receipt=consume_receipt,
         now=lambda: observed_at,
     )
@@ -213,6 +238,7 @@ def execute_read_from_odoo_shell(
         acl_check=acl_check,
         read_executor=executor,
         read_receipt_verifier=executor.verify,
+        availability_channel=capability_channel,
     )
     return gateway.read(context, capability_id, parameters)
 
