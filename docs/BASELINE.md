@@ -210,6 +210,23 @@ Dev6 remains staged with zero enabled capabilities. Real partial/unmatched
 payment fixtures, production-scale execution, immutable runtime ownership, Pi
 E2E, sandbox write lifecycles, and production trust separation remain open.
 
+The immutable dev7 candidate `0.1.0.dev7-4bfe445ca5e4` then added the AP
+open-items read without importing V2's incorrect AP residual algorithm. Its
+canonical package SHA-256 is
+`d51fd4bd1655a58081fd7693134c9c1ade34b383771c34c3398b4a85e18822b5`;
+GitHub Actions run `29314765337` passed all three jobs. Six independent
+read-only AP SQL oracles matched signed Odoo results, and the security,
+parameter, persistence, receipt, and isolation gates passed. The frozen
+root-owned evidence bundle contains 98 files and 97 checksum entries; its
+external anchor records checksum-manifest SHA-256
+`9b1b46486a8de04221198da719ebcc2411558cd79a0a31be713db6f756c9463b`.
+Dev7 remains staged with zero enabled capabilities. Its retained evidence also
+records that a wheel-installed business read is intentionally rejected because
+site-packages is not the configured immutable release source. Dev8 therefore
+formalizes the exact release launcher and retained canonical-package binding;
+it does not weaken the exact-source check or turn the wheel into a second
+production artifact.
+
 ## Phase-one exit gate
 
 The read-only inventory baseline is complete for the running Odoo service, V2

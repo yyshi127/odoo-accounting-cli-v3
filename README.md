@@ -22,18 +22,24 @@ verification, recovery, and evidence gates pass.
 
 ## CLI boundary
 
-The installable `odoo-accounting-cli-v3` command provides registry inspection
-and an authenticated Odoo read boundary. The standard write-operation lifecycle
-commands are present but fail closed. They never return a simulated Odoo
-success.
+The wheel-installed `odoo-accounting-cli-v3` command provides development and
+packaging smoke coverage. A deployed accounting read uses the exact,
+manifest-covered `<release>/bin/odoo-accounting-cli-v3` launcher and a runtime
+configuration bound to the retained canonical tar. This keeps wheel contents,
+working directories, and copied Pi code outside the production business-code
+trust path. The standard write-operation lifecycle commands are present but
+fail closed. They never return a simulated Odoo success.
 
 ```text
-odoo-accounting-cli-v3 registry list
-odoo-accounting-cli-v3 registry get --capability-id acct.gl.trial_balance.v1
-odoo-accounting-cli-v3 release identity
-odoo-accounting-cli-v3 read --runtime-config /absolute/root-managed/runtime.json --request-json '{...}'
-odoo-accounting-cli-v3 operation prepare --request-json '{...}'
+/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 registry list
+/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 registry get --capability-id acct.gl.trial_balance.v1
+/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 release identity
+/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 read --runtime-config /absolute/root-managed/runtime.json --request-json '{...}'
+/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 operation prepare --request-json '{...}'
 ```
+
+The bare wheel command is limited to development smoke such as `--version` and
+registry-contract inspection; it is not a production accounting entry point.
 
 All machine-facing output is JSON. Real accounting success additionally
 requires an Odoo-bound signed receipt. CLI-Anything v0.4.0 supplies the CLI and

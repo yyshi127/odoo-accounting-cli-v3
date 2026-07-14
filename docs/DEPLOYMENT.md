@@ -25,6 +25,7 @@ archive.
 
 ```text
 /opt/odoo-accounting-cli-v3/
+  packages/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz
   releases/<version>-<commit12>/
   trusted-artifacts/<version>-<commit12>.json
 /etc/odoo-accounting-cli-v3/
@@ -61,19 +62,29 @@ extracting it.
 
 ## Side-by-side installation
 
-1. Create a root-owned temporary directory below
+1. Copy the verified archive to a new root-owned, mode `0444` canonical path
+   under `packages/`. Refuse links, an existing destination, a filename that
+   does not match the release, or any digest mismatch.
+2. Create a root-owned temporary directory below
    `/opt/odoo-accounting-cli-v3/releases/` on the same filesystem.
-2. Extract exactly one verified archive there. Reject absolute paths, `..`,
+3. Extract exactly one verified archive there. Reject absolute paths, `..`,
    links, devices, sockets, unexpected owners, and extra files.
-3. With bytecode disabled (`PYTHONDONTWRITEBYTECODE=1` and Python `-B`), run
-   `tools/verify_release.py` against the extracted tree and the expected
-   manifest digest. Verification must not create files in the candidate.
-4. Make the entire candidate root-owned and non-writable by group/world. The
-   final release directory itself must be root-owned and immutable to the Odoo
-   service identity.
-5. Atomically rename the completed temporary directory to
+4. With bytecode disabled, verify the extracted source-layout release using
+   the exact candidate import path and expected manifest digest:
+
+   ```bash
+   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$candidate/src" \
+     /usr/bin/python3 -B "$candidate/tools/verify_release.py" \
+     "$candidate" "$manifest_sha256"
+   ```
+
+   Verification must not create files in the candidate.
+5. Make the entire candidate root-owned: directories mode `0555`, ordinary
+   files mode `0444`, and only `bin/odoo-accounting-cli-v3` mode `0555`. The
+   final release directory must be immutable to the Odoo service identity.
+6. Atomically rename the completed temporary directory to
    `<version>-<commit12>`. Refuse to overwrite an existing release.
-6. Create the matching external anchor under `trusted-artifacts/` as a
+7. Create the matching external anchor under `trusted-artifacts/` as a
    root-owned, non-group/world-writable JSON file with exactly `commit`,
    `manifest_sha256`, `package_sha256`, and `release`.
 
@@ -83,10 +94,10 @@ or the historical `/mnt/.../odoo_accounting_agent_cli_v3` evidence root.
 ## Runtime configuration and state
 
 Create the strict root-managed runtime file described in
-`docs/RUNTIME_CONFIGURATION.md`. Pin the SHA-256 of the resolved Odoo Python
-interpreter, `odoo-bin`, and Odoo configuration. Use `capability_channel` equal
-to `staged` only for the isolated test evidence run; production rejects that
-channel.
+`docs/RUNTIME_CONFIGURATION.md`. Pin the canonical package path and digest as
+well as the SHA-256 of the resolved Odoo Python interpreter, `odoo-bin`, and
+Odoo configuration. Use `capability_channel` equal to `staged` only for the
+isolated test evidence run; production rejects that channel.
 
 Generate two independent random secrets without printing them. Store them as
 separate root-owned files, normally mode `0640`, readable only by the dedicated
@@ -145,7 +156,7 @@ used as rollback evidence. Resume V3 traffic only after the migrated stores and
 their audit chains pass integrity checks. Application rollback must either
 select a prior release that understands schema v2 or, while the same traffic
 remains stopped, atomically restore the matching verified v1 snapshot.
-Switching only the release link is not a valid rollback. Never copy, truncate,
+Switching only a launcher or release path is not a valid rollback. Never copy, truncate,
 or delete a live state database to bypass nonce or receipt history.
 
 ## Test-only candidate verification

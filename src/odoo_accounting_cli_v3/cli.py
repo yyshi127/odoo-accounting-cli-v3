@@ -155,6 +155,11 @@ def _load_release_identity(
 
 def _assert_runtime_release(config: RuntimeConfig, identity: dict[str, Any]) -> None:
     source_release = Path(__file__).resolve().parents[2]
+    expected_package_path = (
+        config.release_root.parent.parent
+        / "packages"
+        / f"odoo-accounting-cli-v3-{config.release_root.name}.tar.gz"
+    )
     if source_release != config.release_root.resolve():
         raise CliFailure(
             command="read",
@@ -162,11 +167,15 @@ def _assert_runtime_release(config: RuntimeConfig, identity: dict[str, Any]) -> 
             message="The CLI process and configured Odoo runner are not from the same release.",
             exit_code=5,
         )
-    if identity.get("version") != __version__:
+    if (
+        identity.get("version") != __version__
+        or identity.get("package_sha256") != config.canonical_package_sha256
+        or config.canonical_package_path != expected_package_path
+    ):
         raise CliFailure(
             command="read",
             code="runtime_release_mismatch",
-            message="The CLI version does not match the configured verified release.",
+            message="The CLI or canonical package does not match the configured verified release.",
             exit_code=5,
         )
 

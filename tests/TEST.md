@@ -79,20 +79,22 @@ not an accounting receipt. An unsigned or unverifiable receipt is a failed gate.
 
 ## Gate C — installed CLI subprocess
 
-The package must be built and installed into a clean environment. Tests execute
-from outside the repository with source-tree import paths removed and resolve
-the V3 executable from that environment.
+The canonical tar must be installed into a clean immutable release directory.
+Tests execute from outside the repository with development import paths removed
+and invoke that release's manifest-covered launcher by exact absolute path. A
+separate wheel smoke verifies Python packaging and registry inspection, but the
+wheel is not an alternate production business-code source.
 
 | ID | Test | Pass condition |
 |---|---|---|
-| C01 | Entry point | The installed V3 executable is resolvable and reports the installed version/release identity |
+| C01 | Entry point | The exact release launcher is executable and reports the canonical package, manifest, commit, version, and registry identity |
 | C02 | JSON contract | Every gateway operation accepts its documented JSON form and emits exactly one machine-readable result on stdout |
 | C03 | Error contract | Invalid JSON, schema errors, denied access, missing backend, and internal failure return stable nonzero status and structured error JSON without secrets or traceback leakage |
 | C04 | Capability query | Query results are ACL/company filtered and contain only registry-backed capabilities |
 | C05 | Read dispatch | Read invokes the registered real adapter and cannot call a write capability |
 | C06 | Write dispatch | Prepare/preview/approve-execute/status/verify/recover cannot skip a required state or policy check |
 | C07 | Full parameter transport | Dates, company, partner/vendor, currency, journal, lines, tax IDs, idempotency key, and approval fields survive CLI serialization exactly |
-| C08 | Source bypass | Tests fail if they accidentally import or invoke an uninstalled source-tree CLI |
+| C08 | Source bypass | Tests fail if they import a developer checkout, wheel business code, V2/Pi copy, or any release other than the configured exact tree |
 
 Installed-CLI cases must inspect the parsed JSON and business evidence, not only
 the subprocess exit code.
@@ -243,11 +245,21 @@ At the current local development checkpoint:
   and a frozen externally anchored evidence bundle. It remains staged because
   the fixture has no partial/unmatched-payment coverage, production-scale and
   runtime immutability gates remain open, and no Pi route exists;
-- dev7 locally adds the strict AP contract and a fixed
-  `liability_payable` Odoo backend while reusing the dev6 historical residual
-  engine. Unit, CLI transport, bootstrap, executor, registry, and gateway tests
-  pass locally; an exact dev7 release still requires target-Linux and real-Odoo
-  AP oracle evidence;
+- dev7 added the strict AP contract and a fixed `liability_payable` Odoo
+  backend while reusing the dev6 historical residual engine. Its exact release
+  passed 231 target-Linux tests plus 107 subtests, six independent read-only AP
+  SQL oracles, parameter round-trip, ACL/company/expiry/tamper/database/replay
+  denials, receipt/audit persistence, and post-run V2/Odoo/Pi isolation. The
+  root-owned frozen bundle contains 98 files with 97 checksum entries and an
+  external anchor; AP remains staged because the real fixture lacks open
+  refund, unmatched-payment, open-partial, FX, and scale-boundary coverage;
+- dev8 binds execution to a manifest-covered release launcher and requires the
+  retained canonical tar path and SHA-256 in the strict runtime contract. The
+  package, anchor, manifest, extracted tree, CLI source path, and child payload
+  must agree before secrets, state, or Odoo execution are reached. The staged
+  target gate must additionally inventory the external system Python and Click
+  bytes; they are not yet release-scoped, so this slice alone is not a
+  production promotion;
 - no sandbox write lifecycle has been authorized or recorded; and
 - no production write is authorized.
 

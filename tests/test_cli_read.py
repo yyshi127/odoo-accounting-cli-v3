@@ -192,6 +192,11 @@ class CliReadTest(unittest.TestCase):
         self.runtime_path = root / "runtime.json"
         self.auth_secret_path = root / "auth.secret"
         self.receipt_secret_path = root / "receipt.secret"
+        self.canonical_package_path = (
+            PROJECT_ROOT.parent.parent
+            / "packages"
+            / f"odoo-accounting-cli-v3-{PROJECT_ROOT.name}.tar.gz"
+        )
         self.auth_secret_path.write_bytes(AUTH_SECRET)
         self.receipt_secret_path.write_bytes(RECEIPT_SECRET)
         self.config = RuntimeConfig(
@@ -207,6 +212,8 @@ class CliReadTest(unittest.TestCase):
             odoo_config=root / "odoo.conf",
             odoo_config_sha256="0" * 64,
             release_root=PROJECT_ROOT,
+            canonical_package_path=self.canonical_package_path,
+            canonical_package_sha256="b" * 64,
             auth_state_path=root / "auth.sqlite3",
             receipt_state_path=root / "receipt.sqlite3",
             auth_key_id=AUTH_KEY_ID,

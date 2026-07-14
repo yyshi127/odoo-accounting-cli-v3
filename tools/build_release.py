@@ -19,6 +19,7 @@ from odoo_accounting_cli_v3.release import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LAUNCHER = "bin/odoo-accounting-cli-v3"
 
 
 def git(*args: str) -> str:
@@ -51,6 +52,7 @@ def build() -> Path:
                 for path in sources:
                     relative = path.relative_to(ROOT).as_posix()
                     info = archive.gettarinfo(str(path), arcname=relative)
+                    info.mode = 0o755 if relative == LAUNCHER else 0o644
                     info.uid = info.gid = 0
                     info.uname = info.gname = "root"
                     info.mtime = 0

@@ -5,14 +5,18 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from odoo_accounting_cli_v3.odoo.runner import (
     FIXED_CHILD_ENVIRONMENT,
     OdooRunnerError,
     RuntimeConfig,
+    _child_main,
     _record_verified_read_audit,
     _verify_child_release,
     load_runtime_config,
@@ -78,6 +82,14 @@ class OdooRunnerTest(unittest.TestCase):
         for path in (self.odoo_python, self.odoo_bin, self.odoo_config):
             path.write_text("test", encoding="utf-8")
         runtime_file_digest = hashlib.sha256(b"test").hexdigest()
+        self.canonical_package_path = (
+            PROJECT_ROOT.parent.parent
+            / "packages"
+            / f"odoo-accounting-cli-v3-{PROJECT_ROOT.name}.tar.gz"
+        )
+        self.canonical_package_sha256 = hashlib.sha256(
+            b"canonical release package"
+        ).hexdigest()
         self.auth_secret_path = root / "auth.secret"
         self.receipt_secret_path = root / "receipt.secret"
         self.auth_secret_path.write_bytes(AUTH_SECRET)
@@ -97,6 +109,11 @@ class OdooRunnerTest(unittest.TestCase):
         )
         secret_reader.start()
         self.addCleanup(secret_reader.stop)
+        package_verification = patch(
+            "odoo_accounting_cli_v3.odoo.runner._verify_canonical_package"
+        )
+        self.verify_canonical_package = package_verification.start()
+        self.addCleanup(package_verification.stop)
         self.config = RuntimeConfig(
             instance_id="odoo19@tokyo2",
             environment="test",
@@ -110,6 +127,8 @@ class OdooRunnerTest(unittest.TestCase):
             odoo_config=self.odoo_config,
             odoo_config_sha256=runtime_file_digest,
             release_root=PROJECT_ROOT,
+            canonical_package_path=self.canonical_package_path,
+            canonical_package_sha256=self.canonical_package_sha256,
             auth_state_path=root / "auth.state",
             receipt_state_path=root / "receipt.state",
             auth_key_id=AUTH_KEY_ID,
@@ -137,6 +156,8 @@ class OdooRunnerTest(unittest.TestCase):
             "odoo_config": str(self.config.odoo_config),
             "odoo_config_sha256": self.config.odoo_config_sha256,
             "release_root": str(self.config.release_root),
+            "canonical_package_path": str(self.config.canonical_package_path),
+            "canonical_package_sha256": self.config.canonical_package_sha256,
             "auth_state_path": str(self.config.auth_state_path),
             "receipt_state_path": str(self.config.receipt_state_path),
             "auth_key_id": self.config.auth_key_id,
@@ -153,7 +174,14 @@ class OdooRunnerTest(unittest.TestCase):
             {**document, "environment": "staging"},
             {**document, "database_uuid": "not-a-uuid"},
             {**document, "odoo_python": "relative/python"},
+            {**document, "canonical_package_path": "relative/package.tar.gz"},
+            {**document, "canonical_package_sha256": "A" * 64},
             {key: value for key, value in document.items() if key != "instance_id"},
+            {
+                key: value
+                for key, value in document.items()
+                if key != "canonical_package_path"
+            },
         )
         for invalid in invalid_documents:
             with self.subTest(invalid=invalid):
@@ -239,6 +267,14 @@ class OdooRunnerTest(unittest.TestCase):
         self.assertEqual(base64.b64decode(payload["auth_secret"]), AUTH_SECRET)
         self.assertEqual(base64.b64decode(payload["receipt_secret"]), RECEIPT_SECRET)
         self.assertEqual(payload["release_digest"], RELEASE_DIGEST)
+        self.assertEqual(
+            payload["canonical_package_path"],
+            str(self.config.canonical_package_path),
+        )
+        self.assertEqual(
+            payload["canonical_package_sha256"],
+            self.config.canonical_package_sha256,
+        )
         self.assertEqual(payload["runtime"], self.config.runtime_identity)
         exposed = json.dumps({"argv": argv, "env": options["env"]}, ensure_ascii=False)
         self.assertNotIn("2026-01-01", exposed)
@@ -317,6 +353,49 @@ class OdooRunnerTest(unittest.TestCase):
 
     @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")
     @patch("odoo_accounting_cli_v3.odoo.runner.load_runtime_secrets")
+    def test_package_path_outside_the_release_slot_is_rejected_before_action(
+        self, load_secrets, run
+    ):
+        config = replace(
+            self.config,
+            canonical_package_path=Path(self.temp.name) / "same-digest-other-path.tar.gz",
+        )
+
+        with self.assertRaisesRegex(OdooRunnerError, "path does not match release_root"):
+            run_odoo_shell(
+                config,
+                request_document(),
+                release_digest=RELEASE_DIGEST,
+                timeout_seconds=10,
+            )
+
+        self.verify_canonical_package.assert_not_called()
+        load_secrets.assert_not_called()
+        self.verify_parent_release.assert_not_called()
+        run.assert_not_called()
+
+    @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")
+    @patch("odoo_accounting_cli_v3.odoo.runner.load_runtime_secrets")
+    def test_untrusted_canonical_package_is_rejected_before_secrets_or_child(
+        self, load_secrets, run
+    ):
+        self.verify_canonical_package.side_effect = OdooRunnerError(
+            "canonical release package cannot be verified"
+        )
+
+        with self.assertRaisesRegex(OdooRunnerError, "canonical release package"):
+            self.execute()
+
+        self.verify_canonical_package.assert_called_once_with(
+            self.config.canonical_package_path,
+            self.config.canonical_package_sha256,
+        )
+        load_secrets.assert_not_called()
+        self.verify_parent_release.assert_not_called()
+        run.assert_not_called()
+
+    @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")
+    @patch("odoo_accounting_cli_v3.odoo.runner.load_runtime_secrets")
     def test_untrusted_parent_release_is_rejected_before_secrets_or_child(
         self, load_secrets, run
     ):
@@ -328,7 +407,10 @@ class OdooRunnerTest(unittest.TestCase):
             self.execute()
 
         self.verify_parent_release.assert_called_once_with(
-            self.config.release_root, RELEASE_DIGEST
+            self.config.release_root,
+            RELEASE_DIGEST,
+            self.config.canonical_package_path,
+            self.config.canonical_package_sha256,
         )
         load_secrets.assert_not_called()
         run.assert_not_called()
@@ -439,23 +521,25 @@ class OdooRunnerTest(unittest.TestCase):
         )
         anchor_directory = trusted_root / "trusted-artifacts"
         anchor_directory.mkdir()
-        (anchor_directory / f"{release_root.name}.json").write_text(
-            json.dumps(
-                {
-                    "commit": "a" * 40,
-                    "manifest_sha256": manifest["manifest_sha256"],
-                    "package_sha256": "b" * 64,
-                    "release": release_root.name,
-                }
-            ),
-            encoding="utf-8",
-        )
+        anchor_path = anchor_directory / f"{release_root.name}.json"
+        anchor_document = {
+            "commit": "a" * 40,
+            "manifest_sha256": manifest["manifest_sha256"],
+            "package_sha256": "b" * 64,
+            "release": release_root.name,
+        }
+        anchor_path.write_text(json.dumps(anchor_document), encoding="utf-8")
         read_json.side_effect = lambda path, _label: json.loads(
             path.read_text(encoding="utf-8")
         )
 
         capabilities = _verify_child_release(
-            release_root, manifest["manifest_sha256"]
+            release_root,
+            manifest["manifest_sha256"],
+            trusted_root
+            / "packages"
+            / f"odoo-accounting-cli-v3-{release_root.name}.tar.gz",
+            "b" * 64,
         )
         self.assertIn("acct.gl.trial_balance.v1", {item.id for item in capabilities})
         self.assertIn(
@@ -463,9 +547,102 @@ class OdooRunnerTest(unittest.TestCase):
             {call.args[0] for call in _managed.call_args_list},
         )
 
+        anchor_path.write_text(
+            json.dumps({**anchor_document, "package_sha256": "c" * 64}),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(OdooRunnerError, "anchor"):
+            _verify_child_release(
+                release_root,
+                manifest["manifest_sha256"],
+                trusted_root
+                / "packages"
+                / f"odoo-accounting-cli-v3-{release_root.name}.tar.gz",
+                "b" * 64,
+            )
+        anchor_path.write_text(json.dumps(anchor_document), encoding="utf-8")
+
+        with self.assertRaisesRegex(OdooRunnerError, "anchor"):
+            _verify_child_release(
+                release_root,
+                manifest["manifest_sha256"],
+                trusted_root / "packages" / "same-bytes-wrong-name.tar.gz",
+                "b" * 64,
+            )
+
         registry_path.write_text("{}", encoding="utf-8")
         with self.assertRaisesRegex(OdooRunnerError, "integrity"):
-            _verify_child_release(release_root, manifest["manifest_sha256"])
+            _verify_child_release(
+                release_root,
+                manifest["manifest_sha256"],
+                trusted_root
+                / "packages"
+                / f"odoo-accounting-cli-v3-{release_root.name}.tar.gz",
+                "b" * 64,
+            )
+
+    def test_child_package_or_release_failure_precedes_sqlite_construction(self):
+        import base64
+
+        payload = {
+            "protocol": 1,
+            "runtime": self.config.runtime_identity,
+            "request_json": json.dumps(request_document()),
+            "auth_secret": base64.b64encode(AUTH_SECRET).decode("ascii"),
+            "auth_key_id": self.config.auth_key_id,
+            "receipt_secret": base64.b64encode(RECEIPT_SECRET).decode("ascii"),
+            "receipt_key_id": self.config.receipt_key_id,
+            "release_digest": RELEASE_DIGEST,
+            "canonical_package_path": str(self.config.canonical_package_path),
+            "canonical_package_sha256": self.config.canonical_package_sha256,
+            "release_root": str(self.config.release_root),
+            "auth_state_path": str(self.config.auth_state_path),
+            "receipt_state_path": str(self.config.receipt_state_path),
+        }
+
+        def payload_fd() -> int:
+            stream = tempfile.TemporaryFile()
+            stream.write(json.dumps(payload).encode("utf-8"))
+            stream.seek(0)
+            descriptor = os.dup(stream.fileno())
+            stream.close()
+            return descriptor
+
+        failures = (
+            ("package rejected", "_validate_canonical_package_binding"),
+            ("release rejected", "_verify_child_release"),
+        )
+        for message, failing_check in failures:
+            with self.subTest(failing_check=failing_check), patch(
+                "odoo_accounting_cli_v3.odoo.runner._validate_canonical_package_binding"
+            ) as package_binding, patch(
+                "odoo_accounting_cli_v3.odoo.runner._verify_child_release"
+            ) as release_verification, patch(
+                "odoo_accounting_cli_v3.odoo.runner.RuntimeConfig",
+                return_value=self.config,
+            ), patch(
+                "odoo_accounting_cli_v3.persistence.SQLitePersistence"
+            ) as persistence:
+                failing = (
+                    package_binding
+                    if failing_check == "_validate_canonical_package_binding"
+                    else release_verification
+                )
+                failing.side_effect = OdooRunnerError(message)
+
+                with self.assertRaisesRegex(OdooRunnerError, message):
+                    _child_main(None, payload_fd(), MARKER)
+
+                persistence.assert_not_called()
+                if failing_check == "_validate_canonical_package_binding":
+                    release_verification.assert_not_called()
+                else:
+                    release_verification.assert_called_once_with(
+                        self.config.release_root.resolve(),
+                        RELEASE_DIGEST,
+                        self.config.canonical_package_path,
+                        self.config.canonical_package_sha256,
+                    )
 
     def execute(self, *, request=None):
         return run_odoo_shell(
@@ -474,6 +651,115 @@ class OdooRunnerTest(unittest.TestCase):
             release_digest=RELEASE_DIGEST,
             timeout_seconds=10,
         )
+
+
+class CanonicalPackageVerificationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.package = Path(self.temp.name) / "odoo-accounting-cli-v3.tar.gz"
+        self.package.write_bytes(b"one immutable package")
+        self.digest = hashlib.sha256(b"one immutable package").hexdigest()
+
+    @staticmethod
+    def _metadata(value, *, uid=0, writable=False, inode_delta=0):
+        mode = value.st_mode | (0o020 if writable else 0)
+        if not writable:
+            mode &= ~0o022
+        return SimpleNamespace(
+            st_dev=value.st_dev,
+            st_ino=value.st_ino + inode_delta,
+            st_mode=mode,
+            st_uid=uid,
+        )
+
+    @contextmanager
+    def trusted_metadata(
+        self,
+        *,
+        bad_ancestor: Path | None = None,
+        bad_uid: int = 0,
+        writable_ancestor: bool = False,
+        opened_inode_delta: int = 0,
+    ):
+        real_lstat = Path.lstat
+        real_fstat = os.fstat
+
+        def lstat(path):
+            observed = real_lstat(path)
+            is_bad = bad_ancestor is not None and path == bad_ancestor
+            return self._metadata(
+                observed,
+                uid=bad_uid if is_bad else 0,
+                writable=writable_ancestor and is_bad,
+            )
+
+        def fstat(descriptor):
+            return self._metadata(
+                real_fstat(descriptor),
+                inode_delta=opened_inode_delta,
+            )
+
+        with patch.object(Path, "lstat", autospec=True, side_effect=lstat), patch(
+            "odoo_accounting_cli_v3.odoo.runner.os.fstat",
+            side_effect=fstat,
+        ):
+            yield
+
+    def verify(self, path: Path | None = None, digest: str | None = None) -> None:
+        from odoo_accounting_cli_v3.odoo.runner import _verify_canonical_package
+
+        _verify_canonical_package(path or self.package, digest or self.digest)
+
+    def test_accepts_the_exact_regular_package_digest(self) -> None:
+        with self.trusted_metadata():
+            self.verify()
+
+    def test_rejects_missing_package_and_wrong_digest(self) -> None:
+        missing = self.package.with_name("missing.tar.gz")
+        with self.trusted_metadata(), self.assertRaisesRegex(
+            OdooRunnerError, "cannot be verified"
+        ):
+            self.verify(path=missing)
+
+        with self.trusted_metadata(), self.assertRaisesRegex(
+            OdooRunnerError, "digest does not match"
+        ):
+            self.verify(digest="0" * 64)
+
+    def test_rejects_package_symlink(self) -> None:
+        target = self.package.with_name("target.tar.gz")
+        target.write_bytes(self.package.read_bytes())
+        self.package.unlink()
+        try:
+            self.package.symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f"symlink creation is unavailable: {exc}")
+
+        with self.trusted_metadata(), self.assertRaisesRegex(
+            OdooRunnerError, "not a regular canonical file"
+        ):
+            self.verify()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX ownership policy")
+    def test_rejects_non_root_or_writable_ancestor(self) -> None:
+        ancestor = self.package.parent
+        conditions = (
+            {"bad_uid": 1001},
+            {"writable_ancestor": True},
+        )
+        for condition in conditions:
+            with self.subTest(condition=condition), self.trusted_metadata(
+                bad_ancestor=ancestor,
+                **condition,
+            ), self.assertRaisesRegex(OdooRunnerError, "ancestors are not root-managed"):
+                self.verify()
+
+    def test_rejects_opened_inode_that_differs_from_lstat(self) -> None:
+        with self.trusted_metadata(opened_inode_delta=1), self.assertRaisesRegex(
+            OdooRunnerError, "changed while it was opened"
+        ):
+            self.verify()
 
 
 if __name__ == "__main__":

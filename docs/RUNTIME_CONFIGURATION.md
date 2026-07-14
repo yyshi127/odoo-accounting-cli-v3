@@ -18,6 +18,8 @@ release, state stores, or signing keys through request parameters.
   "odoo_config": "/mnt/odoo/odoo19/custom/addons/odoo-server19.conf",
   "odoo_config_sha256": "<sha256-of-runtime-file>",
   "release_root": "/opt/odoo-accounting-cli-v3/releases/<release>",
+  "canonical_package_path": "/opt/odoo-accounting-cli-v3/packages/odoo-accounting-cli-v3-<release>.tar.gz",
+  "canonical_package_sha256": "<sha256-of-canonical-release-package>",
   "auth_state_path": "/var/lib/odoo-accounting-cli-v3/test/candidates/<version>-<commit12>/auth.sqlite3",
   "receipt_state_path": "/var/lib/odoo-accounting-cli-v3/test/candidates/<version>-<commit12>/receipt.sqlite3",
   "auth_key_id": "test-auth-2026-07",
@@ -64,12 +66,29 @@ version-scoped `candidates/<version>-<commit12>/` files for both
 the retained dev4 state or evidence databases. Promotion and rollback must
 follow the matched binary/database procedure in `docs/DEPLOYMENT.md`.
 
-The CLI process must itself come from `release_root`. Before starting Odoo it
-verifies the release manifest against the external deployment anchor and
-rejects a version, source root, package, registry, or runtime identity mismatch.
+The business CLI process must itself come from `release_root`, normally through
+the manifest-covered `bin/odoo-accounting-cli-v3` launcher at that exact release
+path. The launcher is not invoked through a `current` symlink. The launcher
+shebang enters Python isolated mode; an invocation through a
+non-isolated interpreter is rejected before application imports. Before
+starting Odoo, V3 opens the retained canonical tar with `O_NOFOLLOW`, compares
+the opened inode with the configured path, hashes that same file descriptor, and
+requires the digest to match both this configuration and the external release
+anchor. It then verifies the extracted release manifest and rejects a version,
+source root, package, registry, or runtime identity mismatch. The separately
+built wheel remains a disposable packaging/CI artifact and is not a second
+production code source.
 The `/opt` release hierarchy is used because every ancestor is root-managed;
 the earlier `/mnt/.../odoo_accounting_agent_cli_v3` candidates remain retained
 deployment evidence and are not a runtime source.
+
+The dev8 staged launcher still relies on the root-managed system Python and its
+installed Click distribution. Those external dependency bytes are not yet
+covered by the canonical tar identity. Target evidence must record their
+resolved paths, versions, ownership, modes, and SHA-256 values. Production
+promotion remains blocked until a release-scoped dependency runtime, vendored
+dependency set, or an equivalent pre-import cryptographic binding removes this
+identity gap.
 
 This configuration enables only capabilities whose registry entry contains the
 same environment in the selected `capability_channel`. The `staged` channel is

@@ -1,0 +1,33 @@
+#!/usr/bin/python3 -I
+"""Start the CLI from this immutable release tree."""
+
+from __future__ import annotations
+
+import os
+import runpy
+import sys
+from pathlib import Path
+
+
+def _source_root() -> Path:
+    launcher = Path(os.path.abspath(__file__))
+    canonical_launcher = Path(os.path.realpath(launcher))
+    if canonical_launcher != launcher:
+        raise SystemExit("canonical release launcher must not be reached through a symlink")
+    if not sys.flags.isolated:
+        raise SystemExit("canonical release launcher requires Python isolated mode")
+    release_root = canonical_launcher.parent.parent
+    source_root = release_root / "src"
+    if not source_root.is_dir() or source_root.is_symlink():
+        raise SystemExit("canonical release source is unavailable")
+    return source_root
+
+
+def main() -> None:
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, str(_source_root()))
+    runpy.run_module("odoo_accounting_cli_v3.cli", run_name="__main__")
+
+
+if __name__ == "__main__":
+    main()

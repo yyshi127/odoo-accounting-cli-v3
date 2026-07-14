@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..operations import canonical_json
-from ..release import ReleaseError, verify_manifest
+from ..release import ReleaseError, ReleaseIdentity, verify_manifest
 
 
 class OdooRunnerError(ValueError):
@@ -47,6 +47,8 @@ CONFIG_FIELDS = frozenset(
         "odoo_config",
         "odoo_config_sha256",
         "release_root",
+        "canonical_package_path",
+        "canonical_package_sha256",
         "auth_state_path",
         "receipt_state_path",
         "auth_key_id",
@@ -74,6 +76,8 @@ CHILD_FIELDS = frozenset(
         "receipt_secret",
         "receipt_key_id",
         "release_digest",
+        "canonical_package_path",
+        "canonical_package_sha256",
         "release_root",
         "auth_state_path",
         "receipt_state_path",
@@ -160,6 +164,8 @@ class RuntimeConfig:
     odoo_config: Path
     odoo_config_sha256: str
     release_root: Path
+    canonical_package_path: Path
+    canonical_package_sha256: str
     auth_state_path: Path
     receipt_state_path: Path
     auth_key_id: str
@@ -190,6 +196,7 @@ class RuntimeConfig:
             "odoo_bin",
             "odoo_config",
             "release_root",
+            "canonical_package_path",
             "auth_state_path",
             "receipt_state_path",
             "auth_secret_path",
@@ -210,6 +217,7 @@ class RuntimeConfig:
             "odoo_python_sha256",
             "odoo_bin_sha256",
             "odoo_config_sha256",
+            "canonical_package_sha256",
         ):
             value = getattr(self, field)
             if not isinstance(value, str) or SHA256.fullmatch(value) is None:
@@ -242,6 +250,10 @@ def _config_from_mapping(value: Any) -> RuntimeConfig:
         odoo_config=_absolute_path(value["odoo_config"], "odoo_config"),
         odoo_config_sha256=value["odoo_config_sha256"],
         release_root=_absolute_path(value["release_root"], "release_root"),
+        canonical_package_path=_absolute_path(
+            value["canonical_package_path"], "canonical_package_path"
+        ),
+        canonical_package_sha256=value["canonical_package_sha256"],
         auth_state_path=_absolute_path(value["auth_state_path"], "auth_state_path"),
         receipt_state_path=_absolute_path(value["receipt_state_path"], "receipt_state_path"),
         auth_key_id=_strict_text(value["auth_key_id"], "auth_key_id"),
@@ -364,6 +376,100 @@ def _verify_runtime_file_digest(path: Path, expected_digest: str, label: str) ->
         raise OdooRunnerError(f"{label} does not match its root-managed digest")
 
 
+def _verify_canonical_package(path: Path, expected_digest: str) -> None:
+    """Hash one canonical root-managed package through the descriptor we opened."""
+
+    if not isinstance(path, Path) or not path.is_absolute():
+        raise OdooRunnerError("canonical_package_path must be an absolute path")
+    if not isinstance(expected_digest, str) or SHA256.fullmatch(expected_digest) is None:
+        raise OdooRunnerError("canonical_package_sha256 must be a lowercase SHA-256 digest")
+    if os.name == "posix" and not hasattr(os, "O_NOFOLLOW"):
+        raise OdooRunnerError("canonical release package requires O_NOFOLLOW")
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or path.is_symlink()
+            or path.resolve(strict=True) != path
+        ):
+            raise OdooRunnerError("canonical release package is not a regular canonical file")
+        if os.name == "posix":
+            current = path.parent
+            while True:
+                metadata = current.lstat()
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or current.is_symlink()
+                    or metadata.st_uid != 0
+                    or metadata.st_mode & 0o022
+                ):
+                    raise OdooRunnerError(
+                        "canonical release package ancestors are not root-managed"
+                    )
+                if current.parent == current:
+                    break
+                current = current.parent
+            if before.st_uid != 0 or before.st_mode & 0o022:
+                raise OdooRunnerError("canonical release package is not root-managed")
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or (
+                    os.name == "posix"
+                    and (opened.st_uid != 0 or opened.st_mode & 0o022)
+                )
+            ):
+                raise OdooRunnerError("canonical release package changed while it was opened")
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        finally:
+            os.close(descriptor)
+        after = path.lstat()
+        if (
+            (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+            or not stat.S_ISREG(after.st_mode)
+            or path.is_symlink()
+        ):
+            raise OdooRunnerError("canonical release package changed while it was verified")
+    except OdooRunnerError:
+        raise
+    except OSError as exc:
+        raise OdooRunnerError("canonical release package cannot be verified") from exc
+    if not hmac.compare_digest(digest.hexdigest(), expected_digest):
+        raise OdooRunnerError("canonical release package digest does not match")
+
+
+def _expected_canonical_package_path(release_root: Path) -> Path:
+    return (
+        release_root.parent.parent
+        / "packages"
+        / f"odoo-accounting-cli-v3-{release_root.name}.tar.gz"
+    )
+
+
+def _validate_canonical_package_binding(config: RuntimeConfig) -> None:
+    if config.canonical_package_path != _expected_canonical_package_path(
+        config.release_root
+    ):
+        raise OdooRunnerError("canonical release package path does not match release_root")
+    _verify_canonical_package(
+        config.canonical_package_path,
+        config.canonical_package_sha256,
+    )
+
+
 def _validate_private_state_path(path: Path, label: str) -> None:
     try:
         parent = path.parent
@@ -443,11 +549,20 @@ def _assert_release_tree_root_managed(release_root: Path) -> None:
         )
 
 
-def _verify_child_release(release_root: Path, expected_manifest_digest: str):
+def _verify_child_release(
+    release_root: Path,
+    expected_manifest_digest: str,
+    expected_package_path: Path,
+    expected_package_digest: str,
+):
     if not isinstance(expected_manifest_digest, str) or SHA256.fullmatch(
         expected_manifest_digest
     ) is None:
         raise OdooRunnerError("child release digest is invalid")
+    if not isinstance(expected_package_digest, str) or SHA256.fullmatch(
+        expected_package_digest
+    ) is None:
+        raise OdooRunnerError("child package digest is invalid")
     trusted_root = release_root.parent.parent
     manifest_path = release_root / "RELEASE-MANIFEST.json"
     anchor_directory = trusted_root / "trusted-artifacts"
@@ -461,13 +576,23 @@ def _verify_child_release(release_root: Path, expected_manifest_digest: str):
         _assert_root_managed_path(path, label, directory=True)
     manifest = _read_small_json_file(manifest_path, "release manifest")
     anchor = _read_small_json_file(anchor_path, "release anchor")
+    try:
+        release_identity = ReleaseIdentity(
+            version=manifest.get("version", ""),
+            commit=manifest.get("commit", ""),
+        )
+    except ReleaseError as exc:
+        raise OdooRunnerError("child release manifest identity is invalid") from exc
+    expected_release = f"{release_identity.version}-{release_identity.commit[:12]}"
     if (
         set(anchor) != {"commit", "manifest_sha256", "package_sha256", "release"}
         or anchor.get("release") != release_root.name
+        or release_root.name != expected_release
         or anchor.get("commit") != manifest.get("commit")
         or anchor.get("manifest_sha256") != expected_manifest_digest
-        or not isinstance(anchor.get("package_sha256"), str)
-        or SHA256.fullmatch(anchor["package_sha256"]) is None
+        or anchor.get("package_sha256") != expected_package_digest
+        or expected_package_path
+        != release_root.parent.parent / "packages" / release_identity.package_name
     ):
         raise OdooRunnerError("child release anchor does not match the requested release")
     try:
@@ -763,14 +888,8 @@ def run_odoo_shell(
 
     if not isinstance(config, RuntimeConfig):
         raise OdooRunnerError("a validated runtime configuration is required")
-    _validate_runtime_paths(config)
     if not isinstance(release_digest, str) or SHA256.fullmatch(release_digest) is None:
         raise OdooRunnerError("release_digest must be a lowercase SHA-256 digest")
-    # Verify the configured release with trusted parent code before secrets can be
-    # copied into a child that imports Python from that release. The child repeats
-    # this check; neither check eliminates the filesystem TOCTOU window.
-    _verify_child_release(config.release_root, release_digest)
-    auth_secret, receipt_secret = load_runtime_secrets(config)
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
@@ -781,8 +900,19 @@ def run_odoo_shell(
         raise OdooRunnerError(
             f"timeout_seconds must be positive and no greater than {MAX_TIMEOUT_SECONDS:g}"
         )
-
     request_json = _normalize_request_json(request)
+    _validate_canonical_package_binding(config)
+    # Verify the configured release with trusted parent code before secrets can be
+    # copied into a child that imports Python from that release. The child repeats
+    # this check; neither check eliminates the filesystem TOCTOU window.
+    _verify_child_release(
+        config.release_root,
+        release_digest,
+        config.canonical_package_path,
+        config.canonical_package_sha256,
+    )
+    _validate_runtime_paths(config)
+    auth_secret, receipt_secret = load_runtime_secrets(config)
     payload = canonical_json(
         {
             "protocol": 1,
@@ -793,6 +923,8 @@ def run_odoo_shell(
             "receipt_secret": base64.b64encode(receipt_secret).decode("ascii"),
             "receipt_key_id": config.receipt_key_id,
             "release_digest": release_digest,
+            "canonical_package_path": str(config.canonical_package_path),
+            "canonical_package_sha256": config.canonical_package_sha256,
             "release_root": str(config.release_root),
             "auth_state_path": str(config.auth_state_path),
             "receipt_state_path": str(config.receipt_state_path),
@@ -946,6 +1078,10 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
         odoo_config=Path("/unused/odoo.conf"),
         odoo_config_sha256="0" * 64,
         release_root=child_release_root,
+        canonical_package_path=_absolute_path(
+            payload["canonical_package_path"], "canonical_package_path"
+        ),
+        canonical_package_sha256=payload["canonical_package_sha256"],
         auth_state_path=_absolute_path(payload["auth_state_path"], "auth_state_path"),
         receipt_state_path=_absolute_path(payload["receipt_state_path"], "receipt_state_path"),
         auth_key_id=_strict_text(payload["auth_key_id"], "auth_key_id"),
@@ -962,6 +1098,14 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
     request_json = payload.get("request_json")
     if not isinstance(request_json, str):
         raise OdooRunnerError("child request is invalid")
+
+    _validate_canonical_package_binding(runtime_config)
+    capabilities = _verify_child_release(
+        release_root,
+        release_digest,
+        runtime_config.canonical_package_path,
+        runtime_config.canonical_package_sha256,
+    )
 
     from ..persistence import ReplayRejected, SQLitePersistence
     from ..registry import registry_digest as calculate_registry_digest
@@ -1000,7 +1144,6 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
             return False
         return True
 
-    capabilities = _verify_child_release(release_root, release_digest)
     result_json = execute_read_json(
         root_env,
         request_json,
