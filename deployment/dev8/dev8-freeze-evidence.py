@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 VERSION = "0.1.0.dev8"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.5"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.6"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 TREE = "fd389ef55fbc6723379a2928a10b665925829599"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
@@ -66,7 +66,7 @@ DEPLOYMENT_FILES = {
     *(f"{name}.{suffix}" for name in ("install", "runtime-setup", "server-gate") for suffix in ("stdout", "stderr", "exit")),
 }
 SOURCE_HASHES = {
-    "real-read-runner": "948ecb472bf4a99e7b8442235190875a4a8e0c5422881079e0422636f6810499",
+    "real-read-runner": "de22f26a9e503581bc9d219322dc626f8830f81c6b06968963719e540f457ffd",
     "signer": "e94e610d480f7ba0736e315a46ca98a6507e82e88e1b35ac2ca6a31ff0592896",
     "launcher-isolation": "9bb2a2596d639851df2567e5a8e9cef98f2c5849725946ecc72bb6b1cfbfa80e",
 }

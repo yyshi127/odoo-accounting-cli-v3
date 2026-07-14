@@ -29,7 +29,7 @@ MANIFEST_SHA256 = "fec52f03c8c5e970f5e89a01f71ef4f7de7de287ea129ea01700d4de23eb6
 REGISTRY_DIGEST = "d8f1e76b674137a330de11bffee43de8a7362f877360d4410edebb54e8856b3e"
 PLAN_SHA256 = "c6dd18fc356bdbc26de43941656e9af62f639d06393ce87572e7a08e5759f2e5"
 SOURCES = {
-    "dev8-run-real-reads.sh": "948ecb472bf4a99e7b8442235190875a4a8e0c5422881079e0422636f6810499",
+    "dev8-run-real-reads.sh": "de22f26a9e503581bc9d219322dc626f8830f81c6b06968963719e540f457ffd",
     "dev8-sign-read.py": "e94e610d480f7ba0736e315a46ca98a6507e82e88e1b35ac2ca6a31ff0592896",
     "dev8-launcher-isolation-gate.py": "9bb2a2596d639851df2567e5a8e9cef98f2c5849725946ecc72bb6b1cfbfa80e",
     "dev8-run-read-oracles.sh": "a69faa4d38341c5c9135c43e0f6308c3335eb65fb90b72f757b8a1e26d1af618",

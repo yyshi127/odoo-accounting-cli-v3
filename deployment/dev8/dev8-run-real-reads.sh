@@ -72,6 +72,7 @@ fi
 sudo -n -u odoo test -r "$signer"
 
 cp -- "$plan" "$evidence/read-plan.input.json"
+chmod 0600 -- "$evidence/read-plan.input.json"
 
 "$python" -I - "$plan" "$evidence" <<'PY'
 import json

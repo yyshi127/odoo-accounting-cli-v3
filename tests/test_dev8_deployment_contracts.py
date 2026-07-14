@@ -291,6 +291,15 @@ def test_runtime_registry_validation_passes_a_path_object():
     assert "load_registry(sys.argv[1])" not in source
 
 
+def test_real_read_runner_normalizes_copied_read_plan_mode():
+    source = (DEPLOYMENT / "dev8-run-real-reads.sh").read_text("utf-8")
+    copy = 'cp -- "$plan" "$evidence/read-plan.input.json"'
+    normalize = 'chmod 0600 -- "$evidence/read-plan.input.json"'
+    assert copy in source
+    assert normalize in source
+    assert source.index(copy) < source.index(normalize)
+
+
 MUTATIONS = (
     "schema-bool",
     "parents-null",
