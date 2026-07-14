@@ -23,6 +23,8 @@ BINDINGS = {
     "user_id": 42,
     "registry_digest": "c" * 64,
     "release_digest": "d" * 64,
+    "environment": "test",
+    "capability_channel": "staged",
 }
 
 
@@ -71,8 +73,8 @@ class ReceiptTest(unittest.TestCase):
             SECRET, canonical_json(unsigned), hashlib.sha256
         ).hexdigest()
         self.assertEqual(receipt["signature"], expected)
-        self.assertEqual(receipt["signature_version"], 1)
-        self.assertEqual(receipt["signature_purpose"], "read_receipt_v1")
+        self.assertEqual(receipt["signature_version"], 2)
+        self.assertEqual(receipt["signature_purpose"], "read_receipt_v2")
         self.assertEqual(receipt["signature_key_id"], KEY_ID)
         verify(receipt, body)
 
@@ -80,7 +82,7 @@ class ReceiptTest(unittest.TestCase):
         body = {"lines": [{"account_id": 1}]}
         receipt = signed_receipt(body)
         for field, value, message in (
-            ("signature_version", 2, "version mismatch"),
+            ("signature_version", 1, "version mismatch"),
             ("signature_purpose", "auth_context_v1", "purpose mismatch"),
             ("signature_key_id", "read-receipt-key-retired", "key ID mismatch"),
         ):
@@ -144,6 +146,23 @@ class ReceiptTest(unittest.TestCase):
         with self.assertRaisesRegex(ReceiptError, "signature mismatch"):
             verify(fabricated, body)
 
+    def test_signed_numeric_type_confusion_is_rejected(self) -> None:
+        body = {"lines": [{"account_id": 1}]}
+        original = signed_receipt(body)
+        for field, value in (("company_id", True), ("user_id", 42.0)):
+            with self.subTest(field=field):
+                malformed = {**original, field: value}
+                unsigned = {
+                    key: item
+                    for key, item in malformed.items()
+                    if key != "signature"
+                }
+                malformed["signature"] = hmac.new(
+                    SECRET, canonical_json(unsigned), hashlib.sha256
+                ).hexdigest()
+                with self.assertRaisesRegex(ReceiptError, "numeric bindings"):
+                    verify(malformed, body)
+
     def test_result_and_runtime_bindings_are_enforced(self) -> None:
         body = {"lines": [{"account_id": 1}]}
         receipt = signed_receipt(body)
@@ -151,6 +170,33 @@ class ReceiptTest(unittest.TestCase):
             verify(receipt, {"lines": []})
         with self.assertRaisesRegex(ReceiptError, "binding mismatch"):
             verify(receipt, body, release_digest="e" * 64)
+
+    def test_environment_and_capability_channel_are_signed_and_policy_bound(self) -> None:
+        body = {"lines": [{"account_id": 1}]}
+        receipt = signed_receipt(body)
+        with self.assertRaisesRegex(ReceiptError, "binding mismatch"):
+            verify(receipt, body, capability_channel="enabled")
+        with self.assertRaisesRegex(ReceiptError, "environment or capability channel"):
+            verify(
+                receipt,
+                body,
+                environment="production",
+                capability_channel="staged",
+            )
+        with self.assertRaisesRegex(ReceiptError, "environment or capability channel"):
+            create_read_receipt(
+                receipt_id="production-staged",
+                result_body=body,
+                record_count=1,
+                observed_at=NOW,
+                key_id=KEY_ID,
+                secret=SECRET,
+                **{
+                    **BINDINGS,
+                    "environment": "production",
+                    "capability_channel": "staged",
+                },
+            )
 
     def test_stale_record_count_mismatch_and_replay_are_rejected(self) -> None:
         body = {"lines": [{"account_id": 1}]}

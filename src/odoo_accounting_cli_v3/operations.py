@@ -64,16 +64,20 @@ ALLOWED_TRANSITIONS: dict[State, frozenset[State]] = {
 
 MAX_APPROVAL_TTL = timedelta(minutes=15)
 MIN_HMAC_SECRET_BYTES = 32
-SIGNATURE_VERSION = 1
-APPROVAL_PURPOSE = "approval_v1"
-EXECUTION_RESULT_PURPOSE = "execution_result_v1"
-VERIFICATION_RESULT_PURPOSE = "verification_result_v1"
+APPROVAL_SIGNATURE_VERSION = 2
+APPROVAL_PURPOSE = "approval_v2"
+RESULT_SIGNATURE_VERSION = 2
+EXECUTION_RESULT_PURPOSE = "execution_result_v2"
+VERIFICATION_RESULT_PURPOSE = "verification_result_v2"
 
 _GUARDED_TARGETS: dict[State, str] = {
     State.APPROVED: "approve_operation",
     State.EXECUTING: "begin_execution",
     State.VERIFYING: "record_execution_result",
     State.COMPLETED: "complete_operation",
+    State.FAILED: "record_failure",
+    State.RECOVERING: "begin_recovery",
+    State.RECOVERED: "complete_recovery",
 }
 
 
@@ -119,6 +123,10 @@ def operation_digest(
     return hashlib.sha256(canonical_json(envelope)).hexdigest()
 
 
+def _is_identifier(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= 512
+
+
 @dataclass(frozen=True)
 class Operation:
     operation_id: str
@@ -155,6 +163,24 @@ class Operation:
 
     def assert_integrity(self) -> None:
         try:
+            identifiers = (
+                self.operation_id,
+                self.request_id,
+                self.capability_id,
+                self.principal,
+                self.idempotency_key,
+                self.odoo_instance_id,
+                self.database_name,
+            )
+            if (
+                not all(_is_identifier(value) for value in identifiers)
+                or type(self.user_id) is not int
+                or self.user_id <= 0
+                or type(self.company_id) is not int
+                or self.company_id <= 0
+                or self.environment not in {"test", "sandbox", "production"}
+            ):
+                raise ValueError("operation identity is invalid")
             parameters = json.loads(self.parameters_json)
             canonical_parameters = canonical_json(parameters).decode("utf-8")
             normalized_database_uuid = str(uuid.UUID(self.database_uuid))
@@ -184,6 +210,104 @@ class Operation:
             or not hmac.compare_digest(expected, self.digest)
         ):
             raise IntegrityRejected("operation immutable content digest mismatch")
+        self._assert_state_metadata()
+
+    def _assert_state_metadata(self) -> None:
+        if not isinstance(self.state, State) or (
+            isinstance(self.revision, bool)
+            or not isinstance(self.revision, int)
+            or self.revision < 0
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        approval_values = (
+            self.approval_signature,
+            self.approval_nonce_digest,
+            self.approval_issued_at,
+            self.approval_expires_at,
+            self.approval_revision,
+            self.approver_user_id,
+        )
+        approval_present = tuple(value is not None for value in approval_values)
+        if any(approval_present) and not all(approval_present):
+            raise IntegrityRejected("operation state metadata is incomplete")
+        has_approval = all(approval_present)
+        if has_approval and (
+            not _is_sha256(self.approval_signature)
+            or not _is_sha256(self.approval_nonce_digest)
+            or not _is_aware(self.approval_issued_at)
+            or not _is_aware(self.approval_expires_at)
+            or self.approval_expires_at <= self.approval_issued_at
+            or isinstance(self.approval_revision, bool)
+            or not isinstance(self.approval_revision, int)
+            or self.approval_revision < 0
+            or isinstance(self.approver_user_id, bool)
+            or not isinstance(self.approver_user_id, int)
+            or self.approver_user_id <= 0
+            or self.approver_user_id == self.user_id
+            or self.approval_expires_at - self.approval_issued_at
+            > MAX_APPROVAL_TTL
+            or self.approval_revision >= self.revision
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        if self.execution_result_digest is not None and not _is_sha256(
+            self.execution_result_digest
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        if self.verification_result_digest is not None and not _is_sha256(
+            self.verification_result_digest
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+
+        preapproval_states = {
+            State.PREPARED,
+            State.PRECHECKED,
+            State.AWAITING_APPROVAL,
+        }
+        if self.state in preapproval_states and (
+            has_approval
+            or self.execution_result_digest is not None
+            or self.verification_result_digest is not None
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        if self.state in {State.APPROVED, State.EXECUTING} and (
+            not has_approval
+            or self.execution_result_digest is not None
+            or self.verification_result_digest is not None
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        if self.state == State.APPROVED and (
+            self.approval_revision != self.revision - 1
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        approval_revision_offsets = {
+            State.EXECUTING: 2,
+            State.VERIFYING: 3,
+            State.COMPLETED: 4,
+        }
+        if self.state in approval_revision_offsets and (
+            self.approval_revision
+            != self.revision - approval_revision_offsets[self.state]
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        if self.state == State.VERIFYING and (
+            not has_approval
+            or self.execution_result_digest is None
+            or self.verification_result_digest is not None
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        if self.state == State.COMPLETED and (
+            not has_approval
+            or self.execution_result_digest is None
+            or self.verification_result_digest is None
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
+        if self.execution_result_digest is not None and not has_approval:
+            raise IntegrityRejected("operation state metadata is invalid")
+        if (
+            self.verification_result_digest is not None
+            and self.execution_result_digest is None
+        ):
+            raise IntegrityRejected("operation state metadata is invalid")
 
     @classmethod
     def prepare(
@@ -213,7 +337,7 @@ class Operation:
             odoo_instance_id,
             database_name,
         )
-        if any(not isinstance(value, str) or not value.strip() for value in identifiers):
+        if any(not _is_identifier(value) for value in identifiers):
             raise OperationError("operation_id, request_id, capability_id, idempotency_key, and principal are required")
         if (
             isinstance(user_id, bool)
@@ -268,6 +392,8 @@ class Operation:
         )
 
     def transition(self, target: State, *, expected_revision: int) -> "Operation":
+        if type(target) is not State:
+            raise OperationError("transition target must be a State")
         self._check_transition(target, expected_revision=expected_revision)
         if target in _GUARDED_TARGETS:
             raise OperationError(
@@ -277,7 +403,13 @@ class Operation:
 
     def _check_transition(self, target: State, *, expected_revision: int) -> None:
         self.assert_integrity()
-        if expected_revision != self.revision:
+        if type(target) is not State:
+            raise OperationError("transition target must be a State")
+        if (
+            type(expected_revision) is not int
+            or expected_revision < 0
+            or expected_revision != self.revision
+        ):
             raise ConcurrentUpdate("operation revision has changed")
         if target not in ALLOWED_TRANSITIONS[self.state]:
             raise OperationError(f"invalid transition: {self.state} -> {target}")
@@ -289,6 +421,7 @@ class Operation:
 @dataclass(frozen=True)
 class Approval:
     operation_id: str
+    request_id: str
     operation_digest: str
     user_id: int
     company_id: int
@@ -297,6 +430,9 @@ class Approval:
     nonce: str
     issued_at: datetime
     expires_at: datetime
+    signature_version: int
+    signature_purpose: str
+    key_id: str
     signature: str
 
     def payload(self) -> dict[str, Any]:
@@ -305,13 +441,15 @@ class Approval:
             "company_id": self.company_id,
             "expires_at": self.expires_at.astimezone(timezone.utc).isoformat(),
             "issued_at": self.issued_at.astimezone(timezone.utc).isoformat(),
+            "key_id": self.key_id,
             "nonce": self.nonce,
             "operation_digest": self.operation_digest,
             "operation_id": self.operation_id,
             "operation_revision": self.operation_revision,
-            "purpose": APPROVAL_PURPOSE,
+            "purpose": self.signature_purpose,
+            "request_id": self.request_id,
             "user_id": self.user_id,
-            "version": SIGNATURE_VERSION,
+            "version": self.signature_version,
         }
 
 
@@ -324,7 +462,9 @@ class ResultKind(StrEnum):
 class TrustedResult:
     kind: ResultKind
     operation_id: str
+    request_id: str
     operation_digest: str
+    operation_state_digest: str
     operation_revision: int
     company_id: int
     issuer: str
@@ -333,14 +473,11 @@ class TrustedResult:
     evidence_digest: str
     prior_evidence_digest: str | None
     issued_at: datetime
+    signature_version: int
+    signature_purpose: str
     signature: str
 
     def payload(self) -> dict[str, Any]:
-        purpose = (
-            EXECUTION_RESULT_PURPOSE
-            if self.kind == ResultKind.EXECUTION
-            else VERIFICATION_RESULT_PURPOSE
-        )
         return {
             "company_id": self.company_id,
             "evidence_digest": self.evidence_digest,
@@ -351,10 +488,12 @@ class TrustedResult:
             "operation_digest": self.operation_digest,
             "operation_id": self.operation_id,
             "operation_revision": self.operation_revision,
+            "operation_state_digest": self.operation_state_digest,
             "prior_evidence_digest": self.prior_evidence_digest,
-            "purpose": purpose,
+            "purpose": self.signature_purpose,
+            "request_id": self.request_id,
             "succeeded": self.succeeded,
-            "version": SIGNATURE_VERSION,
+            "version": self.signature_version,
         }
 
 
@@ -367,7 +506,11 @@ def _is_aware(value: Any) -> bool:
 
 
 def _is_sha256(value: str) -> bool:
-    if not isinstance(value, str) or len(value) != 64:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value != value.lower()
+    ):
         return False
     try:
         int(value, 16)
@@ -378,6 +521,40 @@ def _is_sha256(value: str) -> bool:
 
 def _is_strong_hmac_secret(value: object) -> bool:
     return isinstance(value, bytes) and len(value) >= MIN_HMAC_SECRET_BYTES
+
+
+def _operation_state_digest(operation: Operation) -> str:
+    return hashlib.sha256(
+        canonical_json(
+            {
+                "approval_expires_at": (
+                    None
+                    if operation.approval_expires_at is None
+                    else operation.approval_expires_at.astimezone(
+                        timezone.utc
+                    ).isoformat()
+                ),
+                "approval_issued_at": (
+                    None
+                    if operation.approval_issued_at is None
+                    else operation.approval_issued_at.astimezone(
+                        timezone.utc
+                    ).isoformat()
+                ),
+                "approval_nonce_digest": operation.approval_nonce_digest,
+                "approval_revision": operation.approval_revision,
+                "approval_signature": operation.approval_signature,
+                "approver_user_id": operation.approver_user_id,
+                "execution_result_digest": operation.execution_result_digest,
+                "operation_digest": operation.digest,
+                "operation_id": operation.operation_id,
+                "request_id": operation.request_id,
+                "revision": operation.revision,
+                "state": operation.state.value,
+                "verification_result_digest": operation.verification_result_digest,
+            }
+        )
+    ).hexdigest()
 
 
 def _validate_approval_ttl(approval: Approval, approval_ttl_seconds: int) -> None:
@@ -392,6 +569,22 @@ def _validate_approval_ttl(approval: Approval, approval_ttl_seconds: int) -> Non
         raise ApprovalRejected("approval validity exceeds capability policy TTL")
 
 
+def _validate_approval_protocol(approval: Approval, expected_key_id: str) -> None:
+    if (
+        type(approval.signature_version) is not int
+        or approval.signature_version != APPROVAL_SIGNATURE_VERSION
+    ):
+        raise ApprovalRejected("approval signature version mismatch")
+    if approval.signature_purpose != APPROVAL_PURPOSE:
+        raise ApprovalRejected("approval signature purpose mismatch")
+    if not isinstance(approval.key_id, str) or not approval.key_id.strip():
+        raise ApprovalRejected("approval key ID is required")
+    if not isinstance(expected_key_id, str) or not expected_key_id.strip():
+        raise ApprovalRejected("expected approval key ID is required")
+    if approval.key_id != expected_key_id:
+        raise ApprovalRejected("approval key ID mismatch")
+
+
 def sign_approval(
     *,
     operation: Operation,
@@ -400,6 +593,7 @@ def sign_approval(
     issued_at: datetime,
     expires_at: datetime,
     approval_ttl_seconds: int,
+    key_id: str,
     secret: bytes,
 ) -> Approval:
     operation.assert_integrity()
@@ -410,11 +604,15 @@ def sign_approval(
     if (
         not isinstance(nonce, str)
         or not nonce
+        or not isinstance(key_id, str)
+        or not key_id.strip()
         or isinstance(approver_user_id, bool)
         or not isinstance(approver_user_id, int)
         or approver_user_id <= 0
     ):
-        raise ApprovalRejected("approval signer, nonce, and secret are required")
+        raise ApprovalRejected(
+            "approval signer, nonce, and signed content are invalid"
+        )
     if approver_user_id == operation.user_id:
         raise ApprovalRejected("requester cannot approve their own operation")
     if not _is_aware(issued_at) or not _is_aware(expires_at) or expires_at <= issued_at:
@@ -423,6 +621,7 @@ def sign_approval(
         raise ApprovalRejected("approval validity exceeds maximum TTL")
     unsigned = Approval(
         operation_id=operation.operation_id,
+        request_id=operation.request_id,
         operation_digest=operation.digest,
         user_id=operation.user_id,
         company_id=operation.company_id,
@@ -431,6 +630,9 @@ def sign_approval(
         nonce=nonce,
         issued_at=issued_at,
         expires_at=expires_at,
+        signature_version=APPROVAL_SIGNATURE_VERSION,
+        signature_purpose=APPROVAL_PURPOSE,
+        key_id=key_id,
         signature="",
     )
     _validate_approval_ttl(unsigned, approval_ttl_seconds)
@@ -444,6 +646,7 @@ def approve_operation(
     *,
     now: datetime,
     secret: bytes,
+    expected_key_id: str,
     is_approver_authorized: Callable[[int, int, str], bool],
     consume_nonce: Callable[[str, str, int], bool],
     approval_ttl_seconds: int,
@@ -459,16 +662,26 @@ def approve_operation(
         raise ApprovalRejected("current time must be timezone-aware")
     if not _is_strong_hmac_secret(secret):
         raise ApprovalRejected("approval HMAC secret must be bytes of at least 32 bytes")
+    _validate_approval_protocol(approval, expected_key_id)
     if (
         not isinstance(approval.nonce, str)
         or not approval.nonce
+        or type(approval.user_id) is not int
+        or approval.user_id <= 0
+        or type(approval.company_id) is not int
+        or approval.company_id <= 0
+        or type(approval.operation_revision) is not int
+        or approval.operation_revision < 0
         or isinstance(approval.approver_user_id, bool)
         or not isinstance(approval.approver_user_id, int)
         or approval.approver_user_id <= 0
     ):
-        raise ApprovalRejected("approval signer, nonce, and secret are required")
+        raise ApprovalRejected(
+            "approval signer, nonce, and signed content are invalid"
+        )
     bindings = (
         approval.operation_id == operation.operation_id
+        and approval.request_id == operation.request_id
         and approval.operation_digest == operation.digest
         and approval.user_id == operation.user_id
         and approval.company_id == operation.company_id
@@ -492,12 +705,16 @@ def approve_operation(
         raise ApprovalRejected("approval is not currently valid")
     if approval.approver_user_id == operation.user_id:
         raise ApprovalRejected("requester cannot approve their own operation")
-    if not is_approver_authorized(
+    if is_approver_authorized(
         approval.approver_user_id, operation.company_id, operation.capability_id
-    ):
+    ) is not True:
         raise ApprovalRejected("approver is not authorized")
-    if not consume_nonce(approval.nonce, operation.operation_id, expected_revision):
-        raise ApprovalRejected("approval nonce was already consumed")
+    if consume_nonce(
+        approval.nonce, operation.operation_id, expected_revision
+    ) is not True:
+        raise ApprovalRejected(
+            "approval nonce was already consumed or was not durably consumed"
+        )
     return operation._apply_transition(
         State.APPROVED,
         approval_signature=approval.signature,
@@ -515,6 +732,7 @@ def begin_execution(
     *,
     now: datetime,
     secret: bytes,
+    expected_key_id: str,
     is_approver_authorized: Callable[[int, int, str], bool],
     approval_ttl_seconds: int,
     expected_revision: int,
@@ -524,7 +742,17 @@ def begin_execution(
         raise ApprovalRejected("current time must be timezone-aware")
     if not _is_strong_hmac_secret(secret):
         raise ApprovalRejected("approval HMAC secret must be bytes of at least 32 bytes")
-    if not isinstance(approval.nonce, str) or not approval.nonce:
+    _validate_approval_protocol(approval, expected_key_id)
+    if (
+        not isinstance(approval.nonce, str)
+        or not approval.nonce
+        or type(approval.user_id) is not int
+        or approval.user_id <= 0
+        or type(approval.company_id) is not int
+        or approval.company_id <= 0
+        or type(approval.operation_revision) is not int
+        or approval.operation_revision < 0
+    ):
         raise ApprovalRejected("approval nonce is invalid")
     if (
         not _is_aware(approval.issued_at)
@@ -545,6 +773,7 @@ def begin_execution(
     )
     approval_binding = (
         approval.operation_id == operation.operation_id
+        and approval.request_id == operation.request_id
         and approval.operation_digest == operation.digest
         and approval.user_id == operation.user_id
         and approval.company_id == operation.company_id
@@ -559,9 +788,9 @@ def begin_execution(
     if now < approval.issued_at or now >= approval.expires_at:
         raise ApprovalRejected("approval expired before execution")
     _validate_approval_ttl(approval, approval_ttl_seconds)
-    if not is_approver_authorized(
+    if is_approver_authorized(
         approval.approver_user_id, operation.company_id, operation.capability_id
-    ):
+    ) is not True:
         raise ApprovalRejected("approver is no longer authorized")
     return operation._apply_transition(State.EXECUTING)
 
@@ -608,7 +837,9 @@ def _sign_result(
     unsigned = TrustedResult(
         kind=kind,
         operation_id=operation.operation_id,
+        request_id=operation.request_id,
         operation_digest=operation.digest,
+        operation_state_digest=_operation_state_digest(operation),
         operation_revision=operation.revision,
         company_id=operation.company_id,
         issuer=issuer,
@@ -617,6 +848,12 @@ def _sign_result(
         evidence_digest=evidence_digest,
         prior_evidence_digest=prior_digest,
         issued_at=issued_at,
+        signature_version=RESULT_SIGNATURE_VERSION,
+        signature_purpose=(
+            EXECUTION_RESULT_PURPOSE
+            if kind == ResultKind.EXECUTION
+            else VERIFICATION_RESULT_PURPOSE
+        ),
         signature="",
     )
     signature = hmac.new(secret, canonical_json(unsigned.payload()), hashlib.sha256).hexdigest()
@@ -692,7 +929,9 @@ def _verify_result(
     bindings = (
         result.kind == kind
         and result.operation_id == operation.operation_id
+        and result.request_id == operation.request_id
         and result.operation_digest == operation.digest
+        and result.operation_state_digest == _operation_state_digest(operation)
         and result.operation_revision == operation.revision
         and result.company_id == operation.company_id
     )
@@ -707,7 +946,22 @@ def _verify_result(
     if not bindings:
         raise TrustedResultRejected("trusted result binding mismatch")
     if (
-        not isinstance(result.issuer, str)
+        type(result.kind) is not ResultKind
+        or type(result.operation_revision) is not int
+        or result.operation_revision < 0
+        or type(result.company_id) is not int
+        or result.company_id <= 0
+        or type(result.signature_version) is not int
+        or result.signature_version != RESULT_SIGNATURE_VERSION
+        or result.signature_purpose
+        != (
+            EXECUTION_RESULT_PURPOSE
+            if kind == ResultKind.EXECUTION
+            else VERIFICATION_RESULT_PURPOSE
+        )
+        or not _is_identifier(result.request_id)
+        or not _is_sha256(result.operation_state_digest)
+        or not isinstance(result.issuer, str)
         or not result.issuer.strip()
         or not isinstance(result.key_id, str)
         or not result.key_id.strip()

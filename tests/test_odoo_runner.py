@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,6 +19,7 @@ from odoo_accounting_cli_v3.odoo.runner import (
     run_odoo_shell,
 )
 from odoo_accounting_cli_v3.persistence import SQLitePersistence
+from odoo_accounting_cli_v3.receipts import create_read_receipt
 from odoo_accounting_cli_v3.release import ReleaseIdentity, source_manifest
 
 
@@ -63,6 +65,12 @@ class OdooRunnerTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        release_verification = patch(
+            "odoo_accounting_cli_v3.odoo.runner._verify_child_release",
+            return_value=(),
+        )
+        self.verify_parent_release = release_verification.start()
+        self.addCleanup(release_verification.stop)
         root = Path(self.temp.name)
         self.odoo_python = root / "python"
         self.odoo_bin = root / "odoo-bin"
@@ -293,6 +301,24 @@ class OdooRunnerTest(unittest.TestCase):
         run.assert_not_called()
 
     @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")
+    @patch("odoo_accounting_cli_v3.odoo.runner.load_runtime_secrets")
+    def test_untrusted_parent_release_is_rejected_before_secrets_or_child(
+        self, load_secrets, run
+    ):
+        self.verify_parent_release.side_effect = OdooRunnerError(
+            "release root is not root-managed"
+        )
+
+        with self.assertRaisesRegex(OdooRunnerError, "not root-managed"):
+            self.execute()
+
+        self.verify_parent_release.assert_called_once_with(
+            self.config.release_root, RELEASE_DIGEST
+        )
+        load_secrets.assert_not_called()
+        run.assert_not_called()
+
+    @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")
     def test_short_secrets_do_not_start_child(self, run):
         self.auth_secret_path.write_bytes(b"short")
         with self.assertRaisesRegex(OdooRunnerError, "at least 32 bytes"):
@@ -318,25 +344,58 @@ class OdooRunnerTest(unittest.TestCase):
         run.assert_not_called()
 
     def test_verified_read_is_appended_to_durable_audit_chain(self):
-        request = request_document()
-        request["context"]["auth_token_id"] = "token-audit-1"
-        receipt = {
-            "company_id": 7,
-            "database_uuid": DATABASE_UUID,
-            "id": "receipt-audit-1",
-            "observed_at": "2026-07-13T08:00:00Z",
-            "registry_digest": "c" * 64,
-            "release_digest": RELEASE_DIGEST,
-            "request_digest": "a" * 64,
-            "result_digest": "b" * 64,
-            "user_id": 42,
+        observed_at = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
+        registry_digest = "c" * 64
+        request = {
+            "capability_id": "acct.gl.trial_balance.v1",
+            "context": {
+                "auth_token_id": "token-audit-1",
+                "company_id": 7,
+                "database_name": "odoo_test",
+                "database_uuid": DATABASE_UUID,
+                "odoo_instance_id": "odoo19@tokyo2",
+                "principal": "pi:user-42",
+                "user_id": 42,
+            },
+            "parameters": {"company_id": 7, "date_to": "2026-07-13"},
         }
-        store = SQLitePersistence(Path(self.temp.name) / "receipt-audit.sqlite3")
+        result_body = {"lines": [], "page": {"total_count": 0}}
+        receipt = create_read_receipt(
+            receipt_id="receipt-audit-1",
+            capability_id=request["capability_id"],
+            parameters=request["parameters"],
+            result_body=result_body,
+            auth_token_id=request["context"]["auth_token_id"],
+            principal=request["context"]["principal"],
+            odoo_instance_id=request["context"]["odoo_instance_id"],
+            database_name=request["context"]["database_name"],
+            database_uuid=DATABASE_UUID,
+            company_id=7,
+            user_id=42,
+            registry_digest=registry_digest,
+            release_digest=RELEASE_DIGEST,
+            environment=self.config.environment,
+            capability_channel=self.config.capability_channel,
+            record_count=0,
+            observed_at=observed_at,
+            key_id=RECEIPT_KEY_ID,
+            secret=RECEIPT_SECRET,
+        )
+        store = SQLitePersistence(
+            Path(self.temp.name) / "receipt-audit.sqlite3",
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+        )
 
         _record_verified_read_audit(
             store,
             json.dumps(request),
-            {"lines": [], "receipt": receipt},
+            {**result_body, "receipt": receipt},
+            registry_digest=registry_digest,
+            release_digest=RELEASE_DIGEST,
+            environment=self.config.environment,
+            capability_channel=self.config.capability_channel,
+            now=observed_at + timedelta(seconds=1),
         )
 
         self.assertEqual(store.verify_chain(), 1)
@@ -344,7 +403,9 @@ class OdooRunnerTest(unittest.TestCase):
         self.assertEqual(event.event_type, "read.verified")
         self.assertEqual(event.event_id, "read:receipt-audit-1")
         self.assertEqual(event.payload["auth_token_id"], "token-audit-1")
-        self.assertEqual(event.payload["request_digest"], "a" * 64)
+        self.assertEqual(event.payload["principal"], "pi:user-42")
+        self.assertEqual(event.payload["request_digest"], receipt["request_digest"])
+        self.assertEqual(event.payload["receipt"], receipt)
 
     @patch("odoo_accounting_cli_v3.odoo.runner._assert_root_managed_path")
     def test_child_reverifies_external_anchor_manifest_and_registry(self, _managed):
@@ -376,6 +437,10 @@ class OdooRunnerTest(unittest.TestCase):
             release_root, manifest["manifest_sha256"]
         )
         self.assertIn("acct.gl.trial_balance.v1", {item.id for item in capabilities})
+        self.assertIn(
+            registry_path,
+            {call.args[0] for call in _managed.call_args_list},
+        )
 
         registry_path.write_text("{}", encoding="utf-8")
         with self.assertRaisesRegex(OdooRunnerError, "integrity"):

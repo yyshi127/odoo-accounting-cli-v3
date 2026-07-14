@@ -8,7 +8,11 @@ from typing import Any, Callable
 
 from ..domain.trial_balance import TrialBalanceBackend, read_trial_balance
 from ..gateway import RequestContext
-from ..receipts import create_read_receipt, verify_read_receipt
+from ..receipts import (
+    create_read_receipt,
+    valid_read_runtime_binding,
+    verify_read_receipt,
+)
 from ..registry import Capability
 from .trial_balance import OdooTrialBalanceBackend
 
@@ -27,6 +31,8 @@ class OdooReadExecutor:
         odoo_instance_id: str,
         database_name: str,
         database_uuid: str,
+        environment: str,
+        capability_channel: str,
         receipt_secret: bytes,
         receipt_key_id: str,
         consume_receipt: Callable[[str, str, datetime, datetime], bool],
@@ -42,6 +48,7 @@ class OdooReadExecutor:
             or not isinstance(receipt_key_id, str)
             or not receipt_key_id.strip()
             or not callable(consume_receipt)
+            or not valid_read_runtime_binding(environment, capability_channel)
         ):
             raise OdooExecutionError(
                 "trusted instance, database, receipt key, and replay store are required"
@@ -50,6 +57,8 @@ class OdooReadExecutor:
         self._odoo_instance_id = odoo_instance_id
         self._database_name = database_name
         self._database_uuid = str(uuid.UUID(database_uuid))
+        self._environment = environment
+        self._capability_channel = capability_channel
         self._receipt_secret = receipt_secret
         self._receipt_key_id = receipt_key_id
         self._consume_receipt = consume_receipt
@@ -67,6 +76,7 @@ class OdooReadExecutor:
             context.odoo_instance_id != self._odoo_instance_id
             or context.database_name != self._database_name
             or context.database_uuid != self._database_uuid
+            or context.environment != self._environment
             or actual_database != self._database_name
             or context.user_id != getattr(self._env, "uid", None)
             or getattr(self._env, "su", False)
@@ -102,6 +112,8 @@ class OdooReadExecutor:
             user_id=context.user_id,
             registry_digest=registry_digest,
             release_digest=release_digest,
+            environment=self._environment,
+            capability_channel=self._capability_channel,
             record_count=body["page"]["total_count"],
             observed_at=self._now(),
             key_id=self._receipt_key_id,
@@ -134,6 +146,8 @@ class OdooReadExecutor:
             user_id=context.user_id,
             registry_digest=registry_digest,
             release_digest=release_digest,
+            environment=self._environment,
+            capability_channel=self._capability_channel,
             expected_record_count=body["page"]["total_count"],
             now=self._now(),
             consume_receipt=self._consume_receipt,

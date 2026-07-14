@@ -10,11 +10,174 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[test]"
       - run: python -m pytest
       - run: python tools/check_source_boundary.py
+
+  wheel-smoke:
+    name: wheel -> fresh venv -> outside-source CLI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONNOUSERSITE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel and stage runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="$RUNNER_TEMP/odoo-accounting-cli-v3-wheel-smoke"
+          built="$smoke_root/built"
+          wheelhouse="$smoke_root/wheelhouse"
+          mkdir -p "$built" "$wheelhouse"
+          expected_version="$(tr -d '\r\n' < VERSION)"
+          test -n "$expected_version"
+          export EXPECTED_VERSION="$expected_version"
+          echo "EXPECTED_VERSION=$expected_version" >> "$GITHUB_ENV"
+
+          python -m pip install "build>=1.2,<2"
+          python -m build --wheel --outdir "$built" .
+
+          mapfile -t wheels < <(
+            find "$built" -maxdepth 1 -type f \
+              -name 'odoo_accounting_cli_v3-*.whl' -print
+          )
+          test "${#wheels[@]}" -eq 1
+          test "${wheels[0]##*/}" = \
+            "odoo_accounting_cli_v3-${EXPECTED_VERSION}-py3-none-any.whl"
+          python -m pip download \
+            --only-binary=:all: \
+            --dest "$wheelhouse" \
+            "${wheels[0]}"
+      - name: Install offline and smoke the installed CLI outside source
+        shell: bash
+        env:
+          PYTHONPATH: ""
+        run: |
+          set -euo pipefail
+          smoke_root="$RUNNER_TEMP/odoo-accounting-cli-v3-wheel-smoke"
+          wheelhouse="$smoke_root/wheelhouse"
+          venv="$smoke_root/runtime-venv"
+          outside="$smoke_root/outside-source"
+          python -m venv "$venv"
+
+          runtime_python="$venv/bin/python"
+          runtime_cli="$venv/bin/odoo-accounting-cli-v3"
+          PIP_NO_INDEX=1 "$runtime_python" -m pip install \
+            --find-links "$wheelhouse" \
+            odoo-accounting-cli-v3
+          "$runtime_python" -m pip check
+
+          mkdir -p "$outside"
+          cd "$outside"
+          test ! -e src
+          test ! -e VERSION
+          export PATH="$venv/bin:$PATH"
+          hash -r
+          test "$runtime_cli" = "$(command -v odoo-accounting-cli-v3)"
+
+          SOURCE_ROOT="$GITHUB_WORKSPACE" "$runtime_python" -I - <<'PY'
+          import os
+          import sys
+          from importlib import metadata, resources
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+
+          import odoo_accounting_cli_v3 as package
+          from odoo_accounting_cli_v3.persistence import (
+              SCHEMA_VERSION,
+              SQLitePersistence,
+          )
+
+          module_file = Path(package.__file__).resolve()
+          source_root = Path(os.environ["SOURCE_ROOT"]).resolve()
+          venv_root = Path(sys.prefix).resolve()
+          assert not module_file.is_relative_to(source_root), module_file
+          assert module_file.is_relative_to(venv_root), module_file
+          expected_version = os.environ["EXPECTED_VERSION"]
+          assert package.__version__ == expected_version
+          assert metadata.version("odoo-accounting-cli-v3") == expected_version
+          assert resources.files("odoo_accounting_cli_v3").joinpath(
+              "data", "capabilities.json"
+          ).is_file()
+          assert SCHEMA_VERSION == 2
+          with TemporaryDirectory(prefix="odoo-cli-v3-wheel-state-") as value:
+              state_root = Path(value)
+              state_root.chmod(0o700)
+              state = SQLitePersistence(state_root / "state.sqlite3")
+              assert state.verify_chain() == 0
+          PY
+
+          "$runtime_cli" --help >/dev/null 2> help.stderr
+          test ! -s help.stderr
+          version_output="$("$runtime_cli" --version 2> version.stderr)"
+          test ! -s version.stderr
+          test "$version_output" = \
+            "odoo-accounting-cli-v3, version $EXPECTED_VERSION"
+          "$runtime_cli" registry list \
+            > registry-list.json 2> registry-list.stderr
+          test ! -s registry-list.stderr
+          "$runtime_cli" registry get \
+            --capability-id acct.gl.trial_balance.v1 \
+            > registry-get.json 2> registry-get.stderr
+          test ! -s registry-get.stderr
+
+          set +e
+          "$runtime_cli" registry get \
+            --capability-id acct.unknown.missing.v1 \
+            > unknown.stdout 2> unknown.stderr
+          unknown_status=$?
+          "$runtime_cli" operation prepare \
+            --request-json '{"request_id":"wheel-smoke"}' \
+            > operation.stdout 2> operation.stderr
+          operation_status=$?
+          set -e
+          test "$unknown_status" -eq 4
+          test "$operation_status" -eq 3
+          test ! -s unknown.stdout
+          test ! -s operation.stdout
+
+          "$runtime_python" -I - <<'PY'
+          import json
+          from pathlib import Path
+
+          listed = json.loads(Path("registry-list.json").read_text("utf-8"))
+          fetched = json.loads(Path("registry-get.json").read_text("utf-8"))
+          unknown = json.loads(Path("unknown.stderr").read_text("utf-8"))
+          operation = json.loads(Path("operation.stderr").read_text("utf-8"))
+          capabilities = listed["data"]["capabilities"]
+          assert listed["ok"] is True
+          assert listed["command"] == "registry.list"
+          assert listed["data"]["count"] == len(capabilities) > 0
+          assert [item["id"] for item in capabilities] == sorted(
+              item["id"] for item in capabilities
+          )
+          assert fetched["ok"] is True
+          assert fetched["data"]["capability"]["id"] == (
+              "acct.gl.trial_balance.v1"
+          )
+          assert fetched["data"]["registry_digest"] == (
+              listed["data"]["registry_digest"]
+          )
+          assert unknown["ok"] is False
+          assert unknown["command"] == "registry.get"
+          assert unknown["error"]["code"] == "capability_not_found"
+          assert unknown["error"]["odoo_action_performed"] is False
+          assert operation["ok"] is False
+          assert operation["command"] == "operation.prepare"
+          assert operation["error"]["code"] == "gateway_not_configured"
+          assert operation["error"]["odoo_action_performed"] is False
+          PY

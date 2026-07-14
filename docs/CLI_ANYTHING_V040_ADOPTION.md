@@ -122,6 +122,16 @@ state transition is insufficient evidence of accounting success. Without a
 verified real-Odoo receipt, V3 must return an unverified or failed result and
 must not report business success.
 
+The `wheel-smoke` CI job implements the installed-CLI portion of this method:
+it builds one wheel, resolves dependencies from that wheel's metadata, installs
+offline into a fresh Python 3.12 virtual environment, changes to a directory
+outside the checkout, proves imports resolve inside that environment, and runs
+the installed help, version, registry-list, and registry-get commands. This
+wheel is a disposable CI test input, not a second production release package.
+Build isolation and dependency prefetch still require network access and range
+constraints, so this gate proves an offline runtime install, not a fully
+reproducible offline supply chain.
+
 ## Write authorization boundary
 
 No production-accounting write test is authorized by the current project

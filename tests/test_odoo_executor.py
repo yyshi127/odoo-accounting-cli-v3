@@ -101,6 +101,8 @@ class OdooReadExecutorTest(unittest.TestCase):
             odoo_instance_id="odoo19@tokyo2",
             database_name="odoo_test",
             database_uuid="11111111-1111-4111-8111-111111111111",
+            environment="test",
+            capability_channel="staged",
             receipt_secret=b"test-only-receipt-secret-32-byte",
             receipt_key_id=RECEIPT_KEY_ID,
             consume_receipt=consume,

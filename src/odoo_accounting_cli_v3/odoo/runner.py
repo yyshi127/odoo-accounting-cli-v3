@@ -19,7 +19,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -434,6 +434,15 @@ def _read_small_json_file(path: Path, label: str) -> dict[str, Any]:
         raise OdooRunnerError(f"{label} cannot be read") from exc
 
 
+def _assert_release_tree_root_managed(release_root: Path) -> None:
+    for path in release_root.rglob("*"):
+        _assert_root_managed_path(
+            path,
+            f"release tree path {path.relative_to(release_root).as_posix()}",
+            directory=path.is_dir(),
+        )
+
+
 def _verify_child_release(release_root: Path, expected_manifest_digest: str):
     if not isinstance(expected_manifest_digest, str) or SHA256.fullmatch(
         expected_manifest_digest
@@ -467,6 +476,7 @@ def _verify_child_release(release_root: Path, expected_manifest_digest: str):
             manifest,
             expected_manifest_sha256=expected_manifest_digest,
         )
+        _assert_release_tree_root_managed(release_root)
         from ..registry import load_registry
 
         return load_registry(release_root / "registry" / "capabilities.json")
@@ -754,9 +764,13 @@ def run_odoo_shell(
     if not isinstance(config, RuntimeConfig):
         raise OdooRunnerError("a validated runtime configuration is required")
     _validate_runtime_paths(config)
-    auth_secret, receipt_secret = load_runtime_secrets(config)
     if not isinstance(release_digest, str) or SHA256.fullmatch(release_digest) is None:
         raise OdooRunnerError("release_digest must be a lowercase SHA-256 digest")
+    # Verify the configured release with trusted parent code before secrets can be
+    # copied into a child that imports Python from that release. The child repeats
+    # this check; neither check eliminates the filesystem TOCTOU window.
+    _verify_child_release(config.release_root, release_digest)
+    auth_secret, receipt_secret = load_runtime_secrets(config)
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
@@ -824,61 +838,74 @@ def _decode_secret(value: Any, field: str) -> bytes:
 
 
 def _record_verified_read_audit(
-    store: Any, request_json: str, result: dict[str, Any]
+    store: Any,
+    request_json: str,
+    result: dict[str, Any],
+    *,
+    registry_digest: str,
+    release_digest: str,
+    environment: str,
+    capability_channel: str,
+    now: datetime,
 ) -> None:
     request = _load_json_object(request_json, "audited request")
     context = request.get("context")
+    parameters = request.get("parameters")
     receipt = result.get("receipt") if isinstance(result, dict) else None
-    if not isinstance(context, dict) or not isinstance(receipt, dict):
+    result_body = (
+        {key: value for key, value in result.items() if key != "receipt"}
+        if isinstance(result, dict)
+        else None
+    )
+    if not all(
+        isinstance(value, dict)
+        for value in (context, parameters, receipt, result_body)
+    ):
         raise OdooRunnerError("verified read audit identity is missing")
-    required = {
-        "auth_token_id": context.get("auth_token_id"),
-        "capability_id": request.get("capability_id"),
-        "company_id": receipt.get("company_id"),
-        "database_uuid": receipt.get("database_uuid"),
-        "receipt_id": receipt.get("id"),
-        "registry_digest": receipt.get("registry_digest"),
-        "release_digest": receipt.get("release_digest"),
-        "request_digest": receipt.get("request_digest"),
-        "result_digest": receipt.get("result_digest"),
-        "user_id": receipt.get("user_id"),
+    page = result_body.get("page")
+    record_count = page.get("total_count") if isinstance(page, dict) else None
+    capability_id = request.get("capability_id")
+    required_context = {
+        field: context.get(field)
+        for field in (
+            "auth_token_id",
+            "principal",
+            "odoo_instance_id",
+            "database_name",
+            "database_uuid",
+            "company_id",
+            "user_id",
+        )
     }
     if (
-        any(value is None or isinstance(value, bool) for value in required.values())
-        or any(
-            not isinstance(required[field], str) or not required[field]
-            for field in (
-                "auth_token_id",
-                "capability_id",
-                "database_uuid",
-                "receipt_id",
-                "registry_digest",
-                "release_digest",
-                "request_digest",
-                "result_digest",
-            )
-        )
-        or any(
-            not isinstance(required[field], int) or required[field] <= 0
-            for field in ("company_id", "user_id")
-        )
+        not isinstance(capability_id, str)
+        or not capability_id
+        or any(value is None for value in required_context.values())
+        or type(record_count) is not int
+        or record_count < 0
+        or not isinstance(now, datetime)
+        or now.tzinfo is None
+        or now.utcoffset() is None
     ):
         raise OdooRunnerError("verified read audit identity is invalid")
-    try:
-        occurred_at = datetime.fromisoformat(
-            receipt["observed_at"].replace("Z", "+00:00")
-        )
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise OdooRunnerError("verified read audit timestamp is invalid") from exc
-    if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
-        raise OdooRunnerError("verified read audit timestamp is invalid")
-    store.verify_chain()
-    store.append_audit_event(
-        event_id=f"read:{required['receipt_id']}",
-        event_type="read.verified",
-        operation_id=None,
-        occurred_at=occurred_at,
-        payload=required,
+    store.record_verified_read(
+        receipt=receipt,
+        capability_id=capability_id,
+        parameters=parameters,
+        result_body=result_body,
+        auth_token_id=required_context["auth_token_id"],
+        principal=required_context["principal"],
+        odoo_instance_id=required_context["odoo_instance_id"],
+        database_name=required_context["database_name"],
+        database_uuid=required_context["database_uuid"],
+        company_id=required_context["company_id"],
+        user_id=required_context["user_id"],
+        registry_digest=registry_digest,
+        release_digest=release_digest,
+        environment=environment,
+        capability_channel=capability_channel,
+        expected_record_count=record_count,
+        now=now,
     )
 
 
@@ -937,14 +964,22 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
         raise OdooRunnerError("child request is invalid")
 
     from ..persistence import ReplayRejected, SQLitePersistence
+    from ..registry import registry_digest as calculate_registry_digest
     from .bootstrap import execute_read_json
 
     _validate_private_state_path(runtime_config.auth_state_path, "auth_state_path")
     _validate_private_state_path(runtime_config.receipt_state_path, "receipt_state_path")
+    receipt_secret = _decode_secret(
+        payload.get("receipt_secret"), "receipt_secret"
+    )
     previous_umask = os.umask(0o077)
     try:
         auth_store = SQLitePersistence(runtime_config.auth_state_path)
-        receipt_store = SQLitePersistence(runtime_config.receipt_state_path)
+        receipt_store = SQLitePersistence(
+            runtime_config.receipt_state_path,
+            receipt_key_id=runtime_config.receipt_key_id,
+            receipt_secret=receipt_secret,
+        )
     finally:
         os.umask(previous_umask)
 
@@ -965,39 +1000,34 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
             return False
         return True
 
-    def consume_receipt(
-        receipt_id: str,
-        request_digest: str,
-        observed_at: datetime,
-        verified_at: datetime,
-    ) -> bool:
-        try:
-            receipt_store.consume_receipt(
-                receipt_id=receipt_id,
-                request_digest=request_digest,
-                observed_at=observed_at,
-                now=verified_at,
-            )
-        except ReplayRejected:
-            return False
-        return True
-
+    capabilities = _verify_child_release(release_root, release_digest)
     result_json = execute_read_json(
         root_env,
         request_json,
-        capabilities=_verify_child_release(release_root, release_digest),
+        capabilities=capabilities,
         auth_secret=_decode_secret(payload.get("auth_secret"), "auth_secret"),
         auth_key_id=runtime_config.auth_key_id,
         consume_auth_token=consume_auth_token,
-        receipt_secret=_decode_secret(payload.get("receipt_secret"), "receipt_secret"),
+        receipt_secret=receipt_secret,
         receipt_key_id=runtime_config.receipt_key_id,
-        consume_receipt=consume_receipt,
+        # The executor verifies the signed receipt in memory. Durable replay
+        # consumption is combined with the audit append immediately below.
+        consume_receipt=lambda *_: True,
         release_digest=release_digest,
         odoo_instance_id=runtime_config.instance_id,
         environment=runtime_config.environment,
         capability_channel=runtime_config.capability_channel,
     )
     result = _load_json_object(result_json, "Odoo result")
-    _record_verified_read_audit(receipt_store, request_json, result)
+    _record_verified_read_audit(
+        receipt_store,
+        request_json,
+        result,
+        registry_digest=calculate_registry_digest(capabilities),
+        release_digest=release_digest,
+        environment=runtime_config.environment,
+        capability_channel=runtime_config.capability_channel,
+        now=datetime.now(timezone.utc),
+    )
     response = {"ok": True, "runtime": runtime_config.runtime_identity, "result": result}
     print(marker + canonical_json(response).decode("utf-8"), flush=True)

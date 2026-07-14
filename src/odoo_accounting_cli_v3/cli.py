@@ -211,6 +211,8 @@ def _assert_verified_read_result(
             user_id=context["user_id"],
             registry_digest=identity["registry_digest"],
             release_digest=identity["manifest_sha256"],
+            environment=config.environment,
+            capability_channel=config.capability_channel,
             expected_record_count=body["page"]["total_count"],
             now=datetime.now(timezone.utc),
             consume_receipt=lambda *_args: True,

@@ -15,7 +15,7 @@ Baseline date: 2026-07-13 (Asia/Shanghai)
 | Target server | Read-only SSH succeeded as `root`; hostname is `VM-0-6-ubuntu` | Confirmed 2026-07-13 |
 | Runtime services | `odoo19.service` and `sudo-pi-agent-bridge.service` reported active | Confirmed 2026-07-13 |
 | Server V2 | `/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v2`, owned by `odoo:odoo`; package metadata says `0.1.0`; no Git metadata | Confirmed, untraceable source |
-| Server V3 | Retained dev1/dev2 candidates exist under the earlier `/mnt` evidence root; immutable `0.1.0.dev3-eff74ae179c2` is externally anchored under the independent `/opt` root and is not routed | dev1 rejected by runtime identity; dev2 direct-read evidence; dev3 real CLI read passed but exposed a first-use content-binding design gap |
+| Server V3 | Retained dev1/dev2 candidates exist under the earlier `/mnt` evidence root; immutable dev3 and `0.1.0.dev4-be4ec918f325` releases are externally anchored under the independent `/opt` root and are not routed | dev1 rejected by runtime identity; dev2 direct-read evidence; dev3 exposed a first-use content-binding gap; dev4 closed it and passed the repeated read/security evidence gate |
 | Pi Bridge V2 copy | A second complete V2 tree exists under `/mnt/odoo/odoo19/custom/services/pi-agent-bridge/odoo_accounting_agent_cli_v2` | Confirmed duplicate |
 | V2 copy equality | Active source-tree aggregate hashes differ; `commands/backend.py` also differs while both packages report `0.1.0` | Confirmed version collision |
 | Odoo module | Active `sudo_ai_bot` manifest reports `1.2.0`; manifest SHA-256 is `640ddb271cf04067bc5be68de7d7fb8620e9c19a308417295650b3811279d96b` | Confirmed |
@@ -124,7 +124,14 @@ the same token was rejected. During the next negative-test review, the auth
 context was found not to bind capability ID plus parameters before first use.
 Dev3 is therefore retained as diagnostic evidence only, remains staged rather
 than enabled, and must not be routed to Pi. Dev4 adds that missing signed content
-digest and must repeat all real-Odoo and attack gates.
+digest. Its immutable server release repeated the Linux isolation gates and a
+real `odoo_test` trial balance for company 1/user 2: 15 accounts, debit and
+credit `136193.63`, difference `0.00`, with a verified Odoo receipt. Separate
+process tests rejected content tampering, replay, ACL denial, bound-company
+escape, wrong database UUID, and expiry; an independent SQL oracle matched a
+date/currency/pagination parameter round-trip, and the six-event audit chain
+verified. The evidence bundle is root-owned and read-only. Dev4 remains staged:
+it has no Pi route, enables no capability, and proves no write lifecycle.
 
 ## Phase-one exit gate
 

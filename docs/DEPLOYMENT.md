@@ -31,7 +31,7 @@ archive.
   runtime-test.json
   secrets/test/auth.hmac
   secrets/test/receipt.hmac
-/var/lib/odoo-accounting-cli-v3/test/
+/var/lib/odoo-accounting-cli-v3/test/candidates/<version>-<commit12>/
   auth.sqlite3
   receipt.sqlite3
 ```
@@ -94,8 +94,59 @@ service group. Record only their Key IDs and file hashes in restricted operator
 evidence; never record key contents.
 
 Create the test state directory as service-owned mode `0700`. SQLite database,
-WAL, and shared-memory files must remain mode `0600`. State survives release
-upgrade and rollback; never delete it to make a replayed request succeed.
+WAL, and shared-memory files must remain mode `0600`. State must be preserved
+through upgrade and rollback with an explicitly compatible schema or matched
+snapshot; never delete it to make a replayed request succeed.
+
+Schema v2 adds append-only approval evidence and database-enforced approval
+transitions. Opening a schema-v1 state database with a v2 release performs a
+strict, transactional migration only after the exact v1 schema, operation
+record hashes, foreign keys, and audit chain verify. The migration preserves
+all existing operation and audit bytes, but it is forward-only for older
+binaries: a v1-only release cannot open the resulting database.
+Legacy events that use native v2 `read.*` or `operation.*` evidence identities
+are rejected; they cannot be silently promoted into verified v2 evidence.
+Only pre-execution states and a legacy `approved` state are migratable. A
+legacy approval is marked unverifiable and may be inspected but cannot
+authorize execution. Legacy executing, failed, verification, completion, or
+recovery states have no dev5-grade durable evidence and make the whole
+migration roll back without changing schema v1.
+
+For native dev5 reads, signature revalidation, replay consumption, and the
+`read.verified` event containing the complete signed receipt commit in one
+transaction. Absence of that durable event is a failed read, never business
+success. Receipt protocol v2 binds environment and capability channel and
+forbids a staged production receipt. Initialize the version-scoped receipt
+store only through its root-managed runtime configuration so its Key ID and
+secret fingerprint are pinned before reads; a key mismatch is an integrity
+failure, not an automatic rotation.
+
+These SQLite controls are an application integrity boundary, not a defense
+against arbitrary code running as the state-file owner. A same-UID attacker can
+replace local schema objects and recompute unkeyed hashes. Production promotion
+therefore remains blocked until runtime identities are isolated and the audit
+head is independently anchored; trigger presence alone is not promotion
+evidence.
+
+For side-by-side candidate verification, point dev5 at new version-scoped state
+paths under `candidates/<version>-<commit12>/` so the retained dev4 databases
+remain unchanged. For a promoted v1-to-v2 upgrade, first stop and drain every
+V3 route, worker, scheduled job, canary, and operator command that can access
+the affected state stores. Keep that traffic stopped throughout the SQLite
+checkpoint, creation and verification of a consistent v1 snapshot, the first
+v2 open and migration, and the post-migration integrity verification.
+
+Create the rollback snapshot with a SQLite-supported consistent backup method
+or an atomic storage snapshot that covers the database and all associated WAL
+state. Verify its hashes and test that a copy opens and passes SQLite integrity
+checks before migration. A plain filesystem copy of a database followed by a
+separate copy of its `-wal`/`-shm` files is not an atomic backup and must not be
+used as rollback evidence. Resume V3 traffic only after the migrated stores and
+their audit chains pass integrity checks. Application rollback must either
+select a prior release that understands schema v2 or, while the same traffic
+remains stopped, atomically restore the matching verified v1 snapshot.
+Switching only the release link is not a valid rollback. Never copy, truncate,
+or delete a live state database to bypass nonce or receipt history.
 
 ## Test-only candidate verification
 
@@ -145,6 +196,12 @@ verified immutable release. It must not modify V2, delete V3 state, or attempt
 to undo accounting records. Confirm the selected release's anchor and manifest,
 run its identity/read canary, atomically change the route, and verify Pi and CLI
 again report the same identity.
+
+Before changing a route, verify the selected binary supports the current state
+schema. If the upgrade migrated schema v1 to v2, restore the pre-upgrade v1
+snapshot only as part of a coordinated rollback with traffic stopped for that
+V3 state store, or roll back to a v2-compatible build. Preserve the rejected
+v2 state as evidence; never merge divergent state files by hand.
 
 If a write release is ever promoted, accounting effects are recovered only by
 the capability's recorded Odoo reversal or compensation workflow. Deploying an

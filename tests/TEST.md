@@ -72,6 +72,8 @@ not an accounting receipt. An unsigned or unverifiable receipt is a failed gate.
 | B10 | Trusted execution | Fabricated, reordered, or tampered execution and verification results cannot advance the state machine |
 | B11 | Receipt integrity | Request/result/registry/release/database/user/company bindings and receipt signatures are verified before success is returned |
 | B12 | Durable restart | After process or host restart, operation state, nonce consumption, locks, idempotency result, audit chain, and recovery status remain correct |
+| B13 | Atomic approval acceptance | Nonce consumption, append-only approval evidence, awaiting-to-approved state change, and audit event commit together or all roll back |
+| B14 | Persistence migration | Exact schema v1 migrates transactionally to v2 without changing legacy operation/audit bytes; invalid legacy state remains v1 and fails closed |
 
 ## Gate C — installed CLI subprocess
 
@@ -186,21 +188,33 @@ At the current local development checkpoint:
 
 - contract/control, receipt, release, and trial-balance unit tests exist;
 - the installable V3 executable, JSON registry commands, fail-closed operation
-  commands, and local console-script subprocess suite pass; a clean
-  artifact-installed environment with source-tree imports removed remains a
-  separate gate, as do server identity and real-Odoo execution;
+  commands, and local console-script subprocess suite pass; dev5 also passed a
+  local wheel install into a fresh environment from outside the source tree,
+  and a Python 3.11/3.12 test matrix plus the Python 3.12 `wheel-smoke` CI job
+  are defined, but committed CI evidence remains required;
 - dev2 produced a retained direct Odoo read receipt; dev3 produced a complete
   installed-CLI receipt matching the independent `136193.63` debit/credit
   oracle, passed target-Linux resource gates, and rejected cross-process replay,
   but was deliberately rejected for promotion after review found that its auth
   signature did not bind capability ID plus parameters before first use;
-- dev4 adds the signed request-content digest; its exact artifact must repeat
-  the target Linux, real Odoo, ACL/company/database, tamper, replay, and Pi gates
-  before any enablement;
-- 146 local tests currently pass and four target-Linux gates are intentionally
-  skipped off target, including persistent replay/idempotency,
-  strict signature metadata, Odoo bootstrap, runner, receipt, and registry
-  cases; this is development evidence, not real-Odoo or production promotion;
+- dev4 added the signed request-content digest and its exact immutable server
+  artifact repeated the target-Linux gates, real Odoo trial-balance oracle,
+  ACL denial, authorized multi-company read, bound-company escape denial,
+  database UUID denial, expiry, tamper, durable replay, parameter round-trip,
+  and audit-chain checks. It remains staged rather than enabled because Pi
+  routing/E2E and the remaining production trust split are not complete;
+- dev5 locally adds approval protocol v2, strict request/key/revision binding,
+  result protocol v2 with full operation-state binding, schema-v2 append-only
+  approval records, global durable nonce replay defense, atomic
+  approval/state/audit commit, canonical audit-byte checks, concurrency and
+  rollback tests, atomic signed-read receipt consumption plus audit, reserved
+  legacy-evidence namespace rejection, guarded recovery transitions, and a
+  strict v1 migration. Execution-result, failure, verification, and recovery
+  persistence remain closed until their specialized authoritative transactions
+  exist. These are control-plane tests only; no Odoo write was executed;
+- 196 local tests currently pass and four target-Linux gates are intentionally
+  skipped off target. This is development evidence, not real-Odoo write or
+  production promotion evidence;
 - no sandbox write lifecycle has been authorized or recorded; and
 - no production write is authorized.
 

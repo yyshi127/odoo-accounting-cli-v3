@@ -236,6 +236,8 @@ def execute_read_from_odoo_shell(
         odoo_instance_id=odoo_instance_id,
         database_name=actual_database_name,
         database_uuid=actual_database_uuid,
+        environment=environment,
+        capability_channel=capability_channel,
         receipt_secret=receipt_secret,
         receipt_key_id=receipt_key_id,
         consume_receipt=consume_receipt,

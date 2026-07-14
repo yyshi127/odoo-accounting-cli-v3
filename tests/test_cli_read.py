@@ -151,6 +151,8 @@ class CliReadTest(unittest.TestCase):
             user_id=context["user_id"],
             registry_digest=REGISTRY_DIGEST,
             release_digest=MANIFEST_DIGEST,
+            environment=self.config.environment,
+            capability_channel=self.config.capability_channel,
             record_count=0,
             observed_at=datetime.now(timezone.utc),
             key_id=RECEIPT_KEY_ID,
