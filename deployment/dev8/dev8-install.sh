@@ -1062,7 +1062,8 @@ if (
     or not stat.S_ISDIR(root_metadata.st_mode)
     or root_metadata.st_uid != 0
     or root_metadata.st_gid != 0
-    or root_metadata.st_mode & 0o077
+    or root_metadata.st_mode & 0o022
+    or root_metadata.st_mode & 0o007
     or upload.resolve(strict=True) != upload
     or upload.is_symlink()
     or not stat.S_ISDIR(upload_metadata.st_mode)
@@ -1087,6 +1088,8 @@ for raw_path in sys.argv[2:]:
         raise SystemExit(f"uploaded artifact is not root-managed: {path}")
 print("uploaded_artifact_metadata_verified=true")
 PY
+/usr/bin/sudo -n -u odoo -g odoo /usr/bin/test ! -x "$upload_directory"
+printf 'upload_not_traversable_by_odoo=true\n'
 
 for target in "$release_root" "$canonical_package" "$anchor"; do
   test ! -e "$target"

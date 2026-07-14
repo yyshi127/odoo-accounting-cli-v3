@@ -15,7 +15,7 @@ MANIFEST = ROOT / "TOOLCHAIN-MANIFEST.json"
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.2"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.3"
 TOOLS = (
     "dev8-install.sh",
     "dev8-runtime-setup.sh",
@@ -209,6 +209,10 @@ def main() -> None:
     require("mutable_candidate_test_fixture_used=false" in server_gate, "mutable fixture marker is missing")
     require("server_unit_test_source=github-ci-run-29319326192" in server_gate, "CI source marker is missing")
     require("production_critical_metadata_safe=false" in server_gate, "production metadata blocker marker is missing")
+    install_gate = (ROOT / "dev8-install.sh").read_text(encoding="utf-8")
+    require("root_metadata.st_mode & 0o022" in install_gate, "upload parent write guard is missing")
+    require("root_metadata.st_mode & 0o007" in install_gate, "upload parent other-access guard is missing")
+    require("upload_not_traversable_by_odoo=true" in install_gate, "Odoo upload traversal probe is missing")
     for name in ("dev8-server-gate.sh", "dev8-freeze-evidence.py", "dev8-verify-frozen-evidence.py"):
         source = (ROOT / name).read_text(encoding="utf-8")
         require(source.count("run_unit_listing(") >= 3, f"systemd no-match listing gate is missing: {name}")

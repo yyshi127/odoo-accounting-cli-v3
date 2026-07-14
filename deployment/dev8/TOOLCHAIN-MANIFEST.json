@@ -3,7 +3,7 @@
   "application_package_sha256": "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234",
   "application_release": "0.1.0.dev8-bd21ca07c168",
   "files": [
-    {"name": "dev8-install.sh", "sha256": "ac14654a3f8e321facd0194987cc2ef89221d4ed729df5a10f2356b8e30efab5", "size": 46940},
+    {"name": "dev8-install.sh", "sha256": "b6f085d144671b5ddb29fe0616cd0222dc67b0dbfcb3bb87dd961e5e810b9d37", "size": 47096},
     {"name": "dev8-runtime-setup.sh", "sha256": "9266157beced46cdf3187f7877a3a136a6e1f114b20a69d9c06dcbd69fdc9edd", "size": 63182},
     {"name": "dev8-server-gate.sh", "sha256": "a6043ee204020df42169aee09fd4510b8001bdcd7ebd88188fa4035f4973063a", "size": 37756},
     {"name": "dev8-stage-execution-tools.py", "sha256": "7600c0eea43c6d8ad864ee353b823f1720ba1197f83b0c779f3659d381752fb4", "size": 48521},
@@ -17,11 +17,11 @@
     {"name": "dev8-persistence-audit.py", "sha256": "0ace22833fd799da836e442a81064ae85e79bc17ceebb05885e52f88e0d07f93", "size": 31049},
     {"name": "dev8-runtime-dependency-inventory.py", "sha256": "f2b0675d793b2abfb8cb93bba572c73021447acab8ecd0b473293a8f6f892d12", "size": 11255},
     {"name": "dev8-canonical-package-negative-gates.py", "sha256": "9ad113e2eec2ec08c69befdab1fd15c0938fb5d1327c165feaa84c6a3feed3bb", "size": 31102},
-    {"name": "dev8-freeze-evidence.py", "sha256": "8469f255cae383c8199faf329098abe3177cceb2cfe45f61bf504c4c8d92653a", "size": 93344},
-    {"name": "dev8-verify-frozen-evidence.py", "sha256": "30ca5992158589da2f97316dba923615c55fce90024d73a884f04137e4156532", "size": 101742},
+    {"name": "dev8-freeze-evidence.py", "sha256": "fd89d535d854d7a31b19a7e59e1baa926d52e895cbadd2077705fdac404267ac", "size": 93344},
+    {"name": "dev8-verify-frozen-evidence.py", "sha256": "c45d5700f944e4ffe61682dfdc12a50abc993c2ba031a5baf7fd6dee57a83625", "size": 101742},
     {"name": "SERVER-BASELINE.json", "sha256": "37b498ffce8f175813e866c534b6514142436d9c4dbf29216f1dab1c880c57e4", "size": 5662}
   ],
   "schema_version": 1,
   "source_directory": "deployment/dev8",
-  "toolchain_version": "0.1.0.dev8-toolchain.2"
+  "toolchain_version": "0.1.0.dev8-toolchain.3"
 }

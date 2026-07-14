@@ -266,6 +266,15 @@ def test_server_gate_uses_the_same_systemd_no_match_contract():
     assert "and not completed.stderr.strip()" in source
 
 
+def test_install_gate_accepts_a_non_writable_root_group_traverse_bit_only_with_odoo_probe():
+    source = (DEPLOYMENT / "dev8-install.sh").read_text("utf-8")
+    assert "root_metadata.st_mode & 0o077" not in source
+    assert "root_metadata.st_mode & 0o022" in source
+    assert "root_metadata.st_mode & 0o007" in source
+    assert "/usr/bin/sudo -n -u odoo -g odoo /usr/bin/test ! -x" in source
+    assert "upload_not_traversable_by_odoo=true" in source
+
+
 MUTATIONS = (
     "schema-bool",
     "parents-null",

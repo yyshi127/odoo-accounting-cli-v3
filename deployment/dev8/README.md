@@ -11,7 +11,7 @@ They install and validate a side-by-side test candidate only.
 
 `TOOLCHAIN-MANIFEST.json` binds the exact bytes of all 16 operational tools and
 the read-only `SERVER-BASELINE.json` to toolchain version
-`0.1.0.dev8-toolchain.2` and to the canonical application release.
+`0.1.0.dev8-toolchain.3` and to the canonical application release.
 `check_toolchain.py` verifies that binding in CI.
 
 ## Safety boundary
@@ -28,7 +28,7 @@ Before uploading anything, compare the live server with
 all 12 critical-file byte hashes and full metadata fingerprints, the
 `odoo_test` database UUID, the absent V3 paths, and the absent V3 units. Stop on
 any difference. An empty `systemctl list-unit-files` result may return either
-0 or 1; toolchain.2 accepts exit 1 only when both stdout and stderr are empty.
+0 or 1; toolchain.3 accepts exit 1 only when both stdout and stderr are empty.
 
 ## Upload set
 
