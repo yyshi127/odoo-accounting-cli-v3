@@ -163,8 +163,12 @@ class CliReadTest(unittest.TestCase):
     @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
     @patch("odoo_accounting_cli_v3.cli._load_release_identity")
     @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    @patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_secrets",
+        return_value=(AUTH_SECRET, RECEIPT_SECRET),
+    )
     def test_read_transmits_complete_request_and_returns_bound_receipt(
-        self, load_config, load_identity, run_shell
+        self, _load_secrets, load_config, load_identity, run_shell
     ) -> None:
         load_config.return_value = self.config
         load_identity.return_value = identity()
@@ -203,8 +207,12 @@ class CliReadTest(unittest.TestCase):
     @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
     @patch("odoo_accounting_cli_v3.cli._load_release_identity", return_value=identity())
     @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    @patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_secrets",
+        return_value=(AUTH_SECRET, RECEIPT_SECRET),
+    )
     def test_read_never_reports_success_without_matching_receipt(
-        self, load_config, _load_identity, run_shell
+        self, _load_secrets, load_config, _load_identity, run_shell
     ) -> None:
         load_config.return_value = self.config
         request = request_document()

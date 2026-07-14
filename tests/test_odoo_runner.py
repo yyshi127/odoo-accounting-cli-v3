@@ -82,6 +82,21 @@ class OdooRunnerTest(unittest.TestCase):
         self.receipt_secret_path = root / "receipt.secret"
         self.auth_secret_path.write_bytes(AUTH_SECRET)
         self.receipt_secret_path.write_bytes(RECEIPT_SECRET)
+
+        def read_test_secret(path, label):
+            value = path.read_bytes()
+            if len(value) < 32:
+                raise OdooRunnerError(f"{label} must contain at least 32 bytes")
+            return value
+
+        # These orchestration tests use caller-owned temporary files; the
+        # production ownership and mode checker itself remains unmodified.
+        secret_reader = patch(
+            "odoo_accounting_cli_v3.odoo.runner._read_private_secret",
+            side_effect=read_test_secret,
+        )
+        secret_reader.start()
+        self.addCleanup(secret_reader.stop)
         self.config = RuntimeConfig(
             instance_id="odoo19@tokyo2",
             environment="test",
@@ -407,8 +422,11 @@ class OdooRunnerTest(unittest.TestCase):
         self.assertEqual(event.payload["request_digest"], receipt["request_digest"])
         self.assertEqual(event.payload["receipt"], receipt)
 
+    @patch("odoo_accounting_cli_v3.odoo.runner._read_small_json_file")
     @patch("odoo_accounting_cli_v3.odoo.runner._assert_root_managed_path")
-    def test_child_reverifies_external_anchor_manifest_and_registry(self, _managed):
+    def test_child_reverifies_external_anchor_manifest_and_registry(
+        self, _managed, read_json
+    ):
         trusted_root = Path(self.temp.name) / "trusted-v3"
         release_root = trusted_root / "releases" / "0.1.0.dev3-aaaaaaaaaaaa"
         registry_path = release_root / "registry" / "capabilities.json"
@@ -431,6 +449,9 @@ class OdooRunnerTest(unittest.TestCase):
                 }
             ),
             encoding="utf-8",
+        )
+        read_json.side_effect = lambda path, _label: json.loads(
+            path.read_text(encoding="utf-8")
         )
 
         capabilities = _verify_child_release(

@@ -220,6 +220,7 @@ def create_v1_schema(path: Path) -> None:
         )
         connection.execute("PRAGMA user_version = 1")
         connection.commit()
+    path.chmod(0o600)
 
 
 def insert_v1_operation(
