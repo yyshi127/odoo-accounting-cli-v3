@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import sqlite3
 import sys
 import types
 from pathlib import Path
@@ -226,6 +227,40 @@ def test_service_pids_are_derived_from_the_validated_server_baseline(
     }
     source = Path(module.__file__).read_text("utf-8")
     assert "EXPECTED_PIDS" not in source
+
+
+def test_verifier_inspects_a_wal_snapshot_in_memory(verifier, tmp_path):
+    database = tmp_path / "state.sqlite3"
+    connection = sqlite3.connect(database)
+    try:
+        assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+        for table in (
+            "approval_records",
+            "consumed_auth_tokens",
+            "consumed_receipts",
+            "idempotency_keys",
+            "operations",
+        ):
+            connection.execute(f"CREATE TABLE {table} (id INTEGER)")
+        connection.execute("CREATE TABLE audit_events (sequence INTEGER)")
+        connection.commit()
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+    payload = database.read_bytes()
+    assert payload[18:20] == b"\x02\x02"
+    report, events = verifier.inspect_db(payload)
+    assert report["quick_check"] == ["ok"]
+    assert report["counts"] == {
+        "approval_records": 0,
+        "audit_events": 0,
+        "consumed_auth_tokens": 0,
+        "consumed_receipts": 0,
+        "idempotency_keys": 0,
+        "operations": 0,
+    }
+    assert events == []
 
 
 @pytest.mark.parametrize(
