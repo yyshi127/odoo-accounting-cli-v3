@@ -11,7 +11,7 @@ They install and validate a side-by-side test candidate only.
 
 `TOOLCHAIN-MANIFEST.json` binds the exact bytes of all 16 operational tools and
 the read-only `SERVER-BASELINE.json` to toolchain version
-`0.1.0.dev8-toolchain.9` and to the canonical application release.
+`0.1.0.dev8-toolchain.10` and to the canonical application release.
 `check_toolchain.py` verifies that binding in CI.
 
 ## Safety boundary
@@ -120,6 +120,9 @@ hard-coded source.
 The final verifier deserializes frozen WAL-mode SQLite snapshots into an
 in-memory connection with exclusive locking before enabling query-only mode;
 this avoids filesystem WAL access without changing the frozen bytes.
+Financial oracle reports are bound to their capability, parameters, token,
+receipt, and record count through the exact four-entry request-roundtrip
+record; the SQL report format itself does not duplicate a capability ID.
 
 Create `/tmp/dev8-gate-evidence` as `root:root` mode `0700` before its two
 producers. The execution stager requires its three fixed `/tmp` oracle-source

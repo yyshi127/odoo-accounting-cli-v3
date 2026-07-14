@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 VERSION = "0.1.0.dev8"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.9"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.10"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 TREE = "fd389ef55fbc6723379a2928a10b665925829599"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
@@ -1245,6 +1245,7 @@ def main() -> None:
     receipt_ids: set[str] = set()
     summary_rows = []
     roundtrip = []
+    expected_oracle_roundtrip = []
     for name, capability_id in CASES:
         parameters = document(f"reads/{name}.parameters.json")
         request = document(f"reads/{name}.request.json")
@@ -1373,6 +1374,14 @@ def main() -> None:
             "receipt_id": receipt_id, "record_count": receipt["record_count"],
         })
         roundtrip.append({"name": name, "capability_id": capability_id, "passed": True})
+        expected_oracle_roundtrip.append({
+            "name": name,
+            "capability_id": capability_id,
+            "auth_token_id": token_id,
+            "receipt_id": receipt_id,
+            "record_count": receipt["record_count"],
+            "parameters_sha256": hashlib.sha256(canonical(parameters)).hexdigest(),
+        })
     require(len(token_ids) == len(receipt_ids) == 4, "read token or receipt cardinality mismatch")
     require(document("reads/summary.json") == {"all_verified": True, "reads": summary_rows}, "read summary mismatch")
 
@@ -1418,7 +1427,7 @@ def main() -> None:
         and all(value is True for value in oracle["checks"].values())
         and isinstance(oracle_entries, list) and len(oracle_entries) == 3
         and set(oracle_by_name) == set(oracle_names)
-        and len(oracle.get("request_roundtrip", [])) == 4
+        and oracle.get("request_roundtrip") == expected_oracle_roundtrip
         and len(oracle.get("staged_inputs", [])) == 5
         and oracle.get("odoo_pid_before") == oracle.get("odoo_pid_after") == expected_pids["odoo19.service"]
         and oracle.get("all_checks_passed") is True
@@ -1432,12 +1441,15 @@ def main() -> None:
         item = oracle_by_name[name]
         report = document(f"reads/{name}.oracle.json")
         require(
-            item.get("script_sha256") == script_hash
+            set(item) == {
+                "name", "script_sha256", "transaction_isolation",
+                "transaction_read_only", "rollback_completed", "all_checks_passed",
+            }
+            and item.get("script_sha256") == script_hash
             and item.get("all_checks_passed") is True
             and item.get("transaction_isolation") == "repeatable read"
             and item.get("transaction_read_only") == "on"
             and item.get("rollback_completed") is True
-            and report.get("capability_id") == capability_id
             and report.get("transaction_isolation") == "repeatable read"
             and report.get("transaction_read_only") == "on"
             and report.get("rollback_completed") is True

@@ -263,6 +263,12 @@ def test_verifier_inspects_a_wal_snapshot_in_memory(verifier, tmp_path):
     assert events == []
 
 
+def test_verifier_binds_financial_oracles_through_the_request_roundtrip():
+    source = (DEPLOYMENT / "dev8-verify-frozen-evidence.py").read_text("utf-8")
+    assert 'oracle.get("request_roundtrip") == expected_oracle_roundtrip' in source
+    assert 'report.get("capability_id")' not in source
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("schema-bool", "service-pid-bool", "critical-uid-bool", "safe-flag", "blockers"),
