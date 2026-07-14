@@ -1593,7 +1593,8 @@ if (
     or not stat.S_ISDIR(root_metadata.st_mode)
     or root_metadata.st_uid != 0
     or root_metadata.st_gid != 0
-    or root_metadata.st_mode & 0o077
+    or root_metadata.st_mode & 0o022
+    or root_metadata.st_mode & 0o007
     or upload.resolve(strict=True) != upload
     or upload.is_symlink()
     or not stat.S_ISDIR(upload_metadata.st_mode)
@@ -1613,6 +1614,8 @@ if (
     raise SystemExit("uploaded runtime config is not root-managed")
 print("uploaded_runtime_metadata_verified=true")
 PY
+/usr/bin/sudo -n -u odoo -g odoo /usr/bin/test ! -x "$upload_directory"
+printf 'runtime_upload_not_traversable_by_odoo=true\n'
 for target in "$candidate" "$config" "$auth_secret" "$receipt_secret"; do
   test ! -e "$target"
   test ! -L "$target"
