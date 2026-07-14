@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 VERSION = "0.1.0.dev8"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.1"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.2"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 TREE = "fd389ef55fbc6723379a2928a10b665925829599"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
@@ -849,6 +849,16 @@ def run_checked(*arguments: str) -> str:
     return completed.stdout
 
 
+def run_unit_listing(*arguments: str) -> str:
+    completed = subprocess.run(arguments, capture_output=True, text=True, encoding="utf-8", check=False, timeout=30)
+    no_matches = completed.returncode == 1 and not completed.stdout.strip() and not completed.stderr.strip()
+    require(
+        completed.returncode == 0 or no_matches,
+        f"isolation unit listing failed: {arguments!r}: returncode={completed.returncode}: {completed.stderr.strip()}",
+    )
+    return completed.stdout
+
+
 def live_isolation(server_baseline: dict[str, object]) -> dict[str, object]:
     checks: dict[str, bool] = {}
     services: dict[str, object] = {}
@@ -919,8 +929,8 @@ def live_isolation(server_baseline: dict[str, object]) -> dict[str, object]:
 
     current = Path("/opt/odoo-accounting-cli-v3/current")
     checks["current_absent"] = not os.path.lexists(current)
-    unit_files = run_checked("/usr/bin/systemctl", "list-unit-files", "--no-legend", "odoo-accounting-cli-v3*")
-    active_units = run_checked("/usr/bin/systemctl", "list-units", "--all", "--no-legend", "odoo-accounting-cli-v3*")
+    unit_files = run_unit_listing("/usr/bin/systemctl", "list-unit-files", "--no-legend", "odoo-accounting-cli-v3*")
+    active_units = run_unit_listing("/usr/bin/systemctl", "list-units", "--all", "--no-legend", "odoo-accounting-cli-v3*")
     checks["v3_units_absent"] = not unit_files.strip() and not active_units.strip()
     database_uuid = run_checked(
         "/usr/bin/sudo", "-n", "-u", "postgres", "/usr/bin/env", "-i",

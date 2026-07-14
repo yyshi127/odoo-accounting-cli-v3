@@ -941,6 +941,27 @@ def run(*arguments):
         )
     return completed.stdout
 
+def run_unit_listing(*arguments):
+    completed = subprocess.run(
+        arguments,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    no_matches = (
+        completed.returncode == 1
+        and not completed.stdout.strip()
+        and not completed.stderr.strip()
+    )
+    if completed.returncode != 0 and not no_matches:
+        raise SystemExit(
+            f"isolation unit listing failed: {arguments!r}; "
+            f"returncode={completed.returncode}; stderr={completed.stderr.strip()!r}"
+        )
+    return completed.stdout
+
 for unit, expected_service in expected_services.items():
     if (
         not isinstance(expected_service, dict)
@@ -1069,13 +1090,13 @@ current = pathlib.Path("/opt/odoo-accounting-cli-v3/current")
 if os.path.lexists(current):
     raise SystemExit(f"{phase} isolation current route is present")
 
-unit_files = run(
+unit_files = run_unit_listing(
     "/usr/bin/systemctl",
     "list-unit-files",
     "--no-legend",
     "odoo-accounting-cli-v3*",
 )
-active_units = run(
+active_units = run_unit_listing(
     "/usr/bin/systemctl",
     "list-units",
     "--all",

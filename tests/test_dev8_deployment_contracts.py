@@ -235,6 +235,37 @@ def test_server_baseline_contract_rejects_mutations(request, fixture_name, mutat
         module.validate_server_baseline(baseline)
 
 
+@pytest.mark.parametrize("fixture_name", ("freezer", "verifier"))
+def test_empty_systemd_listing_accepts_no_match_exit(request, fixture_name, monkeypatch):
+    module = request.getfixturevalue(fixture_name)
+    completed = types.SimpleNamespace(returncode=1, stdout="", stderr="")
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: completed)
+    assert module.run_unit_listing("/usr/bin/systemctl", "list-unit-files") == ""
+
+
+@pytest.mark.parametrize("fixture_name", ("freezer", "verifier"))
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    ((1, "unexpected.service\n", ""), (1, "", "warning\n"), (2, "", "failure\n")),
+)
+def test_systemd_listing_rejects_ambiguous_or_failed_exit(
+    request, fixture_name, monkeypatch, returncode, stdout, stderr
+):
+    module = request.getfixturevalue(fixture_name)
+    completed = types.SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: completed)
+    with pytest.raises(RuntimeError):
+        module.run_unit_listing("/usr/bin/systemctl", "list-unit-files")
+
+
+def test_server_gate_uses_the_same_systemd_no_match_contract():
+    source = (DEPLOYMENT / "dev8-server-gate.sh").read_text("utf-8")
+    assert source.count("run_unit_listing(") >= 3
+    assert "completed.returncode == 1" in source
+    assert "and not completed.stdout.strip()" in source
+    assert "and not completed.stderr.strip()" in source
+
+
 MUTATIONS = (
     "schema-bool",
     "parents-null",
