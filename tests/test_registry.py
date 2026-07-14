@@ -35,7 +35,7 @@ class RegistryTest(unittest.TestCase):
                 self.assertIs(item["approval"]["required"], True)
                 self.assertIs(item["idempotency"]["required"], True)
 
-    def test_only_three_verified_read_contracts_are_staged_in_test(self) -> None:
+    def test_only_four_verified_read_contracts_are_staged_in_test(self) -> None:
         staged = [
             item
             for item in self.document["capabilities"]
@@ -47,6 +47,7 @@ class RegistryTest(unittest.TestCase):
                 "acct.registry.list.v1",
                 "acct.gl.trial_balance.v1",
                 "acct.ar.open_items.v1",
+                "acct.ap.open_items.v1",
             ],
         )
         for item in staged:
@@ -131,6 +132,24 @@ class RegistryTest(unittest.TestCase):
         self.assertTrue(
             item["output_schema"]["properties"]["items"]["items"]["properties"]
         )
+        self.assertEqual(item["staged_environments"], ["test"])
+        self.assertEqual(item["enabled_environments"], [])
+
+    def test_ap_open_items_contract_matches_strict_historical_open_item_shape(self) -> None:
+        item = next(
+            item
+            for item in self.document["capabilities"]
+            if item["id"] == "acct.ap.open_items.v1"
+        )
+        ar_item = next(
+            item
+            for item in self.document["capabilities"]
+            if item["id"] == "acct.ar.open_items.v1"
+        )
+        self.assertEqual(item["input_schema"], ar_item["input_schema"])
+        self.assertEqual(item["output_schema"], ar_item["output_schema"])
+        self.assertIn("payable", item["business_description"])
+        self.assertEqual(item["evidence"]["level"], "contract_tested")
         self.assertEqual(item["staged_environments"], ["test"])
         self.assertEqual(item["enabled_environments"], [])
 

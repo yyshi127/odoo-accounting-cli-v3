@@ -231,6 +231,7 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in gateway.list_capabilities(context())],
             [
+                "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
                 "acct.gl.trial_balance.v1",
                 "acct.registry.list.v1",

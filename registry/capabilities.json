@@ -145,11 +145,73 @@
     {
       "id": "acct.ap.open_items.v1",
       "domain": "accounts_payable",
-      "business_description": "Read open vendor payable items with supplier, dates, currency, and residual amounts.",
-      "input_schema": {"type": "object", "properties": {"company_id": {"type": "integer"}, "as_of_date": {"type": "string", "format": "date"}, "partner_id": {"type": ["integer", "null"]}, "currency_id": {"type": ["integer", "null"]}}, "required": ["company_id", "as_of_date", "partner_id", "currency_id"], "additionalProperties": false},
-      "output_schema": {"type": "object", "properties": {"items": {"type": "array", "items": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}, "receipt": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}, "required": ["items", "receipt"], "additionalProperties": false},
+      "business_description": "Read every posted payable debit or credit item open at an explicit Odoo accounting date, including vendor bills, refunds and payable payment lines, using the current reconciliation graph and keeping company-currency and transaction-currency residuals separate; the staged implementation fails closed above 10000 source candidates rather than truncating a financial result.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "company_id": {"type": "integer", "minimum": 1},
+          "as_of_date": {"type": "string", "format": "date"},
+          "partner_id": {"type": ["integer", "null"], "minimum": 1},
+          "currency_id": {"type": ["integer", "null"], "minimum": 1},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+          "offset": {"type": "integer", "minimum": 0}
+        },
+        "required": ["company_id", "as_of_date", "partner_id", "currency_id", "limit", "offset"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "basis": {"type": "string", "enum": ["odoo_accounting_date_current_reconciliation_graph"]},
+          "filters": {"type": "object", "properties": {"company_id": {"type": "integer", "minimum": 1}, "as_of_date": {"type": "string", "format": "date"}, "partner_id": {"type": ["integer", "null"], "minimum": 1}, "currency_id": {"type": ["integer", "null"], "minimum": 1}}, "required": ["company_id", "as_of_date", "partner_id", "currency_id"], "additionalProperties": false},
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "move_line_id": {"type": "integer", "minimum": 1},
+                "move_id": {"type": "integer", "minimum": 1},
+                "move_name": {"type": "string", "minLength": 1},
+                "move_type": {"type": "string", "minLength": 1},
+                "payment_id": {"type": ["integer", "null"], "minimum": 1},
+                "line_date": {"type": "string", "format": "date"},
+                "due_date": {"type": ["string", "null"], "format": "date"},
+                "partner_id": {"type": ["integer", "null"], "minimum": 1},
+                "partner_name": {"type": "string"},
+                "account_id": {"type": "integer", "minimum": 1},
+                "account_code": {"type": "string", "minLength": 1},
+                "account_name": {"type": "string", "minLength": 1},
+                "journal_id": {"type": "integer", "minimum": 1},
+                "journal_code": {"type": "string", "minLength": 1},
+                "currency_id": {"type": "integer", "minimum": 1},
+                "currency_name": {"type": "string", "minLength": 1},
+                "original_company_amount": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"},
+                "residual_company_amount": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"},
+                "original_currency_amount": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"},
+                "residual_currency_amount": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"},
+                "side": {"type": "string", "enum": ["debit", "credit"]},
+                "reconciliation_status": {"type": "string", "enum": ["unreconciled_as_of", "partially_reconciled_as_of"]},
+                "partial_reconcile_count": {"type": "integer", "minimum": 0},
+                "current_reconciled": {"type": "boolean"},
+                "days_overdue": {"type": ["integer", "null"]},
+                "aging_bucket": {"type": "string", "enum": ["current", "days_1_30", "days_31_60", "days_61_90", "over_90", "no_due_date"]}
+              },
+              "required": ["move_line_id", "move_id", "move_name", "move_type", "payment_id", "line_date", "due_date", "partner_id", "partner_name", "account_id", "account_code", "account_name", "journal_id", "journal_code", "currency_id", "currency_name", "original_company_amount", "residual_company_amount", "original_currency_amount", "residual_currency_amount", "side", "reconciliation_status", "partial_reconcile_count", "current_reconciled", "days_overdue", "aging_bucket"],
+              "additionalProperties": false
+            }
+          },
+          "page": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 500}, "offset": {"type": "integer", "minimum": 0}, "count": {"type": "integer", "minimum": 0}, "total_count": {"type": "integer", "minimum": 0}}, "required": ["limit", "offset", "count", "total_count"], "additionalProperties": false},
+          "page_summary": {"type": "object", "properties": {"item_count": {"type": "integer", "minimum": 0}, "debit_residual": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"}, "credit_residual": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"}, "net_residual": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"}}, "required": ["item_count", "debit_residual", "credit_residual", "net_residual"], "additionalProperties": false},
+          "ledger_summary": {"type": "object", "properties": {"item_count": {"type": "integer", "minimum": 0}, "debit_residual": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"}, "credit_residual": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"}, "net_residual": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"}}, "required": ["item_count", "debit_residual", "credit_residual", "net_residual"], "additionalProperties": false},
+          "currency_summaries": {"type": "array", "items": {"type": "object", "properties": {"currency_id": {"type": "integer", "minimum": 1}, "currency_name": {"type": "string", "minLength": 1}, "item_count": {"type": "integer", "minimum": 0}, "debit_residual": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"}, "credit_residual": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"}, "net_residual": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"}}, "required": ["currency_id", "currency_name", "item_count", "debit_residual", "credit_residual", "net_residual"], "additionalProperties": false}},
+          "company_currency": {"type": "object", "properties": {"id": {"type": "integer", "minimum": 1}, "name": {"type": "string", "minLength": 1}, "symbol": {"type": "string", "minLength": 1}, "rounding": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"}}, "required": ["id", "name", "symbol", "rounding"], "additionalProperties": false},
+          "receipt": {"type": "object", "properties": {"id": {"type": "string", "minLength": 1}, "odoo_instance_id": {"type": "string", "minLength": 1}, "database_name": {"type": "string", "minLength": 1}, "database_uuid": {"type": "string", "minLength": 1}, "company_id": {"type": "integer", "minimum": 1}, "user_id": {"type": "integer", "minimum": 1}, "capability_id": {"type": "string", "minLength": 1}, "environment": {"type": "string", "enum": ["test", "sandbox", "production"]}, "capability_channel": {"type": "string", "enum": ["staged", "enabled"]}, "request_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "result_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "registry_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "release_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "record_count": {"type": "integer", "minimum": 0}, "observed_at": {"type": "string", "format": "date-time"}, "signature_version": {"type": "integer", "enum": [2]}, "signature_purpose": {"type": "string", "enum": ["read_receipt_v2"]}, "signature_key_id": {"type": "string", "minLength": 1}, "signature": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "required": ["id", "odoo_instance_id", "database_name", "database_uuid", "company_id", "user_id", "capability_id", "environment", "capability_channel", "request_digest", "result_digest", "registry_digest", "release_digest", "record_count", "observed_at", "signature_version", "signature_purpose", "signature_key_id", "signature"], "additionalProperties": false}
+        },
+        "required": ["basis", "filters", "items", "page", "page_summary", "ledger_summary", "currency_summaries", "company_currency", "receipt"],
+        "additionalProperties": false
+      },
       "access": "read", "risk_level": "low", "odoo_permissions": ["account.group_account_readonly"], "company_scope": "explicit_single_company",
-      "approval": {"required": false}, "idempotency": {"required": false}, "verification": {"method": "odoo_query_receipt_and_residual_reconciliation"}, "recovery": {"method": "not_applicable"}, "evidence": {"level": "declared", "receipts": []}, "enabled_environments": []
+      "approval": {"required": false}, "idempotency": {"required": false}, "verification": {"method": "signed_odoo_query_receipt_and_independent_as_of_residual_oracle"}, "recovery": {"method": "not_applicable"}, "evidence": {"level": "contract_tested", "receipts": []}, "staged_environments": ["test"], "enabled_environments": []
     },
     {
       "id": "acct.invoice.customer_create.v1",

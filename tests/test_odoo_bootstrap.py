@@ -189,6 +189,46 @@ class ArBackend:
         return {701: OpenItemPartial()}
 
 
+class ApBackend(ArBackend):
+    def assert_partner(self, *, company_id, partner_id):
+        if (company_id, partner_id) != (7, 902):
+            raise AssertionError("unexpected supplier binding")
+
+    def currency(self, *, currency_id):
+        if currency_id != 12:
+            raise AssertionError("unexpected currency binding")
+        return self.currency_info
+
+    def source_lines(
+        self, *, company_id, as_of_date, partner_id, currency_id, candidate_limit
+    ):
+        return [
+            OpenItemSource(
+                move_line_id=702,
+                move_id=802,
+                move_name="BILL/2026/007",
+                move_type="in_invoice",
+                payment_id=None,
+                line_date=as_of_date,
+                due_date=as_of_date,
+                partner_id=902,
+                partner_name="Supplier",
+                account_id=1002,
+                account_code="2202",
+                account_name="Accounts Payable",
+                journal_id=1102,
+                journal_code="BILL",
+                currency=self.currency_info,
+                balance=Decimal("-70"),
+                amount_currency=Decimal("-70"),
+                current_reconciled=False,
+            )
+        ]
+
+    def partials_as_of(self, *, company_id, move_line_ids, as_of_date):
+        return {702: OpenItemPartial()}
+
+
 def staged_capabilities():
     document = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     return validate_registry(document)
@@ -268,6 +308,7 @@ class OdooBootstrapTest(unittest.TestCase):
                 receipt_id_factory=lambda: "receipt-bootstrap-1",
                 trial_balance_backend_factory=lambda _env, _uid, _companies: Backend(),
                 ar_open_items_backend_factory=lambda _env, _uid, _companies: ArBackend(),
+                ap_open_items_backend_factory=lambda _env, _uid, _companies: ApBackend(),
             )
 
         result = execute_read_from_odoo_shell(
@@ -355,14 +396,15 @@ class OdooBootstrapTest(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in result["capabilities"]],
             [
+                "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
                 "acct.gl.trial_balance.v1",
                 "acct.registry.list.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 3, "total_count": 3})
+        self.assertEqual(result["page"], {"count": 4, "total_count": 4})
         self.assertEqual(result["receipt"]["capability_id"], "acct.registry.list.v1")
-        self.assertEqual(result["receipt"]["record_count"], 3)
+        self.assertEqual(result["receipt"]["record_count"], 4)
 
     def test_ar_open_items_request_keeps_all_filters_and_returns_bound_receipt(self):
         requested = {
@@ -388,6 +430,32 @@ class OdooBootstrapTest(unittest.TestCase):
         })
         self.assertEqual(result["page"]["limit"], 25)
         self.assertEqual(result["receipt"]["capability_id"], "acct.ar.open_items.v1")
+        self.assertEqual(result["receipt"]["record_count"], 1)
+
+    def test_ap_open_items_request_keeps_all_filters_and_returns_bound_receipt(self):
+        requested = {
+            "company_id": 7,
+            "as_of_date": "2026-03-31",
+            "partner_id": 902,
+            "currency_id": 12,
+            "limit": 25,
+            "offset": 0,
+        }
+        request = request_document(
+            capability_id="acct.ap.open_items.v1",
+            request_parameters=requested,
+        )
+
+        result, _factory_contexts = self.execute(request)
+
+        self.assertEqual(result["filters"], {
+            "company_id": 7,
+            "as_of_date": "2026-03-31",
+            "partner_id": 902,
+            "currency_id": 12,
+        })
+        self.assertEqual(result["page"]["limit"], 25)
+        self.assertEqual(result["receipt"]["capability_id"], "acct.ap.open_items.v1")
         self.assertEqual(result["receipt"]["record_count"], 1)
 
 

@@ -162,6 +162,43 @@ class ArBackend:
         }
 
 
+class ApBackend(ArBackend):
+    def source_lines(
+        self, *, company_id, as_of_date, partner_id, currency_id, candidate_limit
+    ):
+        return [
+            OpenItemSource(
+                move_line_id=702,
+                move_id=802,
+                move_name="BILL/2026/007",
+                move_type="in_invoice",
+                payment_id=None,
+                line_date=as_of_date,
+                due_date=as_of_date,
+                partner_id=902,
+                partner_name="Supplier",
+                account_id=1002,
+                account_code="2202",
+                account_name="Accounts Payable",
+                journal_id=1102,
+                journal_code="BILL",
+                currency=self.currency_info,
+                balance=Decimal("-100"),
+                amount_currency=Decimal("-100"),
+                current_reconciled=False,
+            )
+        ]
+
+    def partials_as_of(self, *, company_id, move_line_ids, as_of_date):
+        return {
+            702: OpenItemPartial(
+                credit_company=Decimal("30"),
+                credit_currency=Decimal("30"),
+                matched_count=1,
+            )
+        }
+
+
 def context(**changes):
     values = {
         "audience": "odoo-accounting-cli-v3",
@@ -230,6 +267,7 @@ class OdooReadExecutorTest(unittest.TestCase):
             receipt_id_factory=lambda: "receipt-1",
             trial_balance_backend_factory=lambda _env, _user, _companies: Backend(),
             ar_open_items_backend_factory=lambda _env, _user, _companies: ArBackend(),
+            ap_open_items_backend_factory=lambda _env, _user, _companies: ApBackend(),
         )
 
     def test_executes_handler_and_verifies_receipt(self) -> None:
@@ -259,13 +297,14 @@ class OdooReadExecutorTest(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in result["capabilities"]],
             [
+                "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
                 "acct.gl.trial_balance.v1",
                 "acct.registry.list.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 3, "total_count": 3})
-        self.assertEqual(result["receipt"]["record_count"], 3)
+        self.assertEqual(result["page"], {"count": 4, "total_count": 4})
+        self.assertEqual(result["receipt"]["record_count"], 4)
         self.assertEqual(env.company.access_checks, [("rights", "read"), ("rule", "read")])
         for descriptor in result["capabilities"]:
             source = capability(descriptor["id"]).data
@@ -340,6 +379,30 @@ class OdooReadExecutorTest(unittest.TestCase):
         self.assertEqual(result["receipt"]["capability_id"], "acct.ar.open_items.v1")
         executor.verify(
             context(), ar_capability, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_ap_open_items_executes_payable_handler_and_verifies_receipt(self) -> None:
+        executor = self.executor()
+        requested = {
+            "company_id": 7,
+            "as_of_date": "2026-03-31",
+            "partner_id": None,
+            "currency_id": None,
+            "limit": 100,
+            "offset": 0,
+        }
+        ap_capability = capability("acct.ap.open_items.v1")
+
+        result = executor(
+            context(), ap_capability, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertEqual(result["ledger_summary"]["net_residual"], "-70.00")
+        self.assertEqual(result["items"][0]["move_type"], "in_invoice")
+        self.assertEqual(result["receipt"]["record_count"], 1)
+        self.assertEqual(result["receipt"]["capability_id"], "acct.ap.open_items.v1")
+        executor.verify(
+            context(), ap_capability, requested, result, "c" * 64, "d" * 64
         )
 
 

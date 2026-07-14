@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
+from ..domain.ap_open_items import ApOpenItemsBackend, read_ap_open_items
 from ..domain.ar_open_items import ArOpenItemsBackend, read_ar_open_items
 from ..domain.trial_balance import TrialBalanceBackend, read_trial_balance
 from ..gateway import RequestContext
@@ -17,6 +18,7 @@ from ..receipts import (
     verify_read_receipt,
 )
 from ..registry import Capability
+from .ap_open_items import OdooApOpenItemsBackend
 from .ar_open_items import OdooArOpenItemsBackend
 from .trial_balance import OdooTrialBalanceBackend
 
@@ -47,6 +49,10 @@ class OdooReadExecutor:
         | None = None,
         ar_open_items_backend_factory: Callable[
             [Any, int, frozenset[int]], ArOpenItemsBackend
+        ]
+        | None = None,
+        ap_open_items_backend_factory: Callable[
+            [Any, int, frozenset[int]], ApOpenItemsBackend
         ]
         | None = None,
     ) -> None:
@@ -86,6 +92,11 @@ class OdooReadExecutor:
         )
         self._ar_open_items_backend_factory = ar_open_items_backend_factory or (
             lambda bound_env, user_id, allowed: OdooArOpenItemsBackend(
+                bound_env, user_id=user_id, allowed_company_ids=allowed
+            )
+        )
+        self._ap_open_items_backend_factory = ap_open_items_backend_factory or (
+            lambda bound_env, user_id, allowed: OdooApOpenItemsBackend(
                 bound_env, user_id=user_id, allowed_company_ids=allowed
             )
         )
@@ -194,6 +205,11 @@ class OdooReadExecutor:
                 self._env, context.user_id, context.allowed_company_ids
             )
             body = read_ar_open_items(backend, parameters)
+        elif capability.id == "acct.ap.open_items.v1":
+            backend = self._ap_open_items_backend_factory(
+                self._env, context.user_id, context.allowed_company_ids
+            )
+            body = read_ap_open_items(backend, parameters)
         else:
             raise OdooExecutionError("read capability has no trusted Odoo handler")
         receipt = create_read_receipt(

@@ -3,6 +3,7 @@ from datetime import date
 from decimal import Decimal
 
 from odoo_accounting_cli_v3.odoo.ar_open_items import OdooArOpenItemsBackend
+from odoo_accounting_cli_v3.odoo.ap_open_items import OdooApOpenItemsBackend
 
 
 class Record:
@@ -249,6 +250,30 @@ class OdooArOpenItemsBackendTest(unittest.TestCase):
                 ("debit_move_id", "in", [101, 102]) in domain
                 or ("credit_move_id", "in", [101, 102]) in domain
             )
+
+    def test_ap_backend_uses_the_same_controls_but_only_payable_accounts(self):
+        backend = OdooApOpenItemsBackend(
+            self.env,
+            user_id=42,
+            allowed_company_ids=frozenset({7, 8}),
+        )
+
+        backend.source_lines(
+            company_id=7,
+            as_of_date=date(2026, 3, 31),
+            partner_id=301,
+            currency_id=2,
+            candidate_limit=10_001,
+        )
+
+        self.assertIn(
+            ("account_id.account_type", "=", "liability_payable"),
+            self.env.move_lines.domain,
+        )
+        self.assertNotIn(
+            ("account_id.account_type", "=", "asset_receivable"),
+            self.env.move_lines.domain,
+        )
 
     def test_company_partner_currency_and_non_superuser_bindings_are_enforced(self):
         self.backend.assert_read_access(company_id=7)

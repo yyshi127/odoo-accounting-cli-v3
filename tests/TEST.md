@@ -17,9 +17,10 @@ where practical, then record actual execution evidence separately.
 - Production-accounting writes are not authorized.
 - The observed database named `codex_sgf_test_20260713_01` is not a write sandbox
   until its purpose, owner, reset method, and allowed companies are confirmed.
-- `acct.registry.list.v1`, `acct.gl.trial_balance.v1`, and
-  `acct.ar.open_items.v1` are staged for the isolated `test` environment; no
-  capability is enabled and no write capability is staged.
+- `acct.registry.list.v1`, `acct.gl.trial_balance.v1`,
+  `acct.ar.open_items.v1`, and `acct.ap.open_items.v1` are staged for the
+  isolated `test` environment; no capability is enabled and no write
+  capability is staged.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -132,6 +133,15 @@ a 10,000-line safety boundary and then fails closed; it must never silently
 truncate. Production enablement requires database-side count, aggregation, and
 page retrieval plus a retained scale test that removes this staged limitation.
 
+For the AP open-items slice, the same historical residual and scale rules apply
+to every posted `liability_payable` debit or credit line. The oracle must retain
+vendor bills, refunds/credit notes, payable payment residuals, and manual
+payable entries without filtering on sign or move type. A negative company
+currency net residual represents a net payable liability. Company-currency and
+transaction-currency amounts must remain separate, and absent real fixtures for
+partial reconciliation, unmatched payments, or foreign currency must be
+recorded as evidence gaps rather than inferred as passing.
+
 ## Gate E — sandbox write lifecycle
 
 Before running this gate, the operator must record the designated sandbox
@@ -226,13 +236,18 @@ At the current local development checkpoint:
   strict v1 migration. Execution-result, failure, verification, and recovery
   persistence remain closed until their specialized authoritative transactions
   exist. These are control-plane tests only; no Odoo write was executed;
-- dev6 adds a signed, Odoo-company/ACL-filtered registry query and a strict AR
-  open-items contract/domain/backend. The AR implementation uses Odoo 19's
-  accounting-date residual formula, keeps signed debit/credit and company/line
-  currencies separate, and preserves date, company, partner, currency, limit,
-  and offset through CLI/bootstrap/executor tests. These remain local
-  development results until an exact immutable dev6 release passes target
-  Linux, real Odoo, independent SQL-oracle, and negative-security evidence;
+- dev6 added a signed, Odoo-company/ACL-filtered registry query and a strict AR
+  open-items contract/domain/backend. Its exact immutable release passed the
+  target Linux suite and six independent real-Odoo SQL oracles, with matching
+  signed receipts, security denials, parameter round-trip, replay rejection,
+  and a frozen externally anchored evidence bundle. It remains staged because
+  the fixture has no partial/unmatched-payment coverage, production-scale and
+  runtime immutability gates remain open, and no Pi route exists;
+- dev7 locally adds the strict AP contract and a fixed
+  `liability_payable` Odoo backend while reusing the dev6 historical residual
+  engine. Unit, CLI transport, bootstrap, executor, registry, and gateway tests
+  pass locally; an exact dev7 release still requires target-Linux and real-Odoo
+  AP oracle evidence;
 - no sandbox write lifecycle has been authorized or recorded; and
 - no production write is authorized.
 

@@ -140,6 +140,38 @@ def ar_result_body() -> dict:
     }
 
 
+def ap_request_document() -> dict:
+    request = ar_request_document()
+    capability_id = "acct.ap.open_items.v1"
+    parameters = {
+        "company_id": 7,
+        "as_of_date": "2026-04-30",
+        "partner_id": 902,
+        "currency_id": 3,
+        "limit": 41,
+        "offset": 6,
+    }
+    request["capability_id"] = capability_id
+    request["parameters"] = parameters
+    request["context"]["auth_token_id"] = "token-cli-ap-read-1"
+    request["context"]["auth_request_digest"] = authentication_request_digest(
+        capability_id, parameters
+    )
+    return request
+
+
+def ap_result_body() -> dict:
+    body = ar_result_body()
+    body["filters"] = {
+        "company_id": 7,
+        "as_of_date": "2026-04-30",
+        "partner_id": 902,
+        "currency_id": 3,
+    }
+    body["page"] = {"limit": 41, "offset": 6, "count": 0, "total_count": 0}
+    return body
+
+
 def identity() -> dict:
     return {
         "commit": "a" * 40,
@@ -285,6 +317,39 @@ class CliReadTest(unittest.TestCase):
         transmitted = run_shell.call_args.args[1]
         self.assertEqual(transmitted["parameters"], request["parameters"])
         self.assertEqual(transmitted["capability_id"], "acct.ar.open_items.v1")
+
+    @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
+    @patch("odoo_accounting_cli_v3.cli._load_release_identity")
+    @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    @patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_secrets",
+        return_value=(AUTH_SECRET, RECEIPT_SECRET),
+    )
+    def test_ap_read_transmits_date_company_supplier_currency_and_page_unchanged(
+        self, _load_secrets, load_config, load_identity, run_shell
+    ) -> None:
+        load_config.return_value = self.config
+        load_identity.return_value = identity()
+        request = ap_request_document()
+        verified = self.verified_result(request, ap_result_body())
+        run_shell.return_value = verified
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "read",
+                "--runtime-config",
+                str(self.runtime_path),
+                "--request-json",
+                json.dumps(request),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.stdout)["data"]["result"], verified)
+        transmitted = run_shell.call_args.args[1]
+        self.assertEqual(transmitted["parameters"], request["parameters"])
+        self.assertEqual(transmitted["capability_id"], "acct.ap.open_items.v1")
 
     @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
     @patch("odoo_accounting_cli_v3.cli._load_release_identity", return_value=identity())

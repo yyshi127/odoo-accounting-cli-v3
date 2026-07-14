@@ -15,6 +15,8 @@ from ..domain.ar_open_items import (
 
 
 class OdooArOpenItemsBackend:
+    ACCOUNT_TYPE = "asset_receivable"
+
     def __init__(self, env: Any, *, user_id: int, allowed_company_ids: frozenset[int]) -> None:
         self._env = env
         self._user_id = user_id
@@ -99,7 +101,7 @@ class OdooArOpenItemsBackend:
         domain: list[Any] = [
             ("company_id", "=", company_id),
             ("parent_state", "=", "posted"),
-            ("account_id.account_type", "=", "asset_receivable"),
+            ("account_id.account_type", "=", self.ACCOUNT_TYPE),
             ("date", "<=", as_of_date),
         ]
         if partner_id is not None:

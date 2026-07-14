@@ -101,6 +101,28 @@ accounting date, rounds each company/transaction residual before testing and
 summing it, and discloses that the result uses Odoo's current reconciliation
 graph rather than an immutable event history.
 
+## V2 reuse record: AP open items
+
+The active and development V2 copies of `src/odoo_acc_cli/commands/ap.py` were
+also inspected read-only and matched SHA-256
+`d193845a4fbfafb8081ea57057b9dd9f9764717f5c665c55c81bc6ee06b569a5`.
+V3 retains only interface and presentation ideas such as explicit supplier and
+date filters, stable sorting, structured errors, and bill source fields. It
+does not import or copy V2's AP accounting algorithm.
+
+V2 filters `account.move` to `in_invoice`, reads the current
+`amount_residual`, and uses `as_of_date` only for aging. It therefore omits
+refunds, payments/prepayments, and manual payable entries, includes documents
+after a historical cutoff, and combines transaction currencies incorrectly.
+A read-only comparison found V2's current 81-bill view at `7,500.15 CNY`, while
+the complete raw AML residual population also contained two open payable
+entries totaling `+11,250.00 CNY`; the 81 bills totaled `-7,500.15 CNY`, for a
+raw net residual of `+3,749.85 CNY`. At `2026-03-31`, the independently derived
+raw net was `+3,975.85 CNY`, while V2 still returned the current 81-bill total.
+These findings make V2 useful as a regression fixture, not as the V3 AP oracle.
+The real fixture currently lacks open supplier refunds, foreign-currency AP,
+and partial-payment examples; those remain explicit sandbox evidence gaps.
+
 An independent SQL/ORM oracle for `odoo_test`, company 1, posted entries, and
 the inclusive 2026 calendar-year period found 2,341 move lines across 12 active
 accounts. Full-period debit and credit both equal `136193.63`; the difference is
@@ -172,6 +194,21 @@ The frozen root-owned evidence bundle reverified all 57 listed files. No
 `current` link, V3 unit, Pi route, Odoo/Pi restart, V2 change, enabled
 capability, or Odoo write was made. Dev5 therefore remains retained staged
 evidence and is not a production promotion.
+
+The immutable dev6 candidate `0.1.0.dev6-6cb907aa66b5` then added the signed
+ACL-filtered capability registry and historical AR open-items read. Its exact
+package SHA-256 is
+`5c0ef5c976c63e702e6387da5e14787d9c1d68655268aa509da484b4f86245be`;
+GitHub Actions run `29309569392` passed Python 3.11, Python 3.12, and the
+outside-source wheel smoke job. Six independent read-only SQL oracles matched
+the real `odoo_test` results, including the company-1 current and historical
+cutoffs, company-2 foreign currency, partner/currency filters, and pagination.
+The frozen evidence bundle has 131 verified checksum entries; its external
+anchor records checksum-manifest SHA-256
+`653a66f52c0b2d7173ab38e1ca00ac7af28b1c8f34b9af0031c5c2841705493b`.
+Dev6 remains staged with zero enabled capabilities. Real partial/unmatched
+payment fixtures, production-scale execution, immutable runtime ownership, Pi
+E2E, sandbox write lifecycles, and production trust separation remain open.
 
 ## Phase-one exit gate
 
