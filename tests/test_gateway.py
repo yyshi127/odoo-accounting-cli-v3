@@ -230,10 +230,24 @@ class GatewayTest(unittest.TestCase):
         )
         self.assertEqual(
             [item["id"] for item in gateway.list_capabilities(context())],
-            ["acct.gl.trial_balance.v1"],
+            [
+                "acct.ar.open_items.v1",
+                "acct.gl.trial_balance.v1",
+                "acct.registry.list.v1",
+            ],
         )
         with self.assertRaisesRegex(GatewayError, "not enabled"):
             gateway.get_capability(context(), "acct.invoice.customer_create.v1")
+
+    def test_registry_list_requires_positive_bound_company(self) -> None:
+        with self.assertRaises(ContractError):
+            self.gateway.validate_request(
+                context(), "acct.registry.list.v1", {"company_id": 0}
+            )
+        with self.assertRaisesRegex(GatewayError, "bound company"):
+            self.gateway.validate_request(
+                context(), "acct.registry.list.v1", {"company_id": 8}
+            )
 
     def test_unauthenticated_context_is_rejected(self) -> None:
         gateway = CapabilityGateway(

@@ -17,8 +17,9 @@ where practical, then record actual execution evidence separately.
 - Production-accounting writes are not authorized.
 - The observed database named `codex_sgf_test_20260713_01` is not a write sandbox
   until its purpose, owner, reset method, and allowed companies are confirmed.
-- Only `acct.gl.trial_balance.v1` is staged for the isolated `test`
-  environment; no capability is enabled and no write capability is staged.
+- `acct.registry.list.v1`, `acct.gl.trial_balance.v1`, and
+  `acct.ar.open_items.v1` are staged for the isolated `test` environment; no
+  capability is enabled and no write capability is staged.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -118,6 +119,19 @@ posted-only filtering, ledger-cumulative opening, period debit and credit,
 closing balance, debit/credit equality, complete totals before pagination, and
 Decimal-safe rounding.
 
+For the AR open-items slice, the oracle must independently recompute every
+posted receivable line at `as_of_date` from `account.partial.reconcile` rows
+whose `max_date` is not later than the cutoff. Company- and transaction-currency
+residuals are rounded per line before the open test and summaries; debit and
+credit items, unmatched payments, currently reconciled but historically open
+items, partner/currency filters, and full totals before pagination are required.
+The result basis is explicitly the current reconciliation graph, not an
+immutable event-sourced historical snapshot.
+The staged implementation retrieves at most 10,001 source candidates to detect
+a 10,000-line safety boundary and then fails closed; it must never silently
+truncate. Production enablement requires database-side count, aggregation, and
+page retrieval plus a retained scale test that removes this staged limitation.
+
 ## Gate E — sandbox write lifecycle
 
 Before running this gate, the operator must record the designated sandbox
@@ -212,9 +226,13 @@ At the current local development checkpoint:
   strict v1 migration. Execution-result, failure, verification, and recovery
   persistence remain closed until their specialized authoritative transactions
   exist. These are control-plane tests only; no Odoo write was executed;
-- 196 local tests currently pass and four target-Linux gates are intentionally
-  skipped off target. This is development evidence, not real-Odoo write or
-  production promotion evidence;
+- dev6 adds a signed, Odoo-company/ACL-filtered registry query and a strict AR
+  open-items contract/domain/backend. The AR implementation uses Odoo 19's
+  accounting-date residual formula, keeps signed debit/credit and company/line
+  currencies separate, and preserves date, company, partner, currency, limit,
+  and offset through CLI/bootstrap/executor tests. These remain local
+  development results until an exact immutable dev6 release passes target
+  Linux, real Odoo, independent SQL-oracle, and negative-security evidence;
 - no sandbox write lifecycle has been authorized or recorded; and
 - no production write is authorized.
 

@@ -5,6 +5,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from odoo_accounting_cli_v3.auth import context_payload, sign_request_context
+from odoo_accounting_cli_v3.domain.ar_open_items import (
+    CurrencyInfo as ArCurrencyInfo,
+    OpenItemPartial,
+    OpenItemSource,
+)
 from odoo_accounting_cli_v3.domain.trial_balance import AccountInfo, Aggregate, CurrencyInfo
 from odoo_accounting_cli_v3.gateway import GatewayError
 from odoo_accounting_cli_v3.odoo.bootstrap import (
@@ -51,10 +56,15 @@ class Companies:
 
 
 class User:
-    def __init__(self, *, company_ids=(7, 8), permitted=True):
+    def __init__(self, *, company_ids=(7, 8), permitted=True, groups=None):
         self.active = True
         self.company_ids = Companies(list(company_ids))
         self._permitted = permitted
+        self._groups = set(
+            {"base.group_user", "account.group_account_readonly"}
+            if groups is None
+            else groups
+        )
 
     def __bool__(self):
         return True
@@ -63,7 +73,7 @@ class User:
         return 1
 
     def has_group(self, xml_id):
-        return self._permitted and xml_id == "account.group_account_readonly"
+        return self._permitted and xml_id in self._groups
 
     def browse(self, user_id):
         if user_id != 42:
@@ -74,17 +84,45 @@ class User:
         return self
 
 
+class Company:
+    def __init__(self):
+        self.access_checks = []
+
+    def browse(self, company_id):
+        if company_id != 7:
+            raise AssertionError("unexpected company")
+        return self
+
+    def exists(self):
+        return self
+
+    def __bool__(self):
+        return True
+
+    def __len__(self):
+        return 1
+
+    def check_access_rights(self, operation):
+        self.access_checks.append(("rights", operation))
+
+    def check_access_rule(self, operation):
+        self.access_checks.append(("rule", operation))
+
+
 class BoundEnvironment:
     def __init__(self, user):
         self.uid = 42
         self.su = False
         self.cr = Cursor()
         self.user = user
+        self.company = Company()
 
     def __getitem__(self, name):
-        if name != "res.users":
-            raise AssertionError("unexpected bound model")
-        return self.user
+        if name == "res.users":
+            return self.user
+        if name == "res.company":
+            return self.company
+        raise AssertionError("unexpected bound model")
 
 
 class Backend:
@@ -105,14 +143,54 @@ class Backend:
         return {401: Aggregate(Decimal("100"), Decimal("100"), Decimal("0"), 2)}
 
 
-def enabled_capabilities():
+class ArBackend:
+    currency_info = ArCurrencyInfo(12, "CNY", "CNY", Decimal("0.01"))
+
+    def assert_read_access(self, *, company_id):
+        if company_id != 7:
+            raise AssertionError("unexpected company")
+
+    def company_currency(self, *, company_id):
+        return self.currency_info
+
+    def assert_partner(self, *, company_id, partner_id):
+        raise AssertionError("partner validation was not requested")
+
+    def currency(self, *, currency_id):
+        raise AssertionError("currency validation was not requested")
+
+    def source_lines(
+        self, *, company_id, as_of_date, partner_id, currency_id, candidate_limit
+    ):
+        return [
+            OpenItemSource(
+                move_line_id=701,
+                move_id=801,
+                move_name="INV/2026/007",
+                move_type="out_invoice",
+                payment_id=None,
+                line_date=as_of_date,
+                due_date=as_of_date,
+                partner_id=901,
+                partner_name="Customer",
+                account_id=1001,
+                account_code="1122",
+                account_name="Accounts Receivable",
+                journal_id=1101,
+                journal_code="INV",
+                currency=self.currency_info,
+                balance=Decimal("70"),
+                amount_currency=Decimal("70"),
+                current_reconciled=False,
+            )
+        ]
+
+    def partials_as_of(self, *, company_id, move_line_ids, as_of_date):
+        return {701: OpenItemPartial()}
+
+
+def staged_capabilities():
     document = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-    item = next(
-        item for item in document["capabilities"] if item["id"] == "acct.gl.trial_balance.v1"
-    )
-    item["staged_environments"] = ["test"]
-    item["enabled_environments"] = []
-    document["capabilities"] = [item]
     return validate_registry(document)
 
 
@@ -153,13 +231,23 @@ def signed_context(**changes):
     return sign_request_context(**values)
 
 
-def request_document(context=None):
-    context = context or signed_context()
+def request_document(
+    context=None,
+    *,
+    capability_id="acct.gl.trial_balance.v1",
+    request_parameters=None,
+):
+    request_parameters = request_parameters or parameters()
+    if context is None:
+        context = signed_context(
+            capability_id=capability_id,
+            parameters=request_parameters,
+        )
     wire_context = {**context_payload(context), "auth_signature": context.auth_signature}
     return {
-        "capability_id": "acct.gl.trial_balance.v1",
+        "capability_id": capability_id,
         "context": wire_context,
-        "parameters": parameters(),
+        "parameters": request_parameters,
     }
 
 
@@ -179,12 +267,13 @@ class OdooBootstrapTest(unittest.TestCase):
                 **kwargs,
                 receipt_id_factory=lambda: "receipt-bootstrap-1",
                 trial_balance_backend_factory=lambda _env, _uid, _companies: Backend(),
+                ar_open_items_backend_factory=lambda _env, _uid, _companies: ArBackend(),
             )
 
         result = execute_read_from_odoo_shell(
             RootEnvironment(),
             request or request_document(),
-            capabilities=enabled_capabilities(),
+            capabilities=staged_capabilities(),
             auth_secret=AUTH_SECRET,
             auth_key_id=AUTH_KEY_ID,
             consume_auth_token=consume_auth_token or (lambda *_: True),
@@ -256,6 +345,50 @@ class OdooBootstrapTest(unittest.TestCase):
         request["context"]["allowed_company_ids"] = [7, 7]
         with self.assertRaisesRegex(OdooBootstrapError, "unique positive"):
             self.execute(request)
+
+    def test_registry_list_uses_bound_odoo_acl_and_returns_standard_receipt(self):
+        request = request_document(
+            capability_id="acct.registry.list.v1",
+            request_parameters={"company_id": 7},
+        )
+        result, _factory_contexts = self.execute(request)
+        self.assertEqual(
+            [item["id"] for item in result["capabilities"]],
+            [
+                "acct.ar.open_items.v1",
+                "acct.gl.trial_balance.v1",
+                "acct.registry.list.v1",
+            ],
+        )
+        self.assertEqual(result["page"], {"count": 3, "total_count": 3})
+        self.assertEqual(result["receipt"]["capability_id"], "acct.registry.list.v1")
+        self.assertEqual(result["receipt"]["record_count"], 3)
+
+    def test_ar_open_items_request_keeps_all_filters_and_returns_bound_receipt(self):
+        requested = {
+            "company_id": 7,
+            "as_of_date": "2026-03-31",
+            "partner_id": None,
+            "currency_id": None,
+            "limit": 25,
+            "offset": 0,
+        }
+        request = request_document(
+            capability_id="acct.ar.open_items.v1",
+            request_parameters=requested,
+        )
+
+        result, _factory_contexts = self.execute(request)
+
+        self.assertEqual(result["filters"], {
+            "company_id": 7,
+            "as_of_date": "2026-03-31",
+            "partner_id": None,
+            "currency_id": None,
+        })
+        self.assertEqual(result["page"]["limit"], 25)
+        self.assertEqual(result["receipt"]["capability_id"], "acct.ar.open_items.v1")
+        self.assertEqual(result["receipt"]["record_count"], 1)
 
 
 if __name__ == "__main__":

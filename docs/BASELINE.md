@@ -76,6 +76,31 @@ trial balance without an independent gold-standard reconciliation.
 V2 exposes 248 collectable unit tests. Collection is evidence of test presence,
 not test success, and no write-oriented test was executed during this audit.
 
+## V2 reuse record: AR open items
+
+For `acct.ar.open_items.v1`, both deployed V2 copies of
+`src/odoo_acc_cli/commands/ar.py` were inspected read-only and had the same
+SHA-256,
+`0d2c28407bc7131fe48b727a7cc77d4c0e15adf67255851219b99742549af765`.
+V3 ports only the useful business predicates and field ideas: explicit company,
+posted receivable lines, partner/due-date/source identifiers, stable
+`date_maturity, date, id` ordering, aging buckets, and read-only side-effect
+tests. V3 has no import or runtime dependency on either V2 tree.
+
+The V2 implementation itself was rejected as the V3 accounting algorithm. Its
+hard-coded database/company, `reconciled=False`, `amount_residual > 0`, limited
+invoice/refund move types, float conversion, and page-sized `total_count` omit
+credits and unmatched payments and cannot answer a historical cutoff. The V3
+formula was instead checked against Odoo 19's move-line residual implementation
+(server file SHA-256
+`2f867883ce6359501915a4d6d6ef9e8c34833d65ad27b68cc1769203505cbcf2`)
+and aged-partner report (SHA-256
+`3fed261ced83ae82b20a840e6c6ad5bd462d91c820f6af214224cc6323d71034`).
+It separately applies debit/credit partial-reconcile amounts through the signed
+accounting date, rounds each company/transaction residual before testing and
+summing it, and discloses that the result uses Odoo's current reconciliation
+graph rather than an immutable event history.
+
 An independent SQL/ORM oracle for `odoo_test`, company 1, posted entries, and
 the inclusive 2026 calendar-year period found 2,341 move lines across 12 active
 accounts. Full-period debit and credit both equal `136193.63`; the difference is
@@ -132,6 +157,21 @@ escape, wrong database UUID, and expiry; an independent SQL oracle matched a
 date/currency/pagination parameter round-trip, and the six-event audit chain
 verified. The evidence bundle is root-owned and read-only. Dev4 remains staged:
 it has no Pi route, enables no capability, and proves no write lifecycle.
+
+The immutable dev5 candidate `0.1.0.dev5-fc6822dae8ba` subsequently passed the
+same target-Linux isolation gate and real `odoo_test` trial-balance oracle from
+its exact release artifact. Its package SHA-256 is
+`877e451ebe732328519f38fd67c16633d705e2f105602e3a550b6edc469fa958`; its
+manifest SHA-256 is
+`2f9a769d2a31385ed61306c06d0138b12b8a6ab9904c562897f4c41291abbcdf`.
+GitHub Actions run `29306441122` passed Python 3.11, Python 3.12, and an
+outside-source wheel smoke test. Three verified signed reads and their atomic
+audit events form a valid chain with head
+`27b9666107df1e12317449cc6bca9d1c3969f36f0e9e2bc67c1980e826c6bf0e`.
+The frozen root-owned evidence bundle reverified all 57 listed files. No
+`current` link, V3 unit, Pi route, Odoo/Pi restart, V2 change, enabled
+capability, or Odoo write was made. Dev5 therefore remains retained staged
+evidence and is not a production promotion.
 
 ## Phase-one exit gate
 

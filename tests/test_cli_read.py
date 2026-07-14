@@ -91,6 +91,55 @@ def result_body() -> dict:
     }
 
 
+def ar_request_document() -> dict:
+    request = request_document()
+    capability_id = "acct.ar.open_items.v1"
+    parameters = {
+        "company_id": 7,
+        "as_of_date": "2026-03-31",
+        "partner_id": 301,
+        "currency_id": 2,
+        "limit": 37,
+        "offset": 4,
+    }
+    request["capability_id"] = capability_id
+    request["parameters"] = parameters
+    request["context"]["auth_token_id"] = "token-cli-ar-read-1"
+    request["context"]["auth_request_digest"] = authentication_request_digest(
+        capability_id, parameters
+    )
+    return request
+
+
+def ar_result_body() -> dict:
+    summary = {
+        "item_count": 0,
+        "debit_residual": "0.00",
+        "credit_residual": "0.00",
+        "net_residual": "0.00",
+    }
+    return {
+        "basis": "odoo_accounting_date_current_reconciliation_graph",
+        "filters": {
+            "company_id": 7,
+            "as_of_date": "2026-03-31",
+            "partner_id": 301,
+            "currency_id": 2,
+        },
+        "items": [],
+        "page": {"limit": 37, "offset": 4, "count": 0, "total_count": 0},
+        "page_summary": dict(summary),
+        "ledger_summary": dict(summary),
+        "currency_summaries": [],
+        "company_currency": {
+            "id": 12,
+            "name": "CNY",
+            "symbol": "CNY",
+            "rounding": "0.01",
+        },
+    }
+
+
 def identity() -> dict:
     return {
         "commit": "a" * 40,
@@ -134,8 +183,8 @@ class CliReadTest(unittest.TestCase):
             receipt_secret_path=self.receipt_secret_path,
         )
 
-    def verified_result(self, request: dict) -> dict:
-        body = result_body()
+    def verified_result(self, request: dict, body: dict | None = None) -> dict:
+        body = result_body() if body is None else body
         context = request["context"]
         receipt = create_read_receipt(
             receipt_id="receipt-cli-read-1",
@@ -203,6 +252,39 @@ class CliReadTest(unittest.TestCase):
             release_digest=MANIFEST_DIGEST,
             timeout_seconds=17.0,
         )
+
+    @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
+    @patch("odoo_accounting_cli_v3.cli._load_release_identity")
+    @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    @patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_secrets",
+        return_value=(AUTH_SECRET, RECEIPT_SECRET),
+    )
+    def test_ar_read_transmits_date_company_partner_currency_and_page_unchanged(
+        self, _load_secrets, load_config, load_identity, run_shell
+    ) -> None:
+        load_config.return_value = self.config
+        load_identity.return_value = identity()
+        request = ar_request_document()
+        verified = self.verified_result(request, ar_result_body())
+        run_shell.return_value = verified
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "read",
+                "--runtime-config",
+                str(self.runtime_path),
+                "--request-json",
+                json.dumps(request),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.stdout)["data"]["result"], verified)
+        transmitted = run_shell.call_args.args[1]
+        self.assertEqual(transmitted["parameters"], request["parameters"])
+        self.assertEqual(transmitted["capability_id"], "acct.ar.open_items.v1")
 
     @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
     @patch("odoo_accounting_cli_v3.cli._load_release_identity", return_value=identity())

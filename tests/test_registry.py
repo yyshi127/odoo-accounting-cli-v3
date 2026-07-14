@@ -35,16 +35,24 @@ class RegistryTest(unittest.TestCase):
                 self.assertIs(item["approval"]["required"], True)
                 self.assertIs(item["idempotency"]["required"], True)
 
-    def test_only_trial_balance_read_is_staged_in_test(self) -> None:
+    def test_only_three_verified_read_contracts_are_staged_in_test(self) -> None:
         staged = [
             item
             for item in self.document["capabilities"]
             if item.get("staged_environments")
         ]
-        self.assertEqual([item["id"] for item in staged], ["acct.gl.trial_balance.v1"])
-        self.assertEqual(staged[0]["staged_environments"], ["test"])
-        self.assertEqual(staged[0]["enabled_environments"], [])
-        self.assertEqual(staged[0]["evidence"]["level"], "contract_tested")
+        self.assertEqual(
+            [item["id"] for item in staged],
+            [
+                "acct.registry.list.v1",
+                "acct.gl.trial_balance.v1",
+                "acct.ar.open_items.v1",
+            ],
+        )
+        for item in staged:
+            self.assertEqual(item["staged_environments"], ["test"])
+            self.assertEqual(item["enabled_environments"], [])
+            self.assertEqual(item["evidence"]["level"], "contract_tested")
         self.assertTrue(
             all(not item["enabled_environments"] for item in self.document["capabilities"])
         )
@@ -58,7 +66,10 @@ class RegistryTest(unittest.TestCase):
 
     def test_staging_and_enablement_are_separate_evidence_gates(self) -> None:
         declared = copy.deepcopy(self.document)
-        declared["capabilities"][0]["staged_environments"] = ["test"]
+        declared_item = next(
+            item for item in declared["capabilities"] if item["evidence"]["level"] == "declared"
+        )
+        declared_item["staged_environments"] = ["test"]
         with self.assertRaisesRegex(RegistryError, "contract-tested"):
             validate_registry(declared)
 
@@ -72,6 +83,56 @@ class RegistryTest(unittest.TestCase):
         trial_balance["enabled_environments"] = ["test"]
         with self.assertRaisesRegex(RegistryError, "test_verified"):
             validate_registry(incomplete)
+
+    def test_registry_list_contract_is_strict_and_non_placeholder(self) -> None:
+        item = next(
+            item
+            for item in self.document["capabilities"]
+            if item["id"] == "acct.registry.list.v1"
+        )
+        self.assertEqual(
+            item["input_schema"]["properties"]["company_id"],
+            {"type": "integer", "minimum": 1},
+        )
+        self.assertEqual(
+            item["output_schema"]["required"],
+            ["capabilities", "page", "receipt"],
+        )
+        descriptor = item["output_schema"]["properties"]["capabilities"]["items"]
+        self.assertEqual(
+            set(descriptor["required"]),
+            {
+                "id", "domain", "business_description", "access", "risk_level",
+                "company_scope", "odoo_permissions", "approval_required",
+                "idempotency_required", "input_schema_json", "output_schema_json",
+                "contract_digest", "evidence_level", "verification_method",
+                "recovery_method", "capability_channel",
+            },
+        )
+        self.assertTrue(descriptor["properties"])
+        page = item["output_schema"]["properties"]["page"]
+        self.assertEqual(page["required"], ["count", "total_count"])
+        self.assertTrue(item["output_schema"]["properties"]["receipt"]["properties"])
+
+    def test_ar_open_items_contract_is_strict_and_discloses_historical_basis(self) -> None:
+        item = next(
+            item
+            for item in self.document["capabilities"]
+            if item["id"] == "acct.ar.open_items.v1"
+        )
+        self.assertEqual(
+            item["input_schema"]["required"],
+            ["company_id", "as_of_date", "partner_id", "currency_id", "limit", "offset"],
+        )
+        self.assertEqual(
+            item["output_schema"]["properties"]["basis"]["enum"],
+            ["odoo_accounting_date_current_reconciliation_graph"],
+        )
+        self.assertTrue(
+            item["output_schema"]["properties"]["items"]["items"]["properties"]
+        )
+        self.assertEqual(item["staged_environments"], ["test"])
+        self.assertEqual(item["enabled_environments"], [])
 
     def test_duplicate_id_is_rejected(self) -> None:
         invalid = copy.deepcopy(self.document)

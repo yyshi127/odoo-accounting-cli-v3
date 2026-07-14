@@ -44,7 +44,7 @@ and read receipts are consumed atomically and survive process restart. A
 verified read is appended to the receipt database's tamper-evident audit chain
 before the CLI may report success.
 
-In dev5, the receipt signature is reverified against the complete request,
+Since dev5, the receipt signature is reverified against the complete request,
 result, runtime, registry, release, user, and company binding inside the
 persistence call. Receipt consumption and the `read.verified` append, including
 the complete signed receipt, commit in one SQLite transaction or both roll
@@ -58,7 +58,7 @@ namespaces are rejected rather than promoted as verified evidence.
 
 Persistence schema v2 is shared by replay, receipt, operation, approval, and
 audit primitives. Its v1 migration is transactional but not readable by dev4's
-v1-only code. A side-by-side dev5 candidate must therefore use new,
+v1-only code. Every side-by-side dev5-or-later candidate must therefore use new,
 version-scoped `candidates/<version>-<commit12>/` files for both
 `auth_state_path` and `receipt_state_path`. It must never reuse, open, or migrate
 the retained dev4 state or evidence databases. Promotion and rollback must

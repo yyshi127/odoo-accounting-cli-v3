@@ -166,6 +166,7 @@ def execute_read_from_odoo_shell(
     """Execute one enabled read capability with a signed, DB-bound context."""
     if not callable(consume_auth_token) or not callable(consume_receipt):
         raise OdooBootstrapError("durable request and receipt replay stores are required")
+    capability_list = tuple(capabilities)
     capability_id, raw_context, parameters = _validate_request_document(request)
     context = request_context_from_mapping(raw_context)
     observed_at = now or datetime.now(timezone.utc)
@@ -233,6 +234,7 @@ def execute_read_from_odoo_shell(
 
     executor = executor_factory(
         bound_env,
+        capabilities=capability_list,
         odoo_instance_id=odoo_instance_id,
         database_name=actual_database_name,
         database_uuid=actual_database_uuid,
@@ -244,7 +246,7 @@ def execute_read_from_odoo_shell(
         now=lambda: observed_at,
     )
     gateway = CapabilityGateway(
-        capabilities,
+        capability_list,
         release_digest=release_digest,
         authenticate_context=authenticate,
         acl_check=acl_check,

@@ -112,7 +112,7 @@ authorize execution. Legacy executing, failed, verification, completion, or
 recovery states have no dev5-grade durable evidence and make the whole
 migration roll back without changing schema v1.
 
-For native dev5 reads, signature revalidation, replay consumption, and the
+For native schema-v2 reads (dev5 and later), signature revalidation, replay consumption, and the
 `read.verified` event containing the complete signed receipt commit in one
 transaction. Absence of that durable event is a failed read, never business
 success. Receipt protocol v2 binds environment and capability channel and
@@ -128,7 +128,7 @@ therefore remains blocked until runtime identities are isolated and the audit
 head is independently anchored; trigger presence alone is not promotion
 evidence.
 
-For side-by-side candidate verification, point dev5 at new version-scoped state
+For side-by-side candidate verification, point each candidate at new version-scoped state
 paths under `candidates/<version>-<commit12>/` so the retained dev4 databases
 remain unchanged. For a promoted v1-to-v2 upgrade, first stop and drain every
 V3 route, worker, scheduled job, canary, and operator command that can access

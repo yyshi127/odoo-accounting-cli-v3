@@ -13,11 +13,12 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-Only the trial-balance read is a staged execution candidate for the dedicated
-test environment. Staging is separate from enablement: no capability is yet
-marked enabled or routed through Pi. No write capability is staged or enabled;
-sandbox and production remain closed until their approval, idempotency,
-verification, recovery, and evidence gates pass.
+Three reads are staged execution candidates for the dedicated test environment:
+the ACL-filtered capability registry, trial balance, and historical AR open
+items. Staging is separate from enablement: no capability is yet marked enabled
+or routed through Pi. No write capability is staged or enabled; sandbox and
+production remain closed until their approval, idempotency, verification,
+recovery, and evidence gates pass.
 
 ## CLI boundary
 
