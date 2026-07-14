@@ -300,6 +300,14 @@ def test_real_read_runner_normalizes_copied_read_plan_mode():
     assert source.index(copy) < source.index(normalize)
 
 
+def test_persistence_audit_compares_consumed_token_to_full_request_digest():
+    source = (DEPLOYMENT / "dev8-persistence-audit.py").read_text("utf-8")
+    assignment = source[source.index("tokens[token_id] =") :]
+    assignment = assignment[: assignment.index("\n\n")]
+    assert '"digest": digest(request)' in assignment
+    assert '"digest": auth_digest' not in assignment
+
+
 MUTATIONS = (
     "schema-bool",
     "parents-null",

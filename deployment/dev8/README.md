@@ -11,7 +11,7 @@ They install and validate a side-by-side test candidate only.
 
 `TOOLCHAIN-MANIFEST.json` binds the exact bytes of all 16 operational tools and
 the read-only `SERVER-BASELINE.json` to toolchain version
-`0.1.0.dev8-toolchain.6` and to the canonical application release.
+`0.1.0.dev8-toolchain.7` and to the canonical application release.
 `check_toolchain.py` verifies that binding in CI.
 
 ## Safety boundary
@@ -111,6 +111,9 @@ python3 -I -B dev8-verify-frozen-evidence.py
 The real-read runner normalizes its copied `read-plan.input.json` to
 `root:root` mode `0600`, matching the persistence and freeze evidence
 contracts even though the immutable upload source is mode `0400`.
+The persistence audit separately verifies the authentication content digest
+and compares consumed-token state with the canonical full signed-request
+digest used by the replay guard.
 
 Create `/tmp/dev8-gate-evidence` as `root:root` mode `0700` before its two
 producers. The execution stager requires its three fixed `/tmp` oracle-source

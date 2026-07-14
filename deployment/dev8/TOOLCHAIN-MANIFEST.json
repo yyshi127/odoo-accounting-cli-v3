@@ -14,14 +14,14 @@
     {"name": "dev6-trial-balance-sql-oracle.py", "sha256": "7aa959361ac994f17cd871d33211bbef02ab816993ff87f088c82a6541cfcb9b", "size": 4766},
     {"name": "dev6-ar-sql-oracle.py", "sha256": "cdb49967d60af0aa416cadaeb61503847ddfeb4d111aa0e01335fe06b78499c6", "size": 10254},
     {"name": "dev7-ap-sql-oracle.py", "sha256": "ad54540725e8110ea1449586d0dcddb1d6c70b1e387f0e843b989aca6b70f1e5", "size": 15739},
-    {"name": "dev8-persistence-audit.py", "sha256": "0ace22833fd799da836e442a81064ae85e79bc17ceebb05885e52f88e0d07f93", "size": 31049},
+    {"name": "dev8-persistence-audit.py", "sha256": "742ff9b206efb3ae13c96790564e52860ab5354a169ca438fabe5f9de7bcb5b4", "size": 31088},
     {"name": "dev8-runtime-dependency-inventory.py", "sha256": "f2b0675d793b2abfb8cb93bba572c73021447acab8ecd0b473293a8f6f892d12", "size": 11255},
     {"name": "dev8-canonical-package-negative-gates.py", "sha256": "9ad113e2eec2ec08c69befdab1fd15c0938fb5d1327c165feaa84c6a3feed3bb", "size": 31102},
-    {"name": "dev8-freeze-evidence.py", "sha256": "96decd077cf52ab5e38131fcc39ccebebfd0a47250b3de3f8523ede3a8739ad2", "size": 93344},
-    {"name": "dev8-verify-frozen-evidence.py", "sha256": "207a4ff0b6941b41b893c8a14cd2400c5ca062074055a81bb4b16d89c96e986d", "size": 101742},
+    {"name": "dev8-freeze-evidence.py", "sha256": "33ac2e0460a42e64a517c5cc94d01576437a192a0146dbc75459020873f0e435", "size": 93344},
+    {"name": "dev8-verify-frozen-evidence.py", "sha256": "c30a3a188e6dd6fc87ced1a6ceffdef7ab6e6aea98eb6e4dedf354ca43b6ad4a", "size": 101742},
     {"name": "SERVER-BASELINE.json", "sha256": "37b498ffce8f175813e866c534b6514142436d9c4dbf29216f1dab1c880c57e4", "size": 5662}
   ],
   "schema_version": 1,
   "source_directory": "deployment/dev8",
-  "toolchain_version": "0.1.0.dev8-toolchain.6"
+  "toolchain_version": "0.1.0.dev8-toolchain.7"
 }

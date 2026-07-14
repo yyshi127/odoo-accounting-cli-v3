@@ -471,7 +471,10 @@ def main() -> None:
             and hmac.compare_digest(signature, hmac.new(auth_secret, canonical(unsigned_context), hashlib.sha256).hexdigest()),
             f"{name} auth signature mismatch",
         )
-        tokens[token_id] = {"digest": auth_digest, "expires": utc_sql(context["auth_expires_at"])}
+        tokens[token_id] = {
+            "digest": digest(request),
+            "expires": utc_sql(context["auth_expires_at"]),
+        }
 
         require(
             isinstance(response, dict)
