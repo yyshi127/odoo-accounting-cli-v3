@@ -284,6 +284,13 @@ def test_upload_gate_accepts_a_non_writable_root_group_traverse_bit_only_with_od
     assert probe in source
 
 
+def test_runtime_registry_validation_passes_a_path_object():
+    source = (DEPLOYMENT / "dev8-runtime-setup.sh").read_text("utf-8")
+    assert "import pathlib" in source
+    assert "load_registry(pathlib.Path(sys.argv[1]))" in source
+    assert "load_registry(sys.argv[1])" not in source
+
+
 MUTATIONS = (
     "schema-bool",
     "parents-null",

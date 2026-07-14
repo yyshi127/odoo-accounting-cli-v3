@@ -1627,11 +1627,12 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH="$release/src" \
   python3 -B "$release/tools/verify_release.py" "$release" "$manifest_sha"
 PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 PYTHONPATH="$release/src" \
 python3 -B - "$release/registry/capabilities.json" <<'PY'
+import pathlib
 import sys
 
 from odoo_accounting_cli_v3.registry import load_registry, registry_digest
 
-observed = registry_digest(load_registry(sys.argv[1]))
+observed = registry_digest(load_registry(pathlib.Path(sys.argv[1])))
 expected = "d8f1e76b674137a330de11bffee43de8a7362f877360d4410edebb54e8856b3e"
 if observed != expected:
     raise SystemExit("installed registry digest mismatch")

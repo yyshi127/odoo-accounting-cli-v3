@@ -15,7 +15,7 @@ MANIFEST = ROOT / "TOOLCHAIN-MANIFEST.json"
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.4"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.5"
 TOOLS = (
     "dev8-install.sh",
     "dev8-runtime-setup.sh",
@@ -216,6 +216,10 @@ def main() -> None:
     require("root_metadata.st_mode & 0o022" in runtime_gate, "runtime upload parent write guard is missing")
     require("root_metadata.st_mode & 0o007" in runtime_gate, "runtime upload parent other-access guard is missing")
     require("runtime_upload_not_traversable_by_odoo=true" in runtime_gate, "runtime Odoo upload traversal probe is missing")
+    require(
+        "load_registry(pathlib.Path(sys.argv[1]))" in runtime_gate,
+        "runtime registry path conversion is missing",
+    )
     for name in ("dev8-server-gate.sh", "dev8-freeze-evidence.py", "dev8-verify-frozen-evidence.py"):
         source = (ROOT / name).read_text(encoding="utf-8")
         require(source.count("run_unit_listing(") >= 3, f"systemd no-match listing gate is missing: {name}")
