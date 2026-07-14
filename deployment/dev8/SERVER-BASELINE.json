@@ -1,0 +1,42 @@
+{
+  "application_release": "0.1.0.dev8-bd21ca07c168",
+  "captured_at": "2026-07-14T12:39:24Z",
+  "critical_files": [
+    {"ctime_ns": 1780484938400748471, "device": 64770, "gid": 1003, "inode": 803499, "mode": "0644", "mtime_ns": 1779991255002643937, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v2/src/odoo_acc_cli/commands/backend.py", "sha256": "2ce74f56013a85771b05c179b2f95dc80ea2981ee1668114383131cfcc179131", "size": 488695, "uid": 999},
+    {"ctime_ns": 1781008714170541892, "device": 64770, "gid": 1003, "inode": 1104618, "mode": "0644", "mtime_ns": 1780901554819003993, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/odoo_accounting_agent_cli_v2/src/odoo_acc_cli/commands/backend.py", "sha256": "b9a6405040f25b518eda82ce5caf3348cac73d4453509939c3a354652813cb78", "size": 522919, "uid": 999},
+    {"ctime_ns": 1781008716520522743, "device": 64770, "gid": 1003, "inode": 848291, "mode": "0644", "mtime_ns": 1781008712364556608, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/server.mjs", "sha256": "fae40056f346df95e55443a1ca44cfd580577c6a7505b87bb46abf9f1d60df9f", "size": 9160, "uid": 999},
+    {"ctime_ns": 1781008716520522743, "device": 64770, "gid": 1003, "inode": 1104427, "mode": "0644", "mtime_ns": 1781000336391914305, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/extensions/odoo-tools.ts", "sha256": "c34484bfb5934513db85a594049a3360b1af62f2496c4c951b4caa000a6e5455", "size": 4117, "uid": 999},
+    {"ctime_ns": 1781772365703230641, "device": 64770, "gid": 1003, "inode": 159155, "mode": "0644", "mtime_ns": 1781000332646944925, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/addons/sudo_ai_bot/controllers/pi_tool_controller.py", "sha256": "ea4b91f5061fb9cc0e200a423c4a30b5cc0b2cb484b60df96ce4dc24b0c0cc8f", "size": 2430, "uid": 999},
+    {"ctime_ns": 1781772365703230641, "device": 64770, "gid": 1003, "inode": 159156, "mode": "0644", "mtime_ns": 1780999075796188288, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/addons/sudo_ai_bot/models/odoo_tool_runtime.py", "sha256": "4e7c7c16ae3cde5e72c423b63b916dd43da320c43d18474b16e6eb62c38f2d73", "size": 5361, "uid": 999},
+    {"ctime_ns": 1781772365703230641, "device": 64770, "gid": 1003, "inode": 159133, "mode": "0644", "mtime_ns": 1781008707679594787, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/addons/sudo_ai_bot/models/pi_bridge.py", "sha256": "c36ffb3a85107c9b8f1ae40a563f0509bf4a23122308434a9254b731864e5b96", "size": 16831, "uid": 999},
+    {"ctime_ns": 1781772365703230641, "device": 64770, "gid": 1003, "inode": 159038, "mode": "0666", "mtime_ns": 1780826267000000000, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/addons/sudo_ai_bot/__manifest__.py", "sha256": "640ddb271cf04067bc5be68de7d7fb8620e9c19a308417295650b3811279d96b", "size": 1119, "uid": 999},
+    {"ctime_ns": 1780484938400748471, "device": 64770, "gid": 1003, "inode": 803502, "mode": "0644", "mtime_ns": 1780484938397748496, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v2/src/odoo_acc_cli/commands/ar.py", "sha256": "0d2c28407bc7131fe48b727a7cc77d4c0e15adf67255851219b99742549af765", "size": 71011, "uid": 999},
+    {"ctime_ns": 1781008714169541901, "device": 64770, "gid": 1003, "inode": 1104621, "mode": "0644", "mtime_ns": 1780901554819003993, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/odoo_accounting_agent_cli_v2/src/odoo_acc_cli/commands/ar.py", "sha256": "0d2c28407bc7131fe48b727a7cc77d4c0e15adf67255851219b99742549af765", "size": 71011, "uid": 999},
+    {"ctime_ns": 1780484938400748471, "device": 64770, "gid": 1003, "inode": 803501, "mode": "0644", "mtime_ns": 1780484938395748512, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v2/src/odoo_acc_cli/commands/ap.py", "sha256": "d193845a4fbfafb8081ea57057b9dd9f9764717f5c665c55c81bc6ee06b569a5", "size": 130134, "uid": 999},
+    {"ctime_ns": 1781008714169541901, "device": 64770, "gid": 1003, "inode": 1104620, "mode": "0644", "mtime_ns": 1780901554819003993, "nlink": 1, "path": "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/odoo_accounting_agent_cli_v2/src/odoo_acc_cli/commands/ap.py", "sha256": "d193845a4fbfafb8081ea57057b9dd9f9764717f5c665c55c81bc6ee06b569a5", "size": 130134, "uid": 999}
+  ],
+  "database_uuid": "19b09656-d10f-11f0-9065-00163e54a5ad",
+  "hostname": "VM-0-6-ubuntu",
+  "production_dependency_metadata_safe": false,
+  "production_promotion_allowed": false,
+  "promotion_blockers": [
+    "/mnt/odoo/odoo19/custom/addons/sudo_ai_bot/__manifest__.py is group/world writable (0666)"
+  ],
+  "schema_version": 1,
+  "services": [
+    {"active_state": "active", "cmdline_sha256": "6b05fb91c48b5a5f06260786145c84718688ff62b5b23aa46d038d353ced15c1", "main_pid": 2257341, "sub_state": "running", "unit": "odoo19.service"},
+    {"active_state": "active", "cmdline_sha256": "b9763f9608a2f35b0e106fc6f07f8fbba8a5e36d6da61782288024f02ef2da68", "main_pid": 2065799, "sub_state": "running", "unit": "sudo-pi-agent-bridge.service"}
+  ],
+  "v3_active_units": [],
+  "v3_paths_absent": [
+    "/root/odoo-accounting-cli-v3-dev8-upload",
+    "/opt/odoo-accounting-cli-v3/releases/0.1.0.dev8-bd21ca07c168",
+    "/opt/odoo-accounting-cli-v3/packages/odoo-accounting-cli-v3-0.1.0.dev8-bd21ca07c168.tar.gz",
+    "/opt/odoo-accounting-cli-v3/trusted-artifacts/0.1.0.dev8-bd21ca07c168.json",
+    "/opt/odoo-accounting-cli-v3/current",
+    "/etc/odoo-accounting-cli-v3/runtime-test-dev8.json",
+    "/var/lib/odoo-accounting-cli-v3/test/candidates/0.1.0.dev8-bd21ca07c168",
+    "/var/lib/odoo-accounting-cli-v3/evidence/0.1.0.dev8-bd21ca07c168"
+  ],
+  "v3_unit_files": []
+}

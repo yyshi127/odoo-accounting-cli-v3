@@ -23,6 +23,25 @@ jobs:
       - run: python -m pytest
       - run: python tools/check_source_boundary.py
 
+  deployment-toolchain:
+    name: dev8 deployment toolchain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify tracked tool manifest and embedded Python
+        run: python deployment/dev8/check_toolchain.py
+      - name: Verify shell syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in deployment/dev8/*.sh; do
+            bash -n "$path"
+          done
+
   wheel-smoke:
     name: wheel -> fresh venv -> outside-source CLI
     runs-on: ubuntu-latest
