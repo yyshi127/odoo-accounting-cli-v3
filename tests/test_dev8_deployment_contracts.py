@@ -213,6 +213,21 @@ def test_toolchain_and_server_baseline_contracts_are_accepted(request, fixture_n
     assert module.validate_server_baseline(baseline)["production_promotion_allowed"] is False
 
 
+@pytest.mark.parametrize("fixture_name", ("freezer", "verifier"))
+def test_service_pids_are_derived_from_the_validated_server_baseline(
+    request, fixture_name
+):
+    module = request.getfixturevalue(fixture_name)
+    baseline = json.loads((DEPLOYMENT / "SERVER-BASELINE.json").read_text("utf-8"))
+    validated = module.validate_server_baseline(baseline)
+    assert module.baseline_service_pids(validated) == {
+        "odoo19.service": 2257341,
+        "sudo-pi-agent-bridge.service": 2065799,
+    }
+    source = Path(module.__file__).read_text("utf-8")
+    assert "EXPECTED_PIDS" not in source
+
+
 @pytest.mark.parametrize(
     "mutation",
     ("schema-bool", "service-pid-bool", "critical-uid-bool", "safe-flag", "blockers"),

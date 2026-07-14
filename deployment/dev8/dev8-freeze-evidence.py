@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 VERSION = "0.1.0.dev8"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.7"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.8"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 TREE = "fd389ef55fbc6723379a2928a10b665925829599"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
@@ -271,6 +271,26 @@ def validate_server_baseline(document: object) -> dict[str, object]:
         "server baseline V3 absence set mismatch",
     )
     return document
+
+
+def baseline_service_pids(document: dict[str, object]) -> dict[str, int]:
+    services = document.get("services")
+    require(isinstance(services, list), "server baseline service set mismatch")
+    pids: dict[str, int] = {}
+    for service in services:
+        require(isinstance(service, dict), "server baseline service record is invalid")
+        unit = service.get("unit")
+        pid = service.get("main_pid")
+        require(
+            isinstance(unit, str) and isinstance(pid, int) and not isinstance(pid, bool),
+            "server baseline service PID is invalid",
+        )
+        pids[unit] = pid
+    require(
+        set(pids) == {"odoo19.service", "sudo-pi-agent-bridge.service"},
+        "server baseline service PID set mismatch",
+    )
+    return pids
 
 
 def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -1011,6 +1031,7 @@ def live_isolation(server_baseline: dict[str, object]) -> dict[str, object]:
 
 def validate_inputs(
     args: argparse.Namespace,
+    expected_pids: dict[str, int],
 ) -> tuple[dict[str, object], dict[str, object], dict[str, bytes]]:
     validate_private_directory(args.read_evidence, READ_FILES)
     validate_private_directory(args.state_evidence, STATE_FILES)
@@ -1326,7 +1347,7 @@ def validate_inputs(
                     "odoo_pid_active", "odoo_canary_fixed_inode_unchanged",
                 }
                 and all(value is True for value in checks.values())
-                and case.get("odoo_pid_after") == EXPECTED_PIDS["odoo19.service"]
+                and case.get("odoo_pid_after") == expected_pids["odoo19.service"]
             )
     require(
         negative.get("release") == RELEASE
@@ -1347,7 +1368,7 @@ def validate_inputs(
             "symlink_fixture_is_link": True,
             "tampered_fixture_differs": True,
         }
-        and negative.get("odoo_pid_before") == EXPECTED_PIDS["odoo19.service"]
+        and negative.get("odoo_pid_before") == expected_pids["odoo19.service"]
         and negative.get("odoo_canary_reached") is False
         and negative.get("secret_material_emitted") is False,
         "canonical-package negative gates mismatch",
@@ -1594,7 +1615,8 @@ def main() -> None:
     server_baseline = validate_server_baseline(
         load_json_bytes(upload_payloads[SERVER_BASELINE_NAME], "server baseline")
     )
-    persistence, reports, journal_payloads = validate_inputs(args)
+    expected_pids = baseline_service_pids(server_baseline)
+    persistence, reports, journal_payloads = validate_inputs(args, expected_pids)
     isolation = live_isolation(server_baseline)
     STAGING.mkdir(mode=0o700)
     published = False

@@ -15,7 +15,7 @@ MANIFEST = ROOT / "TOOLCHAIN-MANIFEST.json"
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.7"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.8"
 TOOLS = (
     "dev8-install.sh",
     "dev8-runtime-setup.sh",

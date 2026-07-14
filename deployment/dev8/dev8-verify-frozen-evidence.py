@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 VERSION = "0.1.0.dev8"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.7"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.8"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 TREE = "fd389ef55fbc6723379a2928a10b665925829599"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
@@ -284,6 +284,26 @@ def validate_server_baseline(document: object) -> dict[str, object]:
         "server baseline V3 absence set mismatch",
     )
     return document
+
+
+def baseline_service_pids(document: dict[str, object]) -> dict[str, int]:
+    services = document.get("services")
+    require(isinstance(services, list), "server baseline service set mismatch")
+    pids: dict[str, int] = {}
+    for service in services:
+        require(isinstance(service, dict), "server baseline service record is invalid")
+        unit = service.get("unit")
+        pid = service.get("main_pid")
+        require(
+            isinstance(unit, str) and isinstance(pid, int) and not isinstance(pid, bool),
+            "server baseline service PID is invalid",
+        )
+        pids[unit] = pid
+    require(
+        set(pids) == {"odoo19.service", "sudo-pi-agent-bridge.service"},
+        "server baseline service PID set mismatch",
+    )
+    return pids
 
 
 def exact_integer_fields(value: object, fields: tuple[str, ...]) -> bool:
@@ -1121,6 +1141,21 @@ def main() -> None:
     def document(relative: str) -> dict[str, object]:
         return load_json_bytes(blobs[relative], relative)
 
+    toolchain_manifest_payload = blobs[f"tools/{TOOLCHAIN_MANIFEST_NAME}"]
+    toolchain_manifest = load_json_bytes(toolchain_manifest_payload, "toolchain manifest")
+    manifest_entries = validate_toolchain_manifest(toolchain_manifest)
+    server_baseline_payload = blobs[f"tools/{SERVER_BASELINE_NAME}"]
+    baseline_expected = manifest_entries[SERVER_BASELINE_NAME]
+    require(
+        hashlib.sha256(server_baseline_payload).hexdigest() == baseline_expected["sha256"]
+        and len(server_baseline_payload) == baseline_expected["size"],
+        "frozen server baseline differs from toolchain manifest",
+    )
+    server_baseline = validate_server_baseline(
+        load_json_bytes(server_baseline_payload, "server baseline")
+    )
+    expected_pids = baseline_service_pids(server_baseline)
+
     package = verify_package(blobs["release/release-package.tar.gz"])
     require(
         blobs["release/RELEASE-MANIFEST.json"] == package["manifest_bytes"],
@@ -1380,7 +1415,7 @@ def main() -> None:
         and set(oracle_by_name) == set(oracle_names)
         and len(oracle.get("request_roundtrip", [])) == 4
         and len(oracle.get("staged_inputs", [])) == 5
-        and oracle.get("odoo_pid_before") == oracle.get("odoo_pid_after") == EXPECTED_PIDS["odoo19.service"]
+        and oracle.get("odoo_pid_before") == oracle.get("odoo_pid_after") == expected_pids["odoo19.service"]
         and oracle.get("all_checks_passed") is True
         and oracle.get("odoo_action_performed") is False
         and oracle.get("database_writes_permitted") is False
@@ -1698,7 +1733,7 @@ def main() -> None:
                     "odoo_canary_fixed_inode_unchanged",
                 }
                 and all(value is True for value in checks.values())
-                and case.get("odoo_pid_after") == EXPECTED_PIDS["odoo19.service"]
+                and case.get("odoo_pid_after") == expected_pids["odoo19.service"]
             )
     require(
         negative.get("release") == RELEASE and negative.get("manifest_sha256") == MANIFEST_SHA256
@@ -1716,7 +1751,7 @@ def main() -> None:
             "wrong_path_is_same_bytes": True, "tmp_copy_is_same_bytes": True,
             "symlink_fixture_is_link": True, "tampered_fixture_differs": True,
         }
-        and negative.get("odoo_pid_before") == EXPECTED_PIDS["odoo19.service"]
+        and negative.get("odoo_pid_before") == expected_pids["odoo19.service"]
         and negative.get("odoo_canary_reached") is False
         and negative.get("secret_material_emitted") is False,
         "canonical-package negative gates mismatch",
@@ -1755,19 +1790,6 @@ def main() -> None:
         "pre-freeze isolation evidence mismatch",
     )
 
-    toolchain_manifest_payload = blobs[f"tools/{TOOLCHAIN_MANIFEST_NAME}"]
-    toolchain_manifest = load_json_bytes(toolchain_manifest_payload, "toolchain manifest")
-    manifest_entries = validate_toolchain_manifest(toolchain_manifest)
-    server_baseline_payload = blobs[f"tools/{SERVER_BASELINE_NAME}"]
-    baseline_expected = manifest_entries[SERVER_BASELINE_NAME]
-    require(
-        hashlib.sha256(server_baseline_payload).hexdigest() == baseline_expected["sha256"]
-        and len(server_baseline_payload) == baseline_expected["size"],
-        "frozen server baseline differs from toolchain manifest",
-    )
-    server_baseline = validate_server_baseline(
-        load_json_bytes(server_baseline_payload, "server baseline")
-    )
     require(
         pre_isolation.get("server_baseline_captured_at") == server_baseline["captured_at"]
         and pre_isolation.get("production_dependency_metadata_safe")

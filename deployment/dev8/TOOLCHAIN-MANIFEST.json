@@ -17,11 +17,11 @@
     {"name": "dev8-persistence-audit.py", "sha256": "742ff9b206efb3ae13c96790564e52860ab5354a169ca438fabe5f9de7bcb5b4", "size": 31088},
     {"name": "dev8-runtime-dependency-inventory.py", "sha256": "f2b0675d793b2abfb8cb93bba572c73021447acab8ecd0b473293a8f6f892d12", "size": 11255},
     {"name": "dev8-canonical-package-negative-gates.py", "sha256": "9ad113e2eec2ec08c69befdab1fd15c0938fb5d1327c165feaa84c6a3feed3bb", "size": 31102},
-    {"name": "dev8-freeze-evidence.py", "sha256": "33ac2e0460a42e64a517c5cc94d01576437a192a0146dbc75459020873f0e435", "size": 93344},
-    {"name": "dev8-verify-frozen-evidence.py", "sha256": "c30a3a188e6dd6fc87ced1a6ceffdef7ab6e6aea98eb6e4dedf354ca43b6ad4a", "size": 101742},
+    {"name": "dev8-freeze-evidence.py", "sha256": "6278d92acba1187d095edb176f3dc71883be6158c1cd63300f500e96ae30ad1c", "size": 94225},
+    {"name": "dev8-verify-frozen-evidence.py", "sha256": "6d6bbc8618cc53adf6ee9822fc3fb7f85d02d659dd4d006ba9d49c8c09beccb6", "size": 102574},
     {"name": "SERVER-BASELINE.json", "sha256": "37b498ffce8f175813e866c534b6514142436d9c4dbf29216f1dab1c880c57e4", "size": 5662}
   ],
   "schema_version": 1,
   "source_directory": "deployment/dev8",
-  "toolchain_version": "0.1.0.dev8-toolchain.7"
+  "toolchain_version": "0.1.0.dev8-toolchain.8"
 }
