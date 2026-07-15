@@ -229,6 +229,574 @@ def test_service_pids_are_derived_from_the_validated_server_baseline(
     assert "EXPECTED_PIDS" not in source
 
 
+def _dev8_controls():
+    baseline_payload = (DEPLOYMENT / "SERVER-BASELINE.json").read_bytes()
+    return (
+        baseline_payload,
+        json.loads(baseline_payload),
+        json.loads((DEPLOYMENT / "SERVER-SERVICE-TRANSITION.json").read_text("utf-8")),
+        json.loads((DEPLOYMENT / "PRIOR-EVIDENCE-DISPOSITION.json").read_text("utf-8")),
+    )
+
+
+@pytest.mark.parametrize("fixture_name", ("freezer", "verifier"))
+def test_service_transition_controls_are_accepted_without_mutating_baseline(
+    request, fixture_name
+):
+    module = request.getfixturevalue(fixture_name)
+    baseline_payload, baseline, transition, disposition = _dev8_controls()
+    baseline_before = copy.deepcopy(baseline)
+    validated_baseline = module.validate_server_baseline(baseline)
+    validated_transition = module.validate_service_transition(
+        transition, baseline_payload, validated_baseline
+    )
+
+    assert module.validate_prior_evidence_disposition(disposition) == disposition
+    assert module.effective_service_pids(validated_baseline, validated_transition) == {
+        "odoo19.service": 2576660,
+        "sudo-pi-agent-bridge.service": 2065799,
+    }
+    identities = module.effective_service_identities(
+        validated_baseline, validated_transition
+    )
+    assert identities["odoo19.service"]["invocation_id"] == transition["services"][0][
+        "invocation_id"
+    ]
+    assert identities["sudo-pi-agent-bridge.service"]["proc_start_ticks"] == transition[
+        "services"
+    ][1]["proc_start_ticks"]
+    assert baseline == baseline_before
+
+
+TRANSITION_MUTATIONS = (
+    "baseline-hash",
+    "baseline-size",
+    "baseline-captured-at",
+    "pid-bool",
+    "invocation-id",
+    "boot-id",
+    "observation-short",
+    "actor",
+    "maintenance-authorized",
+    "production-write-authorized",
+    "production-promotion",
+    "odoo-unchanged",
+    "pi-changed",
+    "document-extra",
+    "baseline-extra",
+    "observation-extra",
+    "service-extra",
+)
+
+
+def _mutate_transition(document, mutation):
+    if mutation == "baseline-hash":
+        document["baseline"]["sha256"] = "0" * 64
+    elif mutation == "baseline-size":
+        document["baseline"]["size"] += 1
+    elif mutation == "baseline-captured-at":
+        document["baseline"]["captured_at"] = "2026-07-14T12:39:25Z"
+    elif mutation == "pid-bool":
+        document["services"][0]["effective_main_pid"] = True
+    elif mutation == "invocation-id":
+        document["services"][0]["invocation_id"] = "not-a-systemd-invocation-id"
+    elif mutation == "boot-id":
+        document["system_boot_id"] = "not-a-boot-id"
+    elif mutation == "observation-short":
+        document["observation"]["last_observed_at"] = document["observation"][
+            "first_observed_at"
+        ]
+    elif mutation == "actor":
+        document["actor_attribution"] = "verified"
+    elif mutation == "maintenance-authorized":
+        document["maintenance_authorization_verified"] = True
+    elif mutation == "production-write-authorized":
+        document["production_write_authorized"] = True
+    elif mutation == "production-promotion":
+        document["production_promotion_allowed"] = True
+    elif mutation == "odoo-unchanged":
+        document["services"][0]["effective_main_pid"] = document["services"][0][
+            "baseline_main_pid"
+        ]
+    elif mutation == "pi-changed":
+        document["services"][1]["effective_main_pid"] += 1
+    elif mutation == "document-extra":
+        document["extra"] = None
+    elif mutation == "baseline-extra":
+        document["baseline"]["extra"] = None
+    elif mutation == "observation-extra":
+        document["observation"]["extra"] = None
+    elif mutation == "service-extra":
+        document["services"][0]["extra"] = None
+    else:  # pragma: no cover
+        raise AssertionError(mutation)
+
+
+@pytest.mark.parametrize("fixture_name", ("freezer", "verifier"))
+@pytest.mark.parametrize("mutation", TRANSITION_MUTATIONS)
+def test_service_transition_contract_rejects_mutations(
+    request, fixture_name, mutation
+):
+    module = request.getfixturevalue(fixture_name)
+    baseline_payload, baseline, transition, _ = _dev8_controls()
+    validated_baseline = module.validate_server_baseline(baseline)
+    _mutate_transition(transition, mutation)
+    with pytest.raises(RuntimeError):
+        module.validate_service_transition(
+            transition, baseline_payload, validated_baseline
+        )
+
+
+@pytest.mark.parametrize("fixture_name", ("freezer", "verifier"))
+@pytest.mark.parametrize("mutation", ("final", "status", "reason", "anchor-hash"))
+def test_prior_evidence_disposition_rejects_mutations(
+    request, fixture_name, mutation
+):
+    module = request.getfixturevalue(fixture_name)
+    _, _, _, disposition = _dev8_controls()
+    if mutation == "final":
+        disposition["final_verifier_passed"] = True
+    elif mutation == "status":
+        disposition["status"] = "final"
+    elif mutation == "reason":
+        disposition["reason_code"] = "accepted_after_restart"
+    elif mutation == "anchor-hash":
+        disposition["prior_evidence"]["anchor_sha256"] = "0" * 64
+    with pytest.raises(RuntimeError):
+        module.validate_prior_evidence_disposition(disposition)
+
+
+@pytest.mark.parametrize("fixture_name", ("freezer", "verifier"))
+def test_evidence_identity_is_scoped_to_release_and_toolchain(request, fixture_name):
+    module = request.getfixturevalue(fixture_name)
+    expected = f"{module.RELEASE}--{module.TOOLCHAIN_VERSION}"
+    evidence_path = module.TARGET if hasattr(module, "TARGET") else module.ROOT
+    anchor_path = module.EVIDENCE_ANCHOR if hasattr(module, "EVIDENCE_ANCHOR") else module.ANCHOR
+
+    assert module.EVIDENCE_ID == expected
+    assert module.EVIDENCE_ID != module.RELEASE
+    assert evidence_path.name == expected
+    assert evidence_path != Path("/var/lib/odoo-accounting-cli-v3/evidence") / module.RELEASE
+    assert anchor_path.name == f"{expected}.json"
+    assert anchor_path != Path(
+        "/var/lib/odoo-accounting-cli-v3/evidence-anchors"
+    ) / f"{module.RELEASE}.json"
+
+
+def test_freezer_fsyncs_final_anchor_bytes_and_metadata(freezer, monkeypatch):
+    events = []
+    payloads = []
+    identity = (7, 11)
+    monkeypatch.setattr(freezer, "ANCHOR_STAGING", Path("/anchor/staging"))
+    monkeypatch.setattr(freezer, "ANCHOR_PARENT", Path("/anchor"))
+    monkeypatch.setattr(freezer.os, "O_NOFOLLOW", 0x100000, raising=False)
+    monkeypatch.setattr(
+        freezer.os,
+        "open",
+        lambda path, flags, mode: events.append(("open", path, flags, mode)) or 17,
+    )
+    descriptor_stat = types.SimpleNamespace(
+        st_mode=freezer.stat.S_IFREG | 0o400,
+        st_uid=0,
+        st_gid=0,
+        st_nlink=1,
+        st_dev=identity[0],
+        st_ino=identity[1],
+    )
+    monkeypatch.setattr(
+        freezer.os,
+        "fstat",
+        lambda descriptor: events.append(("fstat", descriptor)) or descriptor_stat,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "write_all",
+        lambda descriptor, payload: (
+            events.append(("write", descriptor)), payloads.append(payload)
+        ),
+    )
+    monkeypatch.setattr(
+        freezer.os, "fsync", lambda descriptor: events.append(("fsync", descriptor))
+    )
+    monkeypatch.setattr(
+        freezer.os,
+        "fchown",
+        lambda descriptor, uid, gid: events.append(
+            ("fchown", descriptor, uid, gid)
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        freezer.os,
+        "fchmod",
+        lambda descriptor, mode: events.append(("fchmod", descriptor, mode)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        freezer.os, "close", lambda descriptor: events.append(("close", descriptor))
+    )
+    monkeypatch.setattr(
+        freezer,
+        "fsync_directory",
+        lambda path: events.append(("fsync-directory", path)),
+    )
+    monkeypatch.setattr(
+        freezer,
+        "anchor_file_identity",
+        lambda path, **kwargs: events.append(("identity", path, kwargs)) or identity,
+    )
+
+    returned_identity = freezer.write_durable_anchor_staging({"schema_version": 1})
+
+    assert returned_identity == identity
+    assert json.loads(payloads[0]) == {"schema_version": 1}
+    assert events[0][0:2] == ("open", Path("/anchor/staging"))
+    assert events[0][2] & freezer.os.O_EXCL
+    assert events[0][2] & freezer.os.O_NOFOLLOW
+    assert events[0][3] == 0o600
+    assert events[1:] == [
+        ("fstat", 17),
+        ("write", 17),
+        ("fsync", 17),
+        ("fchown", 17, 0, 0),
+        ("fchmod", 17, 0o400),
+        ("fsync", 17),
+        ("fstat", 17),
+        ("close", 17),
+        ("fsync-directory", Path("/anchor")),
+        (
+            "identity",
+            Path("/anchor/staging"),
+            {"allowed_modes": {0o400}, "allowed_nlinks": {1}},
+        ),
+    ]
+
+
+def test_freezer_durably_links_anchor_before_unlinking_staging(
+    freezer, monkeypatch
+):
+    events = []
+    identity = (7, 11)
+    monkeypatch.setattr(freezer, "ANCHOR_STAGING", Path("/anchor/staging"))
+    monkeypatch.setattr(freezer, "EVIDENCE_ANCHOR", Path("/anchor/final"))
+    monkeypatch.setattr(freezer, "ANCHOR_PARENT", Path("/anchor"))
+    monkeypatch.setattr(
+        freezer.os,
+        "link",
+        lambda source, destination, follow_symlinks: events.append(
+            ("link", source, destination, follow_symlinks)
+        ),
+    )
+    monkeypatch.setattr(
+        freezer,
+        "fsync_directory",
+        lambda path: events.append(("fsync-directory", path)),
+    )
+    monkeypatch.setattr(
+        freezer,
+        "anchor_file_identity",
+        lambda path, **kwargs: events.append(("identity", path, kwargs)) or identity,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "unlink_anchor_path",
+        lambda path, expected, **kwargs: events.append(
+            ("unlink", path, expected, kwargs)
+        ),
+    )
+
+    freezer.publish_anchor_staging(identity)
+
+    assert events == [
+        (
+            "identity",
+            Path("/anchor/staging"),
+            {"allowed_modes": {0o400}, "allowed_nlinks": {1}},
+        ),
+        ("link", Path("/anchor/staging"), Path("/anchor/final"), False),
+        (
+            "identity",
+            Path("/anchor/staging"),
+            {"allowed_modes": {0o400}, "allowed_nlinks": {2}},
+        ),
+        (
+            "identity",
+            Path("/anchor/final"),
+            {"allowed_modes": {0o400}, "allowed_nlinks": {2}},
+        ),
+        ("fsync-directory", Path("/anchor")),
+        (
+            "unlink",
+            Path("/anchor/staging"),
+            identity,
+            {"allowed_modes": {0o400}, "allowed_nlinks": {2}},
+        ),
+        (
+            "identity",
+            Path("/anchor/final"),
+            {"allowed_modes": {0o400}, "allowed_nlinks": {1}},
+        ),
+    ]
+
+
+def _configure_freezer_transaction_paths(freezer, monkeypatch, tmp_path):
+    evidence_parent = tmp_path / "evidence"
+    anchor_parent = tmp_path / "anchors"
+    evidence_parent.mkdir(parents=True)
+    anchor_parent.mkdir(parents=True)
+    target = evidence_parent / "target"
+    staging = evidence_parent / ".target.staging"
+    anchor_staging = anchor_parent / ".anchor.staging"
+    evidence_anchor = anchor_parent / "anchor.json"
+    monkeypatch.setattr(freezer, "TARGET", target)
+    monkeypatch.setattr(freezer, "STAGING", staging)
+    monkeypatch.setattr(freezer, "EVIDENCE_PARENT", evidence_parent)
+    monkeypatch.setattr(freezer, "ANCHOR_PARENT", anchor_parent)
+    monkeypatch.setattr(freezer, "ANCHOR_STAGING", anchor_staging)
+    monkeypatch.setattr(freezer, "EVIDENCE_ANCHOR", evidence_anchor)
+    monkeypatch.setattr(freezer, "fsync_directory", lambda path: None)
+    modes = {}
+    real_path_info = freezer.path_info
+
+    def normalized_path_info(path):
+        value = real_path_info(path)
+        value["uid"] = 0
+        value["gid"] = 0
+        value["mode"] = f"{modes.get(Path(path), 0o700 if value['directory'] else 0o400):04o}"
+        return value
+
+    monkeypatch.setattr(freezer, "path_info", normalized_path_info)
+    return {
+        "target": target,
+        "staging": staging,
+        "anchor_staging": anchor_staging,
+        "evidence_anchor": evidence_anchor,
+        "modes": modes,
+    }
+
+
+@pytest.mark.parametrize("state", ("staging", "partial-anchor", "both"))
+def test_freezer_cleans_only_unpublished_incomplete_transaction_state(
+    freezer, monkeypatch, tmp_path, state
+):
+    paths = _configure_freezer_transaction_paths(
+        freezer, monkeypatch, tmp_path / state
+    )
+    if state in {"staging", "both"}:
+        partial = paths["staging"] / "release" / "build-identity.json"
+        partial.parent.mkdir(parents=True)
+        partial.write_bytes(b"partial")
+        paths["modes"][partial] = 0o600
+    if state in {"partial-anchor", "both"}:
+        paths["anchor_staging"].write_bytes(b"partial")
+        paths["modes"][paths["anchor_staging"]] = 0o600
+
+    assert freezer.recover_anchor({}, {}) is False
+    assert not paths["staging"].exists()
+    assert not paths["anchor_staging"].exists()
+
+
+def test_freezer_fails_closed_when_target_has_no_independent_anchor(
+    freezer, monkeypatch, tmp_path
+):
+    paths = _configure_freezer_transaction_paths(
+        freezer, monkeypatch, tmp_path
+    )
+    paths["target"].mkdir()
+    monkeypatch.setattr(
+        freezer,
+        "validate_existing_target",
+        lambda *args: pytest.fail("unanchored target must not be self-validated"),
+    )
+
+    with pytest.raises(RuntimeError, match="no independently durable anchor"):
+        freezer.recover_anchor({}, {})
+    assert not paths["evidence_anchor"].exists()
+    assert not paths["anchor_staging"].exists()
+    assert "reconstruct_anchor_from_target" not in (
+        DEPLOYMENT / "dev8-freeze-evidence.py"
+    ).read_text("utf-8")
+
+
+def test_freezer_fails_closed_on_published_target_with_partial_anchor(
+    freezer, monkeypatch, tmp_path
+):
+    paths = _configure_freezer_transaction_paths(
+        freezer, monkeypatch, tmp_path
+    )
+    paths["target"].mkdir()
+    paths["anchor_staging"].write_bytes(b"partial")
+    paths["modes"][paths["anchor_staging"]] = 0o600
+
+    with pytest.raises(RuntimeError, match="unsafe anchor transaction object"):
+        freezer.recover_anchor({}, {})
+    assert paths["target"].is_dir()
+    assert paths["anchor_staging"].read_bytes() == b"partial"
+    assert not paths["evidence_anchor"].exists()
+
+
+def test_freezer_recovers_target_from_valid_staging_anchor(
+    freezer, monkeypatch, tmp_path
+):
+    paths = _configure_freezer_transaction_paths(
+        freezer, monkeypatch, tmp_path
+    )
+    paths["target"].mkdir()
+    paths["anchor_staging"].write_bytes(b"validated-anchor")
+    anchor = {"schema_version": 1, "freeze_checks_passed": True}
+    monkeypatch.setattr(
+        freezer, "validate_existing_target", lambda *args: anchor
+    )
+
+    assert freezer.recover_anchor({}, {}) is True
+    assert paths["evidence_anchor"].read_bytes() == b"validated-anchor"
+    assert not paths["anchor_staging"].exists()
+
+
+def test_freezer_refuses_to_publish_or_unlink_replacement_anchor(
+    freezer, monkeypatch, tmp_path
+):
+    paths = _configure_freezer_transaction_paths(
+        freezer, monkeypatch, tmp_path
+    )
+    paths["anchor_staging"].write_bytes(b"validated")
+    expected_identity = freezer.anchor_file_identity(
+        paths["anchor_staging"], allowed_modes={0o400}, allowed_nlinks={1}
+    )
+    replacement = paths["anchor_staging"].with_name("replacement")
+    replacement.write_bytes(b"replacement")
+    replacement.replace(paths["anchor_staging"])
+
+    with pytest.raises(RuntimeError, match="identity changed before publication"):
+        freezer.publish_anchor_staging(expected_identity)
+    assert paths["anchor_staging"].read_bytes() == b"replacement"
+    assert not paths["evidence_anchor"].exists()
+
+    with pytest.raises(RuntimeError, match="refusing to unlink a replacement"):
+        freezer.unlink_anchor_path(
+            paths["anchor_staging"],
+            expected_identity,
+            allowed_modes={0o400},
+            allowed_nlinks={1},
+        )
+    assert paths["anchor_staging"].read_bytes() == b"replacement"
+
+
+def test_freezer_does_not_remove_replacement_staging_tree(
+    freezer, monkeypatch, tmp_path
+):
+    paths = _configure_freezer_transaction_paths(
+        freezer, monkeypatch, tmp_path
+    )
+    paths["staging"].mkdir()
+    expected_identity = freezer.incomplete_staging_identity()
+    original = paths["staging"].with_name("original-staging")
+    paths["staging"].rename(original)
+    paths["staging"].mkdir()
+
+    with pytest.raises(RuntimeError, match="replacement evidence staging tree"):
+        freezer.cleanup_incomplete_staging(expected_identity)
+    assert paths["staging"].is_dir()
+    assert original.is_dir()
+
+
+def test_freezer_does_not_delete_different_staging_inode_next_to_valid_anchor(
+    freezer, monkeypatch, tmp_path
+):
+    paths = _configure_freezer_transaction_paths(
+        freezer, monkeypatch, tmp_path
+    )
+    paths["target"].mkdir()
+    paths["evidence_anchor"].write_bytes(b"valid")
+    paths["anchor_staging"].write_bytes(b"replacement")
+    monkeypatch.setattr(
+        freezer,
+        "validate_existing_target",
+        lambda *args: {"schema_version": 1},
+    )
+
+    with pytest.raises(RuntimeError, match="not the same inode"):
+        freezer.recover_anchor({}, {})
+    assert paths["evidence_anchor"].read_bytes() == b"valid"
+    assert paths["anchor_staging"].read_bytes() == b"replacement"
+
+
+def test_freezer_persists_anchor_staging_before_publishing_target():
+    source = (DEPLOYMENT / "dev8-freeze-evidence.py").read_text("utf-8")
+    stage_call = source.rindex(
+        "        anchor_staging_identity = write_durable_anchor_staging(anchor)\n"
+    )
+    target_publish = source.rindex("        os.replace(STAGING, TARGET)\n")
+    assert stage_call < target_publish
+
+
+def test_server_gate_binds_control_hashes_and_full_service_identity():
+    source = (DEPLOYMENT / "dev8-server-gate.sh").read_text("utf-8")
+    assert (
+        "server_baseline_sha="
+        "37b498ffce8f175813e866c534b6514142436d9c4dbf29216f1dab1c880c57e4"
+    ) in source
+    assert (
+        "service_transition_sha="
+        "db60965c8bc1fd6d97ea6c793d135bb2906d10448cf80912538289c54b0fcbb3"
+    ) in source
+    assert "hashlib.sha256(baseline_payload).hexdigest() != baseline_sha256" in source
+    assert "hashlib.sha256(payload).hexdigest() != expected_sha256" in source
+    for marker in (
+        "--property=InvocationID",
+        "--property=ExecMainStartTimestampMonotonic",
+        "/proc/sys/kernel/random/boot_id",
+        'sample["proc_start_ticks"]',
+        'hashlib.sha256(sample["cmdline"]).hexdigest()',
+    ):
+        assert marker in source
+
+
+def test_verifier_service_sampler_closes_toctou_and_backs_final_check():
+    source = (DEPLOYMENT / "dev8-verify-frozen-evidence.py").read_text("utf-8")
+    sampler = source[source.index("def sample_service(") : source.index(
+        "\n\ndef verify_live_isolation(", source.index("def sample_service(")
+    )]
+    for marker in (
+        "boot_before = read_system_boot_id()",
+        "first = systemd_service_properties(unit)",
+        "second = systemd_service_properties(unit)",
+        'first["Id"] == unit',
+        'second["Id"] == unit',
+        "first == second",
+        "first_pid == second_pid",
+        "first_start_ticks == second_start_ticks",
+        "first_cmdline == second_cmdline",
+        "boot_before == boot_after",
+    ):
+        assert marker in sampler
+    assert '"Id", "ActiveState", "SubState"' in source
+    assert (
+        '"service_identity_pid_reuse_and_toctou_resistant": live["checks"]['
+        in source
+    )
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ("dev8-run-read-oracles.sh", "dev8-canonical-package-negative-gates.py"),
+)
+def test_dynamic_evidence_producers_capture_full_odoo_identity(filename):
+    source = (DEPLOYMENT / filename).read_text("utf-8")
+    for marker in (
+        '"boot_id"',
+        '"cmdline_sha256"',
+        '"exec_main_start_monotonic_usec"',
+        '"invocation_id"',
+        '"main_pid"',
+        '"proc_start_ticks"',
+        '"odoo_identity_before"',
+        '"odoo_identity_after"',
+        '"odoo_identity_unchanged"',
+    ):
+        assert marker in source
+
+
 def test_verifier_inspects_a_wal_snapshot_in_memory(verifier, tmp_path):
     database = tmp_path / "state.sqlite3"
     connection = sqlite3.connect(database)

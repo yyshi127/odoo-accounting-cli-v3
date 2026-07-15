@@ -359,9 +359,19 @@ def state_fingerprint(runtime: dict[str, Any]) -> dict[str, object]:
     }
 
 
-def odoo_pid() -> int:
+def systemd_identity() -> dict[str, str]:
     completed = subprocess.run(
-        ["systemctl", "show", "odoo19.service", "--property=MainPID", "--value"],
+        [
+            "/usr/bin/systemctl",
+            "show",
+            "odoo19.service",
+            "--property=Id",
+            "--property=ActiveState",
+            "--property=SubState",
+            "--property=MainPID",
+            "--property=InvocationID",
+            "--property=ExecMainStartTimestampMonotonic",
+        ],
         capture_output=True,
         check=False,
         text=True,
@@ -369,8 +379,69 @@ def odoo_pid() -> int:
         timeout=20,
     )
     if completed.returncode != 0 or completed.stderr.strip():
-        raise RuntimeError("could not inventory the Odoo service PID")
-    return int(completed.stdout.strip() or "0")
+        raise RuntimeError("could not inventory the Odoo service identity")
+    return dict(
+        line.split("=", 1)
+        for line in completed.stdout.splitlines()
+        if "=" in line
+    )
+
+
+def process_start_ticks(process: Path) -> int:
+    payload = (process / "stat").read_text(encoding="ascii")
+    end = payload.rfind(")")
+    fields = payload[end + 2 :].split() if end > 0 else []
+    if len(fields) <= 19 or not fields[19].isdigit():
+        raise RuntimeError("Odoo process start ticks are unavailable")
+    return int(fields[19])
+
+
+def odoo_identity() -> dict[str, object]:
+    boot_path = Path("/proc/sys/kernel/random/boot_id")
+    boot_before = boot_path.read_text(encoding="ascii").strip()
+    first = systemd_identity()
+    pid = int(first.get("MainPID", "0") or "0")
+    process = Path(f"/proc/{pid}")
+    if pid <= 0 or not process.is_dir():
+        raise RuntimeError("the Odoo service has no live MainPID")
+    cmdline = (process / "cmdline").read_bytes().replace(b"\0", b" ")
+    ticks = process_start_ticks(process)
+    second = systemd_identity()
+    second_pid = int(second.get("MainPID", "0") or "0")
+    second_process = Path(f"/proc/{second_pid}")
+    if second_pid <= 0 or not second_process.is_dir():
+        raise RuntimeError("the Odoo process disappeared while sampling")
+    second_cmdline = (second_process / "cmdline").read_bytes().replace(b"\0", b" ")
+    second_ticks = process_start_ticks(second_process)
+    boot_after = boot_path.read_text(encoding="ascii").strip()
+    if (
+        first != second
+        or pid != second_pid
+        or cmdline != second_cmdline
+        or ticks != second_ticks
+        or boot_before != boot_after
+    ):
+        raise RuntimeError("the Odoo service identity changed while sampling")
+    if (
+        first.get("Id") != "odoo19.service"
+        or first.get("ActiveState") != "active"
+        or first.get("SubState") != "running"
+        or b"odoo-accounting-cli-v3" in cmdline
+    ):
+        raise RuntimeError("the Odoo service identity is unsafe")
+    return {
+        "active_state": first["ActiveState"],
+        "boot_id": boot_before,
+        "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+        "exec_main_start_monotonic_usec": int(
+            first["ExecMainStartTimestampMonotonic"]
+        ),
+        "invocation_id": first["InvocationID"],
+        "main_pid": pid,
+        "proc_start_ticks": ticks,
+        "sub_state": first["SubState"],
+        "unit": "odoo19.service",
+    }
 
 
 def harden_tree(root: Path) -> None:
@@ -703,7 +774,8 @@ def main() -> None:
         }
 
         baseline_state = state_fingerprint(runtime)
-        initial_pid = odoo_pid()
+        initial_identity = odoo_identity()
+        initial_pid = int(initial_identity["main_pid"])
         if initial_pid <= 0 or not Path(f"/proc/{initial_pid}").is_dir():
             raise RuntimeError("the Odoo service has no live MainPID")
         results: dict[str, object] = {}
@@ -715,7 +787,8 @@ def main() -> None:
             outcome = execute(launcher, config_path, request)
             after_state = state_fingerprint(runtime)
             after_consumed = token_consumed(Path(runtime["auth_state_path"]), token_id)
-            after_pid = odoo_pid()
+            after_identity = odoo_identity()
+            after_pid = int(after_identity["main_pid"])
             marker_after = descriptor_identity(marker)
             expected_exit = 5 if name in {"wrong-path", "same-bytes-tmp-copy"} else 6
             expected_error = (
@@ -736,6 +809,7 @@ def main() -> None:
                 "receipt_hash_unchanged": after_state["receipt"]
                 == baseline_state["receipt"],
                 "audit_hash_unchanged": after_state["audit"] == baseline_state["audit"],
+                "odoo_identity_unchanged": after_identity == initial_identity,
                 "odoo_pid_unchanged": after_pid == initial_pid,
                 "odoo_pid_active": after_pid > 0
                 and Path(f"/proc/{after_pid}").is_dir(),
@@ -747,6 +821,7 @@ def main() -> None:
                 "expected_error": expected_error,
                 "observed": outcome,
                 "state_after": after_state,
+                "odoo_identity_after": after_identity,
                 "odoo_pid_after": after_pid,
                 "canary_marker_after": marker_after,
                 "checks": checks,
@@ -755,6 +830,7 @@ def main() -> None:
 
         canonical_after = package_identity(CANONICAL_PACKAGE)
         final_marker = descriptor_identity(marker)
+        final_identity = odoo_identity()
         report = {
             "schema_version": 1,
             "release": RELEASE_ID,
@@ -767,12 +843,15 @@ def main() -> None:
             "artifact_evidence": artifact_evidence,
             "fixture_checks": fixture_checks,
             "baseline_state": baseline_state,
+            "odoo_identity_before": initial_identity,
+            "odoo_identity_after": final_identity,
             "odoo_pid_before": initial_pid,
             "canary_marker_final": final_marker,
             "odoo_canary_reached": final_marker != initial_marker,
             "cases": results,
             "all_checks_passed": canonical_after == canonical_before
             and final_marker == initial_marker
+            and final_identity == initial_identity
             and all(fixture_checks.values())
             and all(value["all_checks_passed"] for value in results.values()),
             "production_promotion_allowed": False,

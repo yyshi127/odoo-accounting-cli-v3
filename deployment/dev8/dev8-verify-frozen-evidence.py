@@ -25,7 +25,7 @@ from pathlib import Path, PurePosixPath
 
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 VERSION = "0.1.0.dev8"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.10"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.12"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 TREE = "fd389ef55fbc6723379a2928a10b665925829599"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
@@ -36,8 +36,13 @@ RUNTIME_SHA256 = "a089d13a2418225e245d10cf76728ad6af31ce0b5fde9f5b14902c44eebe59
 PLAN_SHA256 = "c6dd18fc356bdbc26de43941656e9af62f639d06393ce87572e7a08e5759f2e5"
 DATABASE_UUID = "19b09656-d10f-11f0-9065-00163e54a5ad"
 LAUNCHER_SHA256 = "3532fb5e83f9cc74d594f1020ea1572a5a2c6fa1a250c64fd3b210f110ef9944"
-ROOT = Path("/var/lib/odoo-accounting-cli-v3/evidence") / RELEASE
-ANCHOR = Path("/var/lib/odoo-accounting-cli-v3/evidence-anchors") / f"{RELEASE}.json"
+PRIOR_TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.8"
+PRIOR_AUTH_SHA256 = "a344df0dc16910cc517070c52fc0d34179b0ebe4502549e60b22fe96eb6c1109"
+PRIOR_RECEIPT_SHA256 = "a76ebbd71ff034da037fbeac4529f4d466ee8116bb172e1923c5f65d6ce8e82f"
+PRIOR_AUDIT_HEAD = "881bbbeb84a6abb19833f91e6f85ebf337b801c51d8867b344b661dfa9e54570"
+EVIDENCE_ID = f"{RELEASE}--{TOOLCHAIN_VERSION}"
+ROOT = Path("/var/lib/odoo-accounting-cli-v3/evidence") / EVIDENCE_ID
+ANCHOR = Path("/var/lib/odoo-accounting-cli-v3/evidence-anchors") / f"{EVIDENCE_ID}.json"
 CHECKSUMS = ROOT / "EVIDENCE-SHA256SUMS"
 METADATA = ROOT / "EVIDENCE-METADATA.json"
 LIVE_RELEASE = Path("/opt/odoo-accounting-cli-v3/releases") / RELEASE
@@ -48,6 +53,8 @@ PIPELINE_LOCK = Path("/opt/odoo-accounting-cli-v3/.dev8-pipeline.lock")
 INSTALL_JOURNAL = Path("/opt/odoo-accounting-cli-v3/.dev8-install-transaction.json")
 RUNTIME_JOURNAL = Path("/etc/odoo-accounting-cli-v3/.dev8-runtime-transaction.json")
 SERVER_BASELINE_NAME = "SERVER-BASELINE.json"
+SERVER_SERVICE_TRANSITION_NAME = "SERVER-SERVICE-TRANSITION.json"
+PRIOR_EVIDENCE_DISPOSITION_NAME = "PRIOR-EVIDENCE-DISPOSITION.json"
 CASES = (
     ("registry-list", "acct.registry.list.v1"),
     ("trial-balance", "acct.gl.trial_balance.v1"),
@@ -78,7 +85,12 @@ TOOL_FILES = (
     "dev8-verify-frozen-evidence.py",
 )
 TOOLCHAIN_MANIFEST_NAME = "TOOLCHAIN-MANIFEST.json"
-MANIFEST_FILES = (*TOOL_FILES, SERVER_BASELINE_NAME)
+MANIFEST_FILES = (
+    *TOOL_FILES,
+    SERVER_BASELINE_NAME,
+    SERVER_SERVICE_TRANSITION_NAME,
+    PRIOR_EVIDENCE_DISPOSITION_NAME,
+)
 DEPLOYMENT_FILES = {
     *(f"{name}.{suffix}" for name in ("install", "runtime-setup", "server-gate") for suffix in ("stdout", "stderr", "exit")),
 }
@@ -98,6 +110,8 @@ EXPECTED_FILES = {
     "security/secret-scan.json",
     f"tools/{TOOLCHAIN_MANIFEST_NAME}",
     f"tools/{SERVER_BASELINE_NAME}",
+    f"tools/{SERVER_SERVICE_TRANSITION_NAME}",
+    f"tools/{PRIOR_EVIDENCE_DISPOSITION_NAME}",
     "tools/TOOL-INVENTORY.json",
     "EVIDENCE-METADATA.json",
     "EVIDENCE-SHA256SUMS",
@@ -107,6 +121,60 @@ EXPECTED_FILES = {
     *(f"deployment/{name}" for name in DEPLOYMENT_FILES),
     *(f"tools/{name}" for name in TOOL_FILES),
 }
+SERVICE_OBSERVATIONS = (
+    {
+        "observation_id": "service-observation-20260714T145014Z",
+        "first_observed_at": "2026-07-14T14:50:14Z",
+        "last_observed_at": "2026-07-14T14:53:29Z",
+    },
+    {
+        "observation_id": "service-observation-20260715T001423Z",
+        "first_observed_at": "2026-07-15T00:14:23Z",
+        "last_observed_at": "2026-07-15T00:15:58Z",
+    },
+    {
+        "observation_id": "service-observation-20260715T021109Z",
+        "first_observed_at": "2026-07-15T02:11:09Z",
+        "last_observed_at": "2026-07-15T02:13:44Z",
+    },
+)
+JOURNAL_RESTART_CYCLES = (
+    ("2026-07-14T14:54:40.864133Z", "2026-07-14T14:54:44.223188Z"),
+    ("2026-07-14T15:00:15.480601Z", "2026-07-14T15:00:18.317106Z"),
+    ("2026-07-14T15:01:58.803407Z", "2026-07-14T15:02:05.840052Z"),
+    ("2026-07-14T15:04:28.843964Z", "2026-07-14T15:04:36.451130Z"),
+    ("2026-07-14T15:06:18.973566Z", "2026-07-14T15:08:54.104055Z"),
+    ("2026-07-14T15:09:57.196883Z", "2026-07-14T15:10:09.568053Z"),
+    ("2026-07-14T15:12:30.427274Z", "2026-07-14T15:15:20.058024Z"),
+    ("2026-07-14T15:24:41.403921Z", "2026-07-14T15:24:50.648051Z"),
+    ("2026-07-14T15:29:00.948715Z", "2026-07-14T15:29:11.025010Z"),
+    ("2026-07-14T15:37:08.517076Z", "2026-07-14T15:37:23.592036Z"),
+    ("2026-07-15T00:35:03.900349Z", "2026-07-15T00:35:19.231045Z"),
+    ("2026-07-15T00:51:54.132437Z", "2026-07-15T00:52:11.030052Z"),
+    ("2026-07-15T01:56:23.289706Z", "2026-07-15T01:56:38.833032Z"),
+)
+JOURNAL_SEGMENT_COUNTS = (10, 3)
+EVIDENCE_METADATA_FIELDS = frozenset(
+    {
+        "schema_version", "release", "evidence_id", "toolchain_version",
+        "toolchain_manifest_sha256", "server_baseline_sha256",
+        "server_baseline_size", "server_service_transition_sha256",
+        "server_service_transition_size", "prior_evidence_disposition_sha256",
+        "prior_evidence_disposition_size", "version", "commit", "git_tree",
+        "package_sha256", "package_size", "manifest_sha256", "registry_digest",
+        "runtime_config_sha256", "read_plan_sha256", "database_uuid", "audit_head",
+        "auth_tokens", "consumed_receipts", "receipt_audit_events",
+        "verified_batch_auth_tokens", "verified_batch_receipts",
+        "verified_batch_audit_events", "verified_capabilities",
+        "registered_capabilities", "staged_capabilities", "enabled_capabilities",
+        "frozen_at", "evidence_scope", "evidence_visibility", "evidence_file_count",
+        "freeze_checks_passed", "final_verification_status", "goal_complete",
+        "secret_material_included", "production_writes_authorized",
+        "odoo_accounting_write_performed", "pi_route_changed", "v2_changed",
+        "production_dependency_closure_complete", "production_promotion_allowed",
+        "promotion_blockers",
+    }
+)
 GENESIS_HASH = "0" * 64
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_HASHES = {
@@ -118,7 +186,7 @@ EXECUTION_SOURCE_HASHES = {
     "dev8-run-real-reads.sh": SOURCE_HASHES["real-read-runner"],
     "dev8-sign-read.py": SOURCE_HASHES["signer"],
     "dev8-launcher-isolation-gate.py": SOURCE_HASHES["launcher-isolation"],
-    "dev8-run-read-oracles.sh": "a69faa4d38341c5c9135c43e0f6308c3335eb65fb90b72f757b8a1e26d1af618",
+    "dev8-run-read-oracles.sh": "4e057e4e7c0f92525f0ef862fb61b19622fb2f5043c1859bb5f86bdea2fd2689",
     "dev6-trial-balance-sql-oracle.py": "7aa959361ac994f17cd871d33211bbef02ab816993ff87f088c82a6541cfcb9b",
     "dev6-ar-sql-oracle.py": "cdb49967d60af0aa416cadaeb61503847ddfeb4d111aa0e01335fe06b78499c6",
     "dev7-ap-sql-oracle.py": "ad54540725e8110ea1449586d0dcddb1d6c70b1e387f0e843b989aca6b70f1e5",
@@ -163,6 +231,48 @@ EXPECTED_RUNTIME = {
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def validate_evidence_metadata_fields(document: object) -> dict[str, object]:
+    require(
+        isinstance(document, dict) and set(document) == EVIDENCE_METADATA_FIELDS,
+        "evidence metadata fields are not exact",
+    )
+    return document
+
+
+def parse_utc_second(value: object, label: str) -> datetime:
+    require(
+        isinstance(value, str)
+        and re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            value,
+        ) is not None,
+        f"{label} is not a UTC second timestamp",
+    )
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is invalid") from exc
+
+
+def parse_utc_microsecond(value: object, label: str) -> datetime:
+    require(
+        isinstance(value, str)
+        and re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z",
+            value,
+        ) is not None,
+        f"{label} is not a UTC microsecond timestamp",
+    )
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is invalid") from exc
 
 
 def validate_toolchain_manifest(document: object) -> dict[str, dict[str, object]]:
@@ -284,6 +394,421 @@ def validate_server_baseline(document: object) -> dict[str, object]:
         "server baseline V3 absence set mismatch",
     )
     return document
+
+
+def validate_service_transition(
+    document: object,
+    baseline_payload: bytes,
+    server_baseline: dict[str, object],
+) -> dict[str, object]:
+    expected_keys = {
+        "schema_version", "application_release", "baseline", "classification",
+        "actor_attribution", "history", "journal_transition_series",
+        "maintenance_authorization_verified", "observation",
+        "production_write_authorized", "production_promotion_allowed", "services",
+        "system_boot_id",
+    }
+    require(
+        isinstance(document, dict) and set(document) == expected_keys,
+        "server service transition fields are not exact",
+    )
+    require(
+        isinstance(document.get("schema_version"), int)
+        and not isinstance(document.get("schema_version"), bool)
+        and document.get("schema_version") == 2
+        and document.get("application_release") == RELEASE
+        and document.get("classification")
+        == "out_of_band_service_transition_history_observed"
+        and document.get("actor_attribution") == "unverified"
+        and document.get("maintenance_authorization_verified") is False
+        and document.get("production_write_authorized") is False
+        and document.get("production_promotion_allowed") is False
+        and document.get("system_boot_id")
+        == "9546f53a-2e02-476d-b579-1960c2bffc30",
+        "server service transition identity or safety flags mismatch",
+    )
+
+    baseline = document.get("baseline")
+    require(
+        isinstance(baseline, dict)
+        and baseline
+        == {
+            "captured_at": server_baseline.get("captured_at"),
+            "sha256": hashlib.sha256(baseline_payload).hexdigest(),
+            "size": len(baseline_payload),
+        }
+        and isinstance(baseline.get("size"), int)
+        and not isinstance(baseline.get("size"), bool)
+        and set(baseline) == {"captured_at", "sha256", "size"},
+        "server service transition baseline binding mismatch",
+    )
+
+    boot_id = document.get("system_boot_id")
+    require(
+        isinstance(boot_id, str)
+        and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            boot_id,
+        ) is not None,
+        "server service transition boot ID is invalid",
+    )
+
+    baseline_services = server_baseline.get("services")
+    require(isinstance(baseline_services, list), "server baseline service set mismatch")
+    baseline_by_unit = {
+        str(service["unit"]): service
+        for service in baseline_services
+        if isinstance(service, dict) and isinstance(service.get("unit"), str)
+    }
+    require(
+        set(baseline_by_unit)
+        == {"odoo19.service", "sudo-pi-agent-bridge.service"},
+        "server baseline service set mismatch",
+    )
+    expected_odoo_identities = (
+        {
+            "effective_main_pid": 2316421,
+            "exec_main_start_monotonic_usec": 10836291877098,
+            "invocation_id": "5d50fca75f9043c0a7cacb8f9b853dbc",
+            "proc_start_ticks": 1083629187,
+        },
+        {
+            "effective_main_pid": 2344733,
+            "exec_main_start_monotonic_usec": 10840181608082,
+            "invocation_id": "5b211eeb1dbd4f458396f6097b0f6623",
+            "proc_start_ticks": 1084018160,
+        },
+        {
+            "effective_main_pid": 2576660,
+            "exec_main_start_monotonic_usec": 10877336849089,
+            "invocation_id": "ae54787981dd466db3b03ae6148b62bb",
+            "proc_start_ticks": 1087733684,
+        },
+    )
+    pi_identity = {
+        "effective_main_pid": 2065799,
+        "exec_main_start_monotonic_usec": 7805455913314,
+        "invocation_id": "5d393f016f7d4f56849543de03b83a9b",
+        "proc_start_ticks": 780545590,
+    }
+    expected_units = ("odoo19.service", "sudo-pi-agent-bridge.service")
+    service_fields = {
+        "unit", "transition", "active_state", "sub_state", "baseline_main_pid",
+        "effective_main_pid", "cmdline_sha256", "invocation_id",
+        "exec_main_start_monotonic_usec", "proc_start_ticks",
+    }
+
+    def expected_service(
+        unit: str, identity: dict[str, object]
+    ) -> dict[str, object]:
+        baseline_service = baseline_by_unit[unit]
+        return {
+            "unit": unit,
+            "active_state": "active",
+            "sub_state": "running",
+            "baseline_main_pid": baseline_service["main_pid"],
+            "effective_main_pid": identity["effective_main_pid"],
+            "cmdline_sha256": baseline_service["cmdline_sha256"],
+            "invocation_id": identity["invocation_id"],
+            "exec_main_start_monotonic_usec": identity[
+                "exec_main_start_monotonic_usec"
+            ],
+            "proc_start_ticks": identity["proc_start_ticks"],
+            "transition": "changed" if unit == "odoo19.service" else "unchanged",
+        }
+
+    history = document.get("history")
+    require(
+        isinstance(history, list)
+        and len(history) == len(SERVICE_OBSERVATIONS)
+        and all(isinstance(entry, dict) for entry in history),
+        "server service transition history is invalid",
+    )
+    prior_last = parse_utc_second(
+        server_baseline.get("captured_at"), "server baseline capture"
+    )
+    history_windows: list[tuple[datetime, datetime]] = []
+    history_ids: list[str] = []
+    for index, (entry, odoo_identity, expected_observation) in enumerate(
+        zip(history, expected_odoo_identities, SERVICE_OBSERVATIONS, strict=True)
+    ):
+        require(
+            set(entry) == {"observation_id", "observation", "services"}
+            and entry.get("observation_id")
+            == expected_observation["observation_id"],
+            f"server service transition history fields mismatch: {index}",
+        )
+        observation = entry.get("observation")
+        require(
+            isinstance(observation, dict)
+            and observation
+            == {
+                "first_observed_at": expected_observation["first_observed_at"],
+                "last_observed_at": expected_observation["last_observed_at"],
+            },
+            f"server service transition observation fields mismatch: {index}",
+        )
+        first_observed = parse_utc_second(
+            observation.get("first_observed_at"),
+            f"server service observation {index} first",
+        )
+        last_observed = parse_utc_second(
+            observation.get("last_observed_at"),
+            f"server service observation {index} last",
+        )
+        require(
+            first_observed > prior_last
+            and last_observed - first_observed >= timedelta(seconds=60),
+            f"server service transition observation ordering mismatch: {index}",
+        )
+        expected_services = [
+            expected_service("odoo19.service", odoo_identity),
+            expected_service("sudo-pi-agent-bridge.service", pi_identity),
+        ]
+        services = entry.get("services")
+        require(
+            isinstance(services, list) and services == expected_services,
+            f"server service transition service identity mismatch: {index}",
+        )
+        for expected_unit, service in zip(expected_units, services, strict=True):
+            require(
+                isinstance(service, dict)
+                and set(service) == service_fields
+                and service.get("unit") == expected_unit
+                and exact_integer_fields(
+                    service,
+                    (
+                        "baseline_main_pid", "effective_main_pid",
+                        "exec_main_start_monotonic_usec", "proc_start_ticks",
+                    ),
+                )
+                and all(
+                    int(service[field]) > 0
+                    for field in (
+                        "baseline_main_pid", "effective_main_pid",
+                        "exec_main_start_monotonic_usec", "proc_start_ticks",
+                    )
+                )
+                and isinstance(service.get("cmdline_sha256"), str)
+                and HEX64.fullmatch(str(service["cmdline_sha256"])) is not None
+                and isinstance(service.get("invocation_id"), str)
+                and re.fullmatch(r"[0-9a-f]{32}", str(service["invocation_id"]))
+                is not None,
+                f"server service transition record fields mismatch: {index}:{expected_unit}",
+            )
+        history_ids.append(str(entry["observation_id"]))
+        history_windows.append((first_observed, last_observed))
+        prior_last = last_observed
+
+    require(
+        len(set(history_ids)) == len(SERVICE_OBSERVATIONS)
+        and document.get("observation") == history[-1]["observation"]
+        and document.get("services") == history[-1]["services"],
+        "server service transition current projection mismatch",
+    )
+
+    identity_fields = (
+        "effective_main_pid", "invocation_id", "exec_main_start_monotonic_usec",
+        "proc_start_ticks",
+    )
+    require(
+        all(
+            all(
+                previous["services"][0][field] != current["services"][0][field]
+                for field in identity_fields
+            )
+            and previous["services"][1] == current["services"][1]
+            for previous, current in zip(history, history[1:])
+        ),
+        "server service transition adjacent identities mismatch",
+    )
+
+    series = document.get("journal_transition_series")
+    series_fields = {
+        "from_observation_id", "intermediate_full_service_identities_available",
+        "restart_cycle_count", "restart_cycles", "source", "to_observation_id",
+        "unit",
+    }
+    require(
+        isinstance(series, dict)
+        and set(series) == series_fields
+        and series.get("from_observation_id") == history_ids[0]
+        and series.get("to_observation_id") == history_ids[-1]
+        and series.get("intermediate_full_service_identities_available") is False
+        and isinstance(series.get("restart_cycle_count"), int)
+        and not isinstance(series.get("restart_cycle_count"), bool)
+        and series.get("restart_cycle_count") == len(JOURNAL_RESTART_CYCLES)
+        and isinstance(series.get("restart_cycles"), list)
+        and len(series["restart_cycles"]) == len(JOURNAL_RESTART_CYCLES)
+        and series.get("source") == "systemd_journal_read_only"
+        and series.get("unit") == "odoo19.service",
+        "server service transition journal series mismatch",
+    )
+    previous_started = history_windows[0][1]
+    for expected_cycle, (cycle, expected_times) in enumerate(
+        zip(series["restart_cycles"], JOURNAL_RESTART_CYCLES, strict=True), start=1
+    ):
+        stopping_value, started_value = expected_times
+        require(
+            isinstance(cycle, dict)
+            and set(cycle) == {"cycle", "started_at", "stopping_at"}
+            and isinstance(cycle.get("cycle"), int)
+            and not isinstance(cycle.get("cycle"), bool)
+            and cycle
+            == {
+                "cycle": expected_cycle,
+                "started_at": started_value,
+                "stopping_at": stopping_value,
+            },
+            f"server service transition journal cycle fields mismatch: {expected_cycle}",
+        )
+        stopping_at = parse_utc_microsecond(
+            cycle.get("stopping_at"),
+            f"server service transition cycle {expected_cycle} stop",
+        )
+        started_at = parse_utc_microsecond(
+            cycle.get("started_at"),
+            f"server service transition cycle {expected_cycle} start",
+        )
+        require(
+            stopping_at > previous_started
+            and started_at > stopping_at
+            and started_at < history_windows[-1][0],
+            f"server service transition journal chronology mismatch: {expected_cycle}",
+        )
+        previous_started = started_at
+    require(
+        len(JOURNAL_SEGMENT_COUNTS) == len(history) - 1
+        and sum(JOURNAL_SEGMENT_COUNTS) == len(JOURNAL_RESTART_CYCLES),
+        "server service transition journal segment count mismatch",
+    )
+    offset = 0
+    for segment_index, cycle_count in enumerate(JOURNAL_SEGMENT_COUNTS):
+        segment = series["restart_cycles"][offset : offset + cycle_count]
+        require(
+            segment
+            and parse_utc_microsecond(
+                segment[0]["stopping_at"], f"segment {segment_index} stop"
+            ) > history_windows[segment_index][1]
+            and parse_utc_microsecond(
+                segment[-1]["started_at"], f"segment {segment_index} start"
+            ) < history_windows[segment_index + 1][0],
+            f"server service transition journal segment mismatch: {segment_index}",
+        )
+        offset += cycle_count
+    return document
+
+
+def validate_prior_evidence_disposition(document: object) -> dict[str, object]:
+    expected_keys = {
+        "schema_version", "application_release", "recorded_at", "status",
+        "reason_code", "invalidating_service_observation_id",
+        "final_verifier_passed", "prior_evidence", "production_promotion_allowed",
+    }
+    require(
+        isinstance(document, dict) and set(document) == expected_keys,
+        "prior evidence disposition fields are not exact",
+    )
+    require(
+        isinstance(document.get("schema_version"), int)
+        and not isinstance(document.get("schema_version"), bool)
+        and document.get("schema_version") == 1
+        and document.get("application_release") == RELEASE
+        and document.get("status") == "retained_nonfinal"
+        and document.get("reason_code") == "baseline_service_pid_changed_before_final_verification"
+        and document.get("invalidating_service_observation_id")
+        == "service-observation-20260714T145014Z"
+        and document.get("recorded_at") == "2026-07-14T14:53:29Z"
+        and document.get("final_verifier_passed") is False
+        and document.get("production_promotion_allowed") is False,
+        "prior evidence disposition identity or safety flags mismatch",
+    )
+    parse_utc_second(
+        document.get("recorded_at"), "prior evidence disposition time"
+    )
+    prior = document.get("prior_evidence")
+    require(
+        isinstance(prior, dict)
+        and set(prior) == {
+            "toolchain_version", "evidence_path", "anchor_path", "anchor_sha256",
+            "anchor_size", "evidence_checksum_manifest_sha256",
+            "evidence_metadata_sha256",
+        }
+        and prior.get("toolchain_version") == PRIOR_TOOLCHAIN_VERSION
+        and prior.get("evidence_path")
+        == f"/var/lib/odoo-accounting-cli-v3/evidence/{RELEASE}"
+        and prior.get("anchor_path")
+        == f"/var/lib/odoo-accounting-cli-v3/evidence-anchors/{RELEASE}.json"
+        and prior.get("anchor_sha256")
+        == "429d02227cd2d4e35df84d9d0de25ad8f0be7081d8c4cae4d63366dab27b80d6"
+        and isinstance(prior.get("anchor_size"), int)
+        and not isinstance(prior.get("anchor_size"), bool)
+        and prior.get("anchor_size") == 1120
+        and prior.get("evidence_checksum_manifest_sha256")
+        == "0bb87449e070523cabf0967a26dbe04dc8f0c4da3bc1c490618429517320485e"
+        and prior.get("evidence_metadata_sha256")
+        == "0320acebc25ca47590b6898d7630814beb0e1e7c453632c876a63f8c813f00be"
+        and prior.get("evidence_path") != str(ROOT)
+        and prior.get("anchor_path") != str(ANCHOR),
+        "prior evidence disposition retained evidence identity mismatch",
+    )
+    return document
+
+
+def effective_service_identities(
+    server_baseline: dict[str, object],
+    service_transition: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    baseline_services = server_baseline.get("services")
+    transition_services = service_transition.get("services")
+    require(
+        isinstance(baseline_services, list) and isinstance(transition_services, list),
+        "effective service identity inputs are invalid",
+    )
+    baseline_by_unit = {
+        str(service["unit"]): service
+        for service in baseline_services
+        if isinstance(service, dict) and isinstance(service.get("unit"), str)
+    }
+    identities: dict[str, dict[str, object]] = {}
+    for service in transition_services:
+        require(isinstance(service, dict), "server service transition record is invalid")
+        unit = str(service.get("unit"))
+        baseline_service = baseline_by_unit.get(unit)
+        require(
+            isinstance(baseline_service, dict)
+            and service.get("baseline_main_pid") == baseline_service.get("main_pid")
+            and service.get("cmdline_sha256") == baseline_service.get("cmdline_sha256"),
+            f"effective service identity baseline mismatch: {unit}",
+        )
+        identities[unit] = {
+            "unit": unit,
+            "active_state": service["active_state"],
+            "sub_state": service["sub_state"],
+            "main_pid": service["effective_main_pid"],
+            "boot_id": service_transition["system_boot_id"],
+            "invocation_id": service["invocation_id"],
+            "exec_main_start_monotonic_usec": service["exec_main_start_monotonic_usec"],
+            "proc_start_ticks": service["proc_start_ticks"],
+            "cmdline_sha256": service["cmdline_sha256"],
+        }
+    require(
+        set(identities) == {"odoo19.service", "sudo-pi-agent-bridge.service"},
+        "effective service identity set mismatch",
+    )
+    return identities
+
+
+def effective_service_pids(
+    server_baseline: dict[str, object],
+    service_transition: dict[str, object],
+) -> dict[str, int]:
+    return {
+        unit: int(identity["main_pid"])
+        for unit, identity in effective_service_identities(
+            server_baseline, service_transition
+        ).items()
+    }
 
 
 def baseline_service_pids(document: dict[str, object]) -> dict[str, int]:
@@ -457,6 +982,157 @@ def strict_read(
     return b"".join(chunks)
 
 
+def validate_retained_prior_evidence(
+    disposition: dict[str, object],
+) -> dict[str, object]:
+    prior = disposition.get("prior_evidence")
+    require(isinstance(prior, dict), "prior evidence disposition is invalid")
+    evidence_root = Path(str(prior["evidence_path"]))
+    anchor_path = Path(str(prior["anchor_path"]))
+    require(
+        evidence_root
+        == Path("/var/lib/odoo-accounting-cli-v3/evidence") / RELEASE
+        and anchor_path
+        == Path("/var/lib/odoo-accounting-cli-v3/evidence-anchors")
+        / f"{RELEASE}.json"
+        and evidence_root != ROOT
+        and anchor_path != ANCHOR,
+        "prior evidence path is not the retained nonfinal bundle",
+    )
+    root_metadata = evidence_root.lstat()
+    require(
+        stat.S_ISDIR(root_metadata.st_mode)
+        and not evidence_root.is_symlink()
+        and evidence_root.resolve(strict=True) == evidence_root
+        and root_metadata.st_uid == 0
+        and root_metadata.st_gid == 0
+        and stat.S_IMODE(root_metadata.st_mode) == 0o500,
+        "retained prior evidence root metadata is invalid",
+    )
+    anchor_payload = strict_read(
+        anchor_path,
+        mode=0o400,
+        expected_sha256=str(prior["anchor_sha256"]),
+        max_bytes=1_048_576,
+    )
+    require(
+        len(anchor_payload) == prior["anchor_size"],
+        "retained prior evidence anchor size mismatch",
+    )
+    prior_anchor = load_json_bytes(
+        anchor_payload, "retained prior evidence anchor"
+    )
+    require(
+        prior_anchor.get("release") == RELEASE
+        and prior_anchor.get("evidence_path") == str(evidence_root)
+        and prior_anchor.get("evidence_checksum_manifest_sha256")
+        == prior["evidence_checksum_manifest_sha256"]
+        and prior_anchor.get("evidence_metadata_sha256")
+        == prior["evidence_metadata_sha256"]
+        and prior_anchor.get("production_promotion_allowed") is False,
+        "retained prior evidence anchor content mismatch",
+    )
+    checksum_payload = strict_read(
+        evidence_root / "EVIDENCE-SHA256SUMS",
+        mode=0o400,
+        expected_sha256=str(prior["evidence_checksum_manifest_sha256"]),
+    )
+    checksums = parse_checksums(checksum_payload)
+    require(
+        checksums.get("EVIDENCE-METADATA.json")
+        == prior["evidence_metadata_sha256"]
+        and f"tools/{TOOLCHAIN_MANIFEST_NAME}" in checksums,
+        "retained prior evidence checksum bindings are incomplete",
+    )
+    require(
+        checksums.get("state/auth-state.sqlite3") == PRIOR_AUTH_SHA256
+        and checksums.get("state/receipt-state.sqlite3")
+        == PRIOR_RECEIPT_SHA256
+        and "state/audit-events.json" in checksums,
+        "retained prior state checksum bindings are incomplete",
+    )
+    prior_auth_payload = strict_read(
+        evidence_root / "state/auth-state.sqlite3",
+        mode=0o400,
+        expected_sha256=PRIOR_AUTH_SHA256,
+    )
+    prior_receipt_payload = strict_read(
+        evidence_root / "state/receipt-state.sqlite3",
+        mode=0o400,
+        expected_sha256=PRIOR_RECEIPT_SHA256,
+    )
+    prior_audit_payload = strict_read(
+        evidence_root / "state/audit-events.json",
+        mode=0o400,
+        expected_sha256=checksums["state/audit-events.json"],
+    )
+    prior_auth_state, prior_auth_events = inspect_db(prior_auth_payload)
+    prior_receipt_state, prior_receipt_events = inspect_db(prior_receipt_payload)
+    prior_events = verify_chain(prior_receipt_events)
+    prior_exported = json.loads(
+        prior_audit_payload.decode("utf-8"), object_pairs_hook=reject_duplicates
+    )
+    require(
+        prior_auth_events == []
+        and prior_auth_state["counts"]["consumed_auth_tokens"] == 4
+        and prior_receipt_state["counts"]["consumed_receipts"] == 4
+        and prior_receipt_state["counts"]["audit_events"] == 4
+        and len(prior_events) == 4
+        and prior_events[-1]["event_hash"] == PRIOR_AUDIT_HEAD
+        and prior_exported == prior_events,
+        "retained prior state identity or audit chain mismatch",
+    )
+    metadata_payload = strict_read(
+        evidence_root / "EVIDENCE-METADATA.json",
+        mode=0o400,
+        expected_sha256=str(prior["evidence_metadata_sha256"]),
+    )
+    prior_metadata = load_json_bytes(
+        metadata_payload, "retained prior evidence metadata"
+    )
+    require(
+        prior_metadata.get("release") == RELEASE
+        and prior_metadata.get("goal_complete") is False
+        and prior_metadata.get("production_promotion_allowed") is False,
+        "retained prior evidence metadata safety flags mismatch",
+    )
+    manifest_relative = f"tools/{TOOLCHAIN_MANIFEST_NAME}"
+    prior_manifest_payload = strict_read(
+        evidence_root / "tools" / TOOLCHAIN_MANIFEST_NAME,
+        mode=0o400,
+        expected_sha256=checksums[manifest_relative],
+    )
+    prior_manifest = load_json_bytes(
+        prior_manifest_payload, "retained prior toolchain manifest"
+    )
+    require(
+        prior_manifest.get("schema_version") == 1
+        and prior_manifest.get("toolchain_version")
+        == prior["toolchain_version"]
+        == PRIOR_TOOLCHAIN_VERSION
+        and prior_manifest.get("application_release") == RELEASE
+        and prior_manifest.get("application_commit") == COMMIT
+        and prior_manifest.get("application_package_sha256") == PACKAGE_SHA256
+        and prior_manifest.get("source_directory") == "deployment/dev8",
+        "retained prior toolchain manifest identity mismatch",
+    )
+    return {
+        "schema_version": 1,
+        "status": disposition["status"],
+        "evidence_path": str(evidence_root),
+        "anchor_path": str(anchor_path),
+        "anchor_sha256": hashlib.sha256(anchor_payload).hexdigest(),
+        "evidence_checksum_manifest_sha256": hashlib.sha256(
+            checksum_payload
+        ).hexdigest(),
+        "evidence_metadata_sha256": hashlib.sha256(metadata_payload).hexdigest(),
+        "toolchain_version": prior_manifest["toolchain_version"],
+        "read_only_validation_passed": True,
+        "final_verifier_passed": False,
+        "production_promotion_allowed": False,
+    }
+
+
 def baselined_file_bytes(entry: dict[str, object]) -> bytes:
     path = Path(str(entry["path"]))
 
@@ -527,6 +1203,12 @@ def parse_time(value: object) -> datetime:
         raise RuntimeError("timestamp is invalid") from exc
     require(parsed.tzinfo is not None and parsed.utcoffset() is not None, "timestamp is naive")
     return parsed.astimezone(timezone.utc)
+
+
+def utc_sql(value: object) -> str:
+    return parse_time(value).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def inspect_tree() -> tuple[set[str], list[str]]:
@@ -627,6 +1309,36 @@ def inspect_db(payload: bytes) -> tuple[dict[str, object], list[dict[str, object
             "counts": counts,
         }
         return report, events
+    finally:
+        connection.close()
+
+
+def inspect_state_table_rows(
+    payload: bytes, table: str
+) -> list[dict[str, object]]:
+    order_fields = {
+        "consumed_auth_tokens": "token_id",
+        "consumed_receipts": "receipt_id",
+    }
+    require(table in order_fields, "state table is not approved for inspection")
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.deserialize(payload)
+        locking_mode = connection.execute(
+            "PRAGMA locking_mode = EXCLUSIVE"
+        ).fetchone()
+        require(
+            locking_mode is not None and locking_mode[0] == "exclusive",
+            "in-memory SQLite state table did not enter exclusive locking mode",
+        )
+        connection.execute("PRAGMA query_only = ON")
+        return [
+            dict(row)
+            for row in connection.execute(
+                f"SELECT * FROM {table} ORDER BY {order_fields[table]}"
+            )
+        ]
     finally:
         connection.close()
 
@@ -916,31 +1628,157 @@ def validate_completed_journals(
     }
 
 
-def verify_live_isolation(server_baseline: dict[str, object]) -> dict[str, object]:
+def read_system_boot_id() -> str:
+    boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
+        encoding="ascii"
+    ).strip()
+    require(
+        re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            boot_id,
+        ) is not None,
+        "live system boot ID is invalid",
+    )
+    return boot_id
+
+
+def parse_proc_start_ticks(payload: bytes, expected_pid: int | None = None) -> int:
+    marker = payload.rfind(b") ")
+    require(
+        marker > 0
+        and (
+            expected_pid is None
+            or payload.startswith(f"{expected_pid} (".encode("ascii"))
+        ),
+        "process stat identity is invalid",
+    )
+    fields = payload[marker + 2 :].split()
+    require(len(fields) > 19, "process stat field set is incomplete")
+    try:
+        start_ticks = int(fields[19])
+    except ValueError as exc:
+        raise RuntimeError("process start ticks are invalid") from exc
+    require(start_ticks > 0, "process start ticks are not positive")
+    return start_ticks
+
+
+def systemd_service_properties(unit: str) -> dict[str, str]:
+    property_names = (
+        "Id", "ActiveState", "SubState", "MainPID", "InvocationID",
+        "ExecMainStartTimestampMonotonic",
+    )
+    output = run_checked(
+        "/usr/bin/systemctl", "show", unit,
+        *(f"--property={name}" for name in property_names),
+    )
+    properties: dict[str, str] = {}
+    for line in output.splitlines():
+        require("=" in line, f"systemd service property line is invalid: {unit}")
+        name, value = line.split("=", 1)
+        require(
+            name in property_names and name not in properties,
+            f"systemd service property set is invalid: {unit}",
+        )
+        properties[name] = value
+    require(
+        set(properties) == set(property_names),
+        f"systemd service property set is incomplete: {unit}",
+    )
+    return properties
+
+
+def sample_service(unit: str) -> dict[str, object]:
+    boot_before = read_system_boot_id()
+    first = systemd_service_properties(unit)
+    first_pid_text = first["MainPID"]
+    first_start_usec_text = first["ExecMainStartTimestampMonotonic"]
+    require(
+        first["Id"] == unit
+        and re.fullmatch(r"[1-9][0-9]*", first_pid_text) is not None
+        and re.fullmatch(r"[1-9][0-9]*", first_start_usec_text) is not None
+        and re.fullmatch(r"[0-9a-f]{32}", first["InvocationID"]) is not None
+        and first["InvocationID"] != "0" * 32,
+        f"systemd service process identity is invalid: {unit}",
+    )
+    first_pid = int(first_pid_text)
+    first_process = Path(f"/proc/{first_pid}")
+    require(first_process.is_dir(), f"service process is unavailable: {unit}")
+    first_stat = (first_process / "stat").read_bytes()
+    first_cmdline = (first_process / "cmdline").read_bytes()
+    first_start_ticks = parse_proc_start_ticks(first_stat, first_pid)
+
+    second = systemd_service_properties(unit)
+    second_pid_text = second["MainPID"]
+    second_start_usec_text = second["ExecMainStartTimestampMonotonic"]
+    require(
+        second["Id"] == unit
+        and re.fullmatch(r"[1-9][0-9]*", second_pid_text) is not None
+        and re.fullmatch(r"[1-9][0-9]*", second_start_usec_text) is not None
+        and re.fullmatch(r"[0-9a-f]{32}", second["InvocationID"]) is not None
+        and second["InvocationID"] != "0" * 32,
+        f"second systemd service process identity is invalid: {unit}",
+    )
+    second_pid = int(second_pid_text)
+    second_process = Path(f"/proc/{second_pid}")
+    require(second_process.is_dir(), f"service process disappeared: {unit}")
+    second_stat = (second_process / "stat").read_bytes()
+    second_cmdline = (second_process / "cmdline").read_bytes()
+    second_start_ticks = parse_proc_start_ticks(second_stat, second_pid)
+    boot_after = read_system_boot_id()
+    require(
+        first == second
+        and first_pid == second_pid
+        and first_start_ticks == second_start_ticks
+        and first_cmdline == second_cmdline
+        and boot_before == boot_after,
+        f"service identity changed while sampling: {unit}",
+    )
+    normalized_cmdline = first_cmdline.replace(b"\0", b" ")
+    require(
+        b"odoo-accounting-cli-v3" not in normalized_cmdline,
+        f"service unexpectedly references V3: {unit}",
+    )
+    return {
+        "unit": unit,
+        "active_state": first["ActiveState"],
+        "sub_state": first["SubState"],
+        "main_pid": first_pid,
+        "boot_id": boot_after,
+        "invocation_id": first["InvocationID"],
+        "exec_main_start_monotonic_usec": int(first_start_usec_text),
+        "proc_start_ticks": first_start_ticks,
+        "cmdline_sha256": hashlib.sha256(normalized_cmdline).hexdigest(),
+    }
+
+
+def verify_live_isolation(
+    server_baseline: dict[str, object],
+    service_transition: dict[str, object],
+    service_transition_sha256: str,
+    prior_evidence_disposition_sha256: str,
+    prior_evidence_retention: dict[str, object],
+) -> dict[str, object]:
     checks: dict[str, bool] = {}
     services: dict[str, object] = {}
-    for expected_service in server_baseline["services"]:
-        unit = str(expected_service["unit"])
-        expected_pid = int(expected_service["main_pid"])
-        output = run_checked("/usr/bin/systemctl", "show", unit, "--property=ActiveState", "--property=SubState", "--property=MainPID")
-        properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
-        pid = int(properties.get("MainPID", "0") or "0")
-        process = Path(f"/proc/{pid}")
-        cmdline = (process / "cmdline").read_bytes().replace(b"\0", b" ") if process.is_dir() else b""
-        cmdline_sha256 = hashlib.sha256(cmdline).hexdigest()
-        checks[f"service:{unit}"] = (
-            properties.get("ActiveState") == "active"
-            and properties.get("SubState") == "running"
-            and pid == expected_pid and process.is_dir()
-            and cmdline_sha256 == expected_service["cmdline_sha256"]
-            and b"odoo-accounting-cli-v3" not in cmdline
-        )
-        services[unit] = {
-            "pid": pid, "expected_pid": expected_pid,
-            "cmdline_sha256": cmdline_sha256,
-            "expected_cmdline_sha256": expected_service["cmdline_sha256"],
-            "references_v3": b"odoo-accounting-cli-v3" in cmdline,
-        }
+    require(
+        HEX64.fullmatch(service_transition_sha256) is not None
+        and HEX64.fullmatch(prior_evidence_disposition_sha256) is not None,
+        "live isolation control digest is invalid",
+    )
+    require(
+        prior_evidence_retention.get("read_only_validation_passed") is True
+        and prior_evidence_retention.get("final_verifier_passed") is False
+        and prior_evidence_retention.get("production_promotion_allowed") is False,
+        "live isolation prior evidence retention is invalid",
+    )
+    expected_identities = effective_service_identities(
+        server_baseline, service_transition
+    )
+    expected_boot_id = str(service_transition["system_boot_id"])
+    boot_before = read_system_boot_id()
+    before_samples = {
+        unit: sample_service(unit) for unit in expected_identities
+    }
     critical_reports = []
     for index, entry in enumerate(server_baseline["critical_files"]):
         payload = baselined_file_bytes(entry)
@@ -1060,8 +1898,41 @@ def verify_live_isolation(server_baseline: dict[str, object]) -> dict[str, objec
         "package_sha256": PACKAGE_SHA256,
         "release": RELEASE,
     }
+    after_samples = {
+        unit: sample_service(unit) for unit in expected_identities
+    }
+    boot_after = read_system_boot_id()
+    checks["system_boot_id_stable"] = (
+        boot_before == boot_after == expected_boot_id
+    )
+    for unit, expected in expected_identities.items():
+        before = before_samples[unit]
+        after = after_samples[unit]
+        stable = before == after == expected
+        checks[f"{unit}_stable"] = stable
+        services[unit] = {
+            "expected": expected,
+            "before": before,
+            "after": after,
+            "stable": stable,
+        }
+    checks["service_identity_pid_reuse_and_toctou_resistant"] = (
+        checks["system_boot_id_stable"]
+        and all(service["stable"] is True for service in services.values())
+    )
     report = {
+        "schema_version": 1,
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "evidence_id": EVIDENCE_ID,
+        "toolchain_version": TOOLCHAIN_VERSION,
         "server_baseline_captured_at": server_baseline["captured_at"],
+        "server_service_transition_sha256": service_transition_sha256,
+        "prior_evidence_disposition_sha256": prior_evidence_disposition_sha256,
+        "system_boot_id": boot_after,
+        "expected_system_boot_id": expected_boot_id,
+        "service_transition_observation": service_transition["observation"],
+        "prior_evidence_retention": prior_evidence_retention,
+        "release": RELEASE,
         "services": services,
         "v2_critical": critical_reports,
         "database_uuid": database_uuid,
@@ -1091,20 +1962,42 @@ def main() -> None:
     anchor_payload = strict_read(ANCHOR, mode=0o400)
     anchor = load_json_bytes(anchor_payload, "external evidence anchor")
     anchor_keys = {
-        "schema_version", "release", "commit", "git_tree", "evidence_path",
+        "schema_version", "release", "evidence_id", "toolchain_version",
+        "commit", "git_tree", "evidence_path", "toolchain_manifest_sha256",
+        "server_baseline_sha256", "server_baseline_size",
+        "server_service_transition_sha256", "server_service_transition_size",
+        "prior_evidence_disposition_sha256", "prior_evidence_disposition_size",
         "package_sha256", "release_manifest_sha256", "registry_digest",
         "runtime_config_sha256", "read_plan_sha256", "audit_head",
         "evidence_checksum_manifest_sha256", "evidence_metadata_sha256",
         "evidence_checksum_entries", "evidence_file_count",
+        "freeze_checks_passed", "final_verification_status",
         "production_promotion_allowed",
     }
     require(set(anchor) == anchor_keys, "external evidence anchor fields are not exact")
     require(
         anchor["schema_version"] == 1
         and anchor["release"] == RELEASE
+        and anchor["evidence_id"] == EVIDENCE_ID
+        and anchor["toolchain_version"] == TOOLCHAIN_VERSION
         and anchor["commit"] == COMMIT
         and anchor["git_tree"] == TREE
         and anchor["evidence_path"] == str(ROOT)
+        and isinstance(anchor["toolchain_manifest_sha256"], str)
+        and HEX64.fullmatch(anchor["toolchain_manifest_sha256"]) is not None
+        and anchor["server_baseline_sha256"]
+        == "37b498ffce8f175813e866c534b6514142436d9c4dbf29216f1dab1c880c57e4"
+        and anchor["server_baseline_size"] == 5662
+        and isinstance(anchor["server_service_transition_sha256"], str)
+        and HEX64.fullmatch(anchor["server_service_transition_sha256"]) is not None
+        and isinstance(anchor["server_service_transition_size"], int)
+        and not isinstance(anchor["server_service_transition_size"], bool)
+        and anchor["server_service_transition_size"] > 0
+        and isinstance(anchor["prior_evidence_disposition_sha256"], str)
+        and HEX64.fullmatch(anchor["prior_evidence_disposition_sha256"]) is not None
+        and isinstance(anchor["prior_evidence_disposition_size"], int)
+        and not isinstance(anchor["prior_evidence_disposition_size"], bool)
+        and anchor["prior_evidence_disposition_size"] > 0
         and anchor["package_sha256"] == PACKAGE_SHA256
         and anchor["release_manifest_sha256"] == MANIFEST_SHA256
         and anchor["registry_digest"] == REGISTRY_DIGEST
@@ -1114,6 +2007,8 @@ def main() -> None:
         and HEX64.fullmatch(str(anchor["audit_head"])) is not None
         and anchor["evidence_checksum_entries"] == len(EXPECTED_FILES) - 1
         and anchor["evidence_file_count"] == len(EXPECTED_FILES)
+        and anchor["freeze_checks_passed"] is True
+        and anchor["final_verification_status"] == "pending"
         and anchor["production_promotion_allowed"] is False,
         "external evidence anchor identity mismatch",
     )
@@ -1147,6 +2042,11 @@ def main() -> None:
         return load_json_bytes(blobs[relative], relative)
 
     toolchain_manifest_payload = blobs[f"tools/{TOOLCHAIN_MANIFEST_NAME}"]
+    require(
+        hashlib.sha256(toolchain_manifest_payload).hexdigest()
+        == anchor["toolchain_manifest_sha256"],
+        "frozen toolchain manifest differs from external anchor",
+    )
     toolchain_manifest = load_json_bytes(toolchain_manifest_payload, "toolchain manifest")
     manifest_entries = validate_toolchain_manifest(toolchain_manifest)
     server_baseline_payload = blobs[f"tools/{SERVER_BASELINE_NAME}"]
@@ -1156,10 +2056,67 @@ def main() -> None:
         and len(server_baseline_payload) == baseline_expected["size"],
         "frozen server baseline differs from toolchain manifest",
     )
+    require(
+        anchor["server_baseline_sha256"] == baseline_expected["sha256"]
+        and anchor["server_baseline_size"] == baseline_expected["size"],
+        "frozen server baseline differs from external anchor",
+    )
     server_baseline = validate_server_baseline(
         load_json_bytes(server_baseline_payload, "server baseline")
     )
-    expected_pids = baseline_service_pids(server_baseline)
+    service_transition_payload = blobs[f"tools/{SERVER_SERVICE_TRANSITION_NAME}"]
+    service_transition_sha256 = hashlib.sha256(
+        service_transition_payload
+    ).hexdigest()
+    transition_expected = manifest_entries[SERVER_SERVICE_TRANSITION_NAME]
+    require(
+        service_transition_sha256 == transition_expected["sha256"]
+        and len(service_transition_payload) == transition_expected["size"]
+        and anchor["server_service_transition_sha256"]
+        == transition_expected["sha256"]
+        and anchor["server_service_transition_size"] == transition_expected["size"],
+        "frozen server service transition identity mismatch",
+    )
+    service_transition = validate_service_transition(
+        load_json_bytes(service_transition_payload, "server service transition"),
+        server_baseline_payload,
+        server_baseline,
+    )
+    prior_disposition_payload = blobs[f"tools/{PRIOR_EVIDENCE_DISPOSITION_NAME}"]
+    prior_evidence_disposition_sha256 = hashlib.sha256(
+        prior_disposition_payload
+    ).hexdigest()
+    disposition_expected = manifest_entries[PRIOR_EVIDENCE_DISPOSITION_NAME]
+    require(
+        prior_evidence_disposition_sha256 == disposition_expected["sha256"]
+        and len(prior_disposition_payload) == disposition_expected["size"]
+        and anchor["prior_evidence_disposition_sha256"]
+        == disposition_expected["sha256"]
+        and anchor["prior_evidence_disposition_size"] == disposition_expected["size"],
+        "frozen prior evidence disposition identity mismatch",
+    )
+    prior_disposition = validate_prior_evidence_disposition(
+        load_json_bytes(prior_disposition_payload, "prior evidence disposition")
+    )
+    invalidating_observation = service_transition["history"][0]
+    require(
+        parse_utc_second(
+            prior_disposition["recorded_at"], "prior evidence disposition time"
+        )
+        == parse_utc_second(
+            invalidating_observation["observation"]["last_observed_at"],
+            "invalidating service observation last",
+        )
+        and prior_disposition["invalidating_service_observation_id"]
+        == invalidating_observation["observation_id"],
+        "service transition and prior evidence disposition binding mismatch",
+    )
+    prior_retention = validate_retained_prior_evidence(prior_disposition)
+    expected_pids = effective_service_pids(server_baseline, service_transition)
+    effective_identities = effective_service_identities(
+        server_baseline, service_transition
+    )
+    expected_odoo_identity = effective_identities["odoo19.service"]
 
     package = verify_package(blobs["release/release-package.tar.gz"])
     require(
@@ -1246,6 +2203,7 @@ def main() -> None:
     summary_rows = []
     roundtrip = []
     expected_oracle_roundtrip = []
+    wire_evidence: dict[str, dict[str, object]] = {}
     for name, capability_id in CASES:
         parameters = document(f"reads/{name}.parameters.json")
         request = document(f"reads/{name}.request.json")
@@ -1382,6 +2340,15 @@ def main() -> None:
             "record_count": receipt["record_count"],
             "parameters_sha256": hashlib.sha256(canonical(parameters)).hexdigest(),
         })
+        wire_evidence[name] = {
+            "auth_token_id": token_id,
+            "auth_state_request_digest": digest(request),
+            "auth_expires_at": utc_sql(context["auth_expires_at"]),
+            "receipt_id": receipt_id,
+            "request_digest": expected_request_digest,
+            "receipt_observed_at": utc_sql(receipt["observed_at"]),
+            "receipt": receipt,
+        }
     require(len(token_ids) == len(receipt_ids) == 4, "read token or receipt cardinality mismatch")
     require(document("reads/summary.json") == {"all_verified": True, "reads": summary_rows}, "read summary mismatch")
 
@@ -1393,21 +2360,180 @@ def main() -> None:
     require(isinstance(exported, list) and exported == events, "exported audit events mismatch")
     audit_head = events[-1]["event_hash"] if events else None
     event_counts = Counter(event["payload"]["capability_id"] for event in events)
+    prior_evidence_path = Path(
+        str(prior_disposition["prior_evidence"]["evidence_path"])
+    )
+    prior_auth_payload = strict_read(
+        prior_evidence_path / "state/auth-state.sqlite3",
+        mode=0o400,
+        expected_sha256=PRIOR_AUTH_SHA256,
+    )
+    prior_receipt_payload = strict_read(
+        prior_evidence_path / "state/receipt-state.sqlite3",
+        mode=0o400,
+        expected_sha256=PRIOR_RECEIPT_SHA256,
+    )
+    prior_auth_state, prior_auth_events = inspect_db(prior_auth_payload)
+    prior_receipt_state, prior_receipt_events = inspect_db(prior_receipt_payload)
+    prior_events = verify_chain(prior_receipt_events)
+    prior_auth_rows = inspect_state_table_rows(
+        prior_auth_payload, "consumed_auth_tokens"
+    )
+    prior_receipt_rows = inspect_state_table_rows(
+        prior_receipt_payload, "consumed_receipts"
+    )
+    current_auth_rows = inspect_state_table_rows(
+        blobs["state/auth-state.sqlite3"], "consumed_auth_tokens"
+    )
+    current_receipt_rows = inspect_state_table_rows(
+        blobs["state/receipt-state.sqlite3"], "consumed_receipts"
+    )
+    prior_auth_by_id = {str(row["token_id"]): row for row in prior_auth_rows}
+    current_auth_by_id = {str(row["token_id"]): row for row in current_auth_rows}
+    prior_receipt_by_id = {
+        str(row["receipt_id"]): row for row in prior_receipt_rows
+    }
+    current_receipt_by_id = {
+        str(row["receipt_id"]): row for row in current_receipt_rows
+    }
     require(
-        auth_events == [] and auth_state["user_version"] == receipt_state["user_version"] == 2
+        prior_auth_events == []
+        and prior_auth_state["counts"]["consumed_auth_tokens"] == 4
+        and prior_receipt_state["counts"]["consumed_receipts"] == 4
+        and prior_receipt_state["counts"]["audit_events"] == 4
+        and len(prior_events) == 4
+        and prior_events[-1]["event_hash"] == PRIOR_AUDIT_HEAD
+        and len(events) == 8
+        and events[:4] == prior_events
+        and set(prior_auth_by_id).isdisjoint(token_ids)
+        and set(prior_receipt_by_id).isdisjoint(receipt_ids)
+        and set(current_auth_by_id) == set(prior_auth_by_id) | token_ids
+        and set(current_receipt_by_id) == set(prior_receipt_by_id) | receipt_ids
+        and all(
+            current_auth_by_id[token_id] == row
+            for token_id, row in prior_auth_by_id.items()
+        )
+        and all(
+            current_receipt_by_id[receipt_id] == row
+            for receipt_id, row in prior_receipt_by_id.items()
+        ),
+        "cumulative state does not retain the exact prior evidence prefix",
+    )
+    for name, capability_id in CASES:
+        expected = wire_evidence[name]
+        token_id = str(expected["auth_token_id"])
+        receipt_id = str(expected["receipt_id"])
+        auth_row = current_auth_by_id[token_id]
+        receipt_row = current_receipt_by_id[receipt_id]
+        require(
+            auth_row["request_digest"] == expected["auth_state_request_digest"]
+            and auth_row["expires_at"] == expected["auth_expires_at"]
+            and receipt_row["request_digest"] == expected["request_digest"]
+            and receipt_row["observed_at"] == expected["receipt_observed_at"],
+            f"cumulative state suffix does not bind the current wire case: {name}",
+        )
+    for event, (name, capability_id) in zip(events[4:], CASES, strict=True):
+        expected = wire_evidence[name]
+        receipt = expected["receipt"]
+        payload = event["payload"]
+        require(
+            event["event_id"] == f"read:{expected['receipt_id']}"
+            and event["event_type"] == "read.verified"
+            and event["operation_id"] is None
+            and event["occurred_at"] == receipt["observed_at"]
+            and payload.get("auth_token_id") == expected["auth_token_id"]
+            and payload.get("capability_id") == capability_id
+            and payload.get("principal") == "pi:test-user-2"
+            and payload.get("receipt") == receipt
+            and payload.get("receipt_id") == expected["receipt_id"]
+            and payload.get("request_digest") == expected["request_digest"]
+            and payload.get("result_digest") == receipt["result_digest"]
+            and payload.get("release_digest") == MANIFEST_SHA256
+            and payload.get("registry_digest") == REGISTRY_DIGEST,
+            f"cumulative audit suffix does not bind the current wire case: {name}",
+        )
+    expected_prior_state = {
+        "evidence_path": str(prior_evidence_path),
+        "toolchain_version": PRIOR_TOOLCHAIN_VERSION,
+        "auth_sha256": PRIOR_AUTH_SHA256,
+        "receipt_sha256": PRIOR_RECEIPT_SHA256,
+        "audit_head": PRIOR_AUDIT_HEAD,
+        "auth_tokens": 4,
+        "consumed_receipts": 4,
+        "audit_events": 4,
+    }
+    expected_persistence_checks = {
+        "exact_four_new_unique_auth_tokens",
+        "exact_four_new_unique_receipts",
+        "exact_four_new_audit_events",
+        "new_auth_hmac_verified",
+        "new_receipt_hmac_verified",
+        "new_request_response_parameter_roundtrip",
+        "cumulative_sqlite_snapshots_integral",
+        "prior_state_bound",
+        "prior_state_preserved",
+        "prior_audit_prefix_preserved",
+        "full_audit_chain_verified",
+        "new_audit_suffix_bound_to_wire_receipts",
+        "oracle_audit_verified",
+    }
+    expected_persistence_fields = {
+        "schema_version", "release", "version", "commit", "git_tree",
+        "package_sha256", "manifest_sha256", "registry_digest",
+        "runtime_config_sha256", "read_plan_sha256", "database_uuid",
+        "auth", "receipt", "prior_evidence_state", "verified_batch_counts",
+        "cumulative_counts", "prior_audit_head", "audit_head",
+        "audit_event_count", "capability_counts", "wire_cases", "checks",
+        "all_checks_passed", "secret_material_emitted", "odoo_action_performed",
+        "database_writes_permitted", "production_validated",
+        "production_promotion_allowed",
+    }
+    persistence_checks = persistence.get("checks")
+    require(
+        set(persistence) == expected_persistence_fields
+        and isinstance(persistence.get("schema_version"), int)
+        and not isinstance(persistence.get("schema_version"), bool)
+        and persistence.get("schema_version") == 1
+        and auth_events == [] and auth_state["user_version"] == receipt_state["user_version"] == 2
         and auth_state["quick_check"] == receipt_state["quick_check"] == ["ok"]
         and auth_state["foreign_key_violations"] == receipt_state["foreign_key_violations"] == 0
-        and auth_state["counts"] == {"approval_records": 0, "audit_events": 0, "consumed_auth_tokens": 4, "consumed_receipts": 0, "idempotency_keys": 0, "operations": 0}
-        and receipt_state["counts"] == {"approval_records": 0, "audit_events": 4, "consumed_auth_tokens": 0, "consumed_receipts": 4, "idempotency_keys": 0, "operations": 0}
+        and auth_state["counts"] == {"approval_records": 0, "audit_events": 0, "consumed_auth_tokens": 8, "consumed_receipts": 0, "idempotency_keys": 0, "operations": 0}
+        and receipt_state["counts"] == {"approval_records": 0, "audit_events": 8, "consumed_auth_tokens": 0, "consumed_receipts": 8, "idempotency_keys": 0, "operations": 0}
         and audit_head == anchor["audit_head"] == persistence.get("audit_head")
-        and event_counts == {"acct.ap.open_items.v1": 1, "acct.ar.open_items.v1": 1, "acct.gl.trial_balance.v1": 1, "acct.registry.list.v1": 1}
+        and event_counts == {"acct.ap.open_items.v1": 2, "acct.ar.open_items.v1": 2, "acct.gl.trial_balance.v1": 2, "acct.registry.list.v1": 2}
         and auth_state["sha256"] == persistence.get("auth", {}).get("sha256")
         and receipt_state["sha256"] == persistence.get("receipt", {}).get("sha256")
-        and persistence.get("release") == RELEASE and persistence.get("commit") == COMMIT
+        and persistence.get("release") == RELEASE and persistence.get("version") == VERSION
+        and persistence.get("commit") == COMMIT
         and persistence.get("git_tree") == TREE and persistence.get("package_sha256") == PACKAGE_SHA256
         and persistence.get("manifest_sha256") == MANIFEST_SHA256 and persistence.get("registry_digest") == REGISTRY_DIGEST
         and persistence.get("runtime_config_sha256") == RUNTIME_SHA256 and persistence.get("read_plan_sha256") == PLAN_SHA256
-        and persistence.get("audit_event_count") == 4 and persistence.get("all_checks_passed") is True
+        and persistence.get("database_uuid") == DATABASE_UUID
+        and persistence.get("auth", {}).get("counts") == auth_state["counts"]
+        and persistence.get("receipt", {}).get("counts") == receipt_state["counts"]
+        and persistence.get("prior_evidence_state") == expected_prior_state
+        and persistence.get("verified_batch_counts") == {
+            "auth_tokens": 4, "consumed_receipts": 4, "audit_events": 4,
+        }
+        and persistence.get("cumulative_counts") == {
+            "auth_tokens": 8, "consumed_receipts": 8, "audit_events": 8,
+        }
+        and persistence.get("prior_audit_head") == PRIOR_AUDIT_HEAD
+        and persistence.get("audit_event_count") == 8 and persistence.get("all_checks_passed") is True
+        and persistence.get("capability_counts") == {
+            "acct.ap.open_items.v1": 2,
+            "acct.ar.open_items.v1": 2,
+            "acct.gl.trial_balance.v1": 2,
+            "acct.registry.list.v1": 2,
+        }
+        and persistence.get("wire_cases") == summary_rows
+        and isinstance(persistence_checks, dict)
+        and set(persistence_checks) == expected_persistence_checks
+        and all(value is True for value in persistence_checks.values())
+        and persistence.get("secret_material_emitted") is False
+        and persistence.get("odoo_action_performed") is False
+        and persistence.get("database_writes_permitted") is False
+        and persistence.get("production_validated") is False
         and persistence.get("production_promotion_allowed") is False,
         "persistence or audit state mismatch",
     )
@@ -1429,6 +2555,8 @@ def main() -> None:
         and set(oracle_by_name) == set(oracle_names)
         and oracle.get("request_roundtrip") == expected_oracle_roundtrip
         and len(oracle.get("staged_inputs", [])) == 5
+        and oracle.get("odoo_identity_before") == expected_odoo_identity
+        and oracle.get("odoo_identity_after") == expected_odoo_identity
         and oracle.get("odoo_pid_before") == oracle.get("odoo_pid_after") == expected_pids["odoo19.service"]
         and oracle.get("all_checks_passed") is True
         and oracle.get("odoo_action_performed") is False
@@ -1746,10 +2874,12 @@ def main() -> None:
                 and set(checks) == {
                     "fresh_token_before", "token_still_unconsumed", "expected_exit", "stdout_empty",
                     "structured_error", "auth_hash_unchanged", "receipt_hash_unchanged",
-                    "audit_hash_unchanged", "odoo_pid_unchanged", "odoo_pid_active",
+                    "audit_hash_unchanged", "odoo_identity_unchanged",
+                    "odoo_pid_unchanged", "odoo_pid_active",
                     "odoo_canary_fixed_inode_unchanged",
                 }
                 and all(value is True for value in checks.values())
+                and case.get("odoo_identity_after") == expected_odoo_identity
                 and case.get("odoo_pid_after") == expected_pids["odoo19.service"]
             )
     require(
@@ -1759,15 +2889,17 @@ def main() -> None:
         and negative.get("all_checks_passed") is True
         and negative.get("temporary_artifacts_removed") is True
         and negative.get("production_promotion_allowed") is False
-        and negative.get("baseline_state", {}).get("auth", {}).get("table_counts", {}).get("consumed_auth_tokens") == 4
-        and negative.get("baseline_state", {}).get("receipt", {}).get("table_counts", {}).get("consumed_receipts") == 4
-        and negative.get("baseline_state", {}).get("audit", {}).get("row_count") == 4
+        and negative.get("baseline_state", {}).get("auth", {}).get("table_counts", {}).get("consumed_auth_tokens") == 8
+        and negative.get("baseline_state", {}).get("receipt", {}).get("table_counts", {}).get("consumed_receipts") == 8
+        and negative.get("baseline_state", {}).get("audit", {}).get("row_count") == 8
         and negative.get("baseline_state", {}).get("audit", {}).get("head") == audit_head
         and negative_cases_ok
         and negative.get("fixture_checks") == {
             "wrong_path_is_same_bytes": True, "tmp_copy_is_same_bytes": True,
             "symlink_fixture_is_link": True, "tampered_fixture_differs": True,
         }
+        and negative.get("odoo_identity_before") == expected_odoo_identity
+        and negative.get("odoo_identity_after") == expected_odoo_identity
         and negative.get("odoo_pid_before") == expected_pids["odoo19.service"]
         and negative.get("odoo_canary_reached") is False
         and negative.get("secret_material_emitted") is False,
@@ -1790,6 +2922,8 @@ def main() -> None:
         "dev8_server_gate=passed", "dev8_isolation_pre=passed", "dev8_isolation_post=passed",
         f"release={RELEASE}", f"package_sha256={PACKAGE_SHA256}",
         f"manifest_sha256={MANIFEST_SHA256}", f"registry_digest={REGISTRY_DIGEST}",
+        f"server_baseline_sha256={hashlib.sha256(server_baseline_payload).hexdigest()}",
+        f"service_transition_sha256={service_transition_sha256}",
         "mutable_candidate_test_fixture_used=false",
         "server_unit_test_source=github-ci-run-29319326192",
         "production_critical_metadata_safe=false",
@@ -1797,8 +2931,35 @@ def main() -> None:
     require(deployment_ok, "deployment gate captures mismatch")
 
     pre_isolation = document("isolation/pre-freeze.json")
+    pre_isolation_keys = {
+        "schema_version", "observed_at", "evidence_id", "toolchain_version",
+        "server_baseline_captured_at", "server_service_transition_sha256",
+        "prior_evidence_disposition_sha256", "system_boot_id",
+        "expected_system_boot_id", "service_transition_observation", "release",
+        "prior_evidence_retention",
+        "services", "v2_critical", "database_uuid", "release_file_count",
+        "release_tree_unsafe", "checks", "all_checks_passed",
+        "production_dependency_metadata_safe",
+        "production_dependency_closure_complete", "production_promotion_allowed",
+        "promotion_blockers",
+    }
+    parse_time(pre_isolation.get("observed_at"))
     require(
-        pre_isolation.get("release") == RELEASE
+        set(pre_isolation) == pre_isolation_keys
+        and pre_isolation.get("schema_version") == 1
+        and pre_isolation.get("release") == RELEASE
+        and pre_isolation.get("evidence_id") == EVIDENCE_ID
+        and pre_isolation.get("toolchain_version") == TOOLCHAIN_VERSION
+        and pre_isolation.get("server_service_transition_sha256")
+        == service_transition_sha256
+        and pre_isolation.get("prior_evidence_disposition_sha256")
+        == prior_evidence_disposition_sha256
+        and pre_isolation.get("system_boot_id")
+        == pre_isolation.get("expected_system_boot_id")
+        == service_transition["system_boot_id"]
+        and pre_isolation.get("service_transition_observation")
+        == service_transition["observation"]
+        and pre_isolation.get("prior_evidence_retention") == prior_retention
         and isinstance(pre_isolation.get("checks"), dict) and pre_isolation["checks"]
         and all(value is True for value in pre_isolation["checks"].values())
         and pre_isolation.get("all_checks_passed") is True
@@ -1806,6 +2967,23 @@ def main() -> None:
         and pre_isolation.get("production_promotion_allowed") is False,
         "pre-freeze isolation evidence mismatch",
     )
+    pre_services = pre_isolation.get("services")
+    require(
+        isinstance(pre_services, dict)
+        and set(pre_services) == set(effective_identities),
+        "pre-freeze isolation service set mismatch",
+    )
+    for unit, expected_identity in effective_identities.items():
+        service_report = pre_services[unit]
+        require(
+            isinstance(service_report, dict)
+            and set(service_report) == {"expected", "before", "after", "stable"}
+            and service_report.get("expected") == expected_identity
+            and service_report.get("before") == expected_identity
+            and service_report.get("after") == expected_identity
+            and service_report.get("stable") is True,
+            f"pre-freeze isolation service identity mismatch: {unit}",
+        )
 
     require(
         pre_isolation.get("server_baseline_captured_at") == server_baseline["captured_at"]
@@ -1819,18 +2997,29 @@ def main() -> None:
     require(
         set(inventory) == {
             "schema_version", "release", "toolchain_version", "source_directory",
-            "toolchain_manifest_sha256", "server_baseline_sha256",
+            "evidence_id", "toolchain_manifest_sha256", "server_baseline_sha256",
             "server_baseline_size", "upload_root", "tools", "tool_count",
+            "server_service_transition_sha256", "server_service_transition_size",
+            "prior_evidence_disposition_sha256", "prior_evidence_disposition_size",
             "secret_material_included", "production_promotion_allowed",
         }
         and isinstance(inventory.get("schema_version"), int)
         and not isinstance(inventory.get("schema_version"), bool)
         and inventory.get("schema_version") == 1 and inventory.get("release") == RELEASE
+        and inventory.get("evidence_id") == EVIDENCE_ID
         and inventory.get("toolchain_version") == TOOLCHAIN_VERSION
         and inventory.get("source_directory") == "deployment/dev8"
         and inventory.get("toolchain_manifest_sha256") == hashlib.sha256(toolchain_manifest_payload).hexdigest()
         and inventory.get("server_baseline_sha256") == hashlib.sha256(server_baseline_payload).hexdigest()
         and inventory.get("server_baseline_size") == len(server_baseline_payload)
+        and inventory.get("server_service_transition_sha256")
+        == service_transition_sha256
+        and inventory.get("server_service_transition_size")
+        == len(service_transition_payload)
+        and inventory.get("prior_evidence_disposition_sha256")
+        == prior_evidence_disposition_sha256
+        and inventory.get("prior_evidence_disposition_size")
+        == len(prior_disposition_payload)
         and inventory.get("upload_root") == "/root/odoo-accounting-cli-v3-dev8-upload"
         and isinstance(tool_entries, list) and len(tool_entries) == len(TOOL_FILES)
         and inventory.get("tool_count") == len(TOOL_FILES)
@@ -1877,31 +3066,40 @@ def main() -> None:
         require(all(needle not in payload for needle in needles), f"live secret material found in frozen evidence: {label}")
 
     metadata = document("EVIDENCE-METADATA.json")
-    metadata_keys = {
-        "schema_version", "release", "version", "commit", "git_tree", "package_sha256",
-        "package_size", "manifest_sha256", "registry_digest", "runtime_config_sha256",
-        "read_plan_sha256", "database_uuid", "audit_head", "auth_tokens",
-        "consumed_receipts", "receipt_audit_events", "verified_capabilities",
-        "registered_capabilities", "staged_capabilities", "enabled_capabilities",
-        "frozen_at", "evidence_scope", "evidence_visibility", "evidence_file_count",
-        "goal_complete", "secret_material_included", "production_writes_authorized",
-        "odoo_accounting_write_performed", "pi_route_changed", "v2_changed",
-        "production_dependency_closure_complete", "production_promotion_allowed",
-        "promotion_blockers",
-    }
-    require(set(metadata) == metadata_keys, "evidence metadata fields are not exact")
+    metadata = validate_evidence_metadata_fields(metadata)
     parse_time(metadata["frozen_at"])
     require(
         metadata["schema_version"] == 1 and metadata["release"] == RELEASE and metadata["version"] == VERSION
+        and metadata["evidence_id"] == EVIDENCE_ID
+        and metadata["toolchain_version"] == TOOLCHAIN_VERSION
+        and metadata["toolchain_manifest_sha256"]
+        == hashlib.sha256(toolchain_manifest_payload).hexdigest()
+        and metadata["server_baseline_sha256"]
+        == hashlib.sha256(server_baseline_payload).hexdigest()
+        and metadata["server_baseline_size"] == len(server_baseline_payload)
+        and metadata["server_service_transition_sha256"]
+        == service_transition_sha256
+        and metadata["server_service_transition_size"]
+        == len(service_transition_payload)
+        and metadata["prior_evidence_disposition_sha256"]
+        == prior_evidence_disposition_sha256
+        and metadata["prior_evidence_disposition_size"]
+        == len(prior_disposition_payload)
         and metadata["commit"] == COMMIT and metadata["git_tree"] == TREE
         and metadata["package_sha256"] == PACKAGE_SHA256 and metadata["package_size"] == PACKAGE_SIZE
         and metadata["manifest_sha256"] == MANIFEST_SHA256 and metadata["registry_digest"] == REGISTRY_DIGEST
         and metadata["runtime_config_sha256"] == RUNTIME_SHA256 and metadata["read_plan_sha256"] == PLAN_SHA256
         and metadata["database_uuid"] == DATABASE_UUID and metadata["audit_head"] == audit_head
-        and metadata["auth_tokens"] == metadata["consumed_receipts"] == metadata["receipt_audit_events"] == 4
+        and metadata["auth_tokens"] == metadata["consumed_receipts"] == metadata["receipt_audit_events"] == 8
+        and metadata["verified_batch_auth_tokens"]
+        == metadata["verified_batch_receipts"]
+        == metadata["verified_batch_audit_events"]
+        == 4
         and metadata["verified_capabilities"] == ["acct.ap.open_items.v1", "acct.ar.open_items.v1", "acct.gl.trial_balance.v1", "acct.registry.list.v1"]
         and metadata["registered_capabilities"] == 22 and metadata["staged_capabilities"] == 4
         and metadata["enabled_capabilities"] == 0 and metadata["evidence_file_count"] == len(EXPECTED_FILES)
+        and metadata["freeze_checks_passed"] is True
+        and metadata["final_verification_status"] == "pending"
         and metadata["evidence_visibility"] == "root-only directories 0500 and files 0400"
         and metadata["promotion_blockers"] == [
             *dependency["promotion_blockers"], *server_baseline["promotion_blockers"]
@@ -1914,17 +3112,28 @@ def main() -> None:
         "evidence metadata identity or safety flags mismatch",
     )
 
-    live = verify_live_isolation(server_baseline)
+    live = verify_live_isolation(
+        server_baseline,
+        service_transition,
+        service_transition_sha256,
+        prior_evidence_disposition_sha256,
+        prior_retention,
+    )
     require(live["all_checks_passed"] is True and live["production_promotion_allowed"] is False, "post-freeze live isolation mismatch")
     report = {
         "schema_version": 1,
         "release": RELEASE,
+        "evidence_id": EVIDENCE_ID,
+        "toolchain_version": TOOLCHAIN_VERSION,
+        "server_service_transition_sha256": service_transition_sha256,
+        "prior_evidence_disposition_sha256": prior_evidence_disposition_sha256,
         "checksum_entries": len(checksums),
         "actual_file_count": len(actual),
         "audit_head": audit_head,
         "identity_checks": {
             "external_anchor_first": True,
             "checksum_manifest_bound": True,
+            "service_transition_and_prior_disposition": True,
             "canonical_package": True,
             "registry": True,
             "build_and_ci": True,
@@ -1939,15 +3148,21 @@ def main() -> None:
             "pipeline_lock_and_execution_staging": True,
             "deployment_and_negative_gates": True,
             "tool_snapshot": True,
+            "prior_nonfinal_evidence_retained": True,
+            "service_identity_pid_reuse_and_toctou_resistant": live["checks"][
+                "service_identity_pid_reuse_and_toctou_resistant"
+            ],
             "live_secret_rescan": True,
             "pre_and_post_freeze_isolation": True,
         },
         "roundtrip": roundtrip,
+        "prior_nonfinal_evidence": prior_retention,
         "unsafe_entries": [],
         "failed_checksum_paths": [],
         "live_isolation": live,
         "production_dependency_closure_complete": False,
         "production_promotion_allowed": False,
+        "final_verification_passed": True,
         "all_checks_passed": True,
     }
     print(json.dumps(report, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True))

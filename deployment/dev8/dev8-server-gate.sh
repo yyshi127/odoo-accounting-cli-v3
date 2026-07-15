@@ -16,6 +16,11 @@ pipeline_lock=/opt/odoo-accounting-cli-v3/.dev8-pipeline.lock
 install_journal=/opt/odoo-accounting-cli-v3/.dev8-install-transaction.json
 runtime_journal=/etc/odoo-accounting-cli-v3/.dev8-runtime-transaction.json
 server_baseline=/root/odoo-accounting-cli-v3-dev8-upload/SERVER-BASELINE.json
+server_baseline_sha=37b498ffce8f175813e866c534b6514142436d9c4dbf29216f1dab1c880c57e4
+server_baseline_size=5662
+service_transition=/root/odoo-accounting-cli-v3-dev8-upload/SERVER-SERVICE-TRANSITION.json
+service_transition_sha=db60965c8bc1fd6d97ea6c793d135bb2906d10448cf80912538289c54b0fcbb3
+service_transition_size=7627
 
 prepare_pipeline_lock() {
   python3 - "$pipeline_lock" <<'PY'
@@ -822,7 +827,9 @@ print("direct_launcher_identity_verified=true")
 
 verify_isolation() {
   local phase=$1
-  python3 -I -B - "$phase" "$server_baseline" <<'PY'
+  python3 -I -B - \
+    "$phase" "$server_baseline" "$server_baseline_sha" "$server_baseline_size" \
+    "$service_transition" "$service_transition_sha" "$service_transition_size" <<'PY'
 import hashlib
 import json
 import os
@@ -831,9 +838,15 @@ import re
 import stat
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 
 phase = sys.argv[1]
 baseline_path = pathlib.Path(sys.argv[2])
+baseline_sha256 = sys.argv[3]
+baseline_size = int(sys.argv[4])
+transition_path = pathlib.Path(sys.argv[5])
+transition_sha256 = sys.argv[6]
+transition_size = int(sys.argv[7])
 if phase not in {"pre", "post"}:
     raise SystemExit("isolation phase is invalid")
 
@@ -868,7 +881,7 @@ if (
     or baseline_before.st_uid != 0
     or baseline_before.st_gid != 0
     or baseline_before.st_nlink != 1
-    or stat.S_IMODE(baseline_before.st_mode) & 0o022
+    or stat.S_IMODE(baseline_before.st_mode) != 0o400
 ):
     raise SystemExit("server baseline source metadata mismatch")
 baseline_descriptor = os.open(
@@ -897,8 +910,69 @@ if not (
     == fingerprint(baseline_after)
 ):
     raise SystemExit("server baseline changed while reading")
+if (
+    len(baseline_payload) != baseline_size
+    or hashlib.sha256(baseline_payload).hexdigest() != baseline_sha256
+):
+    raise SystemExit("server baseline differs from the version-controlled bytes")
+
+def read_control(path, expected_name, expected_sha256, expected_size):
+    before = path.lstat()
+    parent = path.parent.lstat()
+    if (
+        path.parent != pathlib.Path("/root/odoo-accounting-cli-v3-dev8-upload")
+        or path.name != expected_name
+        or path.parent.resolve(strict=True) != path.parent
+        or path.parent.is_symlink()
+        or not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != 0
+        or parent.st_gid != 0
+        or stat.S_IMODE(parent.st_mode) != 0o700
+        or path.is_symlink()
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != 0
+        or before.st_gid != 0
+        or before.st_nlink != 1
+        or stat.S_IMODE(before.st_mode) != 0o400
+    ):
+        raise SystemExit(f"deployment control source metadata mismatch: {expected_name}")
+    descriptor = os.open(
+        path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        if fingerprint(opened) != fingerprint(before):
+            raise SystemExit(f"deployment control changed while opening: {expected_name}")
+        payload = b""
+        while True:
+            chunk = os.read(descriptor, 65_536)
+            if not chunk:
+                break
+            payload += chunk
+            if len(payload) > 1_048_576:
+                raise SystemExit(f"deployment control is too large: {expected_name}")
+        opened_after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    after = path.lstat()
+    if not fingerprint(before) == fingerprint(opened_after) == fingerprint(after):
+        raise SystemExit(f"deployment control changed while reading: {expected_name}")
+    if len(payload) != expected_size or hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise SystemExit(f"deployment control differs from version-controlled bytes: {expected_name}")
+    return payload
+
+transition_payload = read_control(
+    transition_path,
+    "SERVER-SERVICE-TRANSITION.json",
+    transition_sha256,
+    transition_size,
+)
 baseline = json.loads(
     baseline_payload.decode("utf-8"), object_pairs_hook=reject_duplicates
+)
+transition = json.loads(
+    transition_payload.decode("utf-8"), object_pairs_hook=reject_duplicates
 )
 baseline_keys = {
     "schema_version", "application_release", "captured_at", "hostname",
@@ -925,6 +999,306 @@ if (
 expected_services = {item["unit"]: item for item in baseline["services"]}
 if set(expected_services) != {"odoo19.service", "sudo-pi-agent-bridge.service"}:
     raise SystemExit("server baseline service set mismatch")
+
+transition_keys = {
+    "actor_attribution", "application_release", "baseline", "classification",
+    "history", "journal_transition_series", "maintenance_authorization_verified",
+    "observation",
+    "production_promotion_allowed", "production_write_authorized",
+    "schema_version", "services", "system_boot_id",
+}
+history_fields = {"observation_id", "observation", "services"}
+observation_fields = {"first_observed_at", "last_observed_at"}
+service_transition_fields = {
+    "active_state", "baseline_main_pid", "cmdline_sha256",
+    "effective_main_pid", "exec_main_start_monotonic_usec", "invocation_id",
+    "proc_start_ticks", "sub_state", "transition", "unit",
+}
+journal_transition_fields = {
+    "from_observation_id", "intermediate_full_service_identities_available",
+    "restart_cycle_count", "restart_cycles", "source", "to_observation_id",
+    "unit",
+}
+restart_cycle_fields = {"cycle", "started_at", "stopping_at"}
+
+def parse_utc(value):
+    if not isinstance(value, str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+        value,
+    ) is None:
+        raise SystemExit("service transition timestamp is invalid")
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+def parse_utc_microseconds(value):
+    if not isinstance(value, str) or re.fullmatch(
+        r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z",
+        value,
+    ) is None:
+        raise SystemExit("service transition journal timestamp is invalid")
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+        tzinfo=timezone.utc
+    )
+
+def expected_service(
+    unit, effective_main_pid, invocation_id,
+    exec_main_start_monotonic_usec, proc_start_ticks,
+):
+    baseline_service = expected_services[unit]
+    return {
+        "active_state": "active",
+        "baseline_main_pid": baseline_service["main_pid"],
+        "cmdline_sha256": baseline_service["cmdline_sha256"],
+        "effective_main_pid": effective_main_pid,
+        "exec_main_start_monotonic_usec": exec_main_start_monotonic_usec,
+        "invocation_id": invocation_id,
+        "proc_start_ticks": proc_start_ticks,
+        "sub_state": "running",
+        "transition": "changed" if unit == "odoo19.service" else "unchanged",
+        "unit": unit,
+    }
+
+if (
+    not isinstance(transition, dict)
+    or set(transition) != transition_keys
+    or not isinstance(transition["schema_version"], int)
+    or isinstance(transition["schema_version"], bool)
+    or transition["schema_version"] != 2
+    or transition["application_release"] != baseline["application_release"]
+    or transition["actor_attribution"] != "unverified"
+    or transition["classification"]
+    != "out_of_band_service_transition_history_observed"
+    or transition["maintenance_authorization_verified"] is not False
+    or transition["production_write_authorized"] is not False
+    or transition["production_promotion_allowed"] is not False
+    or transition["baseline"] != {
+        "captured_at": baseline["captured_at"],
+        "sha256": baseline_sha256,
+        "size": baseline_size,
+    }
+    or not isinstance(transition["system_boot_id"], str)
+    or transition["system_boot_id"] != "9546f53a-2e02-476d-b579-1960c2bffc30"
+    or not isinstance(transition["history"], list)
+    or len(transition["history"]) != 3
+):
+    raise SystemExit("service transition envelope mismatch")
+baseline_time = parse_utc(baseline["captured_at"])
+expected_units = ["odoo19.service", "sudo-pi-agent-bridge.service"]
+expected_history_services = [
+    [
+        expected_service(
+            "odoo19.service", 2316421, "5d50fca75f9043c0a7cacb8f9b853dbc",
+            10836291877098, 1083629187,
+        ),
+        expected_service(
+            "sudo-pi-agent-bridge.service", 2065799,
+            "5d393f016f7d4f56849543de03b83a9b", 7805455913314, 780545590,
+        ),
+    ],
+    [
+        expected_service(
+            "odoo19.service", 2344733, "5b211eeb1dbd4f458396f6097b0f6623",
+            10840181608082, 1084018160,
+        ),
+        expected_service(
+            "sudo-pi-agent-bridge.service", 2065799,
+            "5d393f016f7d4f56849543de03b83a9b", 7805455913314, 780545590,
+        ),
+    ],
+    [
+        expected_service(
+            "odoo19.service", 2576660, "ae54787981dd466db3b03ae6148b62bb",
+            10877336849089, 1087733684,
+        ),
+        expected_service(
+            "sudo-pi-agent-bridge.service", 2065799,
+            "5d393f016f7d4f56849543de03b83a9b", 7805455913314, 780545590,
+        ),
+    ],
+]
+expected_history_observations = [
+    {
+        "observation_id": "service-observation-20260714T145014Z",
+        "observation": {
+            "first_observed_at": "2026-07-14T14:50:14Z",
+            "last_observed_at": "2026-07-14T14:53:29Z",
+        },
+    },
+    {
+        "observation_id": "service-observation-20260715T001423Z",
+        "observation": {
+            "first_observed_at": "2026-07-15T00:14:23Z",
+            "last_observed_at": "2026-07-15T00:15:58Z",
+        },
+    },
+    {
+        "observation_id": "service-observation-20260715T021109Z",
+        "observation": {
+            "first_observed_at": "2026-07-15T02:11:09Z",
+            "last_observed_at": "2026-07-15T02:13:44Z",
+        },
+    },
+]
+history_windows = []
+for index, (record, expected_history, expected_observation) in enumerate(
+    zip(
+        transition["history"], expected_history_services,
+        expected_history_observations, strict=True,
+    )
+):
+    if (
+        not isinstance(record, dict)
+        or set(record) != history_fields
+        or not isinstance(record["observation_id"], str)
+        or record["observation_id"] != expected_observation["observation_id"]
+        or not isinstance(record["observation"], dict)
+        or set(record["observation"]) != observation_fields
+        or record["observation"] != expected_observation["observation"]
+        or not isinstance(record["services"], list)
+        or record["services"] != expected_history
+    ):
+        raise SystemExit(f"service transition history record mismatch: {index}")
+    for expected_unit, observed in zip(expected_units, record["services"], strict=True):
+        if (
+            not isinstance(observed, dict)
+            or set(observed) != service_transition_fields
+            or observed["unit"] != expected_unit
+            or any(
+                not isinstance(observed[field], int)
+                or isinstance(observed[field], bool)
+                or observed[field] <= 0
+                for field in (
+                    "baseline_main_pid", "effective_main_pid",
+                    "exec_main_start_monotonic_usec", "proc_start_ticks",
+                )
+            )
+        ):
+            raise SystemExit(
+                f"service transition history service mismatch: {index}:{expected_unit}"
+            )
+    first_observed = parse_utc(record["observation"]["first_observed_at"])
+    last_observed = parse_utc(record["observation"]["last_observed_at"])
+    expected_observation_id = (
+        "service-observation-" + first_observed.strftime("%Y%m%dT%H%M%SZ")
+    )
+    if (
+        record["observation_id"] != expected_observation_id
+        or first_observed <= baseline_time
+        or last_observed - first_observed < timedelta(seconds=60)
+    ):
+        raise SystemExit(f"service transition history interval is invalid: {index}")
+    history_windows.append((first_observed, last_observed))
+
+if (
+    any(
+        previous[1] >= current[0]
+        for previous, current in zip(history_windows, history_windows[1:])
+    )
+    or transition["observation"] != transition["history"][-1]["observation"]
+    or transition["services"] != transition["history"][-1]["services"]
+):
+    raise SystemExit("service transition current observation mismatch")
+
+identity_fields = (
+    "effective_main_pid", "invocation_id", "exec_main_start_monotonic_usec",
+    "proc_start_ticks",
+)
+if (
+    any(
+        any(
+            previous["services"][0][field] == current["services"][0][field]
+            for field in identity_fields
+        )
+        or previous["services"][1] != current["services"][1]
+        for previous, current in zip(
+            transition["history"], transition["history"][1:]
+        )
+    )
+):
+    raise SystemExit("service transition adjacent identity mismatch")
+
+series = transition["journal_transition_series"]
+if (
+    not isinstance(series, dict)
+    or set(series) != journal_transition_fields
+    or series["from_observation_id"] != transition["history"][0]["observation_id"]
+    or series["to_observation_id"] != transition["history"][-1]["observation_id"]
+    or series["intermediate_full_service_identities_available"] is not False
+    or not isinstance(series["restart_cycle_count"], int)
+    or isinstance(series["restart_cycle_count"], bool)
+    or series["restart_cycle_count"] != 13
+    or not isinstance(series["restart_cycles"], list)
+    or len(series["restart_cycles"]) != series["restart_cycle_count"]
+    or series["source"] != "systemd_journal_read_only"
+    or series["unit"] != "odoo19.service"
+):
+    raise SystemExit("service transition journal series mismatch")
+
+expected_restart_cycles = [
+    ("2026-07-14T14:54:40.864133Z", "2026-07-14T14:54:44.223188Z"),
+    ("2026-07-14T15:00:15.480601Z", "2026-07-14T15:00:18.317106Z"),
+    ("2026-07-14T15:01:58.803407Z", "2026-07-14T15:02:05.840052Z"),
+    ("2026-07-14T15:04:28.843964Z", "2026-07-14T15:04:36.451130Z"),
+    ("2026-07-14T15:06:18.973566Z", "2026-07-14T15:08:54.104055Z"),
+    ("2026-07-14T15:09:57.196883Z", "2026-07-14T15:10:09.568053Z"),
+    ("2026-07-14T15:12:30.427274Z", "2026-07-14T15:15:20.058024Z"),
+    ("2026-07-14T15:24:41.403921Z", "2026-07-14T15:24:50.648051Z"),
+    ("2026-07-14T15:29:00.948715Z", "2026-07-14T15:29:11.025010Z"),
+    ("2026-07-14T15:37:08.517076Z", "2026-07-14T15:37:23.592036Z"),
+    ("2026-07-15T00:35:03.900349Z", "2026-07-15T00:35:19.231045Z"),
+    ("2026-07-15T00:51:54.132437Z", "2026-07-15T00:52:11.030052Z"),
+    ("2026-07-15T01:56:23.289706Z", "2026-07-15T01:56:38.833032Z"),
+]
+previous_started = None
+for expected_cycle, (cycle, expected_times) in enumerate(
+    zip(series["restart_cycles"], expected_restart_cycles, strict=True), start=1
+):
+    expected_stopping_at, expected_started_at = expected_times
+    if (
+        not isinstance(cycle, dict)
+        or set(cycle) != restart_cycle_fields
+        or not isinstance(cycle["cycle"], int)
+        or isinstance(cycle["cycle"], bool)
+        or cycle["cycle"] != expected_cycle
+        or cycle["stopping_at"] != expected_stopping_at
+        or cycle["started_at"] != expected_started_at
+    ):
+        raise SystemExit(f"service transition journal cycle mismatch: {expected_cycle}")
+    stopping_at = parse_utc_microseconds(cycle["stopping_at"])
+    started_at = parse_utc_microseconds(cycle["started_at"])
+    if (
+        stopping_at >= started_at
+        or stopping_at <= history_windows[0][1]
+        or started_at >= history_windows[-1][0]
+        or (previous_started is not None and stopping_at <= previous_started)
+    ):
+        raise SystemExit(
+            f"service transition journal chronology mismatch: {expected_cycle}"
+        )
+    previous_started = started_at
+
+segment_counts = (10, 3)
+if len(segment_counts) != len(history_windows) - 1 or sum(segment_counts) != len(
+    expected_restart_cycles
+):
+    raise SystemExit("service transition journal segment count mismatch")
+offset = 0
+for segment_index, cycle_count in enumerate(segment_counts):
+    segment = series["restart_cycles"][offset : offset + cycle_count]
+    if (
+        not segment
+        or parse_utc_microseconds(segment[0]["stopping_at"])
+        <= history_windows[segment_index][1]
+        or parse_utc_microseconds(segment[-1]["started_at"])
+        >= history_windows[segment_index + 1][0]
+    ):
+        raise SystemExit(
+            f"service transition journal segment mismatch: {segment_index}"
+        )
+    offset += cycle_count
+
+effective_services = {
+    service["unit"]: service for service in transition["history"][-1]["services"]
+}
 
 def run(*arguments):
     completed = subprocess.run(
@@ -962,50 +1336,95 @@ def run_unit_listing(*arguments):
         )
     return completed.stdout
 
-for unit, expected_service in expected_services.items():
-    if (
-        not isinstance(expected_service, dict)
-        or set(expected_service)
-        != {"unit", "active_state", "sub_state", "main_pid", "cmdline_sha256"}
-        or expected_service["active_state"] != "active"
-        or expected_service["sub_state"] != "running"
-        or not isinstance(expected_service["main_pid"], int)
-        or isinstance(expected_service["main_pid"], bool)
-        or expected_service["main_pid"] <= 0
-        or not isinstance(expected_service["cmdline_sha256"], str)
-        or not re.fullmatch(r"[0-9a-f]{64}", expected_service["cmdline_sha256"])
-    ):
-        raise SystemExit(f"server baseline service entry mismatch: {unit}")
-    expected_pid = expected_service["main_pid"]
+def process_start_ticks(process):
+    payload = (process / "stat").read_text(encoding="ascii")
+    end = payload.rfind(")")
+    fields = payload[end + 2:].split() if end > 0 else []
+    if len(fields) <= 19 or not fields[19].isdigit():
+        raise SystemExit("process start ticks are unavailable")
+    return int(fields[19])
+
+def service_properties(unit):
     output = run(
         "/usr/bin/systemctl",
         "show",
         unit,
+        "--property=Id",
         "--property=ActiveState",
         "--property=SubState",
         "--property=MainPID",
+        "--property=InvocationID",
+        "--property=ExecMainStartTimestampMonotonic",
     )
-    properties = dict(
-        line.split("=", 1) for line in output.splitlines() if "=" in line
-    )
-    observed_pid = int(properties.get("MainPID", "0") or "0")
+    return dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+
+def capture_service(unit):
+    boot_before = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    first = service_properties(unit)
+    pid = int(first.get("MainPID", "0") or "0")
+    process = pathlib.Path(f"/proc/{pid}")
+    if pid <= 0 or not process.is_dir():
+        raise SystemExit(f"{phase} isolation process is unavailable: {unit}")
+    cmdline = (process / "cmdline").read_bytes().replace(b"\0", b" ")
+    start_ticks = process_start_ticks(process)
+    second = service_properties(unit)
+    second_process = pathlib.Path(f"/proc/{int(second.get('MainPID', '0') or '0')}")
+    if not second_process.is_dir():
+        raise SystemExit(f"{phase} isolation process disappeared: {unit}")
+    second_cmdline = (second_process / "cmdline").read_bytes().replace(b"\0", b" ")
+    second_start_ticks = process_start_ticks(second_process)
+    boot_after = pathlib.Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
     if (
-        properties.get("ActiveState") != "active"
+        first != second
+        or boot_before != boot_after
+        or cmdline != second_cmdline
+        or start_ticks != second_start_ticks
+    ):
+        raise SystemExit(f"{phase} isolation service identity changed while sampling: {unit}")
+    return {
+        "properties": first,
+        "boot_id": boot_before,
+        "pid": pid,
+        "cmdline": cmdline,
+        "proc_start_ticks": start_ticks,
+    }
+
+for unit, baseline_service in expected_services.items():
+    if (
+        not isinstance(baseline_service, dict)
+        or set(baseline_service)
+        != {"unit", "active_state", "sub_state", "main_pid", "cmdline_sha256"}
+        or baseline_service["active_state"] != "active"
+        or baseline_service["sub_state"] != "running"
+        or not isinstance(baseline_service["main_pid"], int)
+        or isinstance(baseline_service["main_pid"], bool)
+        or baseline_service["main_pid"] <= 0
+        or not isinstance(baseline_service["cmdline_sha256"], str)
+        or not re.fullmatch(r"[0-9a-f]{64}", baseline_service["cmdline_sha256"])
+    ):
+        raise SystemExit(f"server baseline service entry mismatch: {unit}")
+    expected = effective_services[unit]
+    sample = capture_service(unit)
+    properties = sample["properties"]
+    if (
+        properties.get("Id") != unit
+        or properties.get("ActiveState") != "active"
         or properties.get("SubState") != "running"
-        or observed_pid != expected_pid
+        or sample["pid"] != expected["effective_main_pid"]
+        or properties.get("InvocationID") != expected["invocation_id"]
+        or int(properties.get("ExecMainStartTimestampMonotonic", "0") or "0")
+        != expected["exec_main_start_monotonic_usec"]
+        or sample["boot_id"] != transition["system_boot_id"]
+        or sample["proc_start_ticks"] != expected["proc_start_ticks"]
     ):
         raise SystemExit(
-            f"{phase} isolation service mismatch: {unit} pid={observed_pid} "
+            f"{phase} isolation service mismatch: {unit} pid={sample['pid']} "
             f"active={properties.get('ActiveState')!r} "
             f"sub={properties.get('SubState')!r}"
         )
-    process = pathlib.Path(f"/proc/{observed_pid}")
-    if not process.is_dir():
-        raise SystemExit(f"{phase} isolation process is unavailable: {unit}")
-    cmdline = (process / "cmdline").read_bytes().replace(b"\0", b" ")
     if (
-        hashlib.sha256(cmdline).hexdigest() != expected_service["cmdline_sha256"]
-        or b"odoo-accounting-cli-v3" in cmdline
+        hashlib.sha256(sample["cmdline"]).hexdigest() != expected["cmdline_sha256"]
+        or b"odoo-accounting-cli-v3" in sample["cmdline"]
     ):
         raise SystemExit(f"{phase} isolation service unexpectedly references V3: {unit}")
 
@@ -1128,8 +1547,8 @@ if database_uuid != "19b09656-d10f-11f0-9065-00163e54a5ad":
 
 print(
     f"dev8_isolation_{phase}=passed "
-    f"odoo_pid={expected_services['odoo19.service']['main_pid']} "
-    f"pi_pid={expected_services['sudo-pi-agent-bridge.service']['main_pid']} "
+    f"odoo_pid={effective_services['odoo19.service']['effective_main_pid']} "
+    f"pi_pid={effective_services['sudo-pi-agent-bridge.service']['effective_main_pid']} "
     f"critical_hashes={len(baseline['critical_files'])} "
     f"production_critical_metadata_safe="
     f"{str(baseline['production_dependency_metadata_safe']).lower()}"
@@ -1162,5 +1581,6 @@ verify_release
 verify_package
 verify_completed_transaction_journals
 verify_isolation post
-printf 'dev8_server_gate=passed\nrelease=%s\npackage_sha256=%s\nmanifest_sha256=%s\nregistry_digest=%s\nmutable_candidate_test_fixture_used=false\nserver_unit_test_source=github-ci-run-29319326192\nproduction_critical_metadata_safe=false\n' \
-  "$release_id" "$package_sha" "$manifest_sha" "$registry_sha"
+printf 'dev8_server_gate=passed\nrelease=%s\npackage_sha256=%s\nmanifest_sha256=%s\nregistry_digest=%s\nserver_baseline_sha256=%s\nservice_transition_sha256=%s\nmutable_candidate_test_fixture_used=false\nserver_unit_test_source=github-ci-run-29319326192\nproduction_critical_metadata_safe=false\n' \
+  "$release_id" "$package_sha" "$manifest_sha" "$registry_sha" \
+  "$server_baseline_sha" "$service_transition_sha"

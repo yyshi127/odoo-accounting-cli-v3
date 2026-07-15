@@ -1,0 +1,221 @@
+{
+  "actor_attribution": "unverified",
+  "application_release": "0.1.0.dev8-bd21ca07c168",
+  "baseline": {
+    "captured_at": "2026-07-14T12:39:24Z",
+    "sha256": "37b498ffce8f175813e866c534b6514142436d9c4dbf29216f1dab1c880c57e4",
+    "size": 5662
+  },
+  "classification": "out_of_band_service_transition_history_observed",
+  "history": [
+    {
+      "observation_id": "service-observation-20260714T145014Z",
+      "observation": {
+        "first_observed_at": "2026-07-14T14:50:14Z",
+        "last_observed_at": "2026-07-14T14:53:29Z"
+      },
+      "services": [
+        {
+          "active_state": "active",
+          "baseline_main_pid": 2257341,
+          "cmdline_sha256": "6b05fb91c48b5a5f06260786145c84718688ff62b5b23aa46d038d353ced15c1",
+          "effective_main_pid": 2316421,
+          "exec_main_start_monotonic_usec": 10836291877098,
+          "invocation_id": "5d50fca75f9043c0a7cacb8f9b853dbc",
+          "proc_start_ticks": 1083629187,
+          "sub_state": "running",
+          "transition": "changed",
+          "unit": "odoo19.service"
+        },
+        {
+          "active_state": "active",
+          "baseline_main_pid": 2065799,
+          "cmdline_sha256": "b9763f9608a2f35b0e106fc6f07f8fbba8a5e36d6da61782288024f02ef2da68",
+          "effective_main_pid": 2065799,
+          "exec_main_start_monotonic_usec": 7805455913314,
+          "invocation_id": "5d393f016f7d4f56849543de03b83a9b",
+          "proc_start_ticks": 780545590,
+          "sub_state": "running",
+          "transition": "unchanged",
+          "unit": "sudo-pi-agent-bridge.service"
+        }
+      ]
+    },
+    {
+      "observation_id": "service-observation-20260715T001423Z",
+      "observation": {
+        "first_observed_at": "2026-07-15T00:14:23Z",
+        "last_observed_at": "2026-07-15T00:15:58Z"
+      },
+      "services": [
+        {
+          "active_state": "active",
+          "baseline_main_pid": 2257341,
+          "cmdline_sha256": "6b05fb91c48b5a5f06260786145c84718688ff62b5b23aa46d038d353ced15c1",
+          "effective_main_pid": 2344733,
+          "exec_main_start_monotonic_usec": 10840181608082,
+          "invocation_id": "5b211eeb1dbd4f458396f6097b0f6623",
+          "proc_start_ticks": 1084018160,
+          "sub_state": "running",
+          "transition": "changed",
+          "unit": "odoo19.service"
+        },
+        {
+          "active_state": "active",
+          "baseline_main_pid": 2065799,
+          "cmdline_sha256": "b9763f9608a2f35b0e106fc6f07f8fbba8a5e36d6da61782288024f02ef2da68",
+          "effective_main_pid": 2065799,
+          "exec_main_start_monotonic_usec": 7805455913314,
+          "invocation_id": "5d393f016f7d4f56849543de03b83a9b",
+          "proc_start_ticks": 780545590,
+          "sub_state": "running",
+          "transition": "unchanged",
+          "unit": "sudo-pi-agent-bridge.service"
+        }
+      ]
+    },
+    {
+      "observation_id": "service-observation-20260715T021109Z",
+      "observation": {
+        "first_observed_at": "2026-07-15T02:11:09Z",
+        "last_observed_at": "2026-07-15T02:13:44Z"
+      },
+      "services": [
+        {
+          "active_state": "active",
+          "baseline_main_pid": 2257341,
+          "cmdline_sha256": "6b05fb91c48b5a5f06260786145c84718688ff62b5b23aa46d038d353ced15c1",
+          "effective_main_pid": 2576660,
+          "exec_main_start_monotonic_usec": 10877336849089,
+          "invocation_id": "ae54787981dd466db3b03ae6148b62bb",
+          "proc_start_ticks": 1087733684,
+          "sub_state": "running",
+          "transition": "changed",
+          "unit": "odoo19.service"
+        },
+        {
+          "active_state": "active",
+          "baseline_main_pid": 2065799,
+          "cmdline_sha256": "b9763f9608a2f35b0e106fc6f07f8fbba8a5e36d6da61782288024f02ef2da68",
+          "effective_main_pid": 2065799,
+          "exec_main_start_monotonic_usec": 7805455913314,
+          "invocation_id": "5d393f016f7d4f56849543de03b83a9b",
+          "proc_start_ticks": 780545590,
+          "sub_state": "running",
+          "transition": "unchanged",
+          "unit": "sudo-pi-agent-bridge.service"
+        }
+      ]
+    }
+  ],
+  "journal_transition_series": {
+    "from_observation_id": "service-observation-20260714T145014Z",
+    "intermediate_full_service_identities_available": false,
+    "restart_cycle_count": 13,
+    "restart_cycles": [
+      {
+        "cycle": 1,
+        "started_at": "2026-07-14T14:54:44.223188Z",
+        "stopping_at": "2026-07-14T14:54:40.864133Z"
+      },
+      {
+        "cycle": 2,
+        "started_at": "2026-07-14T15:00:18.317106Z",
+        "stopping_at": "2026-07-14T15:00:15.480601Z"
+      },
+      {
+        "cycle": 3,
+        "started_at": "2026-07-14T15:02:05.840052Z",
+        "stopping_at": "2026-07-14T15:01:58.803407Z"
+      },
+      {
+        "cycle": 4,
+        "started_at": "2026-07-14T15:04:36.451130Z",
+        "stopping_at": "2026-07-14T15:04:28.843964Z"
+      },
+      {
+        "cycle": 5,
+        "started_at": "2026-07-14T15:08:54.104055Z",
+        "stopping_at": "2026-07-14T15:06:18.973566Z"
+      },
+      {
+        "cycle": 6,
+        "started_at": "2026-07-14T15:10:09.568053Z",
+        "stopping_at": "2026-07-14T15:09:57.196883Z"
+      },
+      {
+        "cycle": 7,
+        "started_at": "2026-07-14T15:15:20.058024Z",
+        "stopping_at": "2026-07-14T15:12:30.427274Z"
+      },
+      {
+        "cycle": 8,
+        "started_at": "2026-07-14T15:24:50.648051Z",
+        "stopping_at": "2026-07-14T15:24:41.403921Z"
+      },
+      {
+        "cycle": 9,
+        "started_at": "2026-07-14T15:29:11.025010Z",
+        "stopping_at": "2026-07-14T15:29:00.948715Z"
+      },
+      {
+        "cycle": 10,
+        "started_at": "2026-07-14T15:37:23.592036Z",
+        "stopping_at": "2026-07-14T15:37:08.517076Z"
+      },
+      {
+        "cycle": 11,
+        "started_at": "2026-07-15T00:35:19.231045Z",
+        "stopping_at": "2026-07-15T00:35:03.900349Z"
+      },
+      {
+        "cycle": 12,
+        "started_at": "2026-07-15T00:52:11.030052Z",
+        "stopping_at": "2026-07-15T00:51:54.132437Z"
+      },
+      {
+        "cycle": 13,
+        "started_at": "2026-07-15T01:56:38.833032Z",
+        "stopping_at": "2026-07-15T01:56:23.289706Z"
+      }
+    ],
+    "source": "systemd_journal_read_only",
+    "to_observation_id": "service-observation-20260715T021109Z",
+    "unit": "odoo19.service"
+  },
+  "maintenance_authorization_verified": false,
+  "observation": {
+    "first_observed_at": "2026-07-15T02:11:09Z",
+    "last_observed_at": "2026-07-15T02:13:44Z"
+  },
+  "production_promotion_allowed": false,
+  "production_write_authorized": false,
+  "schema_version": 2,
+  "services": [
+    {
+      "active_state": "active",
+      "baseline_main_pid": 2257341,
+      "cmdline_sha256": "6b05fb91c48b5a5f06260786145c84718688ff62b5b23aa46d038d353ced15c1",
+      "effective_main_pid": 2576660,
+      "exec_main_start_monotonic_usec": 10877336849089,
+      "invocation_id": "ae54787981dd466db3b03ae6148b62bb",
+      "proc_start_ticks": 1087733684,
+      "sub_state": "running",
+      "transition": "changed",
+      "unit": "odoo19.service"
+    },
+    {
+      "active_state": "active",
+      "baseline_main_pid": 2065799,
+      "cmdline_sha256": "b9763f9608a2f35b0e106fc6f07f8fbba8a5e36d6da61782288024f02ef2da68",
+      "effective_main_pid": 2065799,
+      "exec_main_start_monotonic_usec": 7805455913314,
+      "invocation_id": "5d393f016f7d4f56849543de03b83a9b",
+      "proc_start_ticks": 780545590,
+      "sub_state": "running",
+      "transition": "unchanged",
+      "unit": "sudo-pi-agent-bridge.service"
+    }
+  ],
+  "system_boot_id": "9546f53a-2e02-476d-b579-1960c2bffc30"
+}

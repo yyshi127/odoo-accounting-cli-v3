@@ -1,0 +1,19 @@
+{
+  "application_release": "0.1.0.dev8-bd21ca07c168",
+  "final_verifier_passed": false,
+  "invalidating_service_observation_id": "service-observation-20260714T145014Z",
+  "prior_evidence": {
+    "anchor_path": "/var/lib/odoo-accounting-cli-v3/evidence-anchors/0.1.0.dev8-bd21ca07c168.json",
+    "anchor_sha256": "429d02227cd2d4e35df84d9d0de25ad8f0be7081d8c4cae4d63366dab27b80d6",
+    "anchor_size": 1120,
+    "evidence_checksum_manifest_sha256": "0bb87449e070523cabf0967a26dbe04dc8f0c4da3bc1c490618429517320485e",
+    "evidence_metadata_sha256": "0320acebc25ca47590b6898d7630814beb0e1e7c453632c876a63f8c813f00be",
+    "evidence_path": "/var/lib/odoo-accounting-cli-v3/evidence/0.1.0.dev8-bd21ca07c168",
+    "toolchain_version": "0.1.0.dev8-toolchain.8"
+  },
+  "production_promotion_allowed": false,
+  "reason_code": "baseline_service_pid_changed_before_final_verification",
+  "recorded_at": "2026-07-14T14:53:29Z",
+  "schema_version": 1,
+  "status": "retained_nonfinal"
+}

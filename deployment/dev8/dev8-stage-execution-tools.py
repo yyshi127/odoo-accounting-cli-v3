@@ -32,7 +32,7 @@ SOURCES = {
     "dev8-run-real-reads.sh": "de22f26a9e503581bc9d219322dc626f8830f81c6b06968963719e540f457ffd",
     "dev8-sign-read.py": "e94e610d480f7ba0736e315a46ca98a6507e82e88e1b35ac2ca6a31ff0592896",
     "dev8-launcher-isolation-gate.py": "9bb2a2596d639851df2567e5a8e9cef98f2c5849725946ecc72bb6b1cfbfa80e",
-    "dev8-run-read-oracles.sh": "a69faa4d38341c5c9135c43e0f6308c3335eb65fb90b72f757b8a1e26d1af618",
+    "dev8-run-read-oracles.sh": "4e057e4e7c0f92525f0ef862fb61b19622fb2f5043c1859bb5f86bdea2fd2689",
     "dev6-trial-balance-sql-oracle.py": "7aa959361ac994f17cd871d33211bbef02ab816993ff87f088c82a6541cfcb9b",
     "dev6-ar-sql-oracle.py": "cdb49967d60af0aa416cadaeb61503847ddfeb4d111aa0e01335fe06b78499c6",
     "dev7-ap-sql-oracle.py": "ad54540725e8110ea1449586d0dcddb1d6c70b1e387f0e843b989aca6b70f1e5",

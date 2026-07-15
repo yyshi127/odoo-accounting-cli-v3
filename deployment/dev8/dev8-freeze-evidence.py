@@ -21,7 +21,8 @@ from pathlib import Path, PurePosixPath
 
 RELEASE = "0.1.0.dev8-bd21ca07c168"
 VERSION = "0.1.0.dev8"
-TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.10"
+TOOLCHAIN_VERSION = "0.1.0.dev8-toolchain.12"
+EVIDENCE_ID = f"{RELEASE}--{TOOLCHAIN_VERSION}"
 COMMIT = "bd21ca07c1689a42fbf903b91486269397b44733"
 TREE = "fd389ef55fbc6723379a2928a10b665925829599"
 PACKAGE_SHA256 = "58cfd17e72858b10d4e233b9c21af6e0759dac0ec08a4293e004d7a3b3c22234"
@@ -41,12 +42,14 @@ PIPELINE_LOCK = Path("/opt/odoo-accounting-cli-v3/.dev8-pipeline.lock")
 INSTALL_JOURNAL = Path("/opt/odoo-accounting-cli-v3/.dev8-install-transaction.json")
 RUNTIME_JOURNAL = Path("/etc/odoo-accounting-cli-v3/.dev8-runtime-transaction.json")
 EVIDENCE_PARENT = Path("/var/lib/odoo-accounting-cli-v3/evidence")
-TARGET = EVIDENCE_PARENT / RELEASE
-STAGING = EVIDENCE_PARENT / f".{RELEASE}.staging"
+TARGET = EVIDENCE_PARENT / EVIDENCE_ID
+STAGING = EVIDENCE_PARENT / f".{EVIDENCE_ID}.staging"
 ANCHOR_PARENT = Path("/var/lib/odoo-accounting-cli-v3/evidence-anchors")
-EVIDENCE_ANCHOR = ANCHOR_PARENT / f"{RELEASE}.json"
-ANCHOR_STAGING = ANCHOR_PARENT / f".{RELEASE}.json.staging"
+EVIDENCE_ANCHOR = ANCHOR_PARENT / f"{EVIDENCE_ID}.json"
+ANCHOR_STAGING = ANCHOR_PARENT / f".{EVIDENCE_ID}.json.staging"
 SERVER_BASELINE_NAME = "SERVER-BASELINE.json"
+SERVER_SERVICE_TRANSITION_NAME = "SERVER-SERVICE-TRANSITION.json"
+PRIOR_EVIDENCE_DISPOSITION_NAME = "PRIOR-EVIDENCE-DISPOSITION.json"
 READ_NAMES = ("registry-list", "trial-balance", "ar-open-items", "ap-open-items")
 READ_FILES = {
     "read-plan.input.json", "identity.json", "summary.json", "read-oracles.audit.json",
@@ -74,7 +77,7 @@ EXECUTION_SOURCE_HASHES = {
     "dev8-run-real-reads.sh": SOURCE_HASHES["real-read-runner"],
     "dev8-sign-read.py": SOURCE_HASHES["signer"],
     "dev8-launcher-isolation-gate.py": SOURCE_HASHES["launcher-isolation"],
-    "dev8-run-read-oracles.sh": "a69faa4d38341c5c9135c43e0f6308c3335eb65fb90b72f757b8a1e26d1af618",
+    "dev8-run-read-oracles.sh": "4e057e4e7c0f92525f0ef862fb61b19622fb2f5043c1859bb5f86bdea2fd2689",
     "dev6-trial-balance-sql-oracle.py": "7aa959361ac994f17cd871d33211bbef02ab816993ff87f088c82a6541cfcb9b",
     "dev6-ar-sql-oracle.py": "cdb49967d60af0aa416cadaeb61503847ddfeb4d111aa0e01335fe06b78499c6",
     "dev7-ap-sql-oracle.py": "ad54540725e8110ea1449586d0dcddb1d6c70b1e387f0e843b989aca6b70f1e5",
@@ -98,7 +101,12 @@ TOOL_FILES = (
     "dev8-verify-frozen-evidence.py",
 )
 TOOLCHAIN_MANIFEST_NAME = "TOOLCHAIN-MANIFEST.json"
-MANIFEST_FILES = (*TOOL_FILES, SERVER_BASELINE_NAME)
+MANIFEST_FILES = (
+    *TOOL_FILES,
+    SERVER_BASELINE_NAME,
+    SERVER_SERVICE_TRANSITION_NAME,
+    PRIOR_EVIDENCE_DISPOSITION_NAME,
+)
 EXPECTED_EVIDENCE_FILES = {
     "release/release-package.tar.gz",
     "release/RELEASE-MANIFEST.json",
@@ -115,6 +123,8 @@ EXPECTED_EVIDENCE_FILES = {
     "security/secret-scan.json",
     f"tools/{TOOLCHAIN_MANIFEST_NAME}",
     f"tools/{SERVER_BASELINE_NAME}",
+    f"tools/{SERVER_SERVICE_TRANSITION_NAME}",
+    f"tools/{PRIOR_EVIDENCE_DISPOSITION_NAME}",
     "tools/TOOL-INVENTORY.json",
     "EVIDENCE-METADATA.json",
     "EVIDENCE-SHA256SUMS",
@@ -124,6 +134,60 @@ EXPECTED_EVIDENCE_FILES = {
     *(f"deployment/{name}" for name in DEPLOYMENT_FILES),
     *(f"tools/{name}" for name in TOOL_FILES),
 }
+SERVICE_OBSERVATIONS = (
+    {
+        "observation_id": "service-observation-20260714T145014Z",
+        "first_observed_at": "2026-07-14T14:50:14Z",
+        "last_observed_at": "2026-07-14T14:53:29Z",
+    },
+    {
+        "observation_id": "service-observation-20260715T001423Z",
+        "first_observed_at": "2026-07-15T00:14:23Z",
+        "last_observed_at": "2026-07-15T00:15:58Z",
+    },
+    {
+        "observation_id": "service-observation-20260715T021109Z",
+        "first_observed_at": "2026-07-15T02:11:09Z",
+        "last_observed_at": "2026-07-15T02:13:44Z",
+    },
+)
+JOURNAL_RESTART_CYCLES = (
+    ("2026-07-14T14:54:40.864133Z", "2026-07-14T14:54:44.223188Z"),
+    ("2026-07-14T15:00:15.480601Z", "2026-07-14T15:00:18.317106Z"),
+    ("2026-07-14T15:01:58.803407Z", "2026-07-14T15:02:05.840052Z"),
+    ("2026-07-14T15:04:28.843964Z", "2026-07-14T15:04:36.451130Z"),
+    ("2026-07-14T15:06:18.973566Z", "2026-07-14T15:08:54.104055Z"),
+    ("2026-07-14T15:09:57.196883Z", "2026-07-14T15:10:09.568053Z"),
+    ("2026-07-14T15:12:30.427274Z", "2026-07-14T15:15:20.058024Z"),
+    ("2026-07-14T15:24:41.403921Z", "2026-07-14T15:24:50.648051Z"),
+    ("2026-07-14T15:29:00.948715Z", "2026-07-14T15:29:11.025010Z"),
+    ("2026-07-14T15:37:08.517076Z", "2026-07-14T15:37:23.592036Z"),
+    ("2026-07-15T00:35:03.900349Z", "2026-07-15T00:35:19.231045Z"),
+    ("2026-07-15T00:51:54.132437Z", "2026-07-15T00:52:11.030052Z"),
+    ("2026-07-15T01:56:23.289706Z", "2026-07-15T01:56:38.833032Z"),
+)
+JOURNAL_SEGMENT_COUNTS = (10, 3)
+EVIDENCE_METADATA_FIELDS = frozenset(
+    {
+        "schema_version", "release", "evidence_id", "toolchain_version",
+        "toolchain_manifest_sha256", "server_baseline_sha256",
+        "server_baseline_size", "server_service_transition_sha256",
+        "server_service_transition_size", "prior_evidence_disposition_sha256",
+        "prior_evidence_disposition_size", "version", "commit", "git_tree",
+        "package_sha256", "package_size", "manifest_sha256", "registry_digest",
+        "runtime_config_sha256", "read_plan_sha256", "database_uuid", "audit_head",
+        "auth_tokens", "consumed_receipts", "receipt_audit_events",
+        "verified_batch_auth_tokens", "verified_batch_receipts",
+        "verified_batch_audit_events", "verified_capabilities",
+        "registered_capabilities", "staged_capabilities", "enabled_capabilities",
+        "frozen_at", "evidence_scope", "evidence_visibility", "evidence_file_count",
+        "freeze_checks_passed", "final_verification_status", "goal_complete",
+        "secret_material_included", "production_writes_authorized",
+        "odoo_accounting_write_performed", "pi_route_changed", "v2_changed",
+        "production_dependency_closure_complete", "production_promotion_allowed",
+        "promotion_blockers",
+    }
+)
 EXPECTED_CI = {
     "run_id": 29319326192,
     "head_sha": COMMIT,
@@ -145,11 +209,48 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
+def validate_evidence_metadata_fields(document: object) -> dict[str, object]:
+    require(
+        isinstance(document, dict) and set(document) == EVIDENCE_METADATA_FIELDS,
+        "evidence metadata fields are not exact",
+    )
+    return document
+
+
 def exact_integer_fields(value: object, fields: tuple[str, ...]) -> bool:
     return isinstance(value, dict) and all(
         isinstance(value.get(field), int) and not isinstance(value.get(field), bool)
         for field in fields
     )
+
+
+def parse_utc_second(value: object, label: str) -> dt.datetime:
+    require(
+        isinstance(value, str)
+        and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value) is not None,
+        f"{label} is not a UTC second timestamp",
+    )
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is invalid") from exc
+
+
+def parse_utc_microsecond(value: object, label: str) -> dt.datetime:
+    require(
+        isinstance(value, str)
+        and re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z",
+            value,
+        ) is not None,
+        f"{label} is not a UTC microsecond timestamp",
+    )
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ").replace(
+            tzinfo=dt.timezone.utc
+        )
+    except ValueError as exc:
+        raise RuntimeError(f"{label} is invalid") from exc
 
 
 def validate_toolchain_manifest(document: object) -> dict[str, dict[str, object]]:
@@ -273,6 +374,494 @@ def validate_server_baseline(document: object) -> dict[str, object]:
     return document
 
 
+def validate_service_transition(
+    document: object,
+    baseline_payload: bytes,
+    server_baseline: dict[str, object],
+) -> dict[str, object]:
+    expected_keys = {
+        "schema_version", "application_release", "baseline", "classification",
+        "actor_attribution", "history", "journal_transition_series",
+        "maintenance_authorization_verified", "observation", "services",
+        "system_boot_id", "production_write_authorized",
+        "production_promotion_allowed",
+    }
+    require(
+        isinstance(document, dict) and set(document) == expected_keys,
+        "service transition fields are not exact",
+    )
+    baseline = document.get("baseline")
+    require(
+        isinstance(document.get("schema_version"), int)
+        and not isinstance(document.get("schema_version"), bool)
+        and document.get("schema_version") == 2
+        and document.get("application_release") == RELEASE
+        and document.get("classification")
+        == "out_of_band_service_transition_history_observed"
+        and document.get("actor_attribution") == "unverified"
+        and document.get("maintenance_authorization_verified") is False
+        and document.get("production_write_authorized") is False
+        and document.get("production_promotion_allowed") is False
+        and isinstance(document.get("system_boot_id"), str)
+        and document.get("system_boot_id")
+        == "9546f53a-2e02-476d-b579-1960c2bffc30"
+        and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            str(document["system_boot_id"]),
+        ) is not None,
+        "service transition identity or safety flags mismatch",
+    )
+    require(
+        isinstance(baseline, dict)
+        and baseline
+        == {
+            "captured_at": server_baseline.get("captured_at"),
+            "sha256": hashlib.sha256(baseline_payload).hexdigest(),
+            "size": len(baseline_payload),
+        }
+        and isinstance(baseline.get("size"), int)
+        and not isinstance(baseline.get("size"), bool)
+        and set(baseline) == {"captured_at", "sha256", "size"},
+        "service transition does not bind the server baseline",
+    )
+
+    baseline_services = {
+        str(service["unit"]): service for service in server_baseline["services"]
+    }
+    require(
+        set(baseline_services)
+        == {"odoo19.service", "sudo-pi-agent-bridge.service"},
+        "server baseline service set mismatch",
+    )
+    expected_odoo_identities = (
+        {
+            "effective_main_pid": 2316421,
+            "exec_main_start_monotonic_usec": 10836291877098,
+            "invocation_id": "5d50fca75f9043c0a7cacb8f9b853dbc",
+            "proc_start_ticks": 1083629187,
+        },
+        {
+            "effective_main_pid": 2344733,
+            "exec_main_start_monotonic_usec": 10840181608082,
+            "invocation_id": "5b211eeb1dbd4f458396f6097b0f6623",
+            "proc_start_ticks": 1084018160,
+        },
+        {
+            "effective_main_pid": 2576660,
+            "exec_main_start_monotonic_usec": 10877336849089,
+            "invocation_id": "ae54787981dd466db3b03ae6148b62bb",
+            "proc_start_ticks": 1087733684,
+        },
+    )
+    pi_identity = {
+        "effective_main_pid": 2065799,
+        "exec_main_start_monotonic_usec": 7805455913314,
+        "invocation_id": "5d393f016f7d4f56849543de03b83a9b",
+        "proc_start_ticks": 780545590,
+    }
+    service_fields = {
+        "unit", "active_state", "sub_state", "baseline_main_pid",
+        "effective_main_pid", "cmdline_sha256", "invocation_id",
+        "exec_main_start_monotonic_usec", "proc_start_ticks", "transition",
+    }
+    expected_units = ("odoo19.service", "sudo-pi-agent-bridge.service")
+
+    def expected_service(
+        unit: str, identity: dict[str, object]
+    ) -> dict[str, object]:
+        baseline_service = baseline_services[unit]
+        return {
+            "unit": unit,
+            "active_state": "active",
+            "sub_state": "running",
+            "baseline_main_pid": baseline_service["main_pid"],
+            "effective_main_pid": identity["effective_main_pid"],
+            "cmdline_sha256": baseline_service["cmdline_sha256"],
+            "invocation_id": identity["invocation_id"],
+            "exec_main_start_monotonic_usec": identity[
+                "exec_main_start_monotonic_usec"
+            ],
+            "proc_start_ticks": identity["proc_start_ticks"],
+            "transition": "changed" if unit == "odoo19.service" else "unchanged",
+        }
+
+    history = document.get("history")
+    require(
+        isinstance(history, list)
+        and len(history) == len(SERVICE_OBSERVATIONS)
+        and all(isinstance(entry, dict) for entry in history),
+        "service transition history is invalid",
+    )
+    prior_last = parse_utc_second(
+        server_baseline["captured_at"], "server baseline capture"
+    )
+    history_windows: list[tuple[dt.datetime, dt.datetime]] = []
+    history_ids: list[str] = []
+    for index, (entry, odoo_identity, expected_observation) in enumerate(
+        zip(history, expected_odoo_identities, SERVICE_OBSERVATIONS, strict=True)
+    ):
+        require(
+            set(entry) == {"observation_id", "observation", "services"}
+            and entry.get("observation_id")
+            == expected_observation["observation_id"],
+            f"service transition history fields mismatch: {index}",
+        )
+        observation = entry.get("observation")
+        require(
+            isinstance(observation, dict)
+            and observation
+            == {
+                "first_observed_at": expected_observation["first_observed_at"],
+                "last_observed_at": expected_observation["last_observed_at"],
+            },
+            f"service transition observation fields mismatch: {index}",
+        )
+        first_observed = parse_utc_second(
+            observation["first_observed_at"], f"service observation {index} first"
+        )
+        last_observed = parse_utc_second(
+            observation["last_observed_at"], f"service observation {index} last"
+        )
+        require(
+            first_observed > prior_last
+            and (last_observed - first_observed).total_seconds() >= 60,
+            f"service transition observation ordering mismatch: {index}",
+        )
+        expected_services = [
+            expected_service("odoo19.service", odoo_identity),
+            expected_service("sudo-pi-agent-bridge.service", pi_identity),
+        ]
+        services = entry.get("services")
+        require(
+            isinstance(services, list)
+            and services == expected_services,
+            f"service transition service identity mismatch: {index}",
+        )
+        for expected_unit, service in zip(expected_units, services, strict=True):
+            require(
+                isinstance(service, dict)
+                and set(service) == service_fields
+                and service.get("unit") == expected_unit
+                and exact_integer_fields(
+                    service,
+                    (
+                        "baseline_main_pid", "effective_main_pid",
+                        "exec_main_start_monotonic_usec", "proc_start_ticks",
+                    ),
+                )
+                and all(
+                    int(service[field]) > 0
+                    for field in (
+                        "baseline_main_pid", "effective_main_pid",
+                        "exec_main_start_monotonic_usec", "proc_start_ticks",
+                    )
+                )
+                and isinstance(service.get("cmdline_sha256"), str)
+                and HEX64.fullmatch(str(service["cmdline_sha256"])) is not None
+                and isinstance(service.get("invocation_id"), str)
+                and re.fullmatch(r"[0-9a-f]{32}", str(service["invocation_id"]))
+                is not None,
+                f"service transition record fields mismatch: {index}:{expected_unit}",
+            )
+        history_ids.append(str(entry["observation_id"]))
+        history_windows.append((first_observed, last_observed))
+        prior_last = last_observed
+
+    require(
+        len(set(history_ids)) == len(SERVICE_OBSERVATIONS)
+        and document.get("observation") == history[-1]["observation"]
+        and document.get("services") == history[-1]["services"],
+        "service transition current projection mismatch",
+    )
+
+    identity_fields = (
+        "effective_main_pid", "invocation_id", "exec_main_start_monotonic_usec",
+        "proc_start_ticks",
+    )
+    require(
+        all(
+            all(previous["services"][0][field] != current["services"][0][field]
+                for field in identity_fields)
+            and previous["services"][1] == current["services"][1]
+            for previous, current in zip(history, history[1:])
+        ),
+        "service transition adjacent identities mismatch",
+    )
+
+    series = document.get("journal_transition_series")
+    series_fields = {
+        "from_observation_id", "intermediate_full_service_identities_available",
+        "restart_cycle_count", "restart_cycles", "source", "to_observation_id",
+        "unit",
+    }
+    require(
+        isinstance(series, dict)
+        and set(series) == series_fields
+        and series.get("from_observation_id") == history_ids[0]
+        and series.get("to_observation_id") == history_ids[-1]
+        and series.get("intermediate_full_service_identities_available") is False
+        and isinstance(series.get("restart_cycle_count"), int)
+        and not isinstance(series.get("restart_cycle_count"), bool)
+        and series.get("restart_cycle_count") == len(JOURNAL_RESTART_CYCLES)
+        and isinstance(series.get("restart_cycles"), list)
+        and len(series["restart_cycles"]) == len(JOURNAL_RESTART_CYCLES)
+        and series.get("source") == "systemd_journal_read_only"
+        and series.get("unit") == "odoo19.service",
+        "service transition journal series mismatch",
+    )
+    previous_started = history_windows[0][1]
+    for expected_cycle, (cycle, expected_times) in enumerate(
+        zip(series["restart_cycles"], JOURNAL_RESTART_CYCLES, strict=True), start=1
+    ):
+        stopping_value, started_value = expected_times
+        require(
+            isinstance(cycle, dict)
+            and set(cycle) == {"cycle", "started_at", "stopping_at"}
+            and isinstance(cycle.get("cycle"), int)
+            and not isinstance(cycle.get("cycle"), bool)
+            and cycle
+            == {
+                "cycle": expected_cycle,
+                "started_at": started_value,
+                "stopping_at": stopping_value,
+            },
+            f"service transition journal cycle fields mismatch: {expected_cycle}",
+        )
+        stopping_at = parse_utc_microsecond(
+            cycle.get("stopping_at"), f"service transition cycle {expected_cycle} stop"
+        )
+        started_at = parse_utc_microsecond(
+            cycle.get("started_at"), f"service transition cycle {expected_cycle} start"
+        )
+        require(
+            stopping_at > previous_started
+            and started_at > stopping_at
+            and started_at < history_windows[-1][0],
+            f"service transition journal chronology mismatch: {expected_cycle}",
+        )
+        previous_started = started_at
+    require(
+        len(JOURNAL_SEGMENT_COUNTS) == len(history) - 1
+        and sum(JOURNAL_SEGMENT_COUNTS) == len(JOURNAL_RESTART_CYCLES),
+        "service transition journal segment count mismatch",
+    )
+    offset = 0
+    for segment_index, cycle_count in enumerate(JOURNAL_SEGMENT_COUNTS):
+        segment = series["restart_cycles"][offset : offset + cycle_count]
+        require(
+            segment
+            and parse_utc_microsecond(
+                segment[0]["stopping_at"], f"segment {segment_index} stop"
+            ) > history_windows[segment_index][1]
+            and parse_utc_microsecond(
+                segment[-1]["started_at"], f"segment {segment_index} start"
+            ) < history_windows[segment_index + 1][0],
+            f"service transition journal segment mismatch: {segment_index}",
+        )
+        offset += cycle_count
+    return document
+
+
+def validate_prior_evidence_disposition(document: object) -> dict[str, object]:
+    expected_keys = {
+        "schema_version", "application_release", "prior_evidence", "status",
+        "reason_code", "recorded_at", "invalidating_service_observation_id",
+        "final_verifier_passed", "production_promotion_allowed",
+    }
+    require(
+        isinstance(document, dict) and set(document) == expected_keys,
+        "prior evidence disposition fields are not exact",
+    )
+    prior = document.get("prior_evidence")
+    expected_prior = {
+        "anchor_path": f"/var/lib/odoo-accounting-cli-v3/evidence-anchors/{RELEASE}.json",
+        "anchor_sha256": "429d02227cd2d4e35df84d9d0de25ad8f0be7081d8c4cae4d63366dab27b80d6",
+        "anchor_size": 1120,
+        "evidence_checksum_manifest_sha256": "0bb87449e070523cabf0967a26dbe04dc8f0c4da3bc1c490618429517320485e",
+        "evidence_metadata_sha256": "0320acebc25ca47590b6898d7630814beb0e1e7c453632c876a63f8c813f00be",
+        "evidence_path": f"/var/lib/odoo-accounting-cli-v3/evidence/{RELEASE}",
+        "toolchain_version": "0.1.0.dev8-toolchain.8",
+    }
+    require(
+        isinstance(document.get("schema_version"), int)
+        and not isinstance(document.get("schema_version"), bool)
+        and document.get("schema_version") == 1
+        and document.get("application_release") == RELEASE
+        and document.get("status") == "retained_nonfinal"
+        and document.get("reason_code") == "baseline_service_pid_changed_before_final_verification"
+        and document.get("invalidating_service_observation_id")
+        == "service-observation-20260714T145014Z"
+        and document.get("recorded_at") == "2026-07-14T14:53:29Z"
+        and document.get("final_verifier_passed") is False
+        and document.get("production_promotion_allowed") is False
+        and prior == expected_prior,
+        "prior evidence disposition identity or safety flags mismatch",
+    )
+    parse_utc_second(document.get("recorded_at"), "prior evidence disposition time")
+    return document
+
+
+def validate_retained_prior_evidence(
+    disposition: dict[str, object],
+) -> dict[str, object]:
+    prior = disposition["prior_evidence"]
+    require(isinstance(prior, dict), "prior evidence reference is invalid")
+    anchor_path = Path(str(prior["anchor_path"]))
+    evidence_path = Path(str(prior["evidence_path"]))
+    anchor_info = path_info(anchor_path)
+    evidence_info = path_info(evidence_path)
+    require(
+        anchor_info["regular"] is True
+        and anchor_info["symlink"] is False
+        and anchor_path.resolve(strict=True) == anchor_path
+        and anchor_info["uid"] == 0
+        and anchor_info["gid"] == 0
+        and anchor_info["mode"] == "0400"
+        and anchor_info["nlink"] == 1
+        and anchor_info["size"] == prior["anchor_size"],
+        "retained prior evidence anchor metadata mismatch",
+    )
+    require(
+        evidence_info["directory"] is True
+        and evidence_info["symlink"] is False
+        and evidence_path.resolve(strict=True) == evidence_path
+        and evidence_info["uid"] == 0
+        and evidence_info["gid"] == 0
+        and evidence_info["mode"] == "0500",
+        "retained prior evidence root metadata mismatch",
+    )
+    anchor_payload = secure_bytes(anchor_path)
+    require(
+        hashlib.sha256(anchor_payload).hexdigest() == prior["anchor_sha256"]
+        and len(anchor_payload) == prior["anchor_size"],
+        "retained prior evidence anchor bytes mismatch",
+    )
+    anchor = load_json_bytes(anchor_payload, "retained prior evidence anchor")
+    checksum_path = evidence_path / "EVIDENCE-SHA256SUMS"
+    metadata_path = evidence_path / "EVIDENCE-METADATA.json"
+    old_manifest_path = evidence_path / "tools" / TOOLCHAIN_MANIFEST_NAME
+    for path in (checksum_path, metadata_path, old_manifest_path):
+        value = path_info(path)
+        require(
+            value["regular"] is True
+            and value["symlink"] is False
+            and path.resolve(strict=True) == path
+            and value["uid"] == 0
+            and value["gid"] == 0
+            and value["mode"] == "0400"
+            and value["nlink"] == 1,
+            f"retained prior evidence file metadata mismatch: {path.name}",
+        )
+    checksum_payload = secure_bytes(checksum_path)
+    metadata_payload = secure_bytes(metadata_path)
+    old_manifest_payload = secure_bytes(old_manifest_path)
+    require(
+        hashlib.sha256(checksum_payload).hexdigest()
+        == prior["evidence_checksum_manifest_sha256"]
+        and hashlib.sha256(metadata_payload).hexdigest()
+        == prior["evidence_metadata_sha256"],
+        "retained prior evidence checksum or metadata digest mismatch",
+    )
+    checksum_entries: dict[str, str] = {}
+    for line in checksum_payload.decode("utf-8").splitlines():
+        match = re.fullmatch(r"([0-9a-f]{64})  (.+)", line)
+        require(match is not None, "retained prior checksum line is invalid")
+        digest_value, relative = match.groups()
+        portable = PurePosixPath(relative)
+        require(
+            not portable.is_absolute()
+            and portable.parts
+            and all(part not in {"", ".", ".."} for part in portable.parts)
+            and relative not in checksum_entries,
+            "retained prior checksum path is unsafe or duplicated",
+        )
+        checksum_entries[relative] = digest_value
+    require(
+        checksum_entries.get("EVIDENCE-METADATA.json")
+        == prior["evidence_metadata_sha256"]
+        and checksum_entries.get(f"tools/{TOOLCHAIN_MANIFEST_NAME}")
+        == hashlib.sha256(old_manifest_payload).hexdigest(),
+        "retained prior checksum bindings are incomplete",
+    )
+    require(
+        anchor.get("release") == RELEASE
+        and anchor.get("evidence_path") == str(evidence_path)
+        and anchor.get("evidence_checksum_manifest_sha256")
+        == prior["evidence_checksum_manifest_sha256"]
+        and anchor.get("evidence_metadata_sha256")
+        == prior["evidence_metadata_sha256"]
+        and anchor.get("production_promotion_allowed") is False,
+        "retained prior evidence anchor binding mismatch",
+    )
+    old_manifest = load_json_bytes(old_manifest_payload, "retained prior toolchain manifest")
+    old_metadata = load_json_bytes(metadata_payload, "retained prior evidence metadata")
+    require(
+        old_manifest.get("schema_version") == 1
+        and old_manifest.get("toolchain_version") == prior["toolchain_version"]
+        == "0.1.0.dev8-toolchain.8"
+        and old_manifest.get("application_release") == RELEASE
+        and old_manifest.get("application_commit") == COMMIT
+        and old_manifest.get("application_package_sha256") == PACKAGE_SHA256
+        and old_manifest.get("source_directory") == "deployment/dev8"
+        and isinstance(old_manifest.get("files"), list),
+        "retained prior evidence toolchain identity mismatch",
+    )
+    require(
+        old_metadata.get("release") == RELEASE
+        and old_metadata.get("goal_complete") is False
+        and old_metadata.get("production_promotion_allowed") is False,
+        "retained prior evidence metadata safety flags mismatch",
+    )
+    return {
+        "schema_version": 1,
+        "status": "retained_nonfinal",
+        "evidence_path": str(evidence_path),
+        "anchor_path": str(anchor_path),
+        "anchor_sha256": prior["anchor_sha256"],
+        "evidence_checksum_manifest_sha256": prior[
+            "evidence_checksum_manifest_sha256"
+        ],
+        "evidence_metadata_sha256": prior["evidence_metadata_sha256"],
+        "toolchain_version": prior["toolchain_version"],
+        "read_only_validation_passed": True,
+        "final_verifier_passed": False,
+        "production_promotion_allowed": False,
+    }
+
+
+def effective_service_identities(
+    server_baseline: dict[str, object],
+    service_transition: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    baseline_units = {str(item["unit"]) for item in server_baseline["services"]}
+    identities: dict[str, dict[str, object]] = {}
+    for service in service_transition["services"]:
+        unit = str(service["unit"])
+        identities[unit] = {
+            "unit": unit,
+            "active_state": service["active_state"],
+            "sub_state": service["sub_state"],
+            "main_pid": service["effective_main_pid"],
+            "cmdline_sha256": service["cmdline_sha256"],
+            "boot_id": service_transition["system_boot_id"],
+            "invocation_id": service["invocation_id"],
+            "exec_main_start_monotonic_usec": service["exec_main_start_monotonic_usec"],
+            "proc_start_ticks": service["proc_start_ticks"],
+        }
+    require(set(identities) == baseline_units, "effective service identity set mismatch")
+    return identities
+
+
+def effective_service_pids(
+    server_baseline: dict[str, object],
+    service_transition: dict[str, object],
+) -> dict[str, int]:
+    return {
+        unit: int(identity["main_pid"])
+        for unit, identity in effective_service_identities(server_baseline, service_transition).items()
+    }
+
+
 def baseline_service_pids(document: dict[str, object]) -> dict[str, int]:
     services = document.get("services")
     require(isinstance(services, list), "server baseline service set mismatch")
@@ -377,6 +966,135 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def write_durable_anchor_staging(anchor: dict[str, object]) -> tuple[int, int]:
+    payload = (
+        json.dumps(
+            anchor,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    descriptor = os.open(
+        ANCHOR_STAGING,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    identity: tuple[int, int] | None = None
+    try:
+        try:
+            opened = os.fstat(descriptor)
+            identity = (opened.st_dev, opened.st_ino)
+            write_all(descriptor, payload)
+            os.fsync(descriptor)
+            os.fchown(descriptor, 0, 0)
+            os.fchmod(descriptor, 0o400)
+            os.fsync(descriptor)
+            created = os.fstat(descriptor)
+            require(
+                stat.S_ISREG(created.st_mode)
+                and created.st_uid == 0
+                and created.st_gid == 0
+                and stat.S_IMODE(created.st_mode) == 0o400
+                and created.st_nlink == 1
+                and (created.st_dev, created.st_ino) == identity,
+                "anchor staging descriptor metadata mismatch",
+            )
+        finally:
+            os.close(descriptor)
+    except Exception:
+        if identity is not None and os.path.lexists(ANCHOR_STAGING):
+            unlink_anchor_path(
+                ANCHOR_STAGING,
+                identity,
+                allowed_modes={0o600, 0o400},
+                allowed_nlinks={1},
+            )
+        raise
+    require(identity is not None, "anchor staging identity was not captured")
+    fsync_directory(ANCHOR_PARENT)
+    require(
+        anchor_file_identity(
+            ANCHOR_STAGING,
+            allowed_modes={0o400},
+            allowed_nlinks={1},
+        )
+        == identity,
+        "anchor staging name changed after creation",
+    )
+    return identity
+
+
+def publish_anchor_staging(expected_identity: tuple[int, int]) -> None:
+    require(
+        anchor_file_identity(
+            ANCHOR_STAGING,
+            allowed_modes={0o400},
+            allowed_nlinks={1},
+        )
+        == expected_identity,
+        "anchor staging identity changed before publication",
+    )
+    os.link(ANCHOR_STAGING, EVIDENCE_ANCHOR, follow_symlinks=False)
+    try:
+        require(
+            anchor_file_identity(
+                ANCHOR_STAGING,
+                allowed_modes={0o400},
+                allowed_nlinks={2},
+            )
+            == expected_identity
+            and anchor_file_identity(
+                EVIDENCE_ANCHOR,
+                allowed_modes={0o400},
+                allowed_nlinks={2},
+            )
+            == expected_identity,
+            "published anchor is not the validated staging inode",
+        )
+    except Exception:
+        try:
+            final_identity = anchor_file_identity(
+                EVIDENCE_ANCHOR,
+                allowed_modes={0o400},
+                allowed_nlinks={1, 2},
+            )
+            staging_identity = anchor_file_identity(
+                ANCHOR_STAGING,
+                allowed_modes={0o400},
+                allowed_nlinks={1, 2},
+            )
+        except Exception:
+            pass
+        else:
+            if final_identity != expected_identity and final_identity == staging_identity:
+                unlink_anchor_path(
+                    EVIDENCE_ANCHOR,
+                    final_identity,
+                    allowed_modes={0o400},
+                    allowed_nlinks={2},
+                )
+        raise
+    fsync_directory(ANCHOR_PARENT)
+    unlink_anchor_path(
+        ANCHOR_STAGING,
+        expected_identity,
+        allowed_modes={0o400},
+        allowed_nlinks={2},
+    )
+    require(
+        anchor_file_identity(
+            EVIDENCE_ANCHOR,
+            allowed_modes={0o400},
+            allowed_nlinks={1},
+        )
+        == expected_identity,
+        "final anchor identity changed during publication",
+    )
+
+
 def load_json(path: Path) -> dict[str, object]:
     value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
     require(isinstance(value, dict), f"expected JSON object: {path}")
@@ -405,6 +1123,114 @@ def path_info(path: Path) -> dict[str, object]:
         "directory": stat.S_ISDIR(value.st_mode),
         "symlink": stat.S_ISLNK(value.st_mode),
     }
+
+
+def anchor_file_identity(
+    path: Path,
+    *,
+    allowed_modes: set[int],
+    allowed_nlinks: set[int],
+) -> tuple[int, int]:
+    require(
+        path in {ANCHOR_STAGING, EVIDENCE_ANCHOR}
+        and path.parent == ANCHOR_PARENT,
+        "anchor path is outside the fixed transaction paths",
+    )
+    value = path_info(path)
+    parent = path_info(ANCHOR_PARENT)
+    require(
+        value["regular"] is True
+        and value["symlink"] is False
+        and value["uid"] == 0
+        and value["gid"] == 0
+        and value["device"] == parent["device"]
+        and int(str(value["mode"]), 8) in allowed_modes
+        and value["nlink"] in allowed_nlinks,
+        f"unsafe anchor transaction object: {path}",
+    )
+    return int(value["device"]), int(value["inode"])
+
+
+def unlink_anchor_path(
+    path: Path,
+    expected_identity: tuple[int, int],
+    *,
+    allowed_modes: set[int],
+    allowed_nlinks: set[int],
+) -> None:
+    require(
+        anchor_file_identity(
+            path,
+            allowed_modes=allowed_modes,
+            allowed_nlinks=allowed_nlinks,
+        )
+        == expected_identity,
+        f"refusing to unlink a replacement anchor object: {path}",
+    )
+    os.unlink(path)
+    fsync_directory(ANCHOR_PARENT)
+    require(not os.path.lexists(path), f"anchor transaction object still exists: {path}")
+
+
+def incomplete_staging_identity() -> tuple[int, int]:
+    require(
+        STAGING.parent == EVIDENCE_PARENT,
+        "evidence staging path is outside the fixed transaction parent",
+    )
+    root = path_info(STAGING)
+    parent = path_info(EVIDENCE_PARENT)
+    require(
+        root["directory"] is True
+        and root["symlink"] is False
+        and root["uid"] == 0
+        and root["gid"] == 0
+        and root["device"] == parent["device"]
+        and int(str(root["mode"]), 8) in {0o700, 0o500},
+        "unsafe incomplete evidence staging root",
+    )
+    expected_directories = {
+        parent.as_posix()
+        for relative in EXPECTED_EVIDENCE_FILES
+        for parent in PurePosixPath(relative).parents
+        if parent != PurePosixPath(".")
+    }
+    for parent, directories, files in os.walk(STAGING, followlinks=False):
+        for name in [*directories, *files]:
+            path = Path(parent) / name
+            relative = path.relative_to(STAGING).as_posix()
+            value = path_info(path)
+            require(
+                value["symlink"] is False
+                and value["uid"] == 0
+                and value["gid"] == 0
+                and value["device"] == root["device"],
+                f"unsafe object in incomplete evidence staging: {relative}",
+            )
+            if value["directory"] is True:
+                require(
+                    relative in expected_directories
+                    and int(str(value["mode"]), 8) in {0o700, 0o500},
+                    f"unexpected directory in incomplete evidence staging: {relative}",
+                )
+            else:
+                require(
+                    value["regular"] is True
+                    and relative in EXPECTED_EVIDENCE_FILES
+                    and int(str(value["mode"]), 8) in {0o600, 0o400}
+                    and value["nlink"] == 1,
+                    f"unexpected file in incomplete evidence staging: {relative}",
+                )
+    return int(root["device"]), int(root["inode"])
+
+
+def cleanup_incomplete_staging(expected_identity: tuple[int, int]) -> None:
+    require(
+        incomplete_staging_identity() == expected_identity,
+        "refusing to remove a replacement evidence staging tree",
+    )
+    shutil.rmtree(STAGING)
+    fsync_directory(EVIDENCE_PARENT)
+    require(not os.path.lexists(STAGING), "incomplete evidence staging still exists")
 
 
 def secure_source(path: Path, *, allowed_nlinks: set[int] | None = None) -> tuple[int, dict[str, object]]:
@@ -879,38 +1705,100 @@ def run_unit_listing(*arguments: str) -> str:
     return completed.stdout
 
 
-def live_isolation(server_baseline: dict[str, object]) -> dict[str, object]:
+def read_system_boot_id() -> str:
+    value = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    require(
+        re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            value,
+        ) is not None,
+        "live system boot ID is invalid",
+    )
+    return value
+
+
+def parse_proc_start_ticks(payload: bytes) -> int:
+    closing = payload.rfind(b")")
+    require(closing > 0, "process stat command name is malformed")
+    fields = payload[closing + 1 :].split()
+    require(len(fields) >= 20, "process stat field set is incomplete")
+    try:
+        value = int(fields[19])
+    except ValueError as exc:
+        raise RuntimeError("process start ticks are invalid") from exc
+    require(value > 0, "process start ticks are not positive")
+    return value
+
+
+def sample_service(unit: str) -> dict[str, object]:
+    boot_before = read_system_boot_id()
+    arguments = (
+        "/usr/bin/systemctl", "show", unit,
+        "--property=Id", "--property=ActiveState", "--property=SubState",
+        "--property=MainPID", "--property=InvocationID",
+        "--property=ExecMainStartTimestampMonotonic",
+    )
+    first_output = run_checked(*arguments)
+    first = dict(line.split("=", 1) for line in first_output.splitlines() if "=" in line)
+    try:
+        pid = int(first.get("MainPID", "0") or "0")
+        start_monotonic = int(first.get("ExecMainStartTimestampMonotonic", "0") or "0")
+    except ValueError as exc:
+        raise RuntimeError(f"service numeric identity is invalid: {unit}") from exc
+    process = Path(f"/proc/{pid}")
+    require(pid > 0 and process.is_dir(), f"service process is absent: {unit}")
+    cmdline = (process / "cmdline").read_bytes().replace(b"\0", b" ")
+    proc_start_ticks = parse_proc_start_ticks((process / "stat").read_bytes())
+    second_output = run_checked(*arguments)
+    second = dict(line.split("=", 1) for line in second_output.splitlines() if "=" in line)
+    try:
+        second_pid = int(second.get("MainPID", "0") or "0")
+    except ValueError as exc:
+        raise RuntimeError(f"second service PID is invalid: {unit}") from exc
+    second_process = Path(f"/proc/{second_pid}")
+    require(second_pid > 0 and second_process.is_dir(), f"service process disappeared: {unit}")
+    second_cmdline = (second_process / "cmdline").read_bytes().replace(b"\0", b" ")
+    second_proc_start_ticks = parse_proc_start_ticks((second_process / "stat").read_bytes())
+    boot_after = read_system_boot_id()
+    invocation_id = first.get("InvocationID", "")
+    require(
+        re.fullmatch(r"[0-9a-f]{32}", invocation_id) is not None
+        and invocation_id != "0" * 32
+        and start_monotonic > 0
+        and first == second
+        and first.get("Id") == unit
+        and pid == second_pid
+        and cmdline == second_cmdline
+        and proc_start_ticks == second_proc_start_ticks
+        and boot_before == boot_after
+        and b"odoo-accounting-cli-v3" not in cmdline,
+        f"service identity changed while sampling or is unsafe: {unit}",
+    )
+    return {
+        "unit": unit,
+        "active_state": first.get("ActiveState"),
+        "sub_state": first.get("SubState"),
+        "main_pid": pid,
+        "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+        "boot_id": boot_after,
+        "invocation_id": invocation_id,
+        "exec_main_start_monotonic_usec": start_monotonic,
+        "proc_start_ticks": proc_start_ticks,
+    }
+
+
+def live_isolation(
+    server_baseline: dict[str, object],
+    service_transition: dict[str, object],
+    service_transition_sha256: str,
+    prior_disposition_sha256: str,
+    prior_evidence_retention: dict[str, object],
+) -> dict[str, object]:
     checks: dict[str, bool] = {}
     services: dict[str, object] = {}
-    for expected_service in server_baseline["services"]:
-        unit = str(expected_service["unit"])
-        expected_pid = int(expected_service["main_pid"])
-        output = run_checked(
-            "/usr/bin/systemctl", "show", unit,
-            "--property=ActiveState", "--property=SubState", "--property=MainPID",
-        )
-        properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
-        pid = int(properties.get("MainPID", "0") or "0")
-        process = Path(f"/proc/{pid}")
-        cmdline = (process / "cmdline").read_bytes().replace(b"\0", b" ") if process.is_dir() else b""
-        cmdline_sha256 = hashlib.sha256(cmdline).hexdigest()
-        passed = (
-            properties.get("ActiveState") == "active"
-            and properties.get("SubState") == "running"
-            and pid == expected_pid
-            and process.is_dir()
-            and cmdline_sha256 == expected_service["cmdline_sha256"]
-            and b"odoo-accounting-cli-v3" not in cmdline
-        )
-        checks[f"{unit}_stable"] = passed
-        services[unit] = {
-            "pid": pid, "expected_pid": expected_pid,
-            "cmdline_sha256": cmdline_sha256,
-            "expected_cmdline_sha256": expected_service["cmdline_sha256"],
-            "active": properties.get("ActiveState"),
-            "substate": properties.get("SubState"),
-            "references_v3": b"odoo-accounting-cli-v3" in cmdline,
-        }
+    expected_services = effective_service_identities(server_baseline, service_transition)
+    boot_before = read_system_boot_id()
+    before_samples = {unit: sample_service(unit) for unit in expected_services}
 
     critical_reports = []
     for entry in server_baseline["critical_files"]:
@@ -1008,10 +1896,40 @@ def live_isolation(server_baseline: dict[str, object]) -> dict[str, object]:
     )
     expected_anchor = {"commit": COMMIT, "manifest_sha256": MANIFEST_SHA256, "package_sha256": PACKAGE_SHA256, "release": RELEASE}
     checks["release_anchor"] = load_json(RELEASE_ANCHOR) == expected_anchor
+    after_samples = {unit: sample_service(unit) for unit in expected_services}
+    boot_after = read_system_boot_id()
+    checks["system_boot_id_stable"] = (
+        boot_before == boot_after == service_transition["system_boot_id"]
+    )
+    checks["prior_evidence_retained_nonfinal"] = (
+        prior_evidence_retention.get("read_only_validation_passed") is True
+        and prior_evidence_retention.get("final_verifier_passed") is False
+        and prior_evidence_retention.get("production_promotion_allowed") is False
+    )
+    for unit, expected in expected_services.items():
+        before = before_samples[unit]
+        after = after_samples[unit]
+        stable = before == after == expected
+        checks[f"{unit}_stable"] = stable
+        services[unit] = {
+            "expected": expected,
+            "before": before,
+            "after": after,
+            "stable": stable,
+        }
+
     report = {
         "schema_version": 1,
         "observed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "evidence_id": EVIDENCE_ID,
+        "toolchain_version": TOOLCHAIN_VERSION,
         "server_baseline_captured_at": server_baseline["captured_at"],
+        "server_service_transition_sha256": service_transition_sha256,
+        "prior_evidence_disposition_sha256": prior_disposition_sha256,
+        "system_boot_id": boot_after,
+        "expected_system_boot_id": service_transition["system_boot_id"],
+        "service_transition_observation": service_transition["observation"],
+        "prior_evidence_retention": prior_evidence_retention,
         "release": RELEASE,
         "services": services,
         "v2_critical": critical_reports,
@@ -1032,6 +1950,9 @@ def live_isolation(server_baseline: dict[str, object]) -> dict[str, object]:
 def validate_inputs(
     args: argparse.Namespace,
     expected_pids: dict[str, int],
+    expected_service_identities: dict[str, dict[str, object]],
+    server_baseline_sha256: str,
+    service_transition_sha256: str,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, bytes]]:
     validate_private_directory(args.read_evidence, READ_FILES)
     validate_private_directory(args.state_evidence, STATE_FILES)
@@ -1041,9 +1962,61 @@ def validate_inputs(
     validate_private_report(args.negative_gates)
     require(sha256(args.read_evidence / "read-plan.input.json") == PLAN_SHA256, "read plan hash mismatch")
     persistence = load_json(args.state_evidence / "persistence-audit.json")
+    expected_prior_evidence_state = {
+        "evidence_path": f"/var/lib/odoo-accounting-cli-v3/evidence/{RELEASE}",
+        "toolchain_version": "0.1.0.dev8-toolchain.8",
+        "auth_sha256": "a344df0dc16910cc517070c52fc0d34179b0ebe4502549e60b22fe96eb6c1109",
+        "receipt_sha256": "a76ebbd71ff034da037fbeac4529f4d466ee8116bb172e1923c5f65d6ce8e82f",
+        "audit_head": "881bbbeb84a6abb19833f91e6f85ebf337b801c51d8867b344b661dfa9e54570",
+        "auth_tokens": 4,
+        "consumed_receipts": 4,
+        "audit_events": 4,
+    }
+    expected_batch_counts = {
+        "auth_tokens": 4,
+        "consumed_receipts": 4,
+        "audit_events": 4,
+    }
+    expected_cumulative_counts = {
+        "auth_tokens": 8,
+        "consumed_receipts": 8,
+        "audit_events": 8,
+    }
+    expected_persistence_checks = {
+        "exact_four_new_unique_auth_tokens",
+        "exact_four_new_unique_receipts",
+        "exact_four_new_audit_events",
+        "new_auth_hmac_verified",
+        "new_receipt_hmac_verified",
+        "new_request_response_parameter_roundtrip",
+        "cumulative_sqlite_snapshots_integral",
+        "prior_state_bound",
+        "prior_state_preserved",
+        "prior_audit_prefix_preserved",
+        "full_audit_chain_verified",
+        "new_audit_suffix_bound_to_wire_receipts",
+        "oracle_audit_verified",
+    }
+    expected_persistence_fields = {
+        "schema_version", "release", "version", "commit", "git_tree",
+        "package_sha256", "manifest_sha256", "registry_digest",
+        "runtime_config_sha256", "read_plan_sha256", "database_uuid",
+        "auth", "receipt", "prior_evidence_state", "verified_batch_counts",
+        "cumulative_counts", "prior_audit_head", "audit_head",
+        "audit_event_count", "capability_counts", "wire_cases", "checks",
+        "all_checks_passed", "secret_material_emitted", "odoo_action_performed",
+        "database_writes_permitted", "production_validated",
+        "production_promotion_allowed",
+    }
+    persistence_checks = persistence.get("checks")
     require(
-        persistence.get("all_checks_passed") is True
+        set(persistence) == expected_persistence_fields
+        and isinstance(persistence.get("schema_version"), int)
+        and not isinstance(persistence.get("schema_version"), bool)
+        and persistence.get("schema_version") == 1
+        and persistence.get("all_checks_passed") is True
         and persistence.get("release") == RELEASE
+        and persistence.get("version") == VERSION
         and persistence.get("commit") == COMMIT
         and persistence.get("git_tree") == TREE
         and persistence.get("package_sha256") == PACKAGE_SHA256
@@ -1051,18 +2024,100 @@ def validate_inputs(
         and persistence.get("registry_digest") == REGISTRY_DIGEST
         and persistence.get("runtime_config_sha256") == RUNTIME_SHA256
         and persistence.get("read_plan_sha256") == PLAN_SHA256
-        and persistence.get("audit_event_count") == 4
-        and persistence.get("capability_counts") == {
-            "acct.ap.open_items.v1": 1, "acct.ar.open_items.v1": 1,
-            "acct.gl.trial_balance.v1": 1, "acct.registry.list.v1": 1,
+        and persistence.get("database_uuid") == DATABASE_UUID
+        and persistence.get("auth", {}).get("counts") == {
+            "approval_records": 0,
+            "audit_events": 0,
+            "consumed_auth_tokens": 8,
+            "consumed_receipts": 0,
+            "idempotency_keys": 0,
+            "operations": 0,
         }
+        and persistence.get("receipt", {}).get("counts") == {
+            "approval_records": 0,
+            "audit_events": 8,
+            "consumed_auth_tokens": 0,
+            "consumed_receipts": 8,
+            "idempotency_keys": 0,
+            "operations": 0,
+        }
+        and persistence.get("prior_evidence_state") == expected_prior_evidence_state
+        and persistence.get("verified_batch_counts") == expected_batch_counts
+        and persistence.get("cumulative_counts") == expected_cumulative_counts
+        and persistence.get("prior_audit_head")
+        == expected_prior_evidence_state["audit_head"]
+        and persistence.get("audit_event_count") == 8
+        and persistence.get("capability_counts") == {
+            "acct.ap.open_items.v1": 2, "acct.ar.open_items.v1": 2,
+            "acct.gl.trial_balance.v1": 2, "acct.registry.list.v1": 2,
+        }
+        and isinstance(persistence_checks, dict)
+        and set(persistence_checks) == expected_persistence_checks
+        and all(value is True for value in persistence_checks.values())
+        and persistence.get("secret_material_emitted") is False
+        and persistence.get("odoo_action_performed") is False
+        and persistence.get("database_writes_permitted") is False
+        and persistence.get("production_validated") is False
         and persistence.get("production_promotion_allowed") is False,
         "persistence evidence identity mismatch",
     )
     audit_head = persistence.get("audit_head")
     require(isinstance(audit_head, str) and HEX64.fullmatch(audit_head) is not None, "audit head is invalid")
+    audit_export = json.loads(
+        secure_bytes(args.state_evidence / "audit-events.json").decode("utf-8"),
+        object_pairs_hook=reject_duplicates,
+    )
+    require(
+        isinstance(audit_export, list)
+        and len(audit_export) == persistence["audit_event_count"] == 8
+        and all(isinstance(event, dict) for event in audit_export)
+        and [event.get("sequence") for event in audit_export] == list(range(1, 9))
+        and audit_export[3].get("event_hash")
+        == expected_prior_evidence_state["audit_head"]
+        and audit_export[-1].get("event_hash") == audit_head
+        and all(
+            isinstance(event.get("event_hash"), str)
+            and HEX64.fullmatch(str(event["event_hash"])) is not None
+            for event in audit_export
+        )
+        and all(
+            event.get("previous_hash")
+            == ("0" * 64 if index == 0 else audit_export[index - 1]["event_hash"])
+            for index, event in enumerate(audit_export)
+        )
+        and isinstance(persistence.get("wire_cases"), list)
+        and len(persistence["wire_cases"]) == 4,
+        "full cumulative audit export does not bind the prior prefix and current batch",
+    )
     oracle = load_json(args.read_evidence / "read-oracles.audit.json")
-    require(oracle.get("all_checks_passed") is True and oracle.get("release") == RELEASE and oracle.get("production_promotion_allowed") is False, "read oracle audit did not pass")
+    expected_odoo_identity = expected_service_identities["odoo19.service"]
+    expected_oracle_checks = {
+        "exact_dev8_release_identity_on_four_reads",
+        "exact_staged_four_registry",
+        "registry_page_and_receipt_count_four",
+        "four_request_parameter_context_roundtrip",
+        "three_exact_oracle_hashes",
+        "five_staged_inputs_match_root_private_evidence",
+        "three_financial_oracles_passed",
+        "three_oracle_transactions_read_only",
+        "odoo_identity_unchanged",
+        "odoo_pid_unchanged",
+        "current_absent",
+    }
+    oracle_checks = oracle.get("checks")
+    require(
+        oracle.get("all_checks_passed") is True
+        and oracle.get("release") == RELEASE
+        and oracle.get("production_promotion_allowed") is False
+        and isinstance(oracle_checks, dict)
+        and set(oracle_checks) == expected_oracle_checks
+        and all(value is True for value in oracle_checks.values())
+        and oracle.get("odoo_identity_before") == expected_odoo_identity
+        and oracle.get("odoo_identity_after") == expected_odoo_identity
+        and oracle.get("odoo_pid_before") == expected_pids["odoo19.service"]
+        and oracle.get("odoo_pid_after") == expected_pids["odoo19.service"],
+        "read oracle audit did not pass or used another Odoo service identity",
+    )
 
     staging = load_json(args.execution_evidence / "execution-staging-audit.json")
     odoo_uid = pwd.getpwnam("odoo").pw_uid
@@ -1343,10 +2398,12 @@ def validate_inputs(
                 and set(checks) == {
                     "fresh_token_before", "token_still_unconsumed", "expected_exit",
                     "stdout_empty", "structured_error", "auth_hash_unchanged",
-                    "receipt_hash_unchanged", "audit_hash_unchanged", "odoo_pid_unchanged",
+                    "receipt_hash_unchanged", "audit_hash_unchanged", "odoo_identity_unchanged",
+                    "odoo_pid_unchanged",
                     "odoo_pid_active", "odoo_canary_fixed_inode_unchanged",
                 }
                 and all(value is True for value in checks.values())
+                and case.get("odoo_identity_after") == expected_odoo_identity
                 and case.get("odoo_pid_after") == expected_pids["odoo19.service"]
             )
     require(
@@ -1357,9 +2414,9 @@ def validate_inputs(
         and negative.get("all_checks_passed") is True
         and negative.get("temporary_artifacts_removed") is True
         and negative.get("production_promotion_allowed") is False
-        and negative.get("baseline_state", {}).get("auth", {}).get("table_counts", {}).get("consumed_auth_tokens") == 4
-        and negative.get("baseline_state", {}).get("receipt", {}).get("table_counts", {}).get("consumed_receipts") == 4
-        and negative.get("baseline_state", {}).get("audit", {}).get("row_count") == 4
+        and negative.get("baseline_state", {}).get("auth", {}).get("table_counts", {}).get("consumed_auth_tokens") == 8
+        and negative.get("baseline_state", {}).get("receipt", {}).get("table_counts", {}).get("consumed_receipts") == 8
+        and negative.get("baseline_state", {}).get("audit", {}).get("row_count") == 8
         and negative.get("baseline_state", {}).get("audit", {}).get("head") == audit_head
         and negative_cases_ok
         and negative.get("fixture_checks") == {
@@ -1368,6 +2425,8 @@ def validate_inputs(
             "symlink_fixture_is_link": True,
             "tampered_fixture_differs": True,
         }
+        and negative.get("odoo_identity_before") == expected_odoo_identity
+        and negative.get("odoo_identity_after") == expected_odoo_identity
         and negative.get("odoo_pid_before") == expected_pids["odoo19.service"]
         and negative.get("odoo_canary_reached") is False
         and negative.get("secret_material_emitted") is False,
@@ -1406,6 +2465,8 @@ def validate_inputs(
         and "dev8_isolation_pre=passed" in server and "dev8_isolation_post=passed" in server
         and f"release={RELEASE}" in server and f"package_sha256={PACKAGE_SHA256}" in server
         and f"manifest_sha256={MANIFEST_SHA256}" in server and f"registry_digest={REGISTRY_DIGEST}" in server
+        and f"server_baseline_sha256={server_baseline_sha256}" in server
+        and f"service_transition_sha256={service_transition_sha256}" in server
         and "mutable_candidate_test_fixture_used=false" in server
         and "server_unit_test_source=github-ci-run-29319326192" in server
         and "production_critical_metadata_safe=false" in server,
@@ -1424,7 +2485,78 @@ def assert_parent(path: Path) -> None:
     require(value["directory"] and not value["symlink"] and value["uid"] == 0 and value["gid"] == 0 and not (int(str(value["mode"]), 8) & 0o022), f"unsafe evidence parent: {path}")
 
 
-def validate_existing_target(anchor_path: Path) -> dict[str, object]:
+def build_anchor_document(
+    upload_payloads: dict[str, bytes],
+    checksum_payload: bytes,
+    metadata_payload: bytes,
+) -> dict[str, object]:
+    metadata = load_json_bytes(metadata_payload, "frozen evidence metadata")
+    audit_head = metadata.get("audit_head")
+    file_count = metadata.get("evidence_file_count")
+    require(
+        isinstance(audit_head, str) and HEX64.fullmatch(audit_head) is not None,
+        "frozen evidence metadata audit head is invalid",
+    )
+    require(
+        isinstance(file_count, int) and not isinstance(file_count, bool)
+        and file_count == len(EXPECTED_EVIDENCE_FILES),
+        "frozen evidence metadata file count is invalid",
+    )
+    require(
+        checksum_payload.endswith(b"\n")
+        and len(checksum_payload.splitlines()) == len(EXPECTED_EVIDENCE_FILES) - 1,
+        "frozen evidence checksum entry count is invalid",
+    )
+    return {
+        "schema_version": 1,
+        "release": RELEASE,
+        "evidence_id": EVIDENCE_ID,
+        "toolchain_version": TOOLCHAIN_VERSION,
+        "commit": COMMIT,
+        "git_tree": TREE,
+        "evidence_path": str(TARGET),
+        "package_sha256": PACKAGE_SHA256,
+        "release_manifest_sha256": MANIFEST_SHA256,
+        "registry_digest": REGISTRY_DIGEST,
+        "runtime_config_sha256": RUNTIME_SHA256,
+        "read_plan_sha256": PLAN_SHA256,
+        "toolchain_manifest_sha256": hashlib.sha256(
+            upload_payloads[TOOLCHAIN_MANIFEST_NAME]
+        ).hexdigest(),
+        "server_baseline_sha256": hashlib.sha256(
+            upload_payloads[SERVER_BASELINE_NAME]
+        ).hexdigest(),
+        "server_baseline_size": len(upload_payloads[SERVER_BASELINE_NAME]),
+        "server_service_transition_sha256": hashlib.sha256(
+            upload_payloads[SERVER_SERVICE_TRANSITION_NAME]
+        ).hexdigest(),
+        "server_service_transition_size": len(
+            upload_payloads[SERVER_SERVICE_TRANSITION_NAME]
+        ),
+        "prior_evidence_disposition_sha256": hashlib.sha256(
+            upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME]
+        ).hexdigest(),
+        "prior_evidence_disposition_size": len(
+            upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME]
+        ),
+        "audit_head": audit_head,
+        "evidence_checksum_manifest_sha256": hashlib.sha256(
+            checksum_payload
+        ).hexdigest(),
+        "evidence_metadata_sha256": hashlib.sha256(metadata_payload).hexdigest(),
+        "evidence_checksum_entries": len(checksum_payload.splitlines()),
+        "evidence_file_count": file_count,
+        "freeze_checks_passed": True,
+        "final_verification_status": "pending",
+        "production_promotion_allowed": False,
+    }
+
+
+def validate_existing_target(
+    anchor_path: Path,
+    upload_payloads: dict[str, bytes],
+    manifest_entries: dict[str, dict[str, object]],
+) -> dict[str, object]:
     require(TARGET.is_dir() and not TARGET.is_symlink() and not os.path.lexists(STAGING), "partial target layout is unsafe")
     target_info = path_info(TARGET)
     require(target_info["uid"] == 0 and target_info["gid"] == 0 and target_info["mode"] == "0500", "partial target root metadata mismatch")
@@ -1476,14 +2608,105 @@ def validate_existing_target(anchor_path: Path) -> dict[str, object]:
         ),
         "partial target checksum mismatch",
     )
+    for name in (
+        TOOLCHAIN_MANIFEST_NAME,
+        SERVER_BASELINE_NAME,
+        SERVER_SERVICE_TRANSITION_NAME,
+        PRIOR_EVIDENCE_DISPOSITION_NAME,
+    ):
+        frozen_payload = secure_bytes(TARGET / "tools" / name)
+        require(
+            frozen_payload == upload_payloads[name],
+            f"partial target control belongs to another toolchain: {name}",
+        )
+    recovered_manifest = validate_toolchain_manifest(
+        load_json_bytes(upload_payloads[TOOLCHAIN_MANIFEST_NAME], "recovery toolchain manifest")
+    )
+    require(recovered_manifest == manifest_entries, "partial target manifest entries changed during recovery")
+    for name in TOOL_FILES:
+        frozen_tool_payload = secure_bytes(TARGET / "tools" / name)
+        expected_tool = manifest_entries[name]
+        require(
+            hashlib.sha256(frozen_tool_payload).hexdigest() == expected_tool["sha256"]
+            and len(frozen_tool_payload) == expected_tool["size"],
+            f"partial target tool differs from the current manifest: {name}",
+        )
+    inventory = load_json_bytes(
+        secure_bytes(TARGET / "tools/TOOL-INVENTORY.json"),
+        "partial target tool inventory",
+    )
+    inventory_keys = {
+        "schema_version", "release", "evidence_id", "toolchain_version",
+        "source_directory", "toolchain_manifest_sha256", "server_baseline_sha256",
+        "server_baseline_size", "server_service_transition_sha256",
+        "server_service_transition_size", "prior_evidence_disposition_sha256",
+        "prior_evidence_disposition_size", "upload_root", "tools", "tool_count",
+        "secret_material_included", "production_promotion_allowed",
+    }
+    inventory_tools = inventory.get("tools")
+    require(
+        set(inventory) == inventory_keys
+        and inventory.get("schema_version") == 1
+        and inventory.get("release") == RELEASE
+        and inventory.get("evidence_id") == EVIDENCE_ID
+        and inventory.get("toolchain_version") == TOOLCHAIN_VERSION
+        and inventory.get("source_directory") == "deployment/dev8"
+        and inventory.get("toolchain_manifest_sha256") == hashlib.sha256(upload_payloads[TOOLCHAIN_MANIFEST_NAME]).hexdigest()
+        and inventory.get("server_baseline_sha256") == hashlib.sha256(upload_payloads[SERVER_BASELINE_NAME]).hexdigest()
+        and inventory.get("server_baseline_size") == len(upload_payloads[SERVER_BASELINE_NAME])
+        and inventory.get("server_service_transition_sha256") == hashlib.sha256(upload_payloads[SERVER_SERVICE_TRANSITION_NAME]).hexdigest()
+        and inventory.get("server_service_transition_size") == len(upload_payloads[SERVER_SERVICE_TRANSITION_NAME])
+        and inventory.get("prior_evidence_disposition_sha256") == hashlib.sha256(upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME]).hexdigest()
+        and inventory.get("prior_evidence_disposition_size") == len(upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME])
+        and inventory.get("upload_root") == str(UPLOAD_ROOT)
+        and isinstance(inventory_tools, list)
+        and inventory.get("tool_count") == len(TOOL_FILES) == len(inventory_tools)
+        and [item.get("name") if isinstance(item, dict) else None for item in inventory_tools] == list(TOOL_FILES)
+        and all(
+            isinstance(item, dict)
+            and set(item) == {"name", "sha256", "size", "source_uid", "source_gid", "source_mode", "source_nlink"}
+            and item.get("sha256") == manifest_entries[str(item.get("name"))]["sha256"]
+            and item.get("size") == manifest_entries[str(item.get("name"))]["size"]
+            and item.get("source_uid") == 0
+            and item.get("source_gid") == 0
+            and item.get("source_nlink") == 1
+            and isinstance(item.get("source_mode"), str)
+            and re.fullmatch(r"0[0-7]{3}", str(item["source_mode"])) is not None
+            and not (int(str(item["source_mode"]), 8) & 0o022)
+            for item in inventory_tools
+        )
+        and inventory.get("secret_material_included") is False
+        and inventory.get("production_promotion_allowed") is False,
+        "partial target tool inventory belongs to another toolchain or control set",
+    )
     metadata_payload = secure_bytes(metadata)
-    metadata_document = json.loads(metadata_payload.decode("utf-8"), object_pairs_hook=reject_duplicates)
+    metadata_document = json.loads(
+        metadata_payload.decode("utf-8"), object_pairs_hook=reject_duplicates
+    )
+    metadata_document = validate_evidence_metadata_fields(metadata_document)
     require(
         isinstance(metadata_document, dict)
         and metadata_document.get("release") == RELEASE
+        and metadata_document.get("evidence_id") == EVIDENCE_ID
+        and metadata_document.get("toolchain_version") == TOOLCHAIN_VERSION
         and metadata_document.get("commit") == COMMIT
         and metadata_document.get("git_tree") == TREE
+        and metadata_document.get("toolchain_manifest_sha256") == hashlib.sha256(upload_payloads[TOOLCHAIN_MANIFEST_NAME]).hexdigest()
+        and metadata_document.get("server_baseline_sha256") == hashlib.sha256(upload_payloads[SERVER_BASELINE_NAME]).hexdigest()
+        and metadata_document.get("server_baseline_size") == len(upload_payloads[SERVER_BASELINE_NAME])
+        and metadata_document.get("server_service_transition_sha256") == hashlib.sha256(upload_payloads[SERVER_SERVICE_TRANSITION_NAME]).hexdigest()
+        and metadata_document.get("server_service_transition_size") == len(upload_payloads[SERVER_SERVICE_TRANSITION_NAME])
+        and metadata_document.get("prior_evidence_disposition_sha256") == hashlib.sha256(upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME]).hexdigest()
+        and metadata_document.get("prior_evidence_disposition_size") == len(upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME])
+        and metadata_document.get("auth_tokens") == 8
+        and metadata_document.get("consumed_receipts") == 8
+        and metadata_document.get("receipt_audit_events") == 8
+        and metadata_document.get("verified_batch_auth_tokens") == 4
+        and metadata_document.get("verified_batch_receipts") == 4
+        and metadata_document.get("verified_batch_audit_events") == 4
         and metadata_document.get("evidence_file_count") == len(EXPECTED_EVIDENCE_FILES)
+        and metadata_document.get("freeze_checks_passed") is True
+        and metadata_document.get("final_verification_status") == "pending"
         and metadata_document.get("secret_material_included") is False
         and metadata_document.get("production_promotion_allowed") is False,
         "partial target evidence metadata mismatch",
@@ -1513,57 +2736,178 @@ def validate_existing_target(anchor_path: Path) -> dict[str, object]:
         require(all(needle not in payload for needle in needles), f"secret material found during recovery: {relative}")
     require(all(needle not in anchor_payload for needle in needles), "secret material found in recovery anchor")
     anchor_keys = {
-        "schema_version", "release", "commit", "git_tree", "evidence_path",
+        "schema_version", "release", "evidence_id", "toolchain_version",
+        "commit", "git_tree", "evidence_path",
         "package_sha256", "release_manifest_sha256", "registry_digest",
         "runtime_config_sha256", "read_plan_sha256", "audit_head",
+        "toolchain_manifest_sha256", "server_baseline_sha256", "server_baseline_size",
+        "server_service_transition_sha256", "server_service_transition_size",
+        "prior_evidence_disposition_sha256", "prior_evidence_disposition_size",
         "evidence_checksum_manifest_sha256", "evidence_metadata_sha256",
-        "evidence_checksum_entries", "evidence_file_count", "production_promotion_allowed",
+        "evidence_checksum_entries", "evidence_file_count", "freeze_checks_passed",
+        "final_verification_status", "production_promotion_allowed",
     }
     require(
         set(anchor) == anchor_keys
         and isinstance(anchor.get("schema_version"), int) and not isinstance(anchor.get("schema_version"), bool)
         and anchor.get("schema_version") == 1
-        and anchor.get("release") == RELEASE and anchor.get("evidence_path") == str(TARGET)
+        and anchor.get("release") == RELEASE
+        and anchor.get("evidence_id") == EVIDENCE_ID
+        and anchor.get("toolchain_version") == TOOLCHAIN_VERSION
+        and anchor.get("evidence_path") == str(TARGET)
         and anchor.get("commit") == COMMIT and anchor.get("git_tree") == TREE
         and anchor.get("package_sha256") == PACKAGE_SHA256
         and anchor.get("release_manifest_sha256") == MANIFEST_SHA256
         and anchor.get("registry_digest") == REGISTRY_DIGEST
         and anchor.get("runtime_config_sha256") == RUNTIME_SHA256
         and anchor.get("read_plan_sha256") == PLAN_SHA256
+        and anchor.get("toolchain_manifest_sha256") == hashlib.sha256(upload_payloads[TOOLCHAIN_MANIFEST_NAME]).hexdigest()
+        and anchor.get("server_baseline_sha256") == hashlib.sha256(upload_payloads[SERVER_BASELINE_NAME]).hexdigest()
+        and anchor.get("server_baseline_size") == len(upload_payloads[SERVER_BASELINE_NAME])
+        and anchor.get("server_service_transition_sha256") == hashlib.sha256(upload_payloads[SERVER_SERVICE_TRANSITION_NAME]).hexdigest()
+        and anchor.get("server_service_transition_size") == len(upload_payloads[SERVER_SERVICE_TRANSITION_NAME])
+        and anchor.get("prior_evidence_disposition_sha256") == hashlib.sha256(upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME]).hexdigest()
+        and anchor.get("prior_evidence_disposition_size") == len(upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME])
+        and anchor.get("audit_head") == metadata_document.get("audit_head")
         and isinstance(anchor.get("audit_head"), str) and HEX64.fullmatch(str(anchor["audit_head"])) is not None
         and anchor.get("evidence_checksum_manifest_sha256") == hashlib.sha256(checksum_payload).hexdigest()
         and anchor.get("evidence_metadata_sha256") == hashlib.sha256(metadata_payload).hexdigest()
         and anchor.get("evidence_checksum_entries") == len(EXPECTED_EVIDENCE_FILES) - 1
         and anchor.get("evidence_file_count") == len(EXPECTED_EVIDENCE_FILES)
+        and anchor.get("freeze_checks_passed") is True
+        and anchor.get("final_verification_status") == "pending"
         and anchor.get("production_promotion_allowed") is False,
         "partial-freeze anchor recovery validation failed",
     )
     return anchor
 
 
-def recover_anchor() -> bool:
-    if not TARGET.is_dir() or os.path.lexists(STAGING):
+def recover_anchor(
+    upload_payloads: dict[str, bytes],
+    manifest_entries: dict[str, dict[str, object]],
+) -> bool:
+    """Clean unpublished partial state; recover a target only from a durable anchor."""
+    target_exists = os.path.lexists(TARGET)
+    incomplete_staging_exists = os.path.lexists(STAGING)
+    final_anchor_exists = os.path.lexists(EVIDENCE_ANCHOR)
+    staging_anchor_exists = os.path.lexists(ANCHOR_STAGING)
+
+    if not target_exists:
+        require(
+            not final_anchor_exists,
+            "final anchor exists without its evidence target",
+        )
+        staging_identity = (
+            incomplete_staging_identity() if incomplete_staging_exists else None
+        )
+        anchor_identity = (
+            anchor_file_identity(
+                ANCHOR_STAGING,
+                allowed_modes={0o600, 0o400},
+                allowed_nlinks={1},
+            )
+            if staging_anchor_exists
+            else None
+        )
+        if anchor_identity is not None:
+            unlink_anchor_path(
+                ANCHOR_STAGING,
+                anchor_identity,
+                allowed_modes={0o600, 0o400},
+                allowed_nlinks={1},
+            )
+        if staging_identity is not None:
+            cleanup_incomplete_staging(staging_identity)
         return False
-    final_exists = EVIDENCE_ANCHOR.is_file() and not EVIDENCE_ANCHOR.is_symlink()
-    staging_exists = ANCHOR_STAGING.is_file() and not ANCHOR_STAGING.is_symlink()
-    if not final_exists and not staging_exists:
-        return False
-    source = EVIDENCE_ANCHOR if final_exists else ANCHOR_STAGING
-    validate_existing_target(source)
-    if final_exists and staging_exists:
-        final_meta = EVIDENCE_ANCHOR.lstat()
-        staging_meta = ANCHOR_STAGING.lstat()
-        require((final_meta.st_dev, final_meta.st_ino) == (staging_meta.st_dev, staging_meta.st_ino), "anchor recovery paths are not the same inode")
-        os.unlink(ANCHOR_STAGING)
-    elif staging_exists:
-        os.chmod(ANCHOR_STAGING, 0o400)
-        os.link(ANCHOR_STAGING, EVIDENCE_ANCHOR, follow_symlinks=False)
-        os.unlink(ANCHOR_STAGING)
-    anchor_meta = EVIDENCE_ANCHOR.lstat()
-    require(anchor_meta.st_uid == 0 and anchor_meta.st_gid == 0 and stat.S_IMODE(anchor_meta.st_mode) == 0o400 and anchor_meta.st_nlink == 1, "recovered anchor metadata mismatch")
+
+    require(
+        TARGET.is_dir() and not TARGET.is_symlink(),
+        "unsafe evidence target blocks recovery",
+    )
+    require(
+        not incomplete_staging_exists,
+        "published evidence target coexists with an incomplete staging tree",
+    )
+    require(
+        final_anchor_exists or staging_anchor_exists,
+        "published evidence target has no independently durable anchor",
+    )
+
+    if final_anchor_exists:
+        final_identity = anchor_file_identity(
+            EVIDENCE_ANCHOR,
+            allowed_modes={0o400},
+            allowed_nlinks={1, 2},
+        )
+        anchor = validate_existing_target(
+            EVIDENCE_ANCHOR, upload_payloads, manifest_entries
+        )
+        validated_identity = final_identity
+        if staging_anchor_exists:
+            staging_info = path_info(ANCHOR_STAGING)
+            staging_mode = int(str(staging_info["mode"]), 8)
+            staging_identity = anchor_file_identity(
+                ANCHOR_STAGING,
+                allowed_modes={0o600, 0o400},
+                allowed_nlinks={1, 2},
+            )
+            if staging_mode == 0o600:
+                require(
+                    staging_info["nlink"] == 1,
+                    "incomplete anchor staging has an unexpected hard link",
+                )
+                unlink_anchor_path(
+                    ANCHOR_STAGING,
+                    staging_identity,
+                    allowed_modes={0o600},
+                    allowed_nlinks={1},
+                )
+            else:
+                require(
+                    staging_identity == final_identity,
+                    "anchor recovery paths are not the same inode",
+                )
+                unlink_anchor_path(
+                    ANCHOR_STAGING,
+                    staging_identity,
+                    allowed_modes={0o400},
+                    allowed_nlinks={2},
+                )
+    else:
+        staging_identity = anchor_file_identity(
+            ANCHOR_STAGING,
+            allowed_modes={0o400},
+            allowed_nlinks={1},
+        )
+        anchor = validate_existing_target(
+            ANCHOR_STAGING, upload_payloads, manifest_entries
+        )
+        publish_anchor_staging(staging_identity)
+        validated_identity = staging_identity
+
+    recovered_identity = anchor_file_identity(
+        EVIDENCE_ANCHOR,
+        allowed_modes={0o400},
+        allowed_nlinks={1},
+    )
+    require(
+        recovered_identity == validated_identity
+        and recovered_identity == anchor_file_identity(
+            EVIDENCE_ANCHOR,
+            allowed_modes={0o400},
+            allowed_nlinks={1},
+        ),
+        "recovered anchor identity is unstable",
+    )
     fsync_directory(EVIDENCE_PARENT)
     fsync_directory(ANCHOR_PARENT)
-    print(json.dumps({"release": RELEASE, "recovered_or_verified_anchor": True, "production_promotion_allowed": False}, sort_keys=True))
+    print(json.dumps({
+        **anchor,
+        "anchor_recovered": True,
+        "freeze_checks_passed": True,
+        "final_verification_status": "pending",
+        "production_promotion_allowed": False,
+    }, sort_keys=True))
     return True
 
 
@@ -1581,7 +2925,74 @@ def main() -> None:
     assert_parent(ANCHOR_PARENT)
     pipeline_lock_fd = acquire_pipeline_lock()
     try:
-        if recover_anchor():
+        require(UPLOAD_ROOT == Path("/root/odoo-accounting-cli-v3-dev8-upload"), "upload root binding changed")
+        upload_info = path_info(UPLOAD_ROOT)
+        require(
+            upload_info["directory"] and upload_info["uid"] == 0
+            and upload_info["gid"] == 0 and upload_info["mode"] == "0700",
+            "upload root metadata mismatch",
+        )
+        upload_payloads: dict[str, bytes] = {}
+        control_names = (
+            TOOLCHAIN_MANIFEST_NAME,
+            SERVER_BASELINE_NAME,
+            SERVER_SERVICE_TRANSITION_NAME,
+            PRIOR_EVIDENCE_DISPOSITION_NAME,
+        )
+        for name in control_names:
+            source = UPLOAD_ROOT / name
+            source_info = path_info(source)
+            require(
+                source_info["uid"] == 0 and source_info["gid"] == 0
+                and source_info["regular"] is True and source_info["symlink"] is False
+                and source_info["nlink"] == 1 and not (int(str(source_info["mode"]), 8) & 0o022),
+                f"deployment control source metadata is unsafe: {name}",
+            )
+            upload_payloads[name] = secure_bytes(source)
+        toolchain_manifest = load_json_bytes(
+            upload_payloads[TOOLCHAIN_MANIFEST_NAME], "toolchain manifest"
+        )
+        manifest_entries = validate_toolchain_manifest(toolchain_manifest)
+        for name in (
+            SERVER_BASELINE_NAME,
+            SERVER_SERVICE_TRANSITION_NAME,
+            PRIOR_EVIDENCE_DISPOSITION_NAME,
+        ):
+            expected = manifest_entries[name]
+            require(
+                hashlib.sha256(upload_payloads[name]).hexdigest() == expected["sha256"]
+                and len(upload_payloads[name]) == expected["size"],
+                f"deployment control differs from version-controlled manifest: {name}",
+            )
+        server_baseline = validate_server_baseline(
+            load_json_bytes(upload_payloads[SERVER_BASELINE_NAME], "server baseline")
+        )
+        service_transition = validate_service_transition(
+            load_json_bytes(
+                upload_payloads[SERVER_SERVICE_TRANSITION_NAME],
+                "server service transition",
+            ),
+            upload_payloads[SERVER_BASELINE_NAME],
+            server_baseline,
+        )
+        prior_disposition = validate_prior_evidence_disposition(
+            load_json_bytes(
+                upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME],
+                "prior evidence disposition",
+            )
+        )
+        invalidating_observation = service_transition["history"][0]
+        require(
+            prior_disposition["recorded_at"]
+            == invalidating_observation["observation"]["last_observed_at"]
+            and prior_disposition["invalidating_service_observation_id"]
+            == invalidating_observation["observation_id"],
+            "prior evidence disposition does not bind the invalidating transition observation",
+        )
+        prior_evidence_retention = validate_retained_prior_evidence(
+            prior_disposition
+        )
+        if recover_anchor(upload_payloads, manifest_entries):
             fcntl.flock(pipeline_lock_fd, fcntl.LOCK_UN)
             os.close(pipeline_lock_fd)
             return
@@ -1590,36 +3001,35 @@ def main() -> None:
         raise
     for path in (TARGET, STAGING, EVIDENCE_ANCHOR, ANCHOR_STAGING):
         require(not os.path.lexists(path), f"refusing to overwrite evidence path: {path}")
-    require(UPLOAD_ROOT == Path("/root/odoo-accounting-cli-v3-dev8-upload"), "upload root binding changed")
-    upload_info = path_info(UPLOAD_ROOT)
-    require(upload_info["directory"] and upload_info["uid"] == 0 and upload_info["gid"] == 0 and upload_info["mode"] == "0700", "upload root metadata mismatch")
-    upload_payloads: dict[str, bytes] = {}
-    for name in (TOOLCHAIN_MANIFEST_NAME, SERVER_BASELINE_NAME):
-        source = UPLOAD_ROOT / name
-        source_info = path_info(source)
-        require(
-            source_info["uid"] == 0 and source_info["gid"] == 0
-            and source_info["regular"] is True and source_info["symlink"] is False
-            and source_info["nlink"] == 1 and not (int(str(source_info["mode"]), 8) & 0o022),
-            f"deployment control source metadata is unsafe: {name}",
-        )
-        upload_payloads[name] = secure_bytes(source)
-    toolchain_manifest = load_json_bytes(upload_payloads[TOOLCHAIN_MANIFEST_NAME], "toolchain manifest")
-    manifest_entries = validate_toolchain_manifest(toolchain_manifest)
-    baseline_expected = manifest_entries[SERVER_BASELINE_NAME]
-    require(
-        hashlib.sha256(upload_payloads[SERVER_BASELINE_NAME]).hexdigest() == baseline_expected["sha256"]
-        and len(upload_payloads[SERVER_BASELINE_NAME]) == baseline_expected["size"],
-        "server baseline differs from version-controlled manifest",
+    expected_service_identities = effective_service_identities(
+        server_baseline, service_transition
     )
-    server_baseline = validate_server_baseline(
-        load_json_bytes(upload_payloads[SERVER_BASELINE_NAME], "server baseline")
+    expected_pids = effective_service_pids(server_baseline, service_transition)
+    baseline_sha256 = hashlib.sha256(upload_payloads[SERVER_BASELINE_NAME]).hexdigest()
+    transition_sha256 = hashlib.sha256(
+        upload_payloads[SERVER_SERVICE_TRANSITION_NAME]
+    ).hexdigest()
+    persistence, reports, journal_payloads = validate_inputs(
+        args,
+        expected_pids,
+        expected_service_identities,
+        baseline_sha256,
+        transition_sha256,
     )
-    expected_pids = baseline_service_pids(server_baseline)
-    persistence, reports, journal_payloads = validate_inputs(args, expected_pids)
-    isolation = live_isolation(server_baseline)
+    disposition_sha256 = hashlib.sha256(
+        upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME]
+    ).hexdigest()
+    isolation = live_isolation(
+        server_baseline,
+        service_transition,
+        transition_sha256,
+        disposition_sha256,
+        prior_evidence_retention,
+    )
     STAGING.mkdir(mode=0o700)
+    staging_identity = incomplete_staging_identity()
     published = False
+    anchor_staging_identity: tuple[int, int] | None = None
     try:
         core = {
             PACKAGE: "release/release-package.tar.gz",
@@ -1652,6 +3062,28 @@ def main() -> None:
         copy_evidence(UPLOAD_ROOT / SERVER_BASELINE_NAME, f"tools/{SERVER_BASELINE_NAME}")
         frozen_baseline_payload = secure_bytes(STAGING / "tools" / SERVER_BASELINE_NAME)
         require(frozen_baseline_payload == upload_payloads[SERVER_BASELINE_NAME], "server baseline changed before freeze")
+        copy_evidence(
+            UPLOAD_ROOT / SERVER_SERVICE_TRANSITION_NAME,
+            f"tools/{SERVER_SERVICE_TRANSITION_NAME}",
+        )
+        frozen_transition_payload = secure_bytes(
+            STAGING / "tools" / SERVER_SERVICE_TRANSITION_NAME
+        )
+        require(
+            frozen_transition_payload == upload_payloads[SERVER_SERVICE_TRANSITION_NAME],
+            "server service transition changed before freeze",
+        )
+        copy_evidence(
+            UPLOAD_ROOT / PRIOR_EVIDENCE_DISPOSITION_NAME,
+            f"tools/{PRIOR_EVIDENCE_DISPOSITION_NAME}",
+        )
+        frozen_disposition_payload = secure_bytes(
+            STAGING / "tools" / PRIOR_EVIDENCE_DISPOSITION_NAME
+        )
+        require(
+            frozen_disposition_payload == upload_payloads[PRIOR_EVIDENCE_DISPOSITION_NAME],
+            "prior evidence disposition changed before freeze",
+        )
 
         tool_entries = []
         for name in TOOL_FILES:
@@ -1687,11 +3119,16 @@ def main() -> None:
             {
                 "schema_version": 1,
                 "release": RELEASE,
+                "evidence_id": EVIDENCE_ID,
                 "toolchain_version": TOOLCHAIN_VERSION,
                 "source_directory": "deployment/dev8",
                 "toolchain_manifest_sha256": hashlib.sha256(frozen_manifest_payload).hexdigest(),
                 "server_baseline_sha256": hashlib.sha256(frozen_baseline_payload).hexdigest(),
                 "server_baseline_size": len(frozen_baseline_payload),
+                "server_service_transition_sha256": hashlib.sha256(frozen_transition_payload).hexdigest(),
+                "server_service_transition_size": len(frozen_transition_payload),
+                "prior_evidence_disposition_sha256": hashlib.sha256(frozen_disposition_payload).hexdigest(),
+                "prior_evidence_disposition_size": len(frozen_disposition_payload),
                 "upload_root": str(UPLOAD_ROOT),
                 "tools": tool_entries,
                 "tool_count": len(tool_entries),
@@ -1734,6 +3171,8 @@ def main() -> None:
         metadata = {
             "schema_version": 1,
             "release": RELEASE,
+            "evidence_id": EVIDENCE_ID,
+            "toolchain_version": TOOLCHAIN_VERSION,
             "version": VERSION,
             "commit": COMMIT,
             "git_tree": TREE,
@@ -1743,11 +3182,21 @@ def main() -> None:
             "registry_digest": REGISTRY_DIGEST,
             "runtime_config_sha256": RUNTIME_SHA256,
             "read_plan_sha256": PLAN_SHA256,
+            "toolchain_manifest_sha256": hashlib.sha256(frozen_manifest_payload).hexdigest(),
+            "server_baseline_sha256": hashlib.sha256(frozen_baseline_payload).hexdigest(),
+            "server_baseline_size": len(frozen_baseline_payload),
+            "server_service_transition_sha256": hashlib.sha256(frozen_transition_payload).hexdigest(),
+            "server_service_transition_size": len(frozen_transition_payload),
+            "prior_evidence_disposition_sha256": hashlib.sha256(frozen_disposition_payload).hexdigest(),
+            "prior_evidence_disposition_size": len(frozen_disposition_payload),
             "database_uuid": DATABASE_UUID,
             "audit_head": audit_head,
-            "auth_tokens": 4,
-            "consumed_receipts": 4,
-            "receipt_audit_events": 4,
+            "auth_tokens": 8,
+            "consumed_receipts": 8,
+            "receipt_audit_events": 8,
+            "verified_batch_auth_tokens": 4,
+            "verified_batch_receipts": 4,
+            "verified_batch_audit_events": 4,
             "verified_capabilities": [
                 "acct.ap.open_items.v1", "acct.ar.open_items.v1",
                 "acct.gl.trial_balance.v1", "acct.registry.list.v1",
@@ -1759,6 +3208,8 @@ def main() -> None:
             "evidence_scope": "dev8 canonical launcher, four staged real reads, three financial SQL oracles, persistence, security, and isolation",
             "evidence_visibility": "root-only directories 0500 and files 0400",
             "evidence_file_count": file_count_before_metadata + 2,
+            "freeze_checks_passed": True,
+            "final_verification_status": "pending",
             "goal_complete": False,
             "secret_material_included": False,
             "production_writes_authorized": False,
@@ -1794,52 +3245,35 @@ def main() -> None:
         for directory in sorted((path for path in STAGING.rglob("*") if path.is_dir()), key=lambda item: len(item.parts), reverse=True):
             fsync_directory(directory)
         fsync_directory(STAGING)
-        anchor = {
-            "schema_version": 1,
-            "release": RELEASE,
-            "commit": COMMIT,
-            "git_tree": TREE,
-            "evidence_path": str(TARGET),
-            "package_sha256": PACKAGE_SHA256,
-            "release_manifest_sha256": MANIFEST_SHA256,
-            "registry_digest": REGISTRY_DIGEST,
-            "runtime_config_sha256": RUNTIME_SHA256,
-            "read_plan_sha256": PLAN_SHA256,
-            "audit_head": audit_head,
-            "evidence_checksum_manifest_sha256": sha256(checksum_path),
-            "evidence_metadata_sha256": sha256(STAGING / "EVIDENCE-METADATA.json"),
-            "evidence_checksum_entries": len(checksum_lines),
-            "evidence_file_count": metadata["evidence_file_count"],
-            "production_promotion_allowed": False,
-        }
-        anchor_descriptor = os.open(ANCHOR_STAGING, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        try:
-            payload = json.dumps(anchor, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
-            write_all(anchor_descriptor, payload)
-            os.fsync(anchor_descriptor)
-        finally:
-            os.close(anchor_descriptor)
-        os.chown(ANCHOR_STAGING, 0, 0)
-        os.chmod(ANCHOR_STAGING, 0o400)
+        frozen_controls = dict(upload_payloads)
+        frozen_controls[TOOLCHAIN_MANIFEST_NAME] = frozen_manifest_payload
+        frozen_controls[SERVER_BASELINE_NAME] = frozen_baseline_payload
+        frozen_controls[SERVER_SERVICE_TRANSITION_NAME] = frozen_transition_payload
+        frozen_controls[PRIOR_EVIDENCE_DISPOSITION_NAME] = frozen_disposition_payload
+        anchor = build_anchor_document(
+            frozen_controls,
+            secure_bytes(checksum_path),
+            secure_bytes(STAGING / "EVIDENCE-METADATA.json"),
+        )
+        anchor_staging_identity = write_durable_anchor_staging(anchor)
         os.replace(STAGING, TARGET)
         published = True
         fsync_directory(EVIDENCE_PARENT)
-        os.link(ANCHOR_STAGING, EVIDENCE_ANCHOR, follow_symlinks=False)
-        os.unlink(ANCHOR_STAGING)
-        fsync_directory(ANCHOR_PARENT)
-        print(json.dumps({**anchor, "all_checks_passed": True}, sort_keys=True))
+        publish_anchor_staging(anchor_staging_identity)
+        print(json.dumps(anchor, sort_keys=True))
         fcntl.flock(pipeline_lock_fd, fcntl.LOCK_UN)
         os.close(pipeline_lock_fd)
     except Exception:
         if not published:
-            if STAGING.is_dir() and not STAGING.is_symlink():
-                os.chmod(STAGING, 0o700)
-                for path in STAGING.rglob("*"):
-                    if path.is_dir():
-                        os.chmod(path, 0o700)
-                shutil.rmtree(STAGING)
-            if ANCHOR_STAGING.is_file() and not ANCHOR_STAGING.is_symlink():
-                os.unlink(ANCHOR_STAGING)
+            if anchor_staging_identity is not None and os.path.lexists(ANCHOR_STAGING):
+                unlink_anchor_path(
+                    ANCHOR_STAGING,
+                    anchor_staging_identity,
+                    allowed_modes={0o400},
+                    allowed_nlinks={1},
+                )
+            if os.path.lexists(STAGING):
+                cleanup_incomplete_staging(staging_identity)
         raise
 
 

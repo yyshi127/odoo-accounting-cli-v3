@@ -96,21 +96,86 @@ current_absent() {
     [[ ! -e "$current_route" && ! -L "$current_route" ]]
 }
 
-odoo_pid() {
-    local value
-    value=$(/usr/bin/systemctl show odoo19.service --property=MainPID --value)
-    if [[ ! "$value" =~ ^[1-9][0-9]*$ || ! -d "/proc/$value" ]]; then
-        echo "Odoo has no live MainPID" >&2
-        return 1
-    fi
-    printf '%s\n' "$value"
+odoo_identity() {
+    "$host_python" -I -B - <<'PY'
+import hashlib
+import json
+import pathlib
+import subprocess
+
+UNIT = "odoo19.service"
+
+def fail(message):
+    raise SystemExit(message)
+
+def properties():
+    completed = subprocess.run(
+        [
+            "/usr/bin/systemctl", "show", UNIT,
+            "--property=Id", "--property=ActiveState", "--property=SubState",
+            "--property=MainPID", "--property=InvocationID",
+            "--property=ExecMainStartTimestampMonotonic",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        timeout=20,
+    )
+    if completed.returncode != 0 or completed.stderr.strip():
+        fail("could not sample the Odoo systemd identity")
+    return dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
+
+def start_ticks(process):
+    payload = (process / "stat").read_text(encoding="ascii")
+    end = payload.rfind(")")
+    fields = payload[end + 2:].split() if end > 0 else []
+    if len(fields) <= 19 or not fields[19].isdigit():
+        fail("Odoo process start ticks are unavailable")
+    return int(fields[19])
+
+boot_path = pathlib.Path("/proc/sys/kernel/random/boot_id")
+boot_before = boot_path.read_text(encoding="ascii").strip()
+first = properties()
+pid = int(first.get("MainPID", "0") or "0")
+process = pathlib.Path(f"/proc/{pid}")
+if pid <= 0 or not process.is_dir():
+    fail("Odoo has no live MainPID")
+cmdline = (process / "cmdline").read_bytes().replace(b"\0", b" ")
+ticks = start_ticks(process)
+second = properties()
+second_pid = int(second.get("MainPID", "0") or "0")
+second_process = pathlib.Path(f"/proc/{second_pid}")
+if second_pid <= 0 or not second_process.is_dir():
+    fail("Odoo process disappeared while sampling")
+second_cmdline = (second_process / "cmdline").read_bytes().replace(b"\0", b" ")
+second_ticks = start_ticks(second_process)
+boot_after = boot_path.read_text(encoding="ascii").strip()
+if first != second or pid != second_pid or cmdline != second_cmdline or ticks != second_ticks or boot_before != boot_after:
+    fail("Odoo identity changed while sampling")
+if first.get("Id") != UNIT or first.get("ActiveState") != "active" or first.get("SubState") != "running":
+    fail("Odoo service is not active and running")
+if b"odoo-accounting-cli-v3" in cmdline:
+    fail("Odoo unexpectedly references V3")
+print(json.dumps({
+    "active_state": first["ActiveState"],
+    "boot_id": boot_before,
+    "cmdline_sha256": hashlib.sha256(cmdline).hexdigest(),
+    "exec_main_start_monotonic_usec": int(first["ExecMainStartTimestampMonotonic"]),
+    "invocation_id": first["InvocationID"],
+    "main_pid": pid,
+    "proc_start_ticks": ticks,
+    "sub_state": first["SubState"],
+    "unit": UNIT,
+}, sort_keys=True, separators=(",", ":")))
+PY
 }
 
 if ! current_absent; then
     echo "the unpromoted dev8 boundary requires current to be absent" >&2
     exit 1
 fi
-pid_before=$(odoo_pid)
+identity_before=$(odoo_identity)
 
 staging=""
 cleanup() {
@@ -311,9 +376,9 @@ run_oracle \
     "$staging/ap-open-items.request.json" \
     "$staging/ap-open-items.response.json"
 
-pid_after=$(odoo_pid)
-if [[ "$pid_after" != "$pid_before" ]]; then
-    echo "Odoo MainPID changed while the read-only oracles ran" >&2
+identity_after=$(odoo_identity)
+if [[ "$identity_after" != "$identity_before" ]]; then
+    echo "Odoo service identity changed while the read-only oracles ran" >&2
     exit 1
 fi
 if ! current_absent; then
@@ -322,7 +387,7 @@ if ! current_absent; then
 fi
 
 "$host_python" -I -B - \
-    "$evidence" "$pid_before" "$pid_after" \
+    "$evidence" "$identity_before" "$identity_after" \
     "$staging/dev6-trial-balance-sql-oracle.py" \
     "$staging/dev6-ar-sql-oracle.py" \
     "$staging/dev7-ap-sql-oracle.py" \
@@ -445,8 +510,37 @@ def require(condition: bool, message: str) -> None:
 
 
 root = Path(sys.argv[1])
-pid_before = int(sys.argv[2])
-pid_after = int(sys.argv[3])
+identity_before = json.loads(
+    sys.argv[2], object_pairs_hook=reject_pairs, parse_constant=reject_constant
+)
+identity_after = json.loads(
+    sys.argv[3], object_pairs_hook=reject_pairs, parse_constant=reject_constant
+)
+identity_fields = {
+    "active_state", "boot_id", "cmdline_sha256",
+    "exec_main_start_monotonic_usec", "invocation_id", "main_pid",
+    "proc_start_ticks", "sub_state", "unit",
+}
+require(
+    isinstance(identity_before, dict)
+    and isinstance(identity_after, dict)
+    and set(identity_before) == identity_fields
+    and set(identity_after) == identity_fields
+    and identity_before["unit"] == "odoo19.service"
+    and identity_before["active_state"] == "active"
+    and identity_before["sub_state"] == "running"
+    and all(
+        isinstance(identity_before[field], int)
+        and not isinstance(identity_before[field], bool)
+        and identity_before[field] > 0
+        for field in (
+            "main_pid", "exec_main_start_monotonic_usec", "proc_start_ticks"
+        )
+    ),
+    "Odoo identity evidence is invalid",
+)
+pid_before = identity_before["main_pid"]
+pid_after = identity_after["main_pid"]
 oracle_paths = {
     "trial-balance": Path(sys.argv[4]),
     "ar-open-items": Path(sys.argv[5]),
@@ -793,6 +887,7 @@ checks = {
         and report["rollback_completed"] is True
         for report in oracle_reports.values()
     ),
+    "odoo_identity_unchanged": identity_before == identity_after,
     "odoo_pid_unchanged": pid_before > 0 and pid_after == pid_before,
     "current_absent": not os.path.lexists(CURRENT),
 }
@@ -813,6 +908,8 @@ report = {
     "request_roundtrip": roundtrip_rows,
     "staged_inputs": staged_input_evidence,
     "oracles": oracle_evidence,
+    "odoo_identity_before": identity_before,
+    "odoo_identity_after": identity_after,
     "odoo_pid_before": pid_before,
     "odoo_pid_after": pid_after,
     "checks": checks,
@@ -829,8 +926,8 @@ if ! current_absent; then
     echo "current appeared before the read-oracle audit completed" >&2
     exit 1
 fi
-if [[ "$(odoo_pid)" != "$pid_before" ]]; then
-    echo "Odoo MainPID changed before the read-oracle audit completed" >&2
+if [[ "$(odoo_identity)" != "$identity_before" ]]; then
+    echo "Odoo service identity changed before the read-oracle audit completed" >&2
     exit 1
 fi
 
