@@ -89,6 +89,15 @@ jobs:
       - name: Gate the non-root Linux process tree without skips
         run: |
           set -euo pipefail
+          report_gate_failure() {
+            status=$?
+            line=$1
+            trap - ERR
+            printf '%s\n' \
+              "::error file=.github/workflows/quality.yml,title=Dev9 non-root gate::shell line $line failed with exit $status"
+            exit "$status"
+          }
+          trap 'report_gate_failure "$LINENO"' ERR
           test "$(python -c 'import sys; print(sys.platform)')" = linux
           test "$(id -u)" -ne 0
           command -v systemd-run
