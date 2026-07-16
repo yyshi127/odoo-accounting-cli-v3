@@ -23,13 +23,13 @@ assert_not_suspicious() {
 
 inside_private_namespace() {
   local self_namespace init_namespace propagation
-  self_namespace="$(readlink /proc/self/ns/mnt)"
-  init_namespace="$(readlink /proc/1/ns/mnt)"
-  test -n "$self_namespace"
-  test -n "$init_namespace"
+  self_namespace="$(readlink /proc/self/ns/mnt 2>/dev/null)" || fail_isolation
+  init_namespace="$(readlink /proc/1/ns/mnt 2>/dev/null)" || fail_isolation
+  test -n "$self_namespace" || fail_isolation
+  test -n "$init_namespace" || fail_isolation
   test "$self_namespace" != "$init_namespace" || fail_isolation
 
-  propagation="$(findmnt -n -o PROPAGATION /)"
+  propagation="$(findmnt -n -o PROPAGATION / 2>/dev/null)" || fail_isolation
   case "$propagation" in
     private|unbindable) ;;
     *) fail_isolation ;;
@@ -66,7 +66,8 @@ for executable in awk findmnt grep readlink unshare; do
   command -v "$executable" >/dev/null 2>&1 || fail_isolation
 done
 
-readonly before="$(var_lib_mountinfo)"
+before="$(var_lib_mountinfo)" || fail_isolation
+readonly before
 assert_not_suspicious "$before"
 
 set +e
@@ -80,7 +81,8 @@ unshare \
 readonly command_status=$?
 set -e
 
-readonly after="$(var_lib_mountinfo)"
+after="$(var_lib_mountinfo)" || fail_isolation
+readonly after
 if [[ "$after" != "$before" ]]; then
   fail_isolation
 fi
