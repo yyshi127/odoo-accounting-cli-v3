@@ -20,6 +20,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[test]"
+      - name: Provision the fixed child HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          child_home=/var/lib/odoo-accounting-cli-v3
+          sudo install -d \
+            -m 0700 \
+            -o "$(id -u)" \
+            -g "$(id -g)" \
+            "$child_home"
+          test "$(stat -c '%a:%u:%g' "$child_home")" = \
+            "700:$(id -u):$(id -g)"
       - run: python -m pytest
       - run: python tools/check_source_boundary.py
 
@@ -477,8 +489,48 @@ jobs:
             --capability-id acct.unknown.missing.v1 \
             > unknown.stdout 2> unknown.stderr
           unknown_status=$?
+          operation_request="$(
+            "$runtime_python" -I - <<'PY'
+          import json
+
+          request = {
+              "context": {
+                  "allowed_company_ids": [7],
+                  "audience": "odoo-accounting-cli-v3",
+                  "auth_expires_at": "2026-07-15T08:05:00Z",
+                  "auth_issued_at": "2026-07-15T08:00:00Z",
+                  "auth_key_id": "wheel-smoke-write-auth-v2",
+                  "auth_request_digest": "a" * 64,
+                  "auth_signature": "b" * 64,
+                  "auth_signature_purpose": "write_action_context_v2",
+                  "auth_signature_version": 2,
+                  "auth_token_id": "wheel-smoke-token",
+                  "company_id": 7,
+                  "database_name": "wheel_smoke_sandbox",
+                  "database_uuid": "11111111-1111-4111-8111-111111111111",
+                  "environment": "sandbox",
+                  "odoo_instance_id": "odoo19@wheel-smoke",
+                  "principal": "pi:wheel-smoke",
+                  "user_id": 42,
+              },
+              "operation_id": "op-wheel-smoke",
+              "request_id": "req-wheel-smoke",
+              "capability_id": "acct.bill.vendor_create.v1",
+              "parameters": {},
+          }
+          print(
+              json.dumps(
+                  request,
+                  ensure_ascii=False,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+          )
+          PY
+          )"
           "$runtime_cli" operation prepare \
-            --request-json '{"request_id":"wheel-smoke"}' \
+            --request-json "$operation_request" \
             > operation.stdout 2> operation.stderr
           operation_status=$?
           set -e
@@ -515,6 +567,8 @@ jobs:
           assert unknown["error"]["odoo_action_performed"] is False
           assert operation["ok"] is False
           assert operation["command"] == "operation.prepare"
-          assert operation["error"]["code"] == "gateway_not_configured"
-          assert operation["error"]["odoo_action_performed"] is False
+          assert operation["error"]["code"] == "write_lifecycle_rejected"
+          assert operation["error"]["odoo_effect"] == "none"
+          assert operation["error"]["operation_id"] == "op-wheel-smoke"
+          assert operation["error"]["retryable"] is False
           PY
