@@ -1,0 +1,4 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_operation_executor,V3 operation executor,model_odoo_accounting_cli_operation,odoo_accounting_cli_v3_control.group_executor,1,1,1,0
+access_operation_approver,V3 operation approver,model_odoo_accounting_cli_operation,odoo_accounting_cli_v3_control.group_approver,1,0,0,0
+access_approval_wizard_approver,V3 approval wizard approver,model_odoo_accounting_cli_v3_approval_wizard,odoo_accounting_cli_v3_control.group_approver,1,1,1,0

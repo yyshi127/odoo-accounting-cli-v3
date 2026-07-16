@@ -1,0 +1,46 @@
+[Unit]
+Description=Odoo Accounting CLI V3 dedicated trusted broker
+Requires=odoo-accounting-cli-v3-pi-broker.socket
+Requires=odoo-accounting-cli-v3-session-mint.socket
+Requires=odoo-accounting-cli-v3-trusted-approval.socket
+After=odoo-accounting-cli-v3-pi-broker.socket
+After=odoo-accounting-cli-v3-session-mint.socket
+After=odoo-accounting-cli-v3-trusted-approval.socket
+
+[Service]
+Type=simple
+User=odoo-v3-broker
+Group=odoo-v3-broker
+SupplementaryGroups=odoo-v3-runtime
+StateDirectory=odoo-accounting-cli-v3
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/odoo-accounting-cli-v3
+Sockets=odoo-accounting-cli-v3-pi-broker.socket
+Sockets=odoo-accounting-cli-v3-session-mint.socket
+Sockets=odoo-accounting-cli-v3-trusted-approval.socket
+ExecStart=/opt/odoo-accounting-cli-v3/releases/@V3_RELEASE@/bin/odoo-accounting-cli-v3-broker --config /etc/odoo-accounting-cli-v3/broker-runtime.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=135s
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+SystemCallArchitectures=native

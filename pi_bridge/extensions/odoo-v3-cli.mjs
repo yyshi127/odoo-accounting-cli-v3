@@ -1,0 +1,1043 @@
+import path from "node:path";
+import fs from "node:fs";
+import http from "node:http";
+import { spawn } from "node:child_process";
+import { validBrokerSessionHandle } from "../trusted-session.mjs";
+
+export const V3_TOOL_NAMES = Object.freeze({
+	capabilityList: "odoo_v3_capability_list",
+	capabilityGet: "odoo_v3_capability_get",
+	read: "odoo_v3_read",
+	prepare: "odoo_v3_operation_prepare",
+	preview: "odoo_v3_operation_preview",
+	approveExecute: "odoo_v3_operation_approve_execute",
+	status: "odoo_v3_operation_status",
+	result: "odoo_v3_operation_result",
+	recover: "odoo_v3_operation_recover",
+});
+
+export const V3_OPERATION_COMMANDS = Object.freeze({
+	"operation.prepare": Object.freeze(["operation", "prepare"]),
+	"operation.preview": Object.freeze(["operation", "preview"]),
+	"operation.approve_execute": Object.freeze(["operation", "approve-execute"]),
+	"operation.status": Object.freeze(["operation", "status"]),
+	"operation.result": Object.freeze(["operation", "result"]),
+	"operation.recover": Object.freeze(["operation", "recover"]),
+});
+
+export const V3_BROKER_ACTION_PATHS = Object.freeze({
+	read: "/v1/read",
+	"operation.prepare": "/v1/operation/prepare",
+	"operation.preview": "/v1/operation/preview",
+	"operation.approve_execute": "/v1/operation/approve-execute",
+	"operation.status": "/v1/operation/status",
+	"operation.result": "/v1/operation/result",
+	"operation.recover": "/v1/operation/recover",
+});
+
+export const V3_QUERY_COMMANDS = Object.freeze({
+	"registry.list": Object.freeze(["registry", "list"]),
+	// registry.get is intentionally resolved from one immutable registry.list
+	// invocation so user input is never interpolated into argv.
+	"registry.get": Object.freeze(["registry", "list"]),
+});
+
+const DEFAULT_TIMEOUT_MS = 120000;
+const MAX_OUTPUT_BYTES = 1024 * 1024;
+
+function isObject(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+const SHA256 = /^[0-9a-f]{64}$/;
+const CAPABILITY_ID = /^acct\.[a-z0-9_]+\.[a-z0-9_]+\.v[1-9][0-9]*$/;
+const UTC_TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$/;
+const DATABASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+const WRITE_RECEIPT_KEYS = Object.freeze([
+	"approval_digest",
+	"approver_user_id",
+	"audit_head",
+	"capability_channel",
+	"capability_id",
+	"company_id",
+	"database_name",
+	"database_uuid",
+	"environment",
+	"issued_at",
+	"odoo_instance_id",
+	"operation_digest",
+	"operation_id",
+	"principal",
+	"receipt_id",
+	"registry_digest",
+	"release_digest",
+	"request_digest",
+	"request_id",
+	"result_digest",
+	"signature",
+	"signature_purpose",
+	"signature_version",
+	"signing_key_id",
+	"user_id",
+	"verification_evidence_digest",
+].sort());
+
+const WRITE_RECEIPT_DIGEST_KEYS = Object.freeze([
+	"approval_digest",
+	"audit_head",
+	"operation_digest",
+	"registry_digest",
+	"release_digest",
+	"request_digest",
+	"result_digest",
+	"signature",
+	"verification_evidence_digest",
+]);
+
+const READ_RECEIPT_KEYS = Object.freeze([
+	"capability_channel",
+	"capability_id",
+	"company_id",
+	"database_name",
+	"database_uuid",
+	"environment",
+	"id",
+	"observed_at",
+	"odoo_instance_id",
+	"record_count",
+	"registry_digest",
+	"release_digest",
+	"request_digest",
+	"result_digest",
+	"signature",
+	"signature_key_id",
+	"signature_purpose",
+	"signature_version",
+	"user_id",
+].sort());
+
+function exactKeys(value, keys) {
+	return isObject(value)
+		&& JSON.stringify(Object.keys(value).sort()) === JSON.stringify(keys);
+}
+
+function nonEmptyString(value) {
+	return typeof value === "string" && value.trim().length > 0;
+}
+
+function positiveIntegerValue(value) {
+	return Number.isSafeInteger(value) && value > 0;
+}
+
+function validRegistryList(data, expectedRegistryDigest) {
+	return exactKeys(data, ["capabilities", "count", "registry_digest"])
+		&& Array.isArray(data.capabilities)
+		&& data.capabilities.every((item) => isObject(item) && CAPABILITY_ID.test(item.id))
+		&& Number.isSafeInteger(data.count)
+		&& data.count === data.capabilities.length
+		&& SHA256.test(data.registry_digest)
+		&& data.registry_digest === expectedRegistryDigest;
+}
+
+function validReadReceipt(receipt, request, expectedReleaseDigest, expectedRegistryDigest) {
+	return exactKeys(receipt, READ_RECEIPT_KEYS)
+		&& nonEmptyString(receipt.id)
+		&& receipt.capability_id === request?.capability_id
+		&& nonEmptyString(receipt.odoo_instance_id)
+		&& nonEmptyString(receipt.database_name)
+		&& typeof receipt.database_uuid === "string"
+		&& DATABASE_UUID.test(receipt.database_uuid)
+		&& positiveIntegerValue(receipt.company_id)
+		&& positiveIntegerValue(receipt.user_id)
+		&& nonEmptyString(receipt.environment)
+		&& ["staged", "enabled"].includes(receipt.capability_channel)
+		&& ["request_digest", "result_digest", "registry_digest", "release_digest", "signature"]
+			.every((key) => typeof receipt[key] === "string" && SHA256.test(receipt[key]))
+		&& receipt.release_digest === expectedReleaseDigest
+		&& receipt.registry_digest === expectedRegistryDigest
+		&& Number.isSafeInteger(receipt.record_count)
+		&& receipt.record_count >= 0
+		&& typeof receipt.observed_at === "string"
+		&& UTC_TIMESTAMP.test(receipt.observed_at)
+		&& receipt.signature_version === 2
+		&& receipt.signature_purpose === "read_receipt_v2"
+		&& nonEmptyString(receipt.signature_key_id);
+}
+
+function validReadData(data, request, expectedReleaseDigest, expectedRegistryDigest) {
+	return exactKeys(data, ["capability_id", "release_identity", "result", "runtime"])
+		&& data.capability_id === request?.capability_id
+		&& isObject(data.release_identity)
+		&& data.release_identity.verified === true
+		&& data.release_identity.manifest_sha256 === expectedReleaseDigest
+		&& data.release_identity.registry_digest === expectedRegistryDigest
+		&& isObject(data.result)
+		&& isObject(data.runtime)
+		&& validReadReceipt(
+			data.result.receipt,
+			request,
+			expectedReleaseDigest,
+			expectedRegistryDigest,
+		);
+}
+
+function validWriteAuditReceipt(
+	receipt,
+	verification,
+	data,
+	request,
+	expectedReleaseDigest,
+	expectedRegistryDigest,
+) {
+	return exactKeys(receipt, WRITE_RECEIPT_KEYS)
+		&& nonEmptyString(receipt.receipt_id)
+		&& nonEmptyString(receipt.request_id)
+		&& receipt.operation_id === data.operation_id
+		&& CAPABILITY_ID.test(receipt.capability_id)
+		&& nonEmptyString(receipt.principal)
+		&& nonEmptyString(receipt.odoo_instance_id)
+		&& nonEmptyString(receipt.database_name)
+		&& typeof receipt.database_uuid === "string"
+		&& DATABASE_UUID.test(receipt.database_uuid)
+		&& positiveIntegerValue(receipt.user_id)
+		&& positiveIntegerValue(receipt.approver_user_id)
+		&& positiveIntegerValue(receipt.company_id)
+		&& nonEmptyString(receipt.environment)
+		&& ["staged", "enabled"].includes(receipt.capability_channel)
+		&& WRITE_RECEIPT_DIGEST_KEYS.every(
+			(key) => typeof receipt[key] === "string" && SHA256.test(receipt[key]),
+		)
+		&& receipt.release_digest === expectedReleaseDigest
+		&& receipt.registry_digest === expectedRegistryDigest
+		&& receipt.verification_evidence_digest === verification.evidence_digest
+		&& typeof receipt.issued_at === "string"
+		&& UTC_TIMESTAMP.test(receipt.issued_at)
+		&& receipt.signature_version === 1
+		&& receipt.signature_purpose === "write_audit_receipt_v1"
+		&& nonEmptyString(receipt.signing_key_id);
+}
+
+function validVerifiedWriteSuccess(
+	payload,
+	request,
+	expectedReleaseDigest,
+	expectedRegistryDigest,
+) {
+	const data = payload.data;
+	const verification = data?.verification;
+	return payload.business_succeeded === true
+		&& isObject(data)
+		&& nonEmptyString(data.operation_id)
+		&& data.operation_id === request?.operation_id
+		&& ["completed", "recovered"].includes(data.operation_state)
+		&& isObject(verification)
+		&& nonEmptyString(verification.method)
+		&& verification.passed === true
+		&& Array.isArray(verification.checks)
+		&& verification.checks.length > 0
+		&& verification.checks.every(nonEmptyString)
+		&& typeof verification.evidence_digest === "string"
+		&& SHA256.test(verification.evidence_digest)
+		&& typeof verification.verified_at === "string"
+		&& UTC_TIMESTAMP.test(verification.verified_at)
+		&& validWriteAuditReceipt(
+			data.audit_receipt,
+			verification,
+			data,
+			request,
+			expectedReleaseDigest,
+			expectedRegistryDigest,
+		);
+}
+
+function assertJsonValue(value, seen = new Set()) {
+	if (value === null || typeof value === "string" || typeof value === "boolean") {
+		return;
+	}
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) {
+			throw new TypeError("V3 request contains a non-finite number");
+		}
+		return;
+	}
+	if (typeof value !== "object") {
+		throw new TypeError("V3 request contains a non-JSON value");
+	}
+	if (seen.has(value)) {
+		throw new TypeError("V3 request contains a cycle");
+	}
+	seen.add(value);
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			assertJsonValue(item, seen);
+		}
+	} else {
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) {
+			throw new TypeError("V3 request must contain only JSON objects");
+		}
+		for (const item of Object.values(value)) {
+			assertJsonValue(item, seen);
+		}
+	}
+	seen.delete(value);
+}
+
+function serializeRequest(request) {
+	if (!isObject(request)) {
+		throw new TypeError("V3 request must be a JSON object");
+	}
+	assertJsonValue(request);
+	return JSON.stringify(request);
+}
+
+const FORBIDDEN_AUTHORITY_FIELDS = new Set([
+	"allowed_company_ids",
+	"approval",
+	"approver_user_id",
+	"auth_expires_at",
+	"auth_issued_at",
+	"auth_key_id",
+	"auth_request_digest",
+	"auth_signature",
+	"auth_signature_purpose",
+	"auth_signature_version",
+	"auth_token_id",
+	"binary_path",
+	"broker_socket",
+	"capability_channel",
+	"cli_path",
+	"config_path",
+	"context",
+	"database_name",
+	"database_uuid",
+	"environment",
+	"key_id",
+	"odoo_instance_id",
+	"principal",
+	"registry_digest",
+	"release_digest",
+	"release_version",
+	"request_id",
+	"runtime_config",
+	"runtime_config_path",
+	"signature",
+	"signature_key_id",
+	"signing_key_id",
+	"user_id",
+]);
+
+function containsForbiddenAuthorityField(value) {
+	if (Array.isArray(value)) {
+		return value.some(containsForbiddenAuthorityField);
+	}
+	if (!isObject(value)) {
+		return false;
+	}
+	for (const [key, item] of Object.entries(value)) {
+		if (FORBIDDEN_AUTHORITY_FIELDS.has(key) || key.startsWith("auth_")) {
+			return true;
+		}
+		if (containsForbiddenAuthorityField(item)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+function boundedString(value, maximum = 512) {
+	return typeof value === "string" && value.length > 0 && value.length <= maximum;
+}
+
+function validBrokerBusinessRequest(action, request) {
+	if (!isObject(request) || containsForbiddenAuthorityField(request)) {
+		return false;
+	}
+	if (["read", "operation.prepare"].includes(action)) {
+		return exactKeys(request, ["capability_id", "parameters"])
+			&& CAPABILITY_ID.test(request.capability_id)
+			&& isObject(request.parameters);
+	}
+	if ([
+		"operation.preview",
+		"operation.approve_execute",
+		"operation.status",
+		"operation.result",
+	].includes(action)) {
+		return exactKeys(request, ["operation_id"])
+			&& boundedString(request.operation_id, 128);
+	}
+	if (action === "operation.recover") {
+		return exactKeys(request, [
+			"idempotency_key",
+			"origin_operation_id",
+			"reason",
+			"recovery_date",
+		])
+			&& boundedString(request.origin_operation_id, 128)
+			&& /^\d{4}-\d{2}-\d{2}$/.test(request.recovery_date)
+			&& boundedString(request.reason, 512)
+			&& boundedString(request.idempotency_key, 200);
+	}
+	return false;
+}
+
+function requestedOperationId(action, request) {
+	const field = action === "operation.recover" ? "recovery_operation_id" : "operation_id";
+	return typeof request?.[field] === "string" ? request[field] : undefined;
+}
+
+function bridgeFailure(action, request, { code, message, odooEffect, retryable }) {
+	const error = {
+		code,
+		message,
+		odoo_effect: odooEffect,
+		retryable,
+	};
+	const operationId = requestedOperationId(action, request);
+	if (operationId) {
+		error.operation_id = operationId;
+	}
+	return { command: action, error, ok: false };
+}
+
+function parseCliEnvelope(
+	raw,
+	cliCommand,
+	expectedOk,
+	request,
+	expectedReleaseDigest,
+	expectedRegistryDigest,
+) {
+	let payload;
+	try {
+		payload = JSON.parse(raw);
+	} catch {
+		return null;
+	}
+	if (!isObject(payload) || payload.command !== cliCommand || payload.ok !== expectedOk) {
+		return null;
+	}
+	if (expectedOk) {
+		const reportsBusinessResult = ["operation.approve_execute", "operation.result"].includes(cliCommand);
+		const expectedKeys = reportsBusinessResult
+			? ["business_succeeded", "command", "data", "ok"]
+			: ["command", "data", "ok"];
+		if (
+			JSON.stringify(Object.keys(payload).sort()) !== JSON.stringify(expectedKeys)
+			|| !isObject(payload.data)
+			|| (reportsBusinessResult && typeof payload.business_succeeded !== "boolean")
+		) {
+			return null;
+		}
+		if (
+			reportsBusinessResult
+			&& payload.business_succeeded === true
+			&& !validVerifiedWriteSuccess(
+				payload,
+				request,
+				expectedReleaseDigest,
+				expectedRegistryDigest,
+			)
+		) {
+			return null;
+		}
+		if (
+			cliCommand === "read"
+			&& !validReadData(
+				payload.data,
+				request,
+				expectedReleaseDigest,
+				expectedRegistryDigest,
+			)
+		) {
+			return null;
+		}
+		if (
+			cliCommand === "registry.list"
+			&& !validRegistryList(payload.data, expectedRegistryDigest)
+		) {
+			return null;
+		}
+		return payload;
+	}
+	const error = payload.error;
+	const errorKeys = Object.keys(error ?? {});
+	if (
+		JSON.stringify(Object.keys(payload).sort()) !== JSON.stringify(["command", "error", "ok"])
+		|| !isObject(error)
+		|| typeof error.code !== "string"
+		|| !error.code
+		|| typeof error.message !== "string"
+		|| !error.message
+		|| !["none", "unknown"].includes(error.odoo_effect)
+		|| typeof error.retryable !== "boolean"
+		|| (error.operation_id !== undefined && typeof error.operation_id !== "string")
+		|| (error.state !== undefined && typeof error.state !== "string")
+		|| errorKeys.some((key) => ![
+			"code",
+			"message",
+			"odoo_effect",
+			"operation_id",
+			"retryable",
+			"state",
+		].includes(key))
+	) {
+		return null;
+	}
+	return payload;
+}
+
+function positiveInteger(value, fallback) {
+	return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+export function createV3CliRunner(options = {}) {
+	const cliPath = options.cliPath ?? process.env.ODOO_ACCOUNTING_CLI_V3_BIN ?? "";
+	const prefixArgs = options.prefixArgs ?? [];
+	const expectedReleaseDigest = options.expectedReleaseDigest
+		?? process.env.ODOO_ACCOUNTING_CLI_V3_RELEASE_DIGEST
+		?? "";
+	const expectedRegistryDigest = options.expectedRegistryDigest
+		?? process.env.ODOO_ACCOUNTING_CLI_V3_REGISTRY_DIGEST
+		?? "";
+	const timeoutMs = positiveInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS);
+	const maxOutputBytes = positiveInteger(options.maxOutputBytes, MAX_OUTPUT_BYTES);
+	if (!Array.isArray(prefixArgs) || prefixArgs.some((item) => typeof item !== "string")) {
+		throw new TypeError("V3 CLI prefix arguments are invalid");
+	}
+	const fixedPrefixArgs = Object.freeze([...prefixArgs]);
+
+	return async function runV3Operation(action, request) {
+		if (action === "read" || Object.hasOwn(V3_OPERATION_COMMANDS, action)) {
+			return bridgeFailure(action, request, {
+				code: "bridge_v3_broker_required",
+				message: "Authenticated V3 read and write actions require the local trusted broker.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		const configuredArgs = V3_QUERY_COMMANDS[action];
+		if (!configuredArgs) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_action",
+				message: "The Pi Bridge does not recognize this V3 operation action.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (typeof cliPath !== "string" || !path.isAbsolute(cliPath) || cliPath.includes("\0")) {
+			return bridgeFailure(action, request, {
+				code: "bridge_v3_cli_not_configured",
+				message: "The fixed immutable V3 CLI launcher is not configured.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (!SHA256.test(expectedReleaseDigest) || !SHA256.test(expectedRegistryDigest)) {
+			return bridgeFailure(action, request, {
+				code: "bridge_v3_identity_not_configured",
+				message: "The verified V3 release and registry identities are not configured.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (
+			action === "registry.get"
+			&& (
+				!exactKeys(request, ["capability_id"])
+				|| typeof request.capability_id !== "string"
+				|| !CAPABILITY_ID.test(request.capability_id)
+			)
+		) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_request_json",
+				message: "The capability query must contain one exact capability_id.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (action === "registry.list" && !exactKeys(request, [])) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_request_json",
+				message: "The capability list request must be an empty JSON object.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+
+		const cliCommand = action === "registry.get" ? "registry.list" : action;
+		const commandArgs = [...configuredArgs];
+
+		let stdin;
+		try {
+			stdin = serializeRequest(request);
+		} catch {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_request_json",
+				message: "The V3 request is not a strict JSON object.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+
+		return await new Promise((resolve) => {
+			let child;
+			let spawned = false;
+			let settled = false;
+			let stdout = "";
+			let stderr = "";
+			let timer;
+			const uncertainEffect = () => (
+				action === "operation.approve_execute" && spawned ? "unknown" : "none"
+			);
+			const finish = (result) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(timer);
+				resolve(result);
+			};
+
+			try {
+				child = spawn(cliPath, [...fixedPrefixArgs, ...commandArgs], {
+					cwd: path.dirname(cliPath),
+					env: process.env,
+					stdio: ["pipe", "pipe", "pipe"],
+					windowsHide: true,
+				});
+			} catch {
+				resolve(bridgeFailure(action, request, {
+					code: "bridge_v3_cli_unavailable",
+					message: "The fixed V3 CLI launcher could not be started.",
+					odooEffect: "none",
+					retryable: true,
+				}));
+				return;
+			}
+
+			timer = setTimeout(() => {
+				child.kill("SIGTERM");
+				finish(bridgeFailure(action, request, {
+					code: "bridge_v3_cli_timeout",
+					message: "The V3 CLI did not return before the fixed bridge timeout.",
+					odooEffect: uncertainEffect(),
+					retryable: true,
+				}));
+			}, timeoutMs);
+
+			child.on("spawn", () => {
+				spawned = true;
+			});
+			child.stdout.on("data", (chunk) => {
+				stdout += chunk.toString("utf8");
+				if (Buffer.byteLength(stdout) > maxOutputBytes) {
+					child.kill("SIGTERM");
+					finish(bridgeFailure(action, request, {
+						code: "bridge_v3_cli_output_limit",
+						message: "The V3 CLI stdout exceeded the bridge limit.",
+						odooEffect: uncertainEffect(),
+						retryable: false,
+					}));
+				}
+			});
+			child.stderr.on("data", (chunk) => {
+				stderr += chunk.toString("utf8");
+				if (Buffer.byteLength(stderr) > maxOutputBytes) {
+					child.kill("SIGTERM");
+					finish(bridgeFailure(action, request, {
+						code: "bridge_v3_cli_output_limit",
+						message: "The V3 CLI stderr exceeded the bridge limit.",
+						odooEffect: uncertainEffect(),
+						retryable: false,
+					}));
+				}
+			});
+			child.on("error", () => {
+				finish(bridgeFailure(action, request, {
+					code: "bridge_v3_cli_unavailable",
+					message: "The fixed V3 CLI launcher could not be started.",
+					odooEffect: uncertainEffect(),
+					retryable: true,
+				}));
+			});
+			child.on("close", (code, signal) => {
+				if (settled) {
+					return;
+				}
+				const cleanStdout = stdout.trim();
+				const cleanStderr = stderr.trim();
+				if (code === 0 && signal === null && cleanStderr === "") {
+					const payload = parseCliEnvelope(
+						cleanStdout,
+						cliCommand,
+						true,
+						request,
+						expectedReleaseDigest,
+						expectedRegistryDigest,
+					);
+					if (payload) {
+						if (action === "registry.get") {
+							const capability = payload.data.capabilities.find(
+								(item) => item.id === request.capability_id,
+							);
+							if (!capability) {
+								finish(bridgeFailure(action, request, {
+									code: "capability_not_found",
+									message: "The requested capability is not registered.",
+									odooEffect: "none",
+									retryable: false,
+								}));
+								return;
+							}
+							finish({
+								command: action,
+								data: {
+									capability,
+									registry_digest: payload.data.registry_digest,
+								},
+								ok: true,
+							});
+							return;
+						}
+						finish(payload);
+						return;
+					}
+				} else if (code !== 0 && cleanStdout === "") {
+					const payload = parseCliEnvelope(
+						cleanStderr,
+						cliCommand,
+						false,
+						request,
+						expectedReleaseDigest,
+						expectedRegistryDigest,
+					);
+					if (payload) {
+						finish(action === cliCommand ? payload : { ...payload, command: action });
+						return;
+					}
+				}
+				finish(bridgeFailure(action, request, {
+					code: "bridge_invalid_v3_cli_response",
+					message: "The V3 CLI did not return its strict JSON response contract.",
+					odooEffect: uncertainEffect(),
+					retryable: false,
+				}));
+			});
+			child.stdin.on("error", () => {
+				// The close event determines whether the CLI produced a trusted envelope.
+			});
+			child.stdin.end(stdin, "utf8");
+		});
+	};
+}
+
+let inheritedSessionRead = false;
+let inheritedSessionHandle = "";
+
+function inheritedBrokerSessionHandle() {
+	if (!inheritedSessionRead) {
+		inheritedSessionRead = true;
+		try {
+			inheritedSessionHandle = fs.readFileSync(3, "utf8").trim();
+		} catch {
+			inheritedSessionHandle = "";
+		}
+	}
+	return inheritedSessionHandle;
+}
+
+function defaultBrokerTransport({
+	action,
+	body,
+	maxOutputBytes,
+	path: requestPath,
+	registryDigest,
+	releaseDigest,
+	sessionHandle,
+	socketPath,
+	timeoutMs,
+}) {
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		let responseBody = "";
+		const finish = (callback, value) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			callback(value);
+		};
+		const request = http.request({
+			headers: {
+				"Content-Length": Buffer.byteLength(body),
+				"Content-Type": "application/json; charset=utf-8",
+				"X-Odoo-V3-Broker-Action": action,
+				"X-Odoo-V3-Broker-Protocol": "pi-broker-v1",
+				"X-Odoo-V3-Broker-Session": sessionHandle,
+				"X-Odoo-V3-Registry-Digest": registryDigest,
+				"X-Odoo-V3-Release-Digest": releaseDigest,
+			},
+			method: "POST",
+			path: requestPath,
+			socketPath,
+			timeout: timeoutMs,
+		}, (response) => {
+			response.setEncoding("utf8");
+			response.on("data", (chunk) => {
+				responseBody += chunk;
+				if (Buffer.byteLength(responseBody) > maxOutputBytes) {
+					request.destroy(new Error("broker response exceeded limit"));
+				}
+			});
+			response.on("end", () => finish(resolve, {
+				authorityVerified:
+					response.headers["x-odoo-v3-broker-authority"] === "verified-v1",
+				body: responseBody,
+				executedRegistryDigest:
+					response.headers["x-odoo-v3-executed-registry-digest"],
+				executedReleaseDigest:
+					response.headers["x-odoo-v3-executed-release-digest"],
+				statusCode: response.statusCode ?? 0,
+			}));
+		});
+		request.on("timeout", () => request.destroy(new Error("broker timeout")));
+		request.on("error", (error) => finish(reject, error));
+		request.end(body, "utf8");
+	});
+}
+
+export function createV3BrokerClient(options = {}) {
+	const brokerSocketPath = options.brokerSocketPath
+		?? process.env.ODOO_ACCOUNTING_CLI_V3_BROKER_SOCKET
+		?? "";
+	const expectedReleaseDigest = options.expectedReleaseDigest
+		?? process.env.ODOO_ACCOUNTING_CLI_V3_RELEASE_DIGEST
+		?? "";
+	const expectedRegistryDigest = options.expectedRegistryDigest
+		?? process.env.ODOO_ACCOUNTING_CLI_V3_REGISTRY_DIGEST
+		?? "";
+	const sessionHandleProvider = options.sessionHandleProvider
+		?? inheritedBrokerSessionHandle;
+	const transport = options.transport ?? defaultBrokerTransport;
+	const timeoutMs = positiveInteger(options.timeoutMs, DEFAULT_TIMEOUT_MS);
+	const maxOutputBytes = positiveInteger(options.maxOutputBytes, MAX_OUTPUT_BYTES);
+
+	return async function runV3BrokerOperation(action, request) {
+		const requestPath = V3_BROKER_ACTION_PATHS[action];
+		if (!requestPath) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_action",
+				message: "The Pi Bridge does not recognize this V3 broker action.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (
+			typeof brokerSocketPath !== "string"
+			|| !path.isAbsolute(brokerSocketPath)
+			|| brokerSocketPath.includes("\0")
+		) {
+			return bridgeFailure(action, request, {
+				code: "bridge_v3_broker_not_configured",
+				message: "The fixed local V3 trusted-broker socket is not configured.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (!SHA256.test(expectedReleaseDigest) || !SHA256.test(expectedRegistryDigest)) {
+			return bridgeFailure(action, request, {
+				code: "bridge_v3_identity_not_configured",
+				message: "The verified V3 release and registry identities are not configured.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		let sessionHandle;
+		try {
+			sessionHandle = sessionHandleProvider();
+		} catch {
+			sessionHandle = "";
+		}
+		if (!validBrokerSessionHandle(sessionHandle)) {
+			return bridgeFailure(action, request, {
+				code: "bridge_v3_session_not_authenticated",
+				message: "No independently authenticated broker session is available.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (!isObject(request)) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_request_json",
+				message: "The V3 broker request must be a strict JSON object.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (containsForbiddenAuthorityField(request)) {
+			return bridgeFailure(action, request, {
+				code: "bridge_untrusted_authority_field",
+				message: "Identity, authentication, approval, and signing fields are broker-owned.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		if (!validBrokerBusinessRequest(action, request)) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_request_json",
+				message: "The V3 broker request does not match its business-only action schema.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+		let body;
+		try {
+			body = serializeRequest(request);
+		} catch {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_request_json",
+				message: "The V3 broker request is not strict JSON.",
+				odooEffect: "none",
+				retryable: false,
+			});
+		}
+
+		let response;
+		try {
+			response = await transport({
+				action,
+				body,
+				maxOutputBytes,
+				path: requestPath,
+				registryDigest: expectedRegistryDigest,
+				releaseDigest: expectedReleaseDigest,
+				sessionHandle,
+				socketPath: brokerSocketPath,
+				timeoutMs,
+			});
+		} catch {
+			return bridgeFailure(action, request, {
+				code: "bridge_v3_broker_unavailable",
+				message: "The fixed local V3 trusted broker is unavailable.",
+				odooEffect: action === "operation.approve_execute" ? "unknown" : "none",
+				retryable: true,
+			});
+		}
+		if (
+			!isObject(response)
+			|| response.statusCode !== 200
+			|| response.authorityVerified !== true
+			|| typeof response.body !== "string"
+			|| Buffer.byteLength(response.body) > maxOutputBytes
+			|| response.body.includes(sessionHandle)
+		) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_v3_broker_response",
+				message: "The V3 broker did not return its authenticated response contract.",
+				odooEffect: action === "operation.approve_execute" ? "unknown" : "none",
+				retryable: false,
+			});
+		}
+		const cleanBody = response.body.trim();
+		let envelopeClaimsSuccess = false;
+		try {
+			envelopeClaimsSuccess = JSON.parse(cleanBody)?.ok === true;
+		} catch {
+			// Strict envelope parsing below returns the public failure.
+		}
+		const executedIdentityValid =
+			typeof response.executedReleaseDigest === "string"
+			&& SHA256.test(response.executedReleaseDigest)
+			&& typeof response.executedRegistryDigest === "string"
+			&& SHA256.test(response.executedRegistryDigest);
+		if (
+			envelopeClaimsSuccess
+			&& (
+				!executedIdentityValid
+				|| (
+					["read", "operation.prepare"].includes(action)
+					&& (
+						response.executedReleaseDigest !== expectedReleaseDigest
+						|| response.executedRegistryDigest !== expectedRegistryDigest
+					)
+				)
+			)
+		) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_v3_broker_response",
+				message: "The V3 broker success response has no trusted executed-release identity.",
+				odooEffect: action === "operation.approve_execute" ? "unknown" : "none",
+				retryable: false,
+			});
+		}
+		if (
+			!envelopeClaimsSuccess
+			&& (
+				response.executedReleaseDigest !== undefined
+				|| response.executedRegistryDigest !== undefined
+			)
+			&& !executedIdentityValid
+		) {
+			return bridgeFailure(action, request, {
+				code: "bridge_invalid_v3_broker_response",
+				message: "The V3 broker error response contains an invalid executed-release identity.",
+				odooEffect: action === "operation.approve_execute" ? "unknown" : "none",
+				retryable: false,
+			});
+		}
+		const success = parseCliEnvelope(
+			cleanBody,
+			action,
+			true,
+			request,
+			response.executedReleaseDigest,
+			response.executedRegistryDigest,
+		);
+		if (success) {
+			return success;
+		}
+		const failure = parseCliEnvelope(
+			cleanBody,
+			action,
+			false,
+			request,
+			expectedReleaseDigest,
+			expectedRegistryDigest,
+		);
+		if (failure) {
+			return failure;
+		}
+		return bridgeFailure(action, request, {
+			code: "bridge_invalid_v3_broker_response",
+			message: "The V3 broker response failed signed-receipt structure and release binding validation.",
+			odooEffect: action === "operation.approve_execute" ? "unknown" : "none",
+			retryable: false,
+		});
+	};
+}
+
+export function addUnknownEffectGuidance(payload) {
+	if (
+		payload?.ok !== false
+		|| payload?.error?.odoo_effect !== "unknown"
+	) {
+		return payload;
+	}
+	const operationId = typeof payload.error.operation_id === "string"
+		? payload.error.operation_id
+		: null;
+	return {
+		...payload,
+		bridge_guidance: {
+			must_not_create_new_operation: true,
+			next_action: operationId ? "operation.status" : "operator_review",
+			operation_id: operationId,
+		},
+	};
+}
+
+export const runV3Query = createV3CliRunner();
+export const runV3BrokerOperation = createV3BrokerClient();

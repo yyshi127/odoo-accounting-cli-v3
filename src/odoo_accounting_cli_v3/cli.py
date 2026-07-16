@@ -25,6 +25,7 @@ from .odoo.runner import (
 from .receipts import ReceiptError, verify_read_receipt
 from .registry import Capability, load_registry, registry_digest, validate_registry
 from .release import ReleaseError, verify_manifest
+from .write_api import WriteApiError, parse_write_api_request
 
 
 def _json(value: Any) -> str:
@@ -37,34 +38,66 @@ def _json(value: Any) -> str:
     )
 
 
-def _success(command: str, data: dict[str, Any]) -> None:
-    click.echo(_json({"command": command, "data": data, "ok": True}))
+def _success(
+    command: str,
+    data: dict[str, Any],
+    *,
+    business_succeeded: bool | None = None,
+) -> None:
+    response: dict[str, Any] = {"command": command, "data": data, "ok": True}
+    if business_succeeded is not None:
+        response["business_succeeded"] = business_succeeded
+    click.echo(_json(response))
 
 
 class CliFailure(click.ClickException):
     """A stable machine-readable CLI failure."""
 
-    def __init__(self, *, command: str, code: str, message: str, exit_code: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        command: str,
+        code: str,
+        message: str,
+        exit_code: int = 2,
+        retryable: bool = False,
+        odoo_effect: str | None = None,
+        operation_id: str | None = None,
+        state: str | None = None,
+    ) -> None:
         super().__init__(message)
+        if odoo_effect not in {None, "none", "unknown"}:
+            raise ValueError("odoo_effect must be none or unknown")
         self.command = command
         self.code = code
         self.exit_code = exit_code
+        self.retryable = retryable
+        self.odoo_effect = odoo_effect
+        self.operation_id = operation_id
+        self.state = state
 
     def show(self, file: Any | None = None) -> None:
         stream = file if file is not None else click.get_text_stream("stderr")
+        if self.odoo_effect is None:
+            error: dict[str, Any] = {
+                "code": self.code,
+                "message": self.message,
+                "odoo_action_performed": False,
+                "retryable": self.retryable,
+            }
+        else:
+            error = {
+                "code": self.code,
+                "message": self.message,
+                "odoo_effect": self.odoo_effect,
+                "retryable": self.retryable,
+            }
+            if self.operation_id is not None:
+                error["operation_id"] = self.operation_id
+            if self.state is not None:
+                error["state"] = self.state
         click.echo(
-            _json(
-                {
-                    "command": self.command,
-                    "error": {
-                        "code": self.code,
-                        "message": self.message,
-                        "odoo_action_performed": False,
-                        "retryable": False,
-                    },
-                    "ok": False,
-                }
-            ),
+            _json({"command": self.command, "error": error, "ok": False}),
             file=stream,
         )
 
@@ -265,7 +298,11 @@ def _read_request(command: str, request_json: str | None) -> dict[str, Any]:
             message="A non-empty JSON request object is required.",
         )
     try:
-        value = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+        value = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_finite_json,
+        )
     except (json.JSONDecodeError, ValueError) as exc:
         raise CliFailure(
             command=command,
@@ -290,16 +327,144 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _gateway_unavailable(command: str, request_json: str | None) -> NoReturn:
-    _read_request(command, request_json)
-    raise CliFailure(
+def _reject_non_finite_json(value: str) -> NoReturn:
+    raise ValueError(f"non-finite JSON number: {value}")
+
+
+def _write_cli_failure(
+    *,
+    command: str,
+    code: str,
+    message: str,
+    odoo_effect: str,
+    operation_id: str | None = None,
+    state: str | None = None,
+    retryable: bool = False,
+    exit_code: int = 2,
+) -> CliFailure:
+    return CliFailure(
         command=command,
-        code="gateway_not_configured",
-        message=(
-            "The durable authenticated operation gateway is not configured; "
-            "no Odoo action was performed."
-        ),
-        exit_code=3,
+        code=code,
+        message=message,
+        retryable=retryable,
+        odoo_effect=odoo_effect,
+        operation_id=operation_id,
+        state=state,
+        exit_code=exit_code,
+    )
+
+
+def _operation_id_from_request(action: str, payload: dict[str, Any]) -> str | None:
+    field = "recovery_operation_id" if action == "operation.recover" else "operation_id"
+    value = payload.get(field)
+    return value if isinstance(value, str) else None
+
+
+def _business_succeeded(data: dict[str, Any]) -> bool:
+    verification = data.get("verification")
+    return (
+        data.get("operation_state") in {"completed", "recovered"}
+        and isinstance(verification, dict)
+        and verification.get("passed") is True
+    )
+
+
+def _execute_write_command(
+    *,
+    command: str,
+    action: str,
+    request_json: str | None,
+    report_business_result: bool = False,
+) -> None:
+    try:
+        request = _read_request(command, request_json)
+    except CliFailure as exc:
+        raise _write_cli_failure(
+            command=command,
+            code=exc.code,
+            message=exc.message,
+            odoo_effect="none",
+            exit_code=exc.exit_code,
+        ) from exc
+
+    try:
+        parsed = parse_write_api_request(action, request)
+    except WriteApiError as exc:
+        raise _write_cli_failure(
+            command=command,
+            code="invalid_request",
+            message="The write request does not match the exact action contract.",
+            odoo_effect="none",
+        ) from exc
+
+    operation_id = _operation_id_from_request(action, parsed.payload)
+    uncertain_effect = "unknown" if action == "operation.approve_execute" else "none"
+    try:
+        # The dispatcher owns root-managed runtime paths and secrets. They are
+        # deliberately absent from the Pi-facing command surface.
+        from .write_app import execute_write_action
+
+        raw_data = execute_write_action(action, parsed)
+        if not isinstance(raw_data, dict):
+            raise TypeError("write dispatcher returned a non-object")
+        data = json.loads(
+            json.dumps(
+                raw_data,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    except CliFailure as exc:
+        raise _write_cli_failure(
+            command=command,
+            code=exc.code,
+            message=exc.message,
+            odoo_effect=exc.odoo_effect or uncertain_effect,
+            operation_id=exc.operation_id or operation_id,
+            state=exc.state,
+            retryable=exc.retryable,
+            exit_code=exc.exit_code,
+        ) from exc
+    except Exception as exc:
+        code = getattr(exc, "code", None)
+        structured = isinstance(code, str) and bool(code.strip())
+        effect = getattr(exc, "odoo_effect", uncertain_effect)
+        if effect not in {"none", "unknown"}:
+            effect = uncertain_effect
+        retryable = getattr(exc, "retryable", False)
+        if type(retryable) is not bool:
+            retryable = False
+        exception_operation_id = getattr(exc, "operation_id", operation_id)
+        if not isinstance(exception_operation_id, str):
+            exception_operation_id = operation_id
+        state = getattr(exc, "state", None)
+        if not isinstance(state, str):
+            state = None
+        raise _write_cli_failure(
+            command=command,
+            code=code if structured else "write_action_failed",
+            message=(
+                str(getattr(exc, "message", exc))
+                if structured
+                else "The durable write action did not return a trusted result."
+            ),
+            odoo_effect=effect,
+            operation_id=exception_operation_id,
+            state=state,
+            retryable=retryable,
+            exit_code=int(getattr(exc, "exit_code", 3))
+            if type(getattr(exc, "exit_code", 3)) is int
+            else 3,
+        ) from exc
+
+    _success(
+        command,
+        data,
+        business_succeeded=_business_succeeded(data)
+        if report_business_result
+        else None,
     )
 
 
@@ -427,7 +592,7 @@ def read_capability(
 
 @main.group("operation")
 def operation_group() -> None:
-    """Durable write lifecycle commands (currently disabled)."""
+    """Durable, authenticated write lifecycle commands."""
 
 
 def _request_option(function: Any) -> Any:
@@ -439,38 +604,77 @@ def _request_option(function: Any) -> Any:
 
 @operation_group.command("prepare")
 @_request_option
-def operation_prepare(request_json: str | None) -> NoReturn:
-    _gateway_unavailable("operation.prepare", request_json)
+def operation_prepare(request_json: str | None) -> None:
+    _execute_write_command(
+        command="operation.prepare",
+        action="operation.prepare",
+        request_json=request_json,
+    )
 
 
 @operation_group.command("preview")
 @_request_option
-def operation_preview(request_json: str | None) -> NoReturn:
-    _gateway_unavailable("operation.preview", request_json)
+def operation_preview(request_json: str | None) -> None:
+    _execute_write_command(
+        command="operation.preview",
+        action="operation.preview",
+        request_json=request_json,
+    )
 
 
 @operation_group.command("approve-execute")
 @_request_option
-def operation_approve_execute(request_json: str | None) -> NoReturn:
-    _gateway_unavailable("operation.approve_execute", request_json)
+def operation_approve_execute(request_json: str | None) -> None:
+    _execute_write_command(
+        command="operation.approve_execute",
+        action="operation.approve_execute",
+        request_json=request_json,
+        report_business_result=True,
+    )
 
 
 @operation_group.command("status")
 @_request_option
-def operation_status(request_json: str | None) -> NoReturn:
-    _gateway_unavailable("operation.status", request_json)
+def operation_status(request_json: str | None) -> None:
+    _execute_write_command(
+        command="operation.status",
+        action="operation.status",
+        request_json=request_json,
+    )
+
+
+@operation_group.command("result")
+@_request_option
+def operation_result(request_json: str | None) -> None:
+    _execute_write_command(
+        command="operation.result",
+        action="operation.result",
+        request_json=request_json,
+        report_business_result=True,
+    )
 
 
 @operation_group.command("verify")
 @_request_option
-def operation_verify(request_json: str | None) -> NoReturn:
-    _gateway_unavailable("operation.verify", request_json)
+def operation_verify(request_json: str | None) -> None:
+    """Compatibility alias for the read-only operation result action."""
+
+    _execute_write_command(
+        command="operation.verify",
+        action="operation.result",
+        request_json=request_json,
+        report_business_result=True,
+    )
 
 
 @operation_group.command("recover")
 @_request_option
-def operation_recover(request_json: str | None) -> NoReturn:
-    _gateway_unavailable("operation.recover", request_json)
+def operation_recover(request_json: str | None) -> None:
+    _execute_write_command(
+        command="operation.recover",
+        action="operation.recover",
+        request_json=request_json,
+    )
 
 
 if __name__ == "__main__":

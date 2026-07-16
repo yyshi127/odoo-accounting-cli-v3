@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "broker_service_uid": 3101,
+  "broker_service_gid": 3101,
+  "current_release_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "current_registry_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "historical_routing_manifest_path": "/etc/odoo-accounting-cli-v3/historical-routes.json",
+  "historical_routing_manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "read_runtime_config_path": "/etc/odoo-accounting-cli-v3/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/read-runtime.json",
+  "read_runtime_config_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "shared_write_state_path": "/var/lib/odoo-accounting-cli-v3/write-state.sqlite3",
+  "trusted_session_state_path": "/var/lib/odoo-accounting-cli-v3/trusted-sessions.sqlite3",
+  "broker_audit_state_path": "/var/lib/odoo-accounting-cli-v3/broker-audit.sqlite3",
+  "sqlite_busy_timeout_ms": 1000,
+  "read_context_ttl_seconds": 120,
+  "read_timeout_seconds": 100,
+  "historical_timeout_seconds": 100,
+  "historical_max_stdin_bytes": 262144,
+  "historical_max_stdout_bytes": 2097152,
+  "historical_max_stderr_bytes": 65536,
+  "approver_context_ttl_seconds": 60,
+  "approver_timeout_seconds": 20,
+  "release_routes": [
+    {
+      "release_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "registry_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "authority_runtime_config_path": "/etc/odoo-accounting-cli-v3/releases/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/authority-runtime.json",
+      "authority_runtime_config_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "pi_broker_uds": {
+    "socket_path": "/run/odoo-accounting-cli-v3/pi-broker.sock",
+    "allowed_client_uid": 3102,
+    "socket_group_gid": 3202,
+    "socket_mode": 432,
+    "max_body_bytes": 1048576,
+    "max_response_bytes": 1048576,
+    "max_header_bytes": 8192,
+    "max_header_count": 16,
+    "max_inflight_requests": 16,
+    "request_timeout_seconds": 115
+  },
+  "session_mint_uds": {
+    "socket_path": "/run/odoo-accounting-cli-v3/session-mint.sock",
+    "odoo_issuer_uid": 3103,
+    "pi_bridge_uid": 3102,
+    "socket_group_gid": 3203,
+    "session_ttl_seconds": 180,
+    "session_max_uses": 32,
+    "socket_mode": 432,
+    "max_body_bytes": 8192,
+    "max_response_bytes": 4096,
+    "max_header_bytes": 4096,
+    "max_header_count": 8,
+    "max_inflight_requests": 4,
+    "request_timeout_seconds": 5
+  },
+  "trusted_approval_uds": {
+    "socket_path": "/run/odoo-accounting-cli-v3/trusted-approval.sock",
+    "odoo_client_uid": 3103,
+    "pi_bridge_uid": 3102,
+    "socket_group_gid": 3203,
+    "socket_mode": 432,
+    "max_body_bytes": 8192,
+    "max_response_bytes": 1048576,
+    "max_header_bytes": 4096,
+    "max_header_count": 8,
+    "max_inflight_broker_calls": 4,
+    "request_timeout_seconds": 30
+  }
+}

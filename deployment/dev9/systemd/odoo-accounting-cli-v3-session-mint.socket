@@ -1,0 +1,17 @@
+[Unit]
+Description=Odoo Accounting CLI V3 Odoo session-mint socket
+Before=odoo-accounting-cli-v3-broker.service
+
+[Socket]
+ListenStream=/run/odoo-accounting-cli-v3/session-mint.sock
+Accept=no
+Service=odoo-accounting-cli-v3-broker.service
+FileDescriptorName=odoo-v3-session-mint
+SocketUser=root
+SocketGroup=odoo-v3-odoo-control
+SocketMode=0660
+DirectoryMode=0750
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

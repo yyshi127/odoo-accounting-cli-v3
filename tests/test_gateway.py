@@ -51,12 +51,34 @@ def context(user_id: int = 42, company_id: int = 7, database_uuid: str = DATABAS
 
 def invoice_line():
     return {
+        "line_reference": "line-1",
         "name": "Consulting",
         "product_id": None,
         "account_id": 401,
         "quantity": "1",
         "price_unit": "100.00",
         "tax_ids": [],
+    }
+
+
+def invoice_parameters(
+    idempotency_key: str,
+    *,
+    company_id: int = 7,
+    partner_id: int = 101,
+):
+    return {
+        "company_id": company_id,
+        "partner_id": partner_id,
+        "invoice_date": "2026-07-13",
+        "accounting_date": "2026-07-13",
+        "due_date": "2026-08-13",
+        "currency_id": 12,
+        "journal_id": 5,
+        "posting_mode": "draft",
+        "reference": f"invoice-{idempotency_key}",
+        "lines": [invoice_line()],
+        "idempotency_key": idempotency_key,
     }
 
 
@@ -113,15 +135,22 @@ class GatewayTest(unittest.TestCase):
             RequestContext(**values)
 
     def test_context_rejects_invalid_signature_protocol_fields(self):
-        for field, value, message in (
-            ("auth_signature_version", 2, "version"),
-            ("auth_signature_purpose", "read_receipt_v1", "purpose"),
-            ("auth_key_id", "", "key ID"),
-            ("auth_request_digest", "not-a-digest", "request digest"),
+        valid_write_values = context().__dict__.copy()
+        valid_write_values["auth_signature_version"] = 2
+        valid_write_values["auth_signature_purpose"] = "write_action_context_v2"
+        self.assertEqual(RequestContext(**valid_write_values).auth_signature_version, 2)
+
+        for changes, message in (
+            ({"auth_signature_version": 2}, "version-purpose"),
+            ({"auth_signature_purpose": "write_action_context_v2"}, "version-purpose"),
+            ({"auth_signature_version": 3}, "version-purpose"),
+            ({"auth_signature_purpose": "read_receipt_v1"}, "version-purpose"),
+            ({"auth_key_id": ""}, "key ID"),
+            ({"auth_request_digest": "not-a-digest"}, "request digest"),
         ):
-            with self.subTest(field=field):
+            with self.subTest(changes=changes):
                 values = context().__dict__.copy()
-                values[field] = value
+                values.update(changes)
                 with self.assertRaisesRegex(GatewayError, message):
                     RequestContext(**values)
 
@@ -135,23 +164,35 @@ class GatewayTest(unittest.TestCase):
         )
 
     def test_full_parameters_survive_prepare_and_preview(self) -> None:
-        parameters = {
-            "company_id": 7,
-            "partner_id": 101,
-            "invoice_date": "2026-07-13",
-            "currency_id": 12,
-            "lines": [invoice_line()],
-            "idempotency_key": "invoice-20260713-101",
-        }
+        parameters = invoice_parameters("invoice-20260713-101")
         self.gateway.prepare(
             context(), operation_id="op-1", request_id="request-1",
             capability_id="acct.invoice.customer_create.v1", parameters=parameters,
         )
         preview = self.gateway.preview(context(), "op-1")
         self.assertEqual(preview["parameters"], parameters)
+        self.assertEqual(
+            preview["semantic_precheck"]["computed"]["untaxed_line_subtotal"],
+            "100.00",
+        )
+
+    def test_prepare_rejects_cross_field_accounting_error_before_persistence(self) -> None:
+        parameters = invoice_parameters("invalid-due-date")
+        parameters["due_date"] = "2026-07-12"
+
+        with self.assertRaisesRegex(GatewayError, "semantic precheck"):
+            self.gateway.prepare(
+                context(),
+                operation_id="op-invalid-due-date",
+                request_id="request-invalid-due-date",
+                capability_id="acct.invoice.customer_create.v1",
+                parameters=parameters,
+            )
+        with self.assertRaisesRegex(GatewayError, "unknown operation"):
+            self.gateway.status(context(), "op-invalid-due-date")
 
     def test_duplicate_idempotency_key_returns_same_operation(self) -> None:
-        parameters = {"company_id": 7, "partner_id": 101, "invoice_date": "2026-07-13", "currency_id": 12, "lines": [invoice_line()], "idempotency_key": "same"}
+        parameters = invoice_parameters("same")
         first = self.gateway.prepare(
             context(), operation_id="op-1", request_id="request-1",
             capability_id="acct.invoice.customer_create.v1", parameters=parameters,
@@ -163,7 +204,7 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(first.operation_id, second.operation_id)
 
     def test_same_idempotency_key_with_changed_content_is_rejected(self) -> None:
-        parameters = {"company_id": 7, "partner_id": 101, "invoice_date": "2026-07-13", "currency_id": 12, "lines": [invoice_line()], "idempotency_key": "conflict"}
+        parameters = invoice_parameters("conflict")
         self.gateway.prepare(
             context(), operation_id="op-original", request_id="request-original",
             capability_id="acct.invoice.customer_create.v1", parameters=parameters,
@@ -177,7 +218,7 @@ class GatewayTest(unittest.TestCase):
             )
 
     def test_cross_user_idempotency_collision_does_not_leak_operation(self) -> None:
-        parameters = {"company_id": 7, "partner_id": 101, "invoice_date": "2026-07-13", "currency_id": 12, "lines": [invoice_line()], "idempotency_key": "private"}
+        parameters = invoice_parameters("private")
         self.gateway.prepare(
             context(), operation_id="op-private", request_id="request-private",
             capability_id="acct.invoice.customer_create.v1", parameters=parameters,
@@ -189,7 +230,7 @@ class GatewayTest(unittest.TestCase):
             )
 
     def test_cross_company_request_is_rejected(self) -> None:
-        parameters = {"company_id": 8, "partner_id": 101, "invoice_date": "2026-07-13", "currency_id": 12, "lines": [invoice_line()], "idempotency_key": "cross"}
+        parameters = invoice_parameters("cross", company_id=8)
         with self.assertRaisesRegex(GatewayError, "does not match"):
             self.gateway.prepare(
                 context(), operation_id="op-cross", request_id="request-cross",
@@ -212,7 +253,7 @@ class GatewayTest(unittest.TestCase):
             gateway.get_capability(context(), "acct.gl.trial_balance.v1")
 
     def test_operation_status_is_bound_to_user_and_company(self) -> None:
-        parameters = {"company_id": 7, "partner_id": 101, "invoice_date": "2026-07-13", "currency_id": 12, "lines": [invoice_line()], "idempotency_key": "bound"}
+        parameters = invoice_parameters("bound")
         self.gateway.prepare(
             context(), operation_id="op-bound", request_id="request-bound",
             capability_id="acct.invoice.customer_create.v1", parameters=parameters,
@@ -261,7 +302,7 @@ class GatewayTest(unittest.TestCase):
             gateway.list_capabilities(context())
 
     def test_database_binding_is_part_of_idempotency_identity(self) -> None:
-        parameters = {"company_id": 7, "partner_id": 101, "invoice_date": "2026-07-13", "currency_id": 12, "lines": [invoice_line()], "idempotency_key": "same-db-local-key"}
+        parameters = invoice_parameters("same-db-local-key")
         first = self.gateway.prepare(
             context(), operation_id="op-db-1", request_id="request-db-1",
             capability_id="acct.invoice.customer_create.v1", parameters=parameters,

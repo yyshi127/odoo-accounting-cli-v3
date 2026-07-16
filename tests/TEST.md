@@ -260,6 +260,15 @@ At the current local development checkpoint:
   target gate must additionally inventory the external system Python and Click
   bytes; they are not yet release-scoped, so this slice alone is not a
   production promotion;
+- the in-progress dev9 sidecar adds the business-only Pi-to-UDS broker, durable
+  session/company authority, independent approval, shared-store cross-release
+  prepare idempotency, retained release/key routing, real per-release read/write
+  HMAC response verification, and a separate append-only Broker attempt audit.
+  It also contains strict precheck/handler/verification/recovery implementations
+  for the 13 registered write capabilities. Local loss-response, replay,
+  cross-company, tamper, audit-failure, wrong-key, and historical-route tests are
+  development evidence only until the exact release is frozen and repeated on
+  target Linux with a dedicated sandbox and real Odoo receipts;
 - no sandbox write lifecycle has been authorized or recorded; and
 - no production write is authorized.
 

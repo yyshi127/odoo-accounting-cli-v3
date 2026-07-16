@@ -1,4 +1,6 @@
-# V3 read runtime configuration
+# V3 runtime configuration
+
+## Read runtime configuration
 
 The `read` command accepts one absolute path to a root-managed JSON file. The
 file is an allowlist: callers cannot replace the Odoo executable, database,
@@ -46,6 +48,144 @@ and read receipts are consumed atomically and survive process restart. A
 verified read is appended to the receipt database's tamper-evident audit chain
 before the CLI may report success.
 
+## Write runtime configuration schema v1
+
+The six write-lifecycle actions use the fixed root-managed path
+`/etc/odoo-accounting-cli-v3/write-runtime.json`. Pi and other callers cannot
+select this path, a state database, an Odoo executable, or a key through request
+parameters. The write runtime document has schema version `1`; this is separate
+from the SQLite persistence schema, which is version `4`.
+
+The following is an illustrative disabled configuration. It contains key IDs
+and secret file paths only, never secret values:
+
+```json
+{
+  "schema_version": 1,
+  "write_execution_mode": "disabled",
+  "base_runtime_config_path": "/etc/odoo-accounting-cli-v3/runtime-sandbox.json",
+  "write_state_path": "/var/lib/odoo-accounting-cli-v3/sandbox/candidates/<release>/write.sqlite3",
+  "write_auth": {
+    "key_id": "sandbox-write-auth-2026-07",
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/write-auth.hmac"
+  },
+  "approval": {
+    "key_id": "sandbox-approval-2026-07",
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/approval.hmac"
+  },
+  "execution": {
+    "issuer": "odoo-v3-sandbox-execution",
+    "key_id": "sandbox-execution-2026-07",
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/execution.hmac"
+  },
+  "verification": {
+    "issuer": "odoo-v3-sandbox-verification",
+    "key_id": "sandbox-verification-2026-07",
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/verification.hmac"
+  },
+  "recovery": {
+    "issuer": "odoo-v3-sandbox-recovery",
+    "key_id": "sandbox-recovery-2026-07",
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/recovery.hmac"
+  },
+  "write_receipt": {
+    "key_id": "sandbox-write-receipt-2026-07",
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/write-receipt.hmac"
+  }
+}
+```
+
+`write_auth`, `approval`, `execution`, `verification`, `recovery`, and
+`write_receipt` are six distinct roles. Their Key IDs, absolute paths, and file
+inodes must also be distinct from the two read roles. Execution, verification,
+and recovery issuer names must be different. Each secret is at least 32 random
+bytes in a canonical root-owned regular file, normally mode `0640`, with no
+world access and no group/world write. The recovery role is reserved and
+validated by the runtime boundary; its presence must not be represented as
+evidence that every recovery outcome is currently signed by that role.
+
+The write state parent is service-owned mode `0700`. The SQLite database and
+its `-wal` and `-shm` companions must remain service-owned mode `0600`, and must
+not share a path or inode with read authentication or receipt state. Do not
+print, copy into evidence, commit, or pass any secret or complete signed request
+on argv. Pi integrations must send the JSON request over standard input or an
+equivalent sealed local transport.
+
+The modes are fail-closed:
+
+- `disabled` rejects prepare, preview, approve-execute, and recover while
+  retaining authenticated status and result access;
+- `sandbox_staged` requires a base runtime whose environment is `sandbox` and
+  whose capability channel is `staged`; and
+- `enabled` requires an `enabled` base-runtime channel and does not itself
+  authorize any registry capability or production write.
+
+The standard lifecycle actions are `operation prepare`, `operation preview`,
+`operation approve-execute`, `operation status`, `operation result`, and
+`operation recover`. `operation verify` is a read-only compatibility alias for
+`operation result`. A zero exit status is not accounting-success evidence;
+success additionally requires a terminal result, passing verification, signed
+Odoo evidence, and the durable final audit receipt.
+
+## Pi authenticated-session and broker boundary
+
+The Pi service does not derive accounting identity from a conversation ID or
+model parameter. Its root-managed service environment supplies the immutable
+V3 launcher, broker socket, and one independently authenticated session
+adapter:
+
+```text
+ODOO_ACCOUNTING_CLI_V3_BIN=/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3
+ODOO_ACCOUNTING_CLI_V3_BROKER_SOCKET=/run/odoo-accounting-cli-v3/pi-broker.sock
+PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_MODULE=/etc/odoo-accounting-cli-v3/pi/session-resolver.mjs
+PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_SHA256=<lowercase-sha256-of-exact-module>
+PI_BRIDGE_REQUIRE_V3_IDENTITY=1
+```
+
+The resolver is a dependency-free single-file ESM adapter with exactly one
+default or `resolveAuthenticatedSession` export. On Linux the bridge requires
+the module and all ancestors to be canonical, non-symlink, root-owned, and not
+group/world writable. It opens with `O_NOFOLLOW`, compares `lstat`/`fstat`
+identity and size/timestamps before and after the bounded read, verifies the
+configured SHA-256, and imports those exact bytes from a data URL. A missing or
+changed digest, dependency import, extra export, unsafe ancestor, or non-Linux
+root-owned configuration prevents the bridge from starting.
+
+Only the resulting opaque broker session handle crosses into the Pi child, on
+inherited file descriptor 3. The resolver module path and hash are removed from
+the child environment. Pi sends business-only JSON over the fixed local UDS
+routes; the UDS validates Linux peer credentials, action/protocol headers, and
+the current release headers. The trusted broker, not Pi, selects any retained
+historical release and returns the verified executed release/registry identity.
+None of these settings enables a registry capability.
+
+## Broker response verification and attempt audit
+
+Every current or retained route has its own
+`ReleaseReceiptVerificationConfig`: exact release digest, registry digest,
+capability channel, read-receipt Key ID/secret, and write-receipt Key ID/secret.
+The root composition resolves this configuration by the selected release and
+registry pair with no current-key fallback. Read responses are checked with the
+real read-receipt HMAC over the complete request, result, runtime, user,
+company, database, channel, release, and record count. Terminal write responses
+are checked with the real write-audit-receipt HMAC over the durable Operation,
+approval, audit head, result, tenant, runtime, and route. A digest-looking
+string is not verification evidence.
+
+After independent session authentication, every business write request and
+every independent approval request/decision appends one event to the dedicated
+`SQLiteBrokerAuditSink`. The event contains only a canonical request digest and
+trusted identity, route, operation/challenge/request IDs, result code, Odoo
+effect classification, time, and available UDS peer credentials. Session
+handles, HMAC secrets, and full business parameters have no storage field. The
+store is a private absolute non-symlink SQLite path with STRICT schema,
+append-only triggers, and a verified SHA-256 chain. If this append fails, the
+broker does not report business success; an ambiguous executed request must be
+retried through the same operation/idempotency identity and reconciled from
+durable evidence.
+
+## Read receipt persistence
+
 Since dev5, the receipt signature is reverified against the complete request,
 result, runtime, registry, release, user, and company binding inside the
 persistence call. Receipt consumption and the `read.verified` append, including
@@ -58,13 +198,22 @@ reopen key. The secret itself is never persisted. Legacy v1 events using native
 v2 `read.*` or `operation.*` evidence
 namespaces are rejected rather than promoted as verified evidence.
 
-Persistence schema v2 is shared by replay, receipt, operation, approval, and
-audit primitives. Its v1 migration is transactional but not readable by dev4's
-v1-only code. Every side-by-side dev5-or-later candidate must therefore use new,
-version-scoped `candidates/<version>-<commit12>/` files for both
-`auth_state_path` and `receipt_state_path`. It must never reuse, open, or migrate
-the retained dev4 state or evidence databases. Promotion and rollback must
-follow the matched binary/database procedure in `docs/DEPLOYMENT.md`.
+## Shared persistence and release identity
+
+SQLite persistence schema v4 stores replay consumption, immutable prechecks,
+approval protocol v3, operation protocol bindings, trusted execution and
+verification evidence, terminal receipts, audit events, and recovery-operation
+bindings. Opening an older supported schema performs only the code-defined
+transactional migration after exact schema and integrity validation. That
+mechanism alone is not a cross-release handoff protocol. An unpromoted
+side-by-side candidate uses an isolated state path and must not open, truncate,
+copy over, or silently migrate the live state. Once releases are admitted to
+the root-managed historical router, every retained route and the trusted
+prepare-idempotency resolver must use the same reviewed durable state store.
+The broker resolves an exact retry there before choosing current versus
+historical code, and then verifies the complete canonical request and tenant
+binding. Promotion and rollback follow the matched release/state procedure in
+`docs/DEPLOYMENT.md`.
 
 The business CLI process must itself come from `release_root`, normally through
 the manifest-covered `bin/odoo-accounting-cli-v3` launcher at that exact release
@@ -90,27 +239,18 @@ promotion remains blocked until a release-scoped dependency runtime, vendored
 dependency set, or an equivalent pre-import cryptographic binding removes this
 identity gap.
 
-This configuration enables only capabilities whose registry entry contains the
-same environment in the selected `capability_channel`. The `staged` channel is
-allowed only for root-configured test/sandbox evidence runs; normal Pi-facing
-execution uses `enabled`. It does not authorize production writes; all V3 write
-commands remain fail-closed until their sandbox lifecycle and specialized
-transactional state persistence are complete.
+Runtime configuration never enables a capability by itself. The registry must
+contain the same environment in the selected channel. All 13 registered write
+capabilities remain closed by default. They may move to staged only in a
+dedicated sandbox after their local contract gate passes, and may advance again
+only from retained capability-specific real Odoo lifecycle evidence. Nothing
+in this document is evidence that such a run has occurred. Production writes
+require separate explicit authorization and production-safety review.
 
-The current HMAC arrangement is an isolated test-candidate boundary, not the
-final production trust split: the parent and Odoo child still share symmetric
-key material. Production promotion additionally requires independent service
-identities and role-separated verification/signing keys (preferably
-asymmetric), durable failure auditing, and an externally anchored audit head.
-The pure execution-result validator checks a supplied operation but does not
-reload and re-anchor that operation to the durable approval record. Execution
-and verification HMAC roles are also not yet forced to use different service
-identities and key material. Consequently all result, failure, completion, and
-recovery persistence remains fail-closed until specialized transactions load
-the authoritative operation and approval evidence and enforce the role split.
-SQLite constraints, append-only triggers, and unkeyed record/audit hashes catch
-accidental corruption and out-of-protocol application writes. They do not
-protect against an attacker that can run arbitrary code as the state-file
-owner, replace the schema, and recompute those hashes. The candidate must not
-be described as resistant to same-UID database forgery; service-identity
-isolation and an external audit anchor remain production blockers.
+The role-separated HMAC files and SQLite controls protect protocol boundaries
+against ordinary misconfiguration and out-of-protocol application writes; they
+are not a hardware-backed trust boundary and do not defend against arbitrary
+code running as the state-file owner. Do not describe a candidate as resistant
+to same-UID database forgery. Production promotion remains blocked until the
+required service-identity, external audit anchoring, Pi end-to-end, real Odoo,
+and capability-specific production gates are evidenced.

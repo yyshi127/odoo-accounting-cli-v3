@@ -82,25 +82,33 @@ def test_registry_get_unknown_id_is_structured_failure() -> None:
     }
 
 
-def test_operation_commands_fail_closed_without_claiming_success() -> None:
-    for command in ("prepare", "preview", "approve-execute", "status", "verify", "recover"):
+def test_operation_commands_reject_requests_outside_the_exact_contract() -> None:
+    for command in (
+        "prepare",
+        "preview",
+        "approve-execute",
+        "status",
+        "result",
+        "verify",
+        "recover",
+    ):
         result = _run("operation", command, input_text='{"request_id":"req-1"}')
 
-        assert result.returncode == 3
+        assert result.returncode == 2
         assert result.stdout == ""
         payload = json.loads(result.stderr)
         assert payload["ok"] is False
-        assert payload["error"]["code"] == "gateway_not_configured"
-        assert payload["error"]["odoo_action_performed"] is False
+        assert payload["error"]["code"] == "invalid_request"
+        assert payload["error"]["odoo_effect"] == "none"
 
 
-def test_operation_rejects_invalid_json_before_fail_closed_gateway_error() -> None:
+def test_operation_rejects_invalid_json_before_dispatch() -> None:
     result = _run("operation", "prepare", "--request-json", "not-json")
 
     assert result.returncode == 2
     payload = json.loads(result.stderr)
     assert payload["error"]["code"] == "invalid_json"
-    assert payload["error"]["odoo_action_performed"] is False
+    assert payload["error"]["odoo_effect"] == "none"
 
 
 def test_operation_rejects_duplicate_json_keys() -> None:
@@ -109,4 +117,4 @@ def test_operation_rejects_duplicate_json_keys() -> None:
     assert result.returncode == 2
     payload = json.loads(result.stderr)
     assert payload["error"]["code"] == "invalid_json"
-    assert payload["error"]["odoo_action_performed"] is False
+    assert payload["error"]["odoo_effect"] == "none"

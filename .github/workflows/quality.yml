@@ -23,6 +23,230 @@ jobs:
       - run: python -m pytest
       - run: python tools/check_source_boundary.py
 
+  dev9-linux-runtime:
+    name: Dev9 Linux UDS and systemd evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the Dev9 test runtime
+        run: python -m pip install -e ".[test]"
+      - name: Gate the non-root Linux process tree without skips
+        run: |
+          set -euo pipefail
+          test "$(python -c 'import sys; print(sys.platform)')" = linux
+          test "$(id -u)" -ne 0
+          command -v systemd-run
+          systemd_state="$(sudo systemctl is-system-running || true)"
+          case "$systemd_state" in
+            running|degraded) ;;
+            *) echo "systemd manager is unavailable: $systemd_state" >&2; exit 1 ;;
+          esac
+
+          for group in odoo-v3-broker odoo-v3-runtime; do
+            if ! getent group "$group" >/dev/null; then
+              sudo groupadd --system "$group"
+            fi
+          done
+          if ! getent passwd odoo-v3-broker >/dev/null; then
+            sudo useradd --system \
+              --gid odoo-v3-broker \
+              --groups odoo-v3-runtime \
+              --home-dir /nonexistent \
+              --shell /usr/sbin/nologin \
+              odoo-v3-broker
+          fi
+
+          stage_root=/opt/odoo-accounting-cli-v3-home-gate
+          test ! -e "$stage_root"
+          sudo install -d -m 0755 -o root -g root "$stage_root"
+          sudo cp -a "$GITHUB_WORKSPACE/." "$stage_root/"
+          sudo chown -R root:root "$stage_root"
+          sudo chmod -R u=rwX,go=rX "$stage_root"
+
+          python_bin="$(command -v python)"
+          report=/var/lib/odoo-accounting-cli-v3/non-root-linux-process-tree.xml
+          sudo systemd-run \
+            --unit=odoo-accounting-cli-v3-home-gate \
+            --service-type=exec \
+            --wait \
+            --collect \
+            --pipe \
+            --quiet \
+            --property=User=odoo-v3-broker \
+            --property=Group=odoo-v3-broker \
+            --property=UMask=0077 \
+            --property=NoNewPrivileges=yes \
+            --property=PrivateTmp=yes \
+            --property=ProtectHome=yes \
+            --property=ProtectSystem=strict \
+            --property=StateDirectory=odoo-accounting-cli-v3 \
+            --property=StateDirectoryMode=0700 \
+            --working-directory="$stage_root" \
+            --setenv=HOME=/var/lib/odoo-accounting-cli-v3 \
+            --setenv=ODOO_CLI_V3_LINUX_GATE=1 \
+            --setenv=PYTHONDONTWRITEBYTECODE=1 \
+            --setenv=PYTHONPATH="$stage_root/src" \
+            "$python_bin" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_odoo_runner.py \
+              tests/test_odoo_runner_linux.py
+
+          test "$(sudo stat -c %U:%G /var/lib/odoo-accounting-cli-v3)" = \
+            odoo-v3-broker:odoo-v3-broker
+          test "$(sudo stat -c %a /var/lib/odoo-accounting-cli-v3)" = 700
+          sudo REPORT="$report" "$python_bin" - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(os.environ["REPORT"]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if not tests or failures or errors or skipped:
+              raise SystemExit(
+                  "non-root Linux process gate failed: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print(f"non_root_linux_process_tests={len(tests)}")
+          PY
+      - name: Gate reconciliation-only recovery without skips
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/reconciliation-only.xml"
+          python -m pytest -q --junitxml="$report" \
+            tests/test_trusted_authority.py::test_expired_inflight_approval_issues_reconciliation_only_authority \
+            tests/test_trusted_authority.py::test_unexpired_inflight_retry_uses_safe_reconciliation_mode \
+            tests/test_odoo_write_bootstrap.py::test_expired_execute_mode_without_anchor_is_rejected_without_claim_or_handler \
+            tests/test_odoo_write_bootstrap.py::test_expired_reconciliation_without_anchor_is_unknown_and_never_claims \
+            tests/test_odoo_write_bootstrap.py::test_unexpired_verifying_reconciliation_without_anchor_never_claims_or_executes \
+            tests/test_odoo_write_bootstrap.py::test_reconciliation_mode_bit_flip_is_rejected_before_anchor_lookup \
+            tests/test_odoo_write_bootstrap.py::test_expired_approval_replays_verified_anchor_without_new_write \
+            tests/test_odoo_write_bootstrap.py::test_expired_reconciliation_finishes_committed_anchor_without_execute \
+            tests/test_odoo_write_bootstrap.py::test_normal_verification_rolls_back_handler_side_effect_before_control_commit \
+            tests/test_odoo_write_bootstrap.py::test_committed_reconciliation_rolls_back_verify_side_effect_before_control_commit \
+            tests/test_odoo_write_bootstrap.py::test_expired_reconciliation_rejects_claimed_anchor_without_side_effect \
+            tests/test_odoo_write_bootstrap.py::test_expired_reconciliation_replays_failed_anchor_without_handler_or_commit
+          REPORT="$report" python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(os.environ["REPORT"]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if not tests or failures or errors or skipped:
+              raise SystemExit(
+                  "reconciliation-only gate failed: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print(f"reconciliation_only_tests={len(tests)}")
+          PY
+      - name: Exercise real Linux UDS and systemd activation contracts
+        run: |
+          set -euo pipefail
+          test "$(python -c 'import sys; print(sys.platform)')" = linux
+          python -m pytest -q \
+            tests/test_systemd_activation.py \
+            tests/test_trusted_broker_uds.py \
+            tests/test_trusted_session_mint_uds.py \
+            tests/test_trusted_approval_uds.py \
+            tests/test_trusted_broker_main.py \
+            tests/test_dev9_systemd_units.py
+      - name: Exercise root-owned UDS binding and cleanup guards
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python)"
+          sudo env PYTHONPATH="$GITHUB_WORKSPACE/src" \
+            "$python_bin" -m pytest -q \
+            tests/test_trusted_broker_uds.py::test_root_launcher_binds_and_removes_only_its_real_linux_socket \
+            tests/test_trusted_broker_uds.py::test_server_close_never_unlinks_a_replacement_socket \
+            tests/test_trusted_broker_uds.py::test_root_launcher_rejects_a_symlinked_socket_parent \
+            tests/test_trusted_approval_uds.py::test_real_linux_root_factory_secures_and_cleans_socket
+      - name: Verify the shipped systemd unit graph
+        run: |
+          set -euo pipefail
+          command -v systemd-analyze
+          rendered_root="$RUNNER_TEMP/odoo-v3-systemd"
+          release_name="ci-verified-release"
+          broker_bin="/opt/odoo-accounting-cli-v3/releases/$release_name/bin/odoo-accounting-cli-v3-broker"
+          install -d -m 0755 "$rendered_root"
+          RELEASE_NAME="$release_name" python - <<'PY'
+          import os
+          from pathlib import Path
+
+          source = Path(os.environ["GITHUB_WORKSPACE"]) / "deployment/dev9/systemd"
+          target = Path(os.environ["RUNNER_TEMP"]) / "odoo-v3-systemd"
+          service = (source / "odoo-accounting-cli-v3-broker.service").read_text()
+          assert service.count("@V3_RELEASE@") == 1
+          (target / "odoo-accounting-cli-v3-broker.service").write_text(
+              service.replace("@V3_RELEASE@", os.environ["RELEASE_NAME"])
+          )
+          for name in (
+              "odoo-accounting-cli-v3-pi-broker.socket",
+              "odoo-accounting-cli-v3-session-mint.socket",
+              "odoo-accounting-cli-v3-trusted-approval.socket",
+          ):
+              (target / name).write_bytes((source / name).read_bytes())
+          PY
+          for group in \
+            odoo-v3-broker \
+            odoo-v3-runtime \
+            odoo-v3-pi-broker \
+            odoo-v3-odoo-control; do
+            if ! getent group "$group" >/dev/null; then
+              sudo groupadd --system "$group"
+            fi
+          done
+          if ! getent passwd odoo-v3-broker >/dev/null; then
+            sudo useradd --system \
+              --gid odoo-v3-broker \
+              --groups odoo-v3-runtime \
+              --home-dir /nonexistent \
+              --shell /usr/sbin/nologin \
+              odoo-v3-broker
+          fi
+          sudo install -d -m 0755 "$(dirname "$broker_bin")"
+          sudo install -m 0755 /bin/true "$broker_bin"
+          systemd-analyze \
+            --recursive-errors=yes \
+            --man=no \
+            verify \
+            "$rendered_root/odoo-accounting-cli-v3-broker.service" \
+            "$rendered_root/odoo-accounting-cli-v3-pi-broker.socket" \
+            "$rendered_root/odoo-accounting-cli-v3-session-mint.socket" \
+            "$rendered_root/odoo-accounting-cli-v3-trusted-approval.socket"
+
+  pi-bridge:
+    name: Pi trusted broker contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: npm
+          cache-dependency-path: pi_bridge/package-lock.json
+      - name: Install the locked Pi runtime without package scripts
+        working-directory: pi_bridge
+        run: npm ci --ignore-scripts
+      - name: Verify Pi bridge syntax and security contracts
+        working-directory: pi_bridge
+        run: |
+          node --check server.mjs
+          node --check trusted-session.mjs
+          node --check odoo-session-header-resolver.mjs
+          node --check extensions/odoo-v3-cli.mjs
+          npm test
+
   deployment-toolchain:
     name: dev8 deployment toolchain
     runs-on: ubuntu-latest
@@ -95,6 +319,7 @@ jobs:
 
           runtime_python="$venv/bin/python"
           runtime_cli="$venv/bin/odoo-accounting-cli-v3"
+          runtime_broker="$venv/bin/odoo-accounting-cli-v3-broker"
           PIP_NO_INDEX=1 "$runtime_python" -m pip install \
             --find-links "$wheelhouse" \
             odoo-accounting-cli-v3
@@ -107,15 +332,50 @@ jobs:
           export PATH="$venv/bin:$PATH"
           hash -r
           test "$runtime_cli" = "$(command -v odoo-accounting-cli-v3)"
+          test "$runtime_broker" = "$(command -v odoo-accounting-cli-v3-broker)"
 
           SOURCE_ROOT="$GITHUB_WORKSPACE" "$runtime_python" -I - <<'PY'
           import os
+          import pkgutil
           import sys
-          from importlib import metadata, resources
+          from importlib import import_module, metadata, resources
           from pathlib import Path
           from tempfile import TemporaryDirectory
 
           import odoo_accounting_cli_v3 as package
+          from odoo_accounting_cli_v3 import (
+              broker_audit,
+              historical_router,
+              odoo_approver_authorizer,
+              systemd_activation,
+              trusted_approval_uds,
+              trusted_authority,
+              trusted_authority_bootstrap,
+              trusted_authority_sqlite,
+              trusted_broker,
+              trusted_broker_app,
+              trusted_broker_main,
+              trusted_broker_uds,
+              trusted_idempotency,
+              trusted_read,
+              trusted_response_verifier,
+              trusted_session_mint_uds,
+              trusted_session_sqlite,
+              verified_release,
+              write_api,
+              write_app,
+              write_protocol,
+              write_receipts,
+              write_runtime,
+              write_service,
+          )
+          from odoo_accounting_cli_v3.domain import write_semantics
+          from odoo_accounting_cli_v3.odoo import (
+              write_bootstrap,
+              write_handlers,
+              write_precheck,
+              write_runner,
+          )
           from odoo_accounting_cli_v3.persistence import (
               SCHEMA_VERSION,
               SQLitePersistence,
@@ -126,13 +386,66 @@ jobs:
           venv_root = Path(sys.prefix).resolve()
           assert not module_file.is_relative_to(source_root), module_file
           assert module_file.is_relative_to(venv_root), module_file
+          installed_modules = [
+              import_module(module.name)
+              for module in pkgutil.walk_packages(
+                  package.__path__, package.__name__ + "."
+              )
+          ]
+          assert installed_modules
+          for runtime_module in installed_modules:
+              runtime_module_file = Path(runtime_module.__file__).resolve()
+              assert not runtime_module_file.is_relative_to(source_root), (
+                  runtime_module_file
+              )
+              assert runtime_module_file.is_relative_to(venv_root), (
+                  runtime_module_file
+              )
+          for runtime_module in (
+              broker_audit,
+              historical_router,
+              odoo_approver_authorizer,
+              systemd_activation,
+              trusted_approval_uds,
+              trusted_authority,
+              trusted_authority_bootstrap,
+              trusted_authority_sqlite,
+              trusted_broker,
+              trusted_broker_app,
+              trusted_broker_main,
+              trusted_broker_uds,
+              trusted_idempotency,
+              trusted_read,
+              trusted_response_verifier,
+              trusted_session_mint_uds,
+              trusted_session_sqlite,
+              verified_release,
+              write_api,
+              write_app,
+              write_protocol,
+              write_receipts,
+              write_runtime,
+              write_service,
+              write_semantics,
+              write_bootstrap,
+              write_handlers,
+              write_precheck,
+              write_runner,
+          ):
+              runtime_module_file = Path(runtime_module.__file__).resolve()
+              assert not runtime_module_file.is_relative_to(source_root), (
+                  runtime_module_file
+              )
+              assert runtime_module_file.is_relative_to(venv_root), (
+                  runtime_module_file
+              )
           expected_version = os.environ["EXPECTED_VERSION"]
           assert package.__version__ == expected_version
           assert metadata.version("odoo-accounting-cli-v3") == expected_version
           assert resources.files("odoo_accounting_cli_v3").joinpath(
               "data", "capabilities.json"
           ).is_file()
-          assert SCHEMA_VERSION == 2
+          assert SCHEMA_VERSION == 4
           with TemporaryDirectory(prefix="odoo-cli-v3-wheel-state-") as value:
               state_root = Path(value)
               state_root.chmod(0o700)
@@ -142,6 +455,11 @@ jobs:
 
           "$runtime_cli" --help >/dev/null 2> help.stderr
           test ! -s help.stderr
+          "$runtime_broker" --help > broker-help.stdout 2> broker-help.stderr
+          test ! -s broker-help.stderr
+          grep -Fxq \
+            'usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH' \
+            broker-help.stdout
           version_output="$("$runtime_cli" --version 2> version.stderr)"
           test ! -s version.stderr
           test "$version_output" = \

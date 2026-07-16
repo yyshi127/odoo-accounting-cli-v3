@@ -11,6 +11,7 @@ dependencies = ["click>=8.1,<9"]
 
 [project.scripts]
 odoo-accounting-cli-v3 = "odoo_accounting_cli_v3.cli:main"
+odoo-accounting-cli-v3-broker = "odoo_accounting_cli_v3.trusted_broker_main:main"
 
 [project.optional-dependencies]
 test = ["pytest>=8.0"]

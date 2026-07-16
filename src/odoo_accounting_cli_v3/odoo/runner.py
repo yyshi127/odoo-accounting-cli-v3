@@ -14,6 +14,7 @@ import selectors
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -85,7 +86,7 @@ CHILD_FIELDS = frozenset(
 )
 RESPONSE_FIELDS = frozenset({"ok", "runtime", "result"})
 FIXED_CHILD_ENVIRONMENT = {
-    "HOME": "/home/odoo",
+    "HOME": "/var/lib/odoo-accounting-cli-v3",
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -133,7 +134,7 @@ def _strict_text(value: Any, field: str, *, maximum: int = 128) -> str:
         or not value.strip()
         or value != value.strip()
         or len(value) > maximum
-        or any(ord(character) < 32 for character in value)
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise OdooRunnerError(f"{field} is invalid")
     return value
@@ -677,6 +678,71 @@ def _safe_environment() -> dict[str, str]:
     return dict(FIXED_CHILD_ENVIRONMENT)
 
 
+def _validate_child_home(value: str) -> None:
+    """Require the fixed child HOME to be one canonical private directory."""
+
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise OdooRunnerError("the fixed Odoo HOME directory is not trustworthy")
+    home = Path(value)
+    if not home.is_absolute():
+        raise OdooRunnerError("the fixed Odoo HOME directory is not trustworthy")
+    try:
+        metadata = home.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or home.is_symlink()
+            or home.resolve(strict=True) != home
+        ):
+            raise OdooRunnerError(
+                "the fixed Odoo HOME directory is not trustworthy"
+            )
+        if os.name == "posix":
+            if stat.S_IMODE(metadata.st_mode) != 0o700:
+                raise OdooRunnerError(
+                    "the fixed Odoo HOME directory must have mode 0700"
+                )
+            if metadata.st_uid != os.geteuid():
+                raise OdooRunnerError(
+                    "the fixed Odoo HOME directory must be owned by the effective uid"
+                )
+            no_follow = getattr(os, "O_NOFOLLOW", None)
+            directory = getattr(os, "O_DIRECTORY", None)
+            if no_follow is None or directory is None:
+                raise OdooRunnerError(
+                    "the fixed Odoo HOME directory cannot be opened safely"
+                )
+            flags = os.O_RDONLY | no_follow | directory | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(home, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    (opened.st_dev, opened.st_ino)
+                    != (metadata.st_dev, metadata.st_ino)
+                    or not stat.S_ISDIR(opened.st_mode)
+                    or stat.S_IMODE(opened.st_mode) != 0o700
+                    or opened.st_uid != os.geteuid()
+                ):
+                    raise OdooRunnerError(
+                        "the fixed Odoo HOME directory changed while it was opened"
+                    )
+            finally:
+                os.close(descriptor)
+    except OdooRunnerError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise OdooRunnerError(
+            "the fixed Odoo HOME directory is not trustworthy"
+        ) from exc
+
+
+def _validate_child_environment(env: Mapping[str, str]) -> None:
+    """Reject any environment drift and validate HOME before child creation."""
+
+    if not isinstance(env, dict) or env != FIXED_CHILD_ENVIRONMENT:
+        raise OdooRunnerError("the fixed Odoo child environment is invalid")
+    _validate_child_home(env["HOME"])
+
+
 @contextmanager
 def _private_payload_fd(payload: bytes):
     if not isinstance(payload, bytes) or not payload or len(payload) > MAX_PRIVATE_PAYLOAD_BYTES:
@@ -729,7 +795,7 @@ def _child_source(config: RuntimeConfig, payload_fd: int, marker: str) -> str:
 def _kill_child_process_group(process: subprocess.Popen) -> None:
     try:
         if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
+            process.send_signal(signal.SIGTERM)
         elif process.poll() is None:  # pragma: no cover - trusted runtime is POSIX.
             process.kill()
     except ProcessLookupError:
@@ -737,8 +803,11 @@ def _kill_child_process_group(process: subprocess.Popen) -> None:
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:  # pragma: no cover - SIGKILL should be final.
-        process.kill()
-        process.wait(timeout=5)
+        if os.name == "posix":
+            _force_kill_linux_supervisor_tree(process)
+        else:
+            process.kill()
+            process.wait(timeout=5)
 
 
 def _decode_child_output(value: bytes, label: str) -> str:
@@ -746,6 +815,299 @@ def _decode_child_output(value: bytes, label: str) -> str:
         return value.decode("utf-8")
     except UnicodeError as exc:
         raise OdooRunnerError(f"Odoo shell {label} is not valid UTF-8") from exc
+
+
+class _SupervisorTerminationRequested(BaseException):
+    """Interrupt the persistent supervisor so it can reap the full child tree."""
+
+
+def _request_supervised_tree_termination(_signum: int, _frame: Any) -> None:
+    raise _SupervisorTerminationRequested
+
+
+def _install_linux_parent_death_guard(expected_parent_pid: int) -> None:
+    """Arm PDEATHSIG and close the parent-exit-before-prctl race."""
+
+    if sys.platform != "linux":
+        raise OSError("the Odoo process supervisor requires Linux")
+    if (
+        isinstance(expected_parent_pid, bool)
+        or not isinstance(expected_parent_pid, int)
+        or expected_parent_pid <= 1
+    ):
+        raise OSError("the Odoo process supervisor parent is invalid")
+
+    # This handler remains installed in the persistent supervisor. It is not
+    # installed in a pre-exec child, where execve would reset it.
+    signal.signal(signal.SIGTERM, _request_supervised_tree_termination)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+    try:
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = libc.prctl
+        prctl.argtypes = [
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+        ]
+        prctl.restype = ctypes.c_int
+        result = prctl(1, signal.SIGTERM, 0, 0, 0)  # PR_SET_PDEATHSIG
+        if result != 0:
+            error_number = ctypes.get_errno()
+            raise OSError(error_number, os.strerror(error_number))
+    except (AttributeError, OSError) as exc:
+        raise OSError("the Odoo process supervisor parent guard failed") from exc
+
+    # Linux does not deliver a retroactive PDEATHSIG if the parent died before
+    # prctl completed. Checking after arming it closes that documented race.
+    if os.getppid() != expected_parent_pid:
+        _request_supervised_tree_termination(signal.SIGTERM, None)
+
+    # Reparent Odoo descendants here if their immediate parent exits. This lets
+    # the persistent supervisor clean daemon-like leftovers without signalling
+    # a possibly reused process-group identifier after the leader was reaped.
+    result = prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number))
+
+
+def _kill_adopted_linux_descendants() -> None:
+    """Kill and reap every descendant adopted by the Linux subreaper."""
+
+    children_path = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+    while True:
+        try:
+            raw_children = children_path.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeError):
+            continue
+        if not raw_children:
+            return
+        try:
+            children = tuple(int(value) for value in raw_children.split())
+        except ValueError:
+            continue
+        if any(pid <= 1 for pid in children) or len(set(children)) != len(children):
+            continue
+
+        for pid in children:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for pid in children:
+            while True:
+                try:
+                    os.waitpid(pid, 0)
+                    break
+                except InterruptedError:
+                    continue
+                except ChildProcessError:
+                    break
+
+
+def _validate_linux_descendant_reaper() -> None:
+    """Fail before Odoo starts unless the Linux adopted-child view is usable."""
+
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise OSError("the Odoo process supervisor requires Linux pidfds")
+    children_path = Path(f"/proc/{os.getpid()}/task/{os.getpid()}/children")
+    try:
+        raw_children = children_path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise OSError("the Odoo process supervisor cannot inspect descendants") from exc
+    if raw_children:
+        raise OSError("the Odoo process supervisor has unexpected children")
+
+
+def _linux_process_state(pid: int) -> str | None:
+    try:
+        value = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return None
+    closing_parenthesis = value.rfind(")")
+    if closing_parenthesis < 0:
+        return None
+    remainder = value[closing_parenthesis + 1 :].split()
+    return remainder[0] if remainder else None
+
+
+def _force_kill_linux_supervisor_tree(process: subprocess.Popen[bytes]) -> None:
+    """Last-resort exact-PID cleanup before killing a stuck supervisor."""
+
+    try:
+        process.send_signal(signal.SIGSTOP)
+    except ProcessLookupError:
+        process.wait(timeout=5)
+        return
+    children_path = Path(
+        f"/proc/{process.pid}/task/{process.pid}/children"
+    )
+    while process.poll() is None:
+        try:
+            raw_children = children_path.read_text(encoding="ascii").strip()
+            children = tuple(int(value) for value in raw_children.split())
+        except (OSError, UnicodeError, ValueError):
+            continue
+        if any(pid <= 1 for pid in children) or len(set(children)) != len(children):
+            continue
+        states = {pid: _linux_process_state(pid) for pid in children}
+        if any(state is None for state in states.values()):
+            continue
+        live_children = tuple(pid for pid, state in states.items() if state != "Z")
+        if not live_children:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=5)
+            return
+        for pid in live_children:
+            try:
+                descriptor = os.pidfd_open(pid)
+            except OSError:
+                continue
+            try:
+                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            except OSError:
+                pass
+            finally:
+                os.close(descriptor)
+
+
+def _terminate_supervised_linux_tree(child: subprocess.Popen[bytes]) -> None:
+    """Kill the direct Odoo child, then every cross-session adopted descendant."""
+
+    if child.poll() is None:
+        try:
+            os.kill(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        while True:
+            try:
+                child.wait()
+                break
+            except InterruptedError:
+                continue
+    _kill_adopted_linux_descendants()
+
+
+def _finish_supervised_linux_tree(child: subprocess.Popen[bytes]) -> None:
+    """Never leave the supervisor while any adopted descendant may remain."""
+
+    while True:
+        try:
+            _terminate_supervised_linux_tree(child)
+            return
+        except BaseException:
+            continue
+
+
+def _restore_child_signal_mask(mask: set[signal.Signals]) -> None:
+    """Restore the pre-supervisor mask in the single-threaded pre-exec child."""
+
+    signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+
+
+def _linux_process_supervisor_main() -> None:
+    """Keep a Linux process-group owner alive until the Odoo child exits."""
+
+    failure = b"Odoo process supervisor failed\n"
+    child: subprocess.Popen[bytes] | None = None
+    try:
+        if (
+            sys.platform != "linux"
+            or len(sys.argv) < 5
+            or sys.argv[3] != "--"
+            or os.getpid() != os.getpgrp()
+            or os.getsid(0) != os.getpid()
+        ):
+            raise OSError("invalid Odoo process supervisor boundary")
+        expected_parent_pid = int(sys.argv[1])
+        payload_fd = int(sys.argv[2])
+        if expected_parent_pid <= 1 or payload_fd <= 2:
+            raise OSError("invalid Odoo process supervisor identity")
+        child_argv = sys.argv[4:]
+        if not child_argv or any(
+            not isinstance(value, str) or not value for value in child_argv
+        ):
+            raise OSError("invalid Odoo child command")
+        _install_linux_parent_death_guard(expected_parent_pid)
+        _validate_linux_descendant_reaper()
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM})
+        if signal.SIGTERM in previous_mask:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            raise OSError("the Odoo process supervisor signal mask is invalid")
+        try:
+            # This fixed helper is single-threaded. The pre-exec hook only
+            # restores the inherited mask; it never executes request data.
+            spawned = subprocess.Popen(
+                child_argv,
+                stdin=None,
+                stdout=None,
+                stderr=None,
+                text=False,
+                shell=False,
+                close_fds=True,
+                pass_fds=(payload_fd,),
+                start_new_session=False,
+                cwd=None,
+                env=None,
+                preexec_fn=lambda: _restore_child_signal_mask(previous_mask),
+            )
+            child = spawned
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        returncode = child.wait()
+        _kill_adopted_linux_descendants()
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    except _SupervisorTerminationRequested:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        if child is not None:
+            _finish_supervised_linux_tree(child)
+        os._exit(128 + signal.SIGTERM)
+    except BaseException:
+        if child is not None:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            _finish_supervised_linux_tree(child)
+        try:
+            os.write(2, failure)
+        finally:
+            os._exit(125)
+
+    if returncode < 0:
+        terminating_signal = -returncode
+        if terminating_signal not in {signal.SIGKILL, signal.SIGSTOP}:
+            signal.signal(terminating_signal, signal.SIG_DFL)
+        os.kill(os.getpid(), terminating_signal)
+        os._exit(128 + min(terminating_signal, 127))
+    os._exit(returncode if 0 <= returncode <= 255 else 125)
+
+
+def _linux_supervisor_argv(argv: list[str], payload_fd: int) -> list[str]:
+    """Build a fixed supervisor invocation without request data in argv or env."""
+
+    source_root = Path(__file__).resolve().parents[2]
+    bootstrap = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(source_root)!r})\n"
+        "from odoo_accounting_cli_v3.odoo.runner import "
+        "_linux_process_supervisor_main\n"
+        "_linux_process_supervisor_main()\n"
+    )
+    return [
+        sys.executable,
+        "-I",
+        "-c",
+        bootstrap,
+        str(os.getpid()),
+        str(payload_fd),
+        "--",
+        *argv,
+    ]
 
 
 def _run_child_process(
@@ -757,8 +1119,9 @@ def _run_child_process(
     cwd: str,
     env: dict[str, str],
 ) -> subprocess.CompletedProcess[str]:
-    if os.name != "posix":  # pragma: no cover - local tests mock this Linux boundary.
-        raise OdooRunnerError("the trusted Odoo shell runner requires a POSIX runtime")
+    if sys.platform != "linux":  # pragma: no cover - local tests mock this boundary.
+        raise OdooRunnerError("the trusted Odoo shell runner requires a Linux runtime")
+    _validate_child_environment(env)
     try:
         source_bytes = source.encode("utf-8")
     except UnicodeError as exc:
@@ -767,7 +1130,7 @@ def _run_child_process(
         raise OdooRunnerError("Odoo shell bootstrap is invalid or too large")
     try:
         process = subprocess.Popen(
-            argv,
+            _linux_supervisor_argv(argv, payload_fd),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

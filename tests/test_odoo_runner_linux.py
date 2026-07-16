@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from odoo_accounting_cli_v3.odoo.runner import (
     FIXED_CHILD_ENVIRONMENT,
@@ -18,6 +19,7 @@ from odoo_accounting_cli_v3.odoo.runner import (
     OdooRunnerError,
     _private_payload_fd,
     _run_child_process,
+    _validate_child_environment,
 )
 
 
@@ -36,6 +38,13 @@ class LinuxRunnerGateTest(unittest.TestCase):
             raise AssertionError("the target runner gate requires memfd_create")
         if not Path(FIXED_CHILD_ENVIRONMENT["HOME"]).is_dir():
             raise AssertionError("the fixed Odoo HOME directory does not exist")
+        if FIXED_CHILD_ENVIRONMENT["HOME"] != "/var/lib/odoo-accounting-cli-v3":
+            raise AssertionError("the fixed Odoo HOME is not the managed StateDirectory")
+        if os.environ.get("HOME") != FIXED_CHILD_ENVIRONMENT["HOME"]:
+            raise AssertionError("the service HOME does not match the child HOME")
+        if os.environ.get("STATE_DIRECTORY") != FIXED_CHILD_ENVIRONMENT["HOME"]:
+            raise AssertionError("systemd did not expose the managed StateDirectory")
+        _validate_child_environment(dict(FIXED_CHILD_ENVIRONMENT))
 
     def run_helper(
         self,
@@ -104,6 +113,44 @@ class LinuxRunnerGateTest(unittest.TestCase):
         self.assertEqual(observed["env_hits"], 0)
         self.assertEqual(observed["stdin_hits"], 0)
         self.assertEqual(observed["env"], FIXED_CHILD_ENVIRONMENT)
+
+    def test_managed_home_is_visible_private_owned_and_writable(self) -> None:
+        home = Path(FIXED_CHILD_ENVIRONMENT["HOME"])
+        metadata = home.lstat()
+        self.assertFalse(home.is_symlink())
+        self.assertEqual(home.resolve(strict=True), home)
+        self.assertEqual(metadata.st_uid, os.geteuid())
+        self.assertEqual(metadata.st_mode & 0o7777, 0o700)
+
+        code = (
+            "import json,os,pathlib;"
+            "home=pathlib.Path(os.environ['HOME']);"
+            "probe=home/'ci-home-visibility-probe';"
+            "probe.write_bytes(b'private');"
+            "observed={'home':str(home.resolve(strict=True)),"
+            "'mode':oct(home.stat().st_mode & 0o7777),"
+            "'uid':home.stat().st_uid,'probe':probe.read_text()};"
+            "probe.unlink();print(json.dumps(observed,sort_keys=True))"
+        )
+        completed = self.run_helper(code)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        observed = json.loads(completed.stdout)
+        self.assertEqual(observed["home"], str(home))
+        self.assertEqual(observed["mode"], "0o700")
+        self.assertEqual(observed["uid"], os.geteuid())
+        self.assertEqual(observed["probe"], "private")
+
+    def test_insecure_managed_home_is_rejected_before_child_spawn(self) -> None:
+        home = Path(FIXED_CHILD_ENVIRONMENT["HOME"])
+        home.chmod(0o750)
+        try:
+            with patch(
+                "odoo_accounting_cli_v3.odoo.runner.subprocess.Popen"
+            ) as spawn, self.assertRaisesRegex(OdooRunnerError, "mode 0700"):
+                self.run_helper("print('must not run')")
+            spawn.assert_not_called()
+        finally:
+            home.chmod(0o700)
 
     def test_output_limits_do_not_limit_unrelated_state_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

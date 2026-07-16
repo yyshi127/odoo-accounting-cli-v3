@@ -30,11 +30,23 @@ archive.
   trusted-artifacts/<version>-<commit12>.json
 /etc/odoo-accounting-cli-v3/
   runtime-test.json
+  runtime-sandbox.json
+  write-runtime.json
   secrets/test/auth.hmac
   secrets/test/receipt.hmac
+  secrets/sandbox/auth.hmac
+  secrets/sandbox/receipt.hmac
+  secrets/sandbox/write-auth.hmac
+  secrets/sandbox/approval.hmac
+  secrets/sandbox/execution.hmac
+  secrets/sandbox/verification.hmac
+  secrets/sandbox/recovery.hmac
+  secrets/sandbox/write-receipt.hmac
 /var/lib/odoo-accounting-cli-v3/test/candidates/<version>-<commit12>/
   auth.sqlite3
   receipt.sqlite3
+/var/lib/odoo-accounting-cli-v3/sandbox/candidates/<version>-<commit12>/
+  write.sqlite3
 ```
 
 The V2 tree under `/mnt/odoo/odoo19/custom/tools/` and the Pi Bridge copy of V2
@@ -46,6 +58,7 @@ From a clean committed V3 checkout:
 
 ```powershell
 python -m pytest
+python -m pytest tests/test_release_archive.py
 python tools/check_source_boundary.py
 git diff --check
 python tools/build_release.py
@@ -54,6 +67,9 @@ python tools/build_release.py
 Build the same clean commit twice and retain both command results. The archive
 SHA-256 and manifest SHA-256 must be identical. Refuse a dirty worktree,
 untracked release input, version/commit mismatch, or non-deterministic output.
+The archive gate must explicitly find `write_app.py`, `write_service.py`, the
+Odoo write runner, and every file in the V3 control add-on; equality with an
+incomplete Git file list is not sufficient.
 
 Before transfer, record the archive name, byte size, archive SHA-256, manifest
 SHA-256, registry digest, version, commit, builder, and UTC time. Transfer to a
@@ -80,84 +96,138 @@ extracting it.
 
    Verification must not create files in the candidate.
 5. Make the entire candidate root-owned: directories mode `0555`, ordinary
-   files mode `0444`, and only `bin/odoo-accounting-cli-v3` mode `0555`. The
-   final release directory must be immutable to the Odoo service identity.
+   files mode `0444`, and both canonical launchers
+   `bin/odoo-accounting-cli-v3` and
+   `bin/odoo-accounting-cli-v3-broker` mode `0555`. Refuse the candidate if
+   either launcher is missing, linked, writable, or not executable. Exercise
+   the broker from the frozen extracted tree before publishing it. Here
+   `$temporary_evidence` is a new root-owned mode `0700` directory outside the
+   candidate release:
+
+   ```bash
+   PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+     "$candidate/bin/odoo-accounting-cli-v3-broker" --help \
+     >"$temporary_evidence/broker-help.stdout" \
+     2>"$temporary_evidence/broker-help.stderr"
+   test ! -s "$temporary_evidence/broker-help.stderr"
+   grep -Fx \
+     'usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH' \
+     "$temporary_evidence/broker-help.stdout"
+   ```
+
+   The final release directory must be immutable to the Odoo and broker
+   service identities.
 6. Atomically rename the completed temporary directory to
    `<version>-<commit12>`. Refuse to overwrite an existing release.
 7. Create the matching external anchor under `trusted-artifacts/` as a
    root-owned, non-group/world-writable JSON file with exactly `commit`,
    `manifest_sha256`, `package_sha256`, and `release`.
+8. From that exact anchored release, run
+   `deployment/dev9/render-systemd-service.py` as documented in
+   `deployment/dev9/README.md`. The renderer independently rejects a release
+   unless both canonical launchers remain regular non-symlink files with mode
+   `0555`; install only its verified service output.
+9. For the dedicated sandbox only, add the exact immutable release's
+   `odoo_addons/` directory to that sandbox process's add-ons path and install
+   `odoo_accounting_cli_v3_control` from it. Do not copy the add-on into V2, Pi
+   Bridge, a development directory, or a shared production add-ons tree. A
+   production Odoo configuration change requires separate authorization.
 
 Do not extract into the V2 directory, Pi Bridge, Odoo add-ons, a developer home,
 or the historical `/mnt/.../odoo_accounting_agent_cli_v3` evidence root.
 
 ## Runtime configuration and state
 
-Create the strict root-managed runtime file described in
+Create the strict root-managed read and write runtime files described in
 `docs/RUNTIME_CONFIGURATION.md`. Pin the canonical package path and digest as
 well as the SHA-256 of the resolved Odoo Python interpreter, `odoo-bin`, and
-Odoo configuration. Use `capability_channel` equal to `staged` only for the
-isolated test evidence run; production rejects that channel.
+Odoo configuration. The fixed write path is
+`/etc/odoo-accounting-cli-v3/write-runtime.json`; callers cannot override it.
 
-Generate two independent random secrets without printing them. Store them as
-separate root-owned files, normally mode `0640`, readable only by the dedicated
-service group. Record only their Key IDs and file hashes in restricted operator
-evidence; never record key contents.
+The write runtime configuration schema is version 1. Its
+`write_execution_mode` starts as `disabled`. A sandbox candidate may use
+`sandbox_staged` only when its base runtime is both environment `sandbox` and
+channel `staged`. Mode `enabled` requires an enabled base-runtime channel but
+does not override registry availability or production authorization.
 
-Create the test state directory as service-owned mode `0700`. SQLite database,
-WAL, and shared-memory files must remain mode `0600`. State must be preserved
-through upgrade and rollback with an explicitly compatible schema or matched
-snapshot; never delete it to make a replayed request succeed.
+Generate eight independent secrets without printing them: the two read roles
+plus write-authentication, approval, execution, verification, recovery, and
+write-receipt roles. Every role uses a distinct Key ID, canonical path, and
+file inode; execution, verification, and recovery also use distinct issuer
+names. Store the files root-owned, normally mode `0640`, readable only by the
+dedicated service group. Record only Key IDs and restricted file hashes in
+operator evidence. Never record secret contents or pass a signed write request
+on argv.
 
-Schema v2 adds append-only approval evidence and database-enforced approval
-transitions. Opening a schema-v1 state database with a v2 release performs a
-strict, transactional migration only after the exact v1 schema, operation
-record hashes, foreign keys, and audit chain verify. The migration preserves
-all existing operation and audit bytes, but it is forward-only for older
-binaries: a v1-only release cannot open the resulting database.
-Legacy events that use native v2 `read.*` or `operation.*` evidence identities
-are rejected; they cannot be silently promoted into verified v2 evidence.
-Only pre-execution states and a legacy `approved` state are migratable. A
-legacy approval is marked unverifiable and may be inspected but cannot
-authorize execution. Legacy executing, failed, verification, completion, or
-recovery states have no dev5-grade durable evidence and make the whole
-migration roll back without changing schema v1.
+Create each candidate state directory service-owned mode `0700`. SQLite
+database, WAL, and shared-memory files remain service-owned mode `0600`. The
+write state path must differ by path and inode from both read stores. Preserve
+every store through upgrade and rollback; never delete, truncate, replace, or
+create a fresh store merely to make a replayed request or idempotency key
+succeed.
 
-For native schema-v2 reads (dev5 and later), signature revalidation, replay consumption, and the
-`read.verified` event containing the complete signed receipt commit in one
-transaction. Absence of that durable event is a failed read, never business
-success. Receipt protocol v2 binds environment and capability channel and
-forbids a staged production receipt. Initialize the version-scoped receipt
-store only through its root-managed runtime configuration so its Key ID and
-secret fingerprint are pinned before reads; a key mismatch is an integrity
-failure, not an automatic rotation.
+SQLite persistence schema v4 contains operation and idempotency records,
+immutable prechecks, approvals, trusted results, terminal receipts, audit
+events, and recovery bindings. Its code-defined legacy migrations are
+transactional and validate the exact old schema and integrity first. They do
+not themselves constitute a cross-release operation or idempotency migration
+protocol. Before admission to the retained-release router, a side-by-side
+candidate therefore uses an isolated state path and must not open the live
+store. Admission is a separate reviewed change that pins all retained runtime
+configurations and the broker's idempotency resolver to one shared store.
 
-These SQLite controls are an application integrity boundary, not a defense
-against arbitrary code running as the state-file owner. A same-UID attacker can
-replace local schema objects and recompute unkeyed hashes. Production promotion
-therefore remains blocked until runtime identities are isolated and the audit
-head is independently anchored; trigger presence alone is not promotion
-evidence.
+Before any write-capable upgrade or route change:
 
-For side-by-side candidate verification, point each candidate at new version-scoped state
-paths under `candidates/<version>-<commit12>/` so the retained dev4 databases
-remain unchanged. For a promoted v1-to-v2 upgrade, first stop and drain every
-V3 route, worker, scheduled job, canary, and operator command that can access
-the affected state stores. Keep that traffic stopped throughout the SQLite
-checkpoint, creation and verification of a consistent v1 snapshot, the first
-v2 open and migration, and the post-migration integrity verification.
+1. Stop accepting new prepare requests and general Pi write traffic. Keep only
+   authenticated status/result and the explicitly controlled old-release calls
+   needed to reconcile ambiguous in-flight effects.
+2. Stop all unrelated writers, workers, canaries, and operator commands for
+   that state store.
+3. With the old verified release, reconcile every ambiguous `executing`,
+   `verifying`, or `recovering` effect through its existing Odoo control anchor
+   and result path; never submit it as a new operation. Other nonterminal
+   operations may remain only if the old immutable route, keys, and verifier
+   will stay available.
+4. Checkpoint and back up the SQLite database with a SQLite-supported backup or
+   an atomic storage snapshot covering its WAL state. Verify the backup hashes,
+   `PRAGMA integrity_check`, schema version, audit chain, and terminal receipts.
+5. Install the new root-managed manifest with both old and new immutable routes.
+   Verify both runtime configurations reference the same canonical state path
+   and inode. Retain the old release directory, canonical package, external
+   anchor, runtime configuration, verification keys, and evidence.
+6. Before reopening traffic, prove an old-release prepare whose response was
+   lost resolves to its original operation/request IDs after the new release is
+   current, and that changed content, cross-tenant input, and a missing retained
+   route fail closed without an Odoo effect.
+7. Reopen prepares only after the broker, router, verifier, and audit checks all
+   pass. The operation's stored release remains authoritative for every
+   continuation and result.
 
-Create the rollback snapshot with a SQLite-supported consistent backup method
-or an atomic storage snapshot that covers the database and all associated WAL
-state. Verify its hashes and test that a copy opens and passes SQLite integrity
-checks before migration. A plain filesystem copy of a database followed by a
-separate copy of its `-wal`/`-shm` files is not an atomic backup and must not be
-used as rollback evidence. Resume V3 traffic only after the migrated stores and
-their audit chains pass integrity checks. Application rollback must either
-select a prior release that understands schema v2 or, while the same traffic
-remains stopped, atomically restore the matching verified v1 snapshot.
-Switching only a launcher or release path is not a valid rollback. Never copy, truncate,
-or delete a live state database to bypass nonce or receipt history.
+The broker service also requires a separate private audit database. Before
+traffic, verify its parent ownership/mode, database and WAL/SHM ownership/mode,
+exact schema, append-only triggers, SQLite integrity, and audit-chain head.
+Load each retained route's read/write receipt Key IDs and secrets from distinct
+root-managed files; do not reuse the current key for a historical route. Test a
+fake 64-character signature, wrong Key ID, wrong secret, changed company,
+changed operation, changed result, and deleted historical verifier route. Every
+case must fail without a reported business success and must leave a broker
+attempt event after session authentication.
+
+The Dev9 broker contract resolves a prepare retry from the one shared durable
+store before release routing, reuses the original operation and request IDs,
+and independently checks its full canonical request and tenant binding. A
+promoted retained route must therefore never receive a new empty or separate
+schema-v4 database: that would forget prior idempotency scopes and could
+duplicate an accounting effect. Promotion remains blocked until target Linux
+tests prove the shared store, current-to-historical switch, operation,
+approval, receipt, audit, and idempotency continuity with the immutable release
+launcher. A plain copy of a live database followed by separate copies of
+`-wal` or `-shm` is not acceptable evidence.
+
+SQLite constraints and append-only triggers are application-integrity controls,
+not protection against arbitrary code running as the state-file owner.
+Production promotion still requires the separate service-identity and external
+audit-anchor gates.
 
 ## Test-only candidate verification
 
@@ -180,6 +250,34 @@ Success requires the complete CLI JSON result, valid signed Odoo receipt,
 release/runtime identity, financial-oracle comparison, state/audit evidence,
 and negative-test results. A command exit code alone is not evidence.
 
+## Dedicated write-sandbox candidate verification
+
+All 13 registered write capabilities are closed by default. Local contracts,
+handlers, and tests do not authorize staging. After the complete local gate,
+create a new reviewed release that stages only the selected capabilities for a
+dedicated sandbox. The sandbox must have its own database UUID, filestore,
+database filter, disabled scheduled jobs, non-superuser executor, separately
+authorized approver, and isolated write state. Do not reuse a production clone
+whose UUID, filestore, cron workers, or live connections are shared.
+
+Invoke the six standard actions only through the immutable release launcher:
+prepare, preview, approve-execute, status, result, and recover. Send each signed
+JSON request over standard input. For every staged write capability retain:
+
+- exact parameter round-trip evidence from Pi/CLI input through preview,
+  approval digest, Odoo execution, verification, and receipt;
+- one intended Odoo effect under the bound user and company;
+- repeated and concurrent requests proving no duplicate effect;
+- ACL, company, expiry, replay, and tamper rejection;
+- a pre-effect failure and an ambiguous response-loss reconciliation; and
+- its registered reversal or compensation journey when recovery is available.
+
+No command-existence, mocked handler, local test, exit code, or unsigned Odoo
+record is sandbox evidence. Without a release-bound passing verification and
+durable signed final receipt, the capability remains closed. Passing one
+capability does not stage or enable another, and no sandbox result authorizes a
+production write.
+
 ## Promotion and Pi routing
 
 A staged capability is deliberately not enabled and is invisible to the normal
@@ -191,6 +289,20 @@ route is changed.
 
 Never patch registry metadata inside an existing release. Enabling one read
 does not enable another read or any write.
+Before exposing authenticated V3 tools, pin the independently reviewed,
+dependency-free session-resolver module with
+`PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_SHA256`, require the verified V3
+identity, and prove the root-managed module path plus every ancestor cannot be
+replaced by the Pi service identity. Prove the Pi process receives only the
+opaque session handle on inherited descriptor 3, the resolver path/hash are
+absent from its environment, and an unsafe path, changed module, missing hash,
+wrong UDS peer, mismatched action/protocol, or caller-selected release is
+rejected before execution.
+For a write capability, the reviewed promotion input must include its dedicated
+sandbox create/verify/repeat/failure/recovery receipts and negative-security
+evidence. Until then its `enabled_environments` remains empty. Production also
+requires explicit capability-specific authorization and a new production-safety
+review; sandbox evidence alone is insufficient.
 
 ## Upgrade
 
@@ -199,6 +311,16 @@ Linux, Odoo, ACL, replay, financial, and Pi canary gate. Preserve the prior
 release, external anchor, state databases, and evidence. Change routing only
 after the new release passes; do not restart Odoo merely to install an
 unrouted V3 artifact.
+
+For any route that could mutate write state, perform the drain, reconciliation,
+SQLite backup, and continuity checks in "Runtime configuration and state"
+before changing the route. The seven nonterminal states are `prepared`,
+`prechecked`, `awaiting_approval`, `approved`, `executing`, `verifying`, and
+`recovering`; all must be empty. Keep status/result requests for old operation
+IDs on their old release and state store. Do not point a new release at an old
+store or a new empty store until a release-specific schema-v4 and idempotency
+handoff has passed. If that handoff is unavailable, the write route cannot be
+upgraded.
 
 ## Rollback
 
@@ -209,10 +331,18 @@ run its identity/read canary, atomically change the route, and verify Pi and CLI
 again report the same identity.
 
 Before changing a route, verify the selected binary supports the current state
-schema. If the upgrade migrated schema v1 to v2, restore the pre-upgrade v1
-snapshot only as part of a coordinated rollback with traffic stopped for that
-V3 state store, or roll back to a v2-compatible build. Preserve the rejected
-v2 state as evidence; never merge divergent state files by hand.
+schema. Write persistence is currently schema v4, while the write runtime
+configuration document is schema v1. Restore a pre-upgrade state snapshot only
+as part of a coordinated rollback with all traffic stopped and only with the
+exact release, configuration fingerprint, Key IDs, and verified snapshot that
+belong together. Preserve the rejected/newer state as evidence; never merge
+divergent state files or idempotency tables by hand.
+
+Retain the newer release and store until every operation and audit receipt is
+reconciled. If either release has a nonterminal operation, keep it routed to the
+release that created it; a binary rollback is not permission to replay it under
+another operation ID. If the matched state cannot be restored and verified,
+leave write routing disabled and escalate instead of creating an empty store.
 
 If a write release is ever promoted, accounting effects are recovered only by
 the capability's recorded Odoo reversal or compensation workflow. Deploying an

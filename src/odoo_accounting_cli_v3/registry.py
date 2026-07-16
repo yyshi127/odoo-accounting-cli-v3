@@ -46,7 +46,7 @@ PRODUCTION_WRITE_EVIDENCE = PRODUCTION_READ_EVIDENCE | {
 }
 WRITE_IDEMPOTENCY_SCOPES = {
     "company_capability",
-    "company_depreciation_line",
+    "company_depreciation_move",
     "company_journal_source_digest",
     "company_line_set",
     "company_origin_move",

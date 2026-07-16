@@ -1,0 +1,1993 @@
+from __future__ import annotations
+
+import ast
+import copy
+import hashlib
+import json
+from contextlib import contextmanager, nullcontext
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import odoo_accounting_cli_v3.odoo.write_bootstrap as write_bootstrap
+from odoo_accounting_cli_v3.auth import sign_request_context
+from odoo_accounting_cli_v3.gateway import RequestContext
+from odoo_accounting_cli_v3.odoo.write_bootstrap import (
+    OdooWriteBootstrapError,
+    _default_handler_factory,
+    _difference,
+    _resource_lock_digests,
+    execute_write_from_odoo_shell,
+)
+from odoo_accounting_cli_v3.odoo.write_precheck import (
+    canonical_precheck_evidence,
+)
+from odoo_accounting_cli_v3.operations import (
+    State,
+    approve_operation,
+    begin_execution,
+    canonical_json,
+    record_precheck,
+    sign_approval,
+)
+from odoo_accounting_cli_v3.registry import registry_digest, validate_registry
+from odoo_accounting_cli_v3.write_protocol import (
+    approved_write_authentication_parameters,
+    approval_to_mapping,
+    operation_to_mapping,
+    trusted_result_from_mapping,
+)
+from odoo_accounting_cli_v3.write_receipts import create_recovery_plan
+
+
+NOW = datetime(2026, 7, 15, 4, 0, tzinfo=timezone.utc)
+DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
+AUTH_SECRET = b"auth-secret-material-at-least-32-bytes"
+APPROVAL_SECRET = b"approval-secret-material-at-least-32"
+EXECUTION_SECRET = b"execution-secret-material-at-least-32"
+VERIFICATION_SECRET = b"verification-secret-material-32-bytes"
+RELEASE_DIGEST = "d" * 64
+SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "odoo_accounting_cli_v3"
+    / "odoo"
+    / "write_bootstrap.py"
+)
+
+
+def test_overlapping_accounting_resources_share_a_stable_advisory_lock():
+    first = _resource_lock_digests(
+        "acct.reconciliation.apply.v1",
+        7,
+        {"line_ids": [502, 501]},
+        None,
+    )
+    reordered = _resource_lock_digests(
+        "acct.reconciliation.apply.v1",
+        7,
+        {"line_ids": [501, 502]},
+        None,
+    )
+    overlapping = _resource_lock_digests(
+        "acct.reconciliation.apply.v1",
+        7,
+        {"line_ids": [502, 503]},
+        None,
+    )
+
+    assert first == reordered
+    assert len(first) == 2
+    assert len(set(first) & set(overlapping)) == 1
+    assert first == sorted(first)
+    assert all(len(value) == 64 for value in first)
+
+
+def test_difference_marks_every_created_record_absent_before_it_exists():
+    values = {
+        "company_id": 7,
+        "state": "posted",
+        "line_ids": [502, 503],
+    }
+    raw_after = {
+        "model": "account.move",
+        "record_id": 501,
+        "company_id": 7,
+        "state": "posted",
+        "values": values,
+        "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+    }
+
+    difference, records = _difference([], [raw_after], 7)
+
+    assert difference["before"] == [
+        {
+            "model": "account.move",
+            "record_id": 501,
+            "exists": False,
+            "record_state": "absent",
+            "values_json": "{}",
+            "values_digest": hashlib.sha256(b"{}").hexdigest(),
+        }
+    ]
+    assert difference["after"][0]["exists"] is True
+    assert set(difference["changed_fields"]) == {
+        "company_id",
+        "line_ids",
+        "record_state",
+        "state",
+    }
+    assert records[0]["record_id"] == 501
+
+
+def test_execution_difference_rejects_a_graph_too_large_for_the_receipt_contract():
+    after = []
+    for record_id in range(1, 902):
+        values = {"company_id": 7, "state": "posted"}
+        after.append(
+            {
+                "model": "account.move.line",
+                "record_id": record_id,
+                "company_id": 7,
+                "state": "posted",
+                "values": values,
+                "values_digest": hashlib.sha256(
+                    canonical_json(values)
+                ).hexdigest(),
+            }
+        )
+
+    with pytest.raises(OdooWriteBootstrapError, match="auditable record limit"):
+        _difference([], after, 7)
+
+
+def _capabilities():
+    document = json.loads(
+        (Path(__file__).resolve().parents[1] / "registry" / "capabilities.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    selected = []
+    for capability_id in (
+        "acct.invoice.customer_create.v1",
+        "acct.recovery.execute.v1",
+    ):
+        capability = copy.deepcopy(
+            next(
+                item
+                for item in document["capabilities"]
+                if item["id"] == capability_id
+            )
+        )
+        capability["staged_environments"] = ["sandbox"]
+        capability["evidence"] = {"level": "contract_tested", "receipts": []}
+        selected.append(capability)
+    return validate_registry({"schema_version": 1, "capabilities": selected})
+
+
+CAPABILITIES = _capabilities()
+REGISTRY_DIGEST = registry_digest(CAPABILITIES)
+
+
+def _parameters(*, company_id=7, idempotency_key="invoice-1"):
+    return {
+        "company_id": company_id,
+        "partner_id": 101,
+        "invoice_date": "2026-07-15",
+        "accounting_date": "2026-07-15",
+        "due_date": "2026-08-15",
+        "currency_id": 12,
+        "journal_id": 5,
+        "posting_mode": "post",
+        "reference": "INV-SANDBOX-1",
+        "lines": [
+            {
+                "line_reference": "line-1",
+                "name": "Consulting",
+                "product_id": None,
+                "account_id": 401,
+                "quantity": "1",
+                "price_unit": "100.00",
+                "tax_ids": [],
+            }
+        ],
+        "idempotency_key": idempotency_key,
+    }
+
+
+def _recovery_case(
+    *,
+    company_id=7,
+    origin_operation_id="origin-op-1",
+    target_record_id=501,
+    target_company_id=None,
+    idempotency_key="recover-origin-op-1",
+):
+    target_company_id = target_company_id or company_id
+    target = {
+        "model": "account.move",
+        "record_id": target_record_id,
+        "company_id": target_company_id,
+        "record_state": "posted",
+        "record_fingerprint": hashlib.sha256(
+            f"account.move:{target_record_id}:{target_company_id}".encode()
+        ).hexdigest(),
+    }
+    plan = create_recovery_plan(
+        origin_operation_id=origin_operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method="reverse_posted_move",
+        requires_approval=True,
+        target_records=[target],
+        parameters={
+            "company_id": company_id,
+            "origin_operation_id": origin_operation_id,
+            "method": "reverse_posted_move",
+            "target_records": [
+                {"model": "account.move", "record_id": target_record_id}
+            ],
+        },
+    )
+    parameters = {
+        "company_id": company_id,
+        "origin_operation_id": origin_operation_id,
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "recovery_date": "2026-07-15",
+        "reason": "Approved compensating reversal",
+        "idempotency_key": idempotency_key,
+    }
+    return parameters, plan
+
+
+def _context(
+    parameters,
+    *,
+    capability_id="acct.invoice.customer_create.v1",
+    user_id=42,
+    company_id=7,
+    allowed=frozenset({7}),
+    reconciliation_only=False,
+):
+    return sign_request_context(
+        auth_token_id=f"token-{user_id}-{company_id}",
+        principal=f"pi:sandbox:{user_id}",
+        odoo_instance_id="odoo19@sandbox",
+        database_name="v3_sandbox",
+        database_uuid=DATABASE_UUID,
+        user_id=user_id,
+        company_id=company_id,
+        allowed_company_ids=allowed,
+        environment="sandbox",
+        capability_id=capability_id,
+        parameters=approved_write_authentication_parameters(
+            parameters, reconciliation_only
+        ),
+        issued_at=NOW - timedelta(seconds=30),
+        expires_at=NOW + timedelta(minutes=4, seconds=30),
+        key_id="auth-v1",
+        secret=AUTH_SECRET,
+    )
+
+
+def _reconciliation_context(operation):
+    return _context(
+        operation.parameters,
+        capability_id=operation.capability_id,
+        user_id=operation.user_id,
+        company_id=operation.company_id,
+        allowed=frozenset({operation.company_id}),
+        reconciliation_only=True,
+    )
+
+
+def _raw_precheck(capability_id, parameters):
+    return {
+        "capability_id": capability_id,
+        "company_id": parameters["company_id"],
+        "parameters_digest": hashlib.sha256(
+            canonical_json(parameters)
+        ).hexdigest(),
+        "checks": ["acl", "company", "parameters"],
+        "before": [],
+    }
+
+
+def _preview_digest(context, capability_id, parameters, *, raw_precheck=None):
+    evidence = canonical_precheck_evidence(
+        raw_precheck or _raw_precheck(capability_id, parameters),
+        capability_id=capability_id,
+        company_id=parameters["company_id"],
+        parameters=parameters,
+        context=context,
+        actual_database_name="v3_sandbox",
+        actual_database_uuid=DATABASE_UUID,
+        capability_channel="staged",
+        registry_sha256=REGISTRY_DIGEST,
+        release_digest=RELEASE_DIGEST,
+    )
+    return hashlib.sha256(canonical_json(evidence)).hexdigest()
+
+
+def _executing(
+    parameters=None,
+    *,
+    capability_id="acct.invoice.customer_create.v1",
+    company_id=7,
+    operation_id="op-1",
+    raw_precheck=None,
+):
+    parameters = parameters or _parameters(company_id=company_id)
+    context = _context(
+        parameters,
+        capability_id=capability_id,
+        company_id=company_id,
+        allowed=frozenset({company_id}),
+    )
+    from odoo_accounting_cli_v3.operations import Operation
+
+    capability = next(item for item in CAPABILITIES if item.id == capability_id)
+    approval_ttl_seconds = capability.data["approval"]["ttl_seconds"]
+
+    operation = Operation.prepare(
+        operation_id=operation_id,
+        request_id=f"req-{operation_id}",
+        capability_id=capability_id,
+        parameters=parameters,
+        principal=context.principal,
+        user_id=context.user_id,
+        company_id=company_id,
+        idempotency_key=parameters["idempotency_key"],
+        odoo_instance_id=context.odoo_instance_id,
+        database_name=context.database_name,
+        database_uuid=context.database_uuid,
+        environment=context.environment,
+        registry_digest=REGISTRY_DIGEST,
+        release_digest=RELEASE_DIGEST,
+    )
+    operation = record_precheck(
+        operation,
+        precheck_digest=_preview_digest(
+            context,
+            capability_id,
+            parameters,
+            raw_precheck=raw_precheck,
+        ),
+        expected_revision=0,
+    )
+    operation = operation.transition(State.AWAITING_APPROVAL, expected_revision=1)
+    approval = sign_approval(
+        operation=operation,
+        approver_user_id=77,
+        nonce=f"nonce-{operation_id}",
+        issued_at=NOW - timedelta(seconds=30),
+        expires_at=NOW + timedelta(minutes=4),
+        approval_ttl_seconds=approval_ttl_seconds,
+        key_id="approval-v2",
+        secret=APPROVAL_SECRET,
+    )
+    operation = approve_operation(
+        operation,
+        approval,
+        now=NOW,
+        secret=APPROVAL_SECRET,
+        expected_key_id="approval-v2",
+        is_approver_authorized=lambda *_: True,
+        consume_nonce=lambda *_: True,
+        approval_ttl_seconds=approval_ttl_seconds,
+        expected_revision=2,
+    )
+    operation = begin_execution(
+        operation,
+        approval,
+        now=NOW,
+        secret=APPROVAL_SECRET,
+        expected_key_id="approval-v2",
+        is_approver_authorized=lambda *_: True,
+        approval_ttl_seconds=approval_ttl_seconds,
+        expected_revision=3,
+    )
+    return context, operation, approval
+
+
+def _context_mapping(context: RequestContext):
+    def utc(value):
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    return {
+        "allowed_company_ids": sorted(context.allowed_company_ids),
+        "audience": context.audience,
+        "auth_expires_at": utc(context.auth_expires_at),
+        "auth_issued_at": utc(context.auth_issued_at),
+        "auth_key_id": context.auth_key_id,
+        "auth_request_digest": context.auth_request_digest,
+        "auth_signature": context.auth_signature,
+        "auth_signature_purpose": context.auth_signature_purpose,
+        "auth_signature_version": context.auth_signature_version,
+        "auth_token_id": context.auth_token_id,
+        "company_id": context.company_id,
+        "database_name": context.database_name,
+        "database_uuid": context.database_uuid,
+        "environment": context.environment,
+        "odoo_instance_id": context.odoo_instance_id,
+        "principal": context.principal,
+        "user_id": context.user_id,
+    }
+
+
+def _request(
+    context,
+    operation,
+    approval,
+    *,
+    trusted_recovery_plan=None,
+    reconciliation_only=False,
+):
+    return {
+        "context": _context_mapping(context),
+        "operation": operation_to_mapping(operation),
+        "approval": approval_to_mapping(approval),
+        "trusted_recovery_plan": trusted_recovery_plan,
+        "reconciliation_only": reconciliation_only,
+    }
+
+
+class User:
+    def __init__(self, identifier, company_ids, groups):
+        self.id = identifier
+        self.ids = [identifier]
+        self.active = True
+        self.company_ids = SimpleNamespace(ids=list(company_ids))
+        self._groups = set(groups)
+
+    def __bool__(self):
+        return True
+
+    def __len__(self):
+        return 1
+
+    def exists(self):
+        return self
+
+    def has_group(self, group):
+        return group in self._groups
+
+
+class UserModel:
+    def __init__(self, users):
+        self.users = users
+
+    def browse(self, identifier):
+        return self.users[identifier]
+
+
+class ConfigModel:
+    def get_param(self, key):
+        assert key == "database.uuid"
+        return DATABASE_UUID
+
+
+class Cursor:
+    dbname = "v3_sandbox"
+
+    def __init__(self):
+        self.commits = 0
+        self.savepoints = 0
+        self.rolled_back_savepoints = 0
+        self.side_effects = []
+
+    @contextmanager
+    def savepoint(self):
+        self.savepoints += 1
+        side_effects_before = copy.deepcopy(self.side_effects)
+        try:
+            yield
+        except Exception:
+            self.side_effects = side_effects_before
+            self.rolled_back_savepoints += 1
+            raise
+
+    def commit(self):
+        self.commits += 1
+
+
+class BoundEnv:
+    def __init__(self, cr, users, anchors, uid=42):
+        self.cr = cr
+        self.uid = uid
+        self.su = False
+        self.user = users[uid]
+        self.cache_invalidations = 0
+        self._models = {
+            "res.users": UserModel(users),
+            "odoo.accounting.cli.operation": anchors,
+        }
+
+    def __getitem__(self, name):
+        return self._models[name]
+
+    def invalidate_all(self):
+        self.cache_invalidations += 1
+
+
+class RootEnv:
+    def __init__(self, cr):
+        self.cr = cr
+        self._config = ConfigModel()
+
+    def __getitem__(self, name):
+        assert name == "ir.config_parameter"
+        return self._config
+
+
+class Anchor:
+    def __init__(self, values):
+        for key, value in values.items():
+            setattr(self, key, value)
+        self.state = "claimed"
+        for phase in ("execution", "verification"):
+            setattr(self, f"{phase}_evidence_json", False)
+            setattr(self, f"{phase}_evidence_digest", False)
+            setattr(self, f"{phase}_result_json", False)
+            setattr(self, f"{phase}_result_digest", False)
+        self.bound_verification_calls = 0
+        self.root_verification_calls = 0
+        self.resource_locks = []
+
+    def _acquire_resource_locks(self, resource_digests):
+        assert self.state == "claimed"
+        assert resource_digests == sorted(set(resource_digests))
+        self.resource_locks.extend(resource_digests)
+
+    def _record_execution(self, *, evidence, evidence_digest, result, result_digest, succeeded):
+        self.execution_evidence_json = canonical_json(evidence).decode()
+        self.execution_evidence_digest = evidence_digest
+        self.execution_result_json = canonical_json(result).decode()
+        self.execution_result_digest = result_digest
+        self.state = "committed" if succeeded else "failed"
+
+    def _record_verification(self, *, evidence, evidence_digest, result, result_digest, passed):
+        self.bound_verification_calls += 1
+        self._store_verification(
+            evidence=evidence,
+            evidence_digest=evidence_digest,
+            result=result,
+            result_digest=result_digest,
+            passed=passed,
+        )
+
+    def _record_committed_verification_from_root(
+        self, *, evidence, evidence_digest, result, result_digest, passed
+    ):
+        self.root_verification_calls += 1
+        self._store_verification(
+            evidence=evidence,
+            evidence_digest=evidence_digest,
+            result=result,
+            result_digest=result_digest,
+            passed=passed,
+        )
+
+    def _store_verification(self, *, evidence, evidence_digest, result, result_digest, passed):
+        self.verification_evidence_json = canonical_json(evidence).decode()
+        self.verification_evidence_digest = evidence_digest
+        self.verification_result_json = canonical_json(result).decode()
+        self.verification_result_digest = result_digest
+        self.state = "verified" if passed else "failed"
+
+
+class Anchors:
+    def __init__(self):
+        self.by_scope = {}
+        self.claim_calls = 0
+        self.lookup_calls = 0
+
+    def _lookup_exact(self, **values):
+        self.lookup_calls += 1
+        matches = [
+            anchor
+            for anchor in self.by_scope.values()
+            if anchor.operation_id == values["operation_id"]
+        ]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise RuntimeError("operation lookup is not unique")
+        anchor = matches[0]
+        for name, value in values.items():
+            if getattr(anchor, name) != value:
+                raise RuntimeError("operation lookup immutable binding mismatch")
+        return anchor
+
+    def _claim(self, **values):
+        self.claim_calls += 1
+        key = (values["company_id"], values["capability_id"], values["idempotency_scope"])
+        existing = self.by_scope.get(key)
+        if existing:
+            for name, value in values.items():
+                if getattr(existing, name) != value:
+                    raise RuntimeError("idempotency scope has different immutable content")
+            return existing
+        anchor = Anchor(values)
+        self.by_scope[key] = anchor
+        return anchor
+
+
+class LockableRecordset:
+    def __init__(self, identifier, *, snapshot_state="stable", on_lock=None):
+        self.id = identifier
+        self.ids = [identifier]
+        self.snapshot_state = snapshot_state
+        self.on_lock = on_lock
+        self.lock_calls = []
+        self.invalidations = 0
+        self.access_rules = []
+
+    def __bool__(self):
+        return True
+
+    def __len__(self):
+        return 1
+
+    def exists(self):
+        return self
+
+    def check_access_rule(self, operation):
+        self.access_rules.append(operation)
+
+    def lock_for_update(self, *, allow_referencing=False):
+        self.lock_calls.append(allow_referencing)
+        if self.on_lock is not None:
+            self.on_lock(self)
+
+    def invalidate_recordset(self):
+        self.invalidations += 1
+
+
+class LockableModel:
+    def __init__(self, record):
+        self.record = record
+        self.access = []
+
+    def check_access_rights(self, operation):
+        self.access.append(operation)
+
+    def browse(self, identifiers):
+        assert list(identifiers) == self.record.ids
+        return self.record
+
+
+class Handler:
+    def __init__(self, *, execute_error=None, verify_error=None):
+        self.calls = []
+        self.precheck_calls = 0
+        self.prechecked_executions = []
+        self.factory_plans = []
+        self.execute_error = execute_error
+        self.verify_error = verify_error
+
+    def precheck(self, capability_id, parameters):
+        self.precheck_calls += 1
+        return _raw_precheck(capability_id, parameters)
+
+    def execute(self, capability_id, parameters):
+        self.calls.append("execute")
+        if self.execute_error:
+            raise self.execute_error
+        return {
+            "capability_id": capability_id,
+            "company_id": parameters["company_id"],
+            "parameters_digest": hashlib.sha256(canonical_json(parameters)).hexdigest(),
+            "before": [],
+            "after": [{
+                "model": "account.move", "record_id": 501, "company_id": 7,
+                "state": "posted", "values": {"state": "posted", "amount_total": "100.00"},
+                "values_digest": hashlib.sha256(
+                    canonical_json({"state": "posted", "amount_total": "100.00"})
+                ).hexdigest(),
+            }],
+            "records": [{"model": "account.move", "record_id": 501}],
+            "recovery": {
+                "status": "available", "method": "reverse_posted_move",
+                "targets": [{"model": "account.move", "record_id": 501}],
+            },
+        }
+
+    def execute_prechecked(self, capability_id, parameters, checked):
+        self.prechecked_executions.append(copy.deepcopy(checked))
+        return self.execute(capability_id, parameters)
+
+    def verify(self, capability_id, parameters, execution):
+        self.calls.append("verify")
+        if self.verify_error:
+            raise self.verify_error
+        after = [{
+            "model": "account.move",
+            "record_id": 501,
+            "company_id": 7,
+            "state": "posted",
+            "values": {"state": "posted", "amount_total": "100.00"},
+            "values_digest": hashlib.sha256(
+                canonical_json({"state": "posted", "amount_total": "100.00"})
+            ).hexdigest(),
+        }]
+        return {
+            "passed": True,
+            "method": "odoo_public_orm_readback_v1",
+            "checks": ["record_exists", "state_matches"],
+            "after": after,
+            "evidence_digest": hashlib.sha256(canonical_json(after)).hexdigest(),
+        }
+
+
+def _dependency_precheck(capability_id, parameters, record):
+    result = _raw_precheck(capability_id, parameters)
+    values = {"company_id": parameters["company_id"], "state": record.snapshot_state}
+    result["dependencies"] = [
+        {
+            "model": "account.asset",
+            "record_id": record.id,
+            "company_id": parameters["company_id"],
+            "state": record.snapshot_state,
+            "values": values,
+            "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+        }
+    ]
+    return result
+
+
+class DependencyHandler(Handler):
+    def __init__(self, record):
+        super().__init__()
+        self.record = record
+
+    def precheck(self, capability_id, parameters):
+        self.precheck_calls += 1
+        return _dependency_precheck(capability_id, parameters, self.record)
+
+    def execute_prechecked(self, capability_id, parameters, checked):
+        assert self.record.lock_calls == [True]
+        assert self.record.invalidations == 1
+        return super().execute_prechecked(capability_id, parameters, checked)
+
+
+def _harness(*, handler=None, approver_group=True):
+    cr = Cursor()
+    anchors = Anchors()
+    users = {
+        42: User(42, [7, 8], {
+            "odoo_accounting_cli_v3_control.group_executor",
+            "account.group_account_invoice",
+            "account.group_account_manager",
+        }),
+        77: User(77, [7, 8], {
+            "odoo_accounting_cli_v3_control.group_approver" if approver_group else "unrelated.group"
+        }),
+    }
+    bound = BoundEnv(cr, users, anchors)
+    anchors.users = users
+    anchors.bound_env = bound
+    root = RootEnv(cr)
+    selected_handler = handler or Handler()
+    kwargs = {
+        "capabilities": CAPABILITIES,
+        "auth_secret": AUTH_SECRET,
+        "auth_key_id": "auth-v1",
+        "approval_secret": APPROVAL_SECRET,
+        "approval_key_id": "approval-v2",
+        "execution_secret": EXECUTION_SECRET,
+        "execution_key_id": "execution-v2",
+        "execution_issuer": "odoo-write-executor",
+        "verification_secret": VERIFICATION_SECRET,
+        "verification_key_id": "verification-v2",
+        "verification_issuer": "odoo-write-verifier",
+        "release_digest": RELEASE_DIGEST,
+        "odoo_instance_id": "odoo19@sandbox",
+        "environment": "sandbox",
+        "capability_channel": "staged",
+        "now": NOW,
+        "environment_factory": lambda _cr, _uid, _context: bound,
+        "handler_factory": lambda _env, _context, _now, trusted_plan=None: (
+            selected_handler.factory_plans.append(copy.deepcopy(trusted_plan))
+            or selected_handler
+        ),
+        "control_store_factory": lambda _env: anchors,
+        "control_lookup_factory": lambda _env: anchors,
+        "metadata_execution_scope_factory": nullcontext,
+    }
+    return root, cr, anchors, selected_handler, kwargs
+
+
+def test_first_write_commits_atomic_execution_then_verified_readback():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    result = execute_write_from_odoo_shell(root, _request(context, operation, approval), **kwargs)
+    assert cr.commits == 2
+    assert cr.savepoints == 4
+    assert cr.rolled_back_savepoints == 2
+    assert handler.calls == ["execute", "verify"]
+    assert len(handler.prechecked_executions) == 1
+    assert anchors.bound_env.cache_invalidations == 1
+    assert len(anchors.by_scope) == 1
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.state == "verified"
+    assert anchor.resource_locks == _resource_lock_digests(
+        operation.capability_id,
+        operation.company_id,
+        operation.parameters,
+        None,
+    )
+    assert anchor.bound_verification_calls == 1
+    assert anchor.root_verification_calls == 0
+    assert trusted_result_from_mapping(result["execution"]["result"]).succeeded is True
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded is True
+    assert result["verification"]["evidence"]["method"] == (
+        CAPABILITIES[0].data["verification"]["method"]
+    )
+    assert result["execution"]["evidence"]["odoo_records"][0]["record_id"] == 501
+    assert result["verification"]["evidence"]["readback"]["records"] == (
+        result["execution"]["evidence"]["odoo_records"]
+    )
+    assert len(
+        result["verification"]["evidence"]["readback"]["fresh_snapshots"]
+    ) == 1
+    assert set(result["execution"]["evidence"]) == {
+        "operation_id", "capability_id", "succeeded", "odoo_records",
+        "difference", "recovery_plan", "recovery_parameters", "failure_checks",
+    }
+    assert set(result["verification"]["evidence"]["readback"]) == {
+        "company_id",
+        "records",
+        "fresh_snapshots",
+        "fresh_snapshots_digest",
+        "request_parameters_digest",
+        "control_anchor",
+    }
+
+
+def test_normal_verification_rolls_back_handler_side_effect_before_control_commit():
+    context, operation, approval = _executing()
+
+    class WritingVerifier(Handler):
+        cursor = None
+
+        def verify(self, capability_id, parameters, execution):
+            self.cursor.side_effects.append("forbidden verify ORM write")
+            return super().verify(capability_id, parameters, execution)
+
+    writing = WritingVerifier()
+    root, cr, anchors, handler, kwargs = _harness(handler=writing)
+    writing.cursor = cr
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert result["reconciliation_only"] is False
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded
+    assert cr.side_effects == []
+    assert cr.commits == 2
+    assert next(iter(anchors.by_scope.values())).state == "verified"
+
+
+def test_metadata_authority_scope_wraps_only_approved_handler_execution():
+    active = False
+    observations: list[tuple[str, bool]] = []
+
+    @contextmanager
+    def metadata_scope():
+        nonlocal active
+        assert active is False
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    class ScopeHandler(Handler):
+        def precheck(self, capability_id, parameters):
+            observations.append(("precheck", active))
+            return super().precheck(capability_id, parameters)
+
+        def execute_prechecked(self, capability_id, parameters, checked):
+            observations.append(("execute", active))
+            return super().execute_prechecked(capability_id, parameters, checked)
+
+        def verify(self, capability_id, parameters, execution):
+            observations.append(("verify", active))
+            return super().verify(capability_id, parameters, execution)
+
+    context, operation, approval = _executing()
+    root, _cr, _anchors, _handler, kwargs = _harness(handler=ScopeHandler())
+    kwargs["metadata_execution_scope_factory"] = metadata_scope
+
+    execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert observations == [
+        ("precheck", False),
+        ("execute", True),
+        ("verify", False),
+    ]
+    assert active is False
+
+
+def test_default_metadata_scope_is_lazily_loaded_from_the_odoo_addon(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    active = False
+    imported: list[str] = []
+
+    @contextmanager
+    def scope():
+        nonlocal active
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    module = SimpleNamespace(_accounting_metadata_execution_scope=scope)
+
+    def import_module(name):
+        imported.append(name)
+        return module
+
+    monkeypatch.setattr(write_bootstrap.importlib, "import_module", import_module)
+    with write_bootstrap._default_metadata_execution_scope():
+        assert active is True
+
+    assert active is False
+    assert imported == [write_bootstrap.METADATA_SCOPE_MODULE]
+
+    monkeypatch.setattr(
+        write_bootstrap.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(),
+    )
+    with pytest.raises(OdooWriteBootstrapError, match="scope is unavailable"):
+        write_bootstrap._default_metadata_execution_scope()
+
+
+def test_verification_rebinds_to_a_new_environment_after_the_business_commit():
+    context, operation, approval = _executing()
+    root, cr, anchors, _handler, kwargs = _harness()
+    events = []
+    first_env = anchors.bound_env
+    second_env = BoundEnv(cr, anchors.users, anchors)
+    original_invalidate = first_env.invalidate_all
+    original_commit = cr.commit
+
+    def invalidate_first_env():
+        events.append("invalidate:first")
+        original_invalidate()
+
+    def commit():
+        original_commit()
+        events.append(f"commit:{cr.commits}")
+
+    first_env.invalidate_all = invalidate_first_env
+    cr.commit = commit
+    environments = iter([first_env, second_env])
+    kwargs["environment_factory"] = lambda _cr, _uid, _context: next(
+        environments
+    )
+
+    class PhaseHandler(Handler):
+        def __init__(self, label):
+            super().__init__()
+            self.label = label
+
+        def precheck(self, capability_id, parameters):
+            events.append(f"precheck:{self.label}")
+            return super().precheck(capability_id, parameters)
+
+        def execute_prechecked(self, capability_id, parameters, checked):
+            assert cr.commits == 0
+            events.append(f"execute:{self.label}")
+            return super().execute_prechecked(capability_id, parameters, checked)
+
+        def verify(self, capability_id, parameters, execution):
+            assert cr.commits == 1
+            events.append(f"verify:{self.label}")
+            return super().verify(capability_id, parameters, execution)
+
+    first_handler = PhaseHandler("first")
+    second_handler = PhaseHandler("second")
+    kwargs["handler_factory"] = lambda env, *_args: (
+        first_handler if env is first_env else second_handler
+    )
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded is True
+    assert first_handler.calls == ["execute"]
+    assert second_handler.calls == ["verify"]
+    assert first_env.cache_invalidations == 1
+    assert second_env.cache_invalidations == 0
+    assert events == [
+        "precheck:first",
+        "execute:first",
+        "commit:1",
+        "invalidate:first",
+        "verify:second",
+        "commit:2",
+    ]
+
+
+def test_same_signed_request_replays_verified_anchor_without_another_write_or_commit():
+    context, operation, approval = _executing()
+    root, cr, _anchors, handler, kwargs = _harness()
+    request = _request(context, operation, approval)
+    first = execute_write_from_odoo_shell(root, request, **kwargs)
+    second = execute_write_from_odoo_shell(root, request, **kwargs)
+    assert second == first
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+    assert _anchors.bound_env.cache_invalidations == 1
+
+
+def test_verified_anchor_replays_after_executor_and_approver_acl_revocation():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    request = _request(context, operation, approval)
+    first = execute_write_from_odoo_shell(root, request, **kwargs)
+    anchors.users[42]._groups.clear()
+    anchors.users[77]._groups.clear()
+
+    replay = execute_write_from_odoo_shell(root, request, **kwargs)
+
+    assert replay == first
+    assert handler.precheck_calls == 1
+    assert handler.calls == ["execute", "verify"]
+    assert anchors.lookup_calls == 2
+    assert anchors.claim_calls == 1
+    assert cr.commits == 2
+
+
+def test_committed_anchor_can_finish_readback_after_write_acl_revocation():
+    context, operation, approval = _executing()
+    interrupted = Handler(verify_error=SystemExit("response channel lost"))
+    root, cr, anchors, handler, kwargs = _harness(handler=interrupted)
+    request = _request(context, operation, approval)
+    with pytest.raises(SystemExit, match="response channel lost"):
+        execute_write_from_odoo_shell(root, request, **kwargs)
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.state == "committed"
+
+    anchors.users[42]._groups.clear()
+    anchors.users[77]._groups.clear()
+    interrupted.verify_error = None
+    replay = execute_write_from_odoo_shell(root, request, **kwargs)
+
+    assert trusted_result_from_mapping(replay["verification"]["result"]).succeeded is True
+    assert handler.precheck_calls == 1
+    assert handler.calls == ["execute", "verify", "verify"]
+    assert anchors.claim_calls == 1
+    assert cr.commits == 2
+    assert anchor.bound_verification_calls == 0
+    assert anchor.root_verification_calls == 1
+
+
+def test_response_loss_after_business_commit_retries_from_committed_anchor_only():
+    context, operation, approval = _executing()
+    interrupted = Handler(verify_error=SystemExit("response channel lost"))
+    root, cr, anchors, handler, kwargs = _harness(handler=interrupted)
+    request = _request(context, operation, approval)
+    with pytest.raises(SystemExit, match="response channel lost"):
+        execute_write_from_odoo_shell(root, request, **kwargs)
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.state == "committed"
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 1
+
+    interrupted.verify_error = None
+    result = execute_write_from_odoo_shell(root, request, **kwargs)
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded is True
+    assert handler.calls == ["execute", "verify", "verify"]
+    assert cr.commits == 2
+    assert anchor.state == "verified"
+
+
+def test_unapproved_operation_is_rejected_before_anchor_or_handler():
+    context, operation, approval = _executing()
+    request = _request(context, operation, approval)
+    request["operation"]["state"] = "awaiting_approval"
+    request["operation"]["revision"] = 2
+    request["operation"]["approval"] = None
+    root, cr, anchors, handler, kwargs = _harness()
+    with pytest.raises(OdooWriteBootstrapError, match="executing"):
+        execute_write_from_odoo_shell(root, request, **kwargs)
+    assert anchors.claim_calls == 0
+    assert handler.calls == []
+    assert cr.commits == 0
+
+
+def test_cross_company_binding_and_missing_approver_group_are_rejected():
+    context, operation, approval = _executing()
+    foreign_context = _context(operation.parameters, company_id=8, allowed=frozenset({7, 8}))
+    root, cr, anchors, handler, kwargs = _harness()
+    with pytest.raises(OdooWriteBootstrapError, match="binding"):
+        execute_write_from_odoo_shell(root, _request(foreign_context, operation, approval), **kwargs)
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+
+def test_expired_execute_mode_without_anchor_is_rejected_without_claim_or_handler():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    kwargs["now"] = NOW + timedelta(minutes=4, seconds=15)
+    with pytest.raises(OdooWriteBootstrapError, match="reconciliation-only"):
+        execute_write_from_odoo_shell(
+            root, _request(context, operation, approval), **kwargs
+        )
+    assert anchors.by_scope == {}
+    assert anchors.claim_calls == 0
+    assert handler.precheck_calls == 0
+    assert handler.calls == []
+    assert cr.commits == 0
+
+
+def test_expired_reconciliation_without_anchor_is_unknown_and_never_claims():
+    context, operation, approval = _executing()
+    context = _reconciliation_context(operation)
+    root, cr, anchors, handler, kwargs = _harness()
+    kwargs["now"] = approval.expires_at
+    forbidden = {"control_store": 0, "handler_factory": 0, "metadata_scope": 0}
+
+    def control_store(_env):
+        forbidden["control_store"] += 1
+        return anchors
+
+    def handler_factory(*_args):
+        forbidden["handler_factory"] += 1
+        return handler
+
+    def metadata_scope():
+        forbidden["metadata_scope"] += 1
+        return nullcontext()
+
+    kwargs["control_store_factory"] = control_store
+    kwargs["handler_factory"] = handler_factory
+    kwargs["metadata_execution_scope_factory"] = metadata_scope
+
+    with pytest.raises(OdooWriteBootstrapError, match="durable anchor"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                reconciliation_only=True,
+            ),
+            **kwargs,
+        )
+
+    assert anchors.by_scope == {}
+    assert anchors.claim_calls == 0
+    assert handler.precheck_calls == 0
+    assert handler.calls == []
+    assert forbidden == {
+        "control_store": 0,
+        "handler_factory": 0,
+        "metadata_scope": 0,
+    }
+    assert cr.commits == 0
+
+
+def test_unexpired_verifying_reconciliation_without_anchor_never_claims_or_executes():
+    context, operation, approval = _executing()
+    context = _reconciliation_context(operation)
+    root, cr, anchors, handler, kwargs = _harness()
+
+    with pytest.raises(OdooWriteBootstrapError, match="durable anchor"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                reconciliation_only=True,
+            ),
+            **kwargs,
+        )
+
+    assert anchors.by_scope == {}
+    assert anchors.claim_calls == 0
+    assert handler.precheck_calls == 0
+    assert handler.calls == []
+    assert cr.commits == 0
+
+
+def test_reconciliation_mode_bit_flip_is_rejected_before_anchor_lookup():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+
+    with pytest.raises(OdooWriteBootstrapError, match="request digest"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                reconciliation_only=True,
+            ),
+            **kwargs,
+        )
+
+    assert anchors.lookup_calls == 0
+    assert anchors.claim_calls == 0
+    assert handler.precheck_calls == 0
+    assert handler.calls == []
+    assert cr.commits == 0
+
+
+def test_exact_anchor_lookup_rejects_immutable_release_tampering_before_replay():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    request = _request(context, operation, approval)
+    execute_write_from_odoo_shell(root, request, **kwargs)
+    anchor = next(iter(anchors.by_scope.values()))
+    anchor.release_digest = "f" * 64
+
+    with pytest.raises(RuntimeError, match="immutable binding mismatch"):
+        execute_write_from_odoo_shell(root, request, **kwargs)
+
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+
+    wrong_parameters = copy.deepcopy(operation.parameters)
+    wrong_parameters["reference"] = "AUTHENTICATED-DIFFERENT-CONTENT"
+    wrong_context = _context(wrong_parameters)
+    root, cr, anchors, handler, kwargs = _harness()
+    with pytest.raises(OdooWriteBootstrapError, match="request digest"):
+        execute_write_from_odoo_shell(root, _request(wrong_context, operation, approval), **kwargs)
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+
+def test_expired_approval_replays_verified_anchor_without_new_write():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    request = _request(context, operation, approval)
+
+    first = execute_write_from_odoo_shell(root, request, **kwargs)
+    kwargs["now"] = NOW + timedelta(minutes=4, seconds=15)
+    reconciliation_context = _reconciliation_context(operation)
+    replay = execute_write_from_odoo_shell(
+        root,
+        _request(
+            reconciliation_context,
+            operation,
+            approval,
+            reconciliation_only=True,
+        ),
+        **kwargs,
+    )
+
+    assert replay["execution"] == first["execution"]
+    assert replay["verification"] == first["verification"]
+    assert first["reconciliation_only"] is False
+    assert replay["reconciliation_only"] is True
+    assert next(iter(anchors.by_scope.values())).state == "verified"
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+
+
+def test_expired_reconciliation_finishes_committed_anchor_without_execute():
+    context, operation, approval = _executing()
+    interrupted = Handler(verify_error=SystemExit("response channel lost"))
+    root, cr, anchors, handler, kwargs = _harness(handler=interrupted)
+    with pytest.raises(SystemExit, match="response channel lost"):
+        execute_write_from_odoo_shell(
+            root, _request(context, operation, approval), **kwargs
+        )
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.state == "committed"
+    interrupted.verify_error = None
+    kwargs["now"] = approval.expires_at
+    reconciliation_context = _reconciliation_context(operation)
+
+    result = execute_write_from_odoo_shell(
+        root,
+        _request(
+            reconciliation_context,
+            operation,
+            approval,
+            reconciliation_only=True,
+        ),
+        **kwargs,
+    )
+
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded
+    assert handler.calls == ["execute", "verify", "verify"]
+    assert anchors.claim_calls == 1
+    assert anchor.state == "verified"
+
+
+def test_committed_reconciliation_rolls_back_verify_side_effect_before_control_commit():
+    context, operation, approval = _executing()
+
+    class WritingVerifier(Handler):
+        cursor = None
+
+        def verify(self, capability_id, parameters, execution):
+            if self.verify_error is None:
+                self.cursor.side_effects.append("forbidden reconcile verify ORM write")
+            return super().verify(capability_id, parameters, execution)
+
+    writing = WritingVerifier(
+        verify_error=SystemExit("response channel lost after commit")
+    )
+    root, cr, anchors, handler, kwargs = _harness(handler=writing)
+    writing.cursor = cr
+    with pytest.raises(SystemExit, match="response channel lost"):
+        execute_write_from_odoo_shell(
+            root, _request(context, operation, approval), **kwargs
+        )
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.state == "committed"
+    assert cr.commits == 1
+    writing.verify_error = None
+
+    result = execute_write_from_odoo_shell(
+        root,
+        _request(
+            _reconciliation_context(operation),
+            operation,
+            approval,
+            reconciliation_only=True,
+        ),
+        **kwargs,
+    )
+
+    assert result["reconciliation_only"] is True
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded
+    assert handler.calls == ["execute", "verify", "verify"]
+    assert cr.side_effects == []
+    assert cr.commits == 2
+    assert anchor.state == "verified"
+
+
+def test_expired_reconciliation_rejects_claimed_anchor_without_side_effect():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+    anchor = next(iter(anchors.by_scope.values()))
+    anchor.state = "claimed"
+    handler.calls.clear()
+    handler.precheck_calls = 0
+    commits = cr.commits
+    resource_locks = list(anchor.resource_locks)
+    kwargs["now"] = approval.expires_at
+    reconciliation_context = _reconciliation_context(operation)
+    forbidden = {"control_store": 0, "handler_factory": 0, "metadata_scope": 0}
+
+    def control_store(_env):
+        forbidden["control_store"] += 1
+        return anchors
+
+    def handler_factory(*_args):
+        forbidden["handler_factory"] += 1
+        return handler
+
+    def metadata_scope():
+        forbidden["metadata_scope"] += 1
+        return nullcontext()
+
+    kwargs["control_store_factory"] = control_store
+    kwargs["handler_factory"] = handler_factory
+    kwargs["metadata_execution_scope_factory"] = metadata_scope
+
+    with pytest.raises(OdooWriteBootstrapError, match="durable anchor"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                reconciliation_context,
+                operation,
+                approval,
+                reconciliation_only=True,
+            ),
+            **kwargs,
+        )
+
+    assert handler.precheck_calls == 0
+    assert handler.calls == []
+    assert anchors.claim_calls == 1
+    assert anchor.resource_locks == resource_locks
+    assert forbidden == {
+        "control_store": 0,
+        "handler_factory": 0,
+        "metadata_scope": 0,
+    }
+    assert cr.commits == commits
+
+    root, cr, anchors, handler, kwargs = _harness(approver_group=False)
+    with pytest.raises(OdooWriteBootstrapError, match="approver"):
+        execute_write_from_odoo_shell(root, _request(context, operation, approval), **kwargs)
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+
+def test_expired_reconciliation_replays_failed_anchor_without_handler_or_commit():
+    context, operation, approval = _executing()
+    failing = Handler(execute_error=RuntimeError("business write failed"))
+    root, cr, anchors, handler, kwargs = _harness(handler=failing)
+    first = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.state == "failed"
+    commits = cr.commits
+    handler.calls.clear()
+    handler.precheck_calls = 0
+    kwargs["now"] = approval.expires_at
+
+    replay = execute_write_from_odoo_shell(
+        root,
+        _request(
+            _reconciliation_context(operation),
+            operation,
+            approval,
+            reconciliation_only=True,
+        ),
+        **kwargs,
+    )
+
+    assert replay["execution"] == first["execution"]
+    assert replay["verification"] is None
+    assert replay["reconciliation_only"] is True
+    assert handler.precheck_calls == 0
+    assert handler.calls == []
+    assert anchors.claim_calls == 1
+    assert cr.commits == commits
+
+
+def test_same_idempotency_scope_with_different_signed_content_is_rejected():
+    context, operation, approval = _executing()
+    root, cr, _anchors, handler, kwargs = _harness()
+    execute_write_from_odoo_shell(root, _request(context, operation, approval), **kwargs)
+    changed = _parameters(idempotency_key="invoice-1")
+    changed["reference"] = "INV-SANDBOX-CHANGED"
+    # Same idempotency scope with different approved business content conflicts.
+    context2, operation2, approval2 = _executing(changed, operation_id="op-2")
+    with pytest.raises(RuntimeError, match="different immutable content"):
+        execute_write_from_odoo_shell(root, _request(context2, operation2, approval2), **kwargs)
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+
+
+def test_execution_exception_rolls_back_savepoint_and_commits_signed_failure_anchor():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness(
+        handler=Handler(execute_error=RuntimeError("business write failed"))
+    )
+    result = execute_write_from_odoo_shell(root, _request(context, operation, approval), **kwargs)
+    execution = trusted_result_from_mapping(result["execution"]["result"])
+    assert execution.succeeded is False
+    assert result["verification"] is None
+    assert result["execution"]["evidence"]["failure_checks"] == ["execution_exception:RuntimeError"]
+    assert cr.rolled_back_savepoints == 2
+    assert cr.savepoints == 3
+    assert cr.commits == 1
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+
+
+def test_changed_live_precheck_is_anchored_as_no_effect_failure_before_execute():
+    context, operation, approval = _executing()
+
+    class DriftedPrecheck(Handler):
+        def precheck(self, capability_id, parameters):
+            result = super().precheck(capability_id, parameters)
+            result["checks"] = [*result["checks"], "runtime_drift"]
+            return result
+
+    root, cr, anchors, handler, kwargs = _harness(
+        handler=DriftedPrecheck()
+    )
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    execution = trusted_result_from_mapping(result["execution"]["result"])
+    assert execution.succeeded is False
+    assert result["verification"] is None
+    assert result["execution"]["evidence"]["failure_checks"] == [
+        "precheck_drift_before_execution"
+    ]
+    assert handler.precheck_calls == 1
+    assert handler.calls == []
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+    assert cr.commits == 1
+
+
+def test_precheck_dependencies_are_row_locked_invalidated_and_rechecked_before_write():
+    record = LockableRecordset(901)
+    handler = DependencyHandler(record)
+    parameters = _parameters()
+    raw_precheck = _dependency_precheck(
+        "acct.invoice.customer_create.v1", parameters, record
+    )
+    context, operation, approval = _executing(
+        parameters, raw_precheck=raw_precheck
+    )
+    root, cr, anchors, handler, kwargs = _harness(handler=handler)
+    anchors.bound_env._models["account.asset"] = LockableModel(record)
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(result["execution"]["result"]).succeeded is True
+    assert handler.precheck_calls == 2
+    assert handler.calls == ["execute", "verify"]
+    assert record.lock_calls == [True]
+    assert record.invalidations == 1
+    assert record.access_rules == ["read"]
+    assert cr.commits == 2
+
+
+def test_dependency_drift_after_row_lock_is_anchored_before_any_business_write():
+    record = LockableRecordset(
+        901,
+        on_lock=lambda locked: setattr(locked, "snapshot_state", "changed"),
+    )
+    handler = DependencyHandler(record)
+    parameters = _parameters()
+    raw_precheck = _dependency_precheck(
+        "acct.invoice.customer_create.v1", parameters, record
+    )
+    context, operation, approval = _executing(
+        parameters, raw_precheck=raw_precheck
+    )
+    root, cr, anchors, handler, kwargs = _harness(handler=handler)
+    anchors.bound_env._models["account.asset"] = LockableModel(record)
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    execution = trusted_result_from_mapping(result["execution"]["result"])
+    assert execution.succeeded is False
+    assert result["execution"]["evidence"]["failure_checks"] == [
+        "precheck_drift_after_dependency_lock"
+    ]
+    assert handler.precheck_calls == 2
+    assert handler.calls == []
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+    assert cr.commits == 1
+
+
+def test_dependency_row_lock_failure_is_anchored_before_any_business_write():
+    def fail_lock(_record):
+        raise RuntimeError("already locked")
+
+    record = LockableRecordset(901, on_lock=fail_lock)
+    handler = DependencyHandler(record)
+    parameters = _parameters()
+    raw_precheck = _dependency_precheck(
+        "acct.invoice.customer_create.v1", parameters, record
+    )
+    context, operation, approval = _executing(
+        parameters, raw_precheck=raw_precheck
+    )
+    root, cr, anchors, handler, kwargs = _harness(handler=handler)
+    anchors.bound_env._models["account.asset"] = LockableModel(record)
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(result["execution"]["result"]).succeeded is False
+    assert result["execution"]["evidence"]["failure_checks"] == [
+        "precheck_dependency_lock_exception:RuntimeError"
+    ]
+    assert handler.precheck_calls == 1
+    assert handler.calls == []
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+    assert cr.commits == 1
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda snapshot: snapshot.update(values_digest="0" * 64),
+        lambda snapshot: snapshot.update(company_id=8),
+        lambda snapshot: snapshot.update(model="account.move; DROP TABLE x"),
+    ],
+)
+def test_invalid_precheck_lock_snapshot_is_anchored_before_business_write(mutate):
+    record = LockableRecordset(901)
+    parameters = _parameters()
+    raw_precheck = _dependency_precheck(
+        "acct.invoice.customer_create.v1", parameters, record
+    )
+    mutate(raw_precheck["dependencies"][0])
+
+    class RawDependencyHandler(Handler):
+        def precheck(self, capability_id, received_parameters):
+            self.precheck_calls += 1
+            return copy.deepcopy(raw_precheck)
+
+    handler = RawDependencyHandler()
+    context, operation, approval = _executing(
+        parameters, raw_precheck=raw_precheck
+    )
+    root, cr, anchors, handler, kwargs = _harness(handler=handler)
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(result["execution"]["result"]).succeeded is False
+    assert result["execution"]["evidence"]["failure_checks"] == [
+        "precheck_dependency_lock_exception:OdooWriteBootstrapError"
+    ]
+    assert handler.calls == []
+    assert cr.commits == 1
+
+
+def test_approval_expiring_during_live_precheck_never_starts_business_execution():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    moments = iter([NOW, approval.expires_at + timedelta(microseconds=1)])
+    kwargs.pop("now")
+    kwargs["clock"] = lambda: next(moments)
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    execution = trusted_result_from_mapping(result["execution"]["result"])
+    assert execution.succeeded is False
+    assert result["execution"]["evidence"]["failure_checks"] == [
+        "approval_expired_during_precheck"
+    ]
+    assert handler.precheck_calls == 1
+    assert handler.prechecked_executions == []
+    assert handler.calls == []
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+    assert cr.commits == 1
+    assert cr.savepoints == 2
+    assert cr.rolled_back_savepoints == 1
+
+
+def test_live_precheck_side_effect_is_rolled_back_before_business_execution():
+    context, operation, approval = _executing()
+
+    class SideEffectPrecheck(Handler):
+        def precheck(self, capability_id, parameters):
+            cr.side_effects.append("unexpected precheck mutation")
+            return super().precheck(capability_id, parameters)
+
+    handler = SideEffectPrecheck()
+    root, cr, _anchors, handler, kwargs = _harness(handler=handler)
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(result["execution"]["result"]).succeeded is True
+    assert cr.side_effects == []
+    assert handler.precheck_calls == 1
+    assert len(handler.prechecked_executions) == 1
+
+
+def test_verification_failure_is_signed_and_never_reported_as_passing():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness(
+        handler=Handler(verify_error=RuntimeError("readback mismatch"))
+    )
+    result = execute_write_from_odoo_shell(root, _request(context, operation, approval), **kwargs)
+    verification = trusted_result_from_mapping(result["verification"]["result"])
+    assert verification.succeeded is False
+    assert result["verification"]["evidence"]["passed"] is False
+    assert cr.commits == 2
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+
+
+def test_changed_fresh_snapshot_is_signed_as_failed_verification():
+    context, operation, approval = _executing()
+
+    class ChangedReadback(Handler):
+        def verify(self, capability_id, parameters, execution):
+            result = super().verify(capability_id, parameters, execution)
+            values = {"state": "posted", "amount_total": "101.00"}
+            result["after"][0]["values"] = values
+            result["after"][0]["values_digest"] = hashlib.sha256(
+                canonical_json(values)
+            ).hexdigest()
+            result["evidence_digest"] = hashlib.sha256(
+                canonical_json(result["after"])
+            ).hexdigest()
+            return result
+
+    root, cr, anchors, handler, kwargs = _harness(handler=ChangedReadback())
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(result["execution"]["result"]).succeeded is True
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded is False
+    assert result["verification"]["evidence"]["readback"]["records"] == []
+    assert result["verification"]["evidence"]["readback"]["fresh_snapshots"] == []
+    assert result["verification"]["evidence"]["checks"] == [
+        "verification_exception:OdooWriteBootstrapError"
+    ]
+    assert handler.calls == ["execute", "verify"]
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+    assert cr.commits == 2
+
+
+def test_tampered_stored_result_signature_is_rejected_before_replay():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    request = _request(context, operation, approval)
+    execute_write_from_odoo_shell(root, request, **kwargs)
+    anchor = next(iter(anchors.by_scope.values()))
+    envelope = json.loads(anchor.execution_result_json)
+    envelope["signature"] = "0" * 64
+    anchor.execution_result_json = canonical_json(envelope).decode()
+    anchor.execution_result_digest = hashlib.sha256(
+        anchor.execution_result_json.encode()
+    ).hexdigest()
+    with pytest.raises(Exception, match="signature"):
+        execute_write_from_odoo_shell(root, request, **kwargs)
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+
+
+def test_request_shape_and_authenticated_content_digest_are_exact():
+    context, operation, approval = _executing()
+    root, cr, anchors, handler, kwargs = _harness()
+    request = _request(context, operation, approval)
+    with pytest.raises(OdooWriteBootstrapError, match="fields"):
+        execute_write_from_odoo_shell(root, {**request, "extra": True}, **kwargs)
+    tampered = copy.deepcopy(request)
+    tampered["operation"]["parameters"]["idempotency_key"] = "changed"
+    with pytest.raises(Exception, match="digest"):
+        execute_write_from_odoo_shell(root, tampered, **kwargs)
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+
+def test_non_recovery_write_rejects_injected_trusted_recovery_plan():
+    context, operation, approval = _executing()
+    _parameters_for_recovery, plan = _recovery_case()
+    root, cr, anchors, handler, kwargs = _harness()
+
+    with pytest.raises(OdooWriteBootstrapError, match="must be null"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                trusted_recovery_plan=plan,
+            ),
+            **kwargs,
+        )
+
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+
+def test_recovery_requires_separately_supplied_valid_receipt_plan():
+    parameters, plan = _recovery_case()
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-1",
+    )
+    root, cr, anchors, handler, kwargs = _harness()
+
+    missing = _request(context, operation, approval)
+    with pytest.raises(OdooWriteBootstrapError, match="is required"):
+        execute_write_from_odoo_shell(root, missing, **kwargs)
+
+    missing_field = _request(
+        context, operation, approval, trusted_recovery_plan=plan
+    )
+    missing_field.pop("trusted_recovery_plan")
+    with pytest.raises(OdooWriteBootstrapError, match="fields"):
+        execute_write_from_odoo_shell(root, missing_field, **kwargs)
+
+    tampered = copy.deepcopy(plan)
+    tampered["target_records"][0]["record_id"] = 999
+    with pytest.raises(OdooWriteBootstrapError, match="plan is invalid"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                trusted_recovery_plan=tampered,
+            ),
+            **kwargs,
+        )
+
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+
+def test_recovery_plan_origin_digest_and_target_company_are_strictly_bound():
+    parameters, plan = _recovery_case()
+    wrong_origin_parameters = {
+        **parameters,
+        "origin_operation_id": "different-origin-op",
+    }
+    context, operation, approval = _executing(
+        wrong_origin_parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-wrong-origin",
+    )
+    root, cr, anchors, handler, kwargs = _harness()
+    with pytest.raises(OdooWriteBootstrapError, match="origin, digest, or company"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                trusted_recovery_plan=plan,
+            ),
+            **kwargs,
+        )
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+    wrong_digest_parameters = {
+        **parameters,
+        "origin_operation_id": plan["origin_operation_id"],
+        "expected_recovery_plan_digest": "a" * 64,
+    }
+    context, operation, approval = _executing(
+        wrong_digest_parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-wrong-digest",
+    )
+    root, cr, anchors, handler, kwargs = _harness()
+    with pytest.raises(OdooWriteBootstrapError, match="origin, digest, or company"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                trusted_recovery_plan=plan,
+            ),
+            **kwargs,
+        )
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+    parameters, foreign_plan = _recovery_case(target_company_id=8)
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-foreign-target",
+    )
+    root, cr, anchors, handler, kwargs = _harness()
+    with pytest.raises(OdooWriteBootstrapError, match="company-bound"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context,
+                operation,
+                approval,
+                trusted_recovery_plan=foreign_plan,
+            ),
+            **kwargs,
+        )
+    assert anchors.claim_calls == 0 and handler.calls == [] and cr.commits == 0
+
+
+def test_valid_recovery_plan_reaches_handler_and_is_bound_to_control_anchor():
+    parameters, plan = _recovery_case()
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-valid",
+    )
+    root, cr, anchors, handler, kwargs = _harness()
+
+    result = execute_write_from_odoo_shell(
+        root,
+        _request(
+            context,
+            operation,
+            approval,
+            trusted_recovery_plan=plan,
+        ),
+        **kwargs,
+    )
+
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.operation_digest == operation.digest
+    assert operation.parameters["expected_recovery_plan_digest"] == plan["plan_digest"]
+    assert handler.factory_plans == [plan, plan]
+    assert trusted_result_from_mapping(result["verification"]["result"]).succeeded
+
+    default_handler = _default_handler_factory(
+        SimpleNamespace(uid=context.user_id, su=False), context, NOW, plan
+    )
+    assert default_handler.context.trusted_recovery_plan == plan
+
+
+def test_recovery_idempotency_anchor_rejects_a_different_plan_for_same_origin():
+    parameters, plan = _recovery_case()
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-first",
+    )
+    root, cr, _anchors, handler, kwargs = _harness()
+    execute_write_from_odoo_shell(
+        root,
+        _request(
+            context,
+            operation,
+            approval,
+            trusted_recovery_plan=plan,
+        ),
+        **kwargs,
+    )
+
+    other_parameters, other_plan = _recovery_case(
+        target_record_id=502,
+        idempotency_key="recover-origin-op-1-again",
+    )
+    context2, operation2, approval2 = _executing(
+        other_parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-second",
+    )
+    with pytest.raises(RuntimeError, match="different immutable content"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context2,
+                operation2,
+                approval2,
+                trusted_recovery_plan=other_plan,
+            ),
+            **kwargs,
+        )
+
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+
+
+def test_bootstrap_is_the_single_commit_owner_and_has_no_privilege_escape():
+    source = SOURCE.read_text(encoding="utf-8")
+    assert source.count(".commit(") == 1
+    assert ".sudo(" not in source
+    assert ".rollback(" not in source
+    for private_odoo_call in (
+        "._create_payments(",
+        "._reverse_moves(",
+        "._generate_deferred_entries(",
+        "._post(",
+    ):
+        assert private_odoo_call not in source
+
+
+def test_bootstrap_uses_only_private_control_anchor_methods():
+    source = SOURCE.read_text(encoding="utf-8")
+    attributes = {
+        node.attr
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+    }
+    public_control_methods = {
+        "lookup_exact",
+        "claim",
+        "acquire_resource_locks",
+        "record_execution",
+        "record_verification",
+        "record_committed_verification_from_root",
+    }
+    private_control_methods = {f"_{name}" for name in public_control_methods}
+
+    assert public_control_methods.isdisjoint(attributes)
+    assert private_control_methods <= attributes

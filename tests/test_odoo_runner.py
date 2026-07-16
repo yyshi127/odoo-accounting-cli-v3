@@ -2,7 +2,11 @@ import ast
 import hashlib
 import json
 import os
+import select
+import signal
+import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
@@ -10,14 +14,22 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import pytest
 
 from odoo_accounting_cli_v3.odoo.runner import (
     FIXED_CHILD_ENVIRONMENT,
     OdooRunnerError,
     RuntimeConfig,
     _child_main,
+    _force_kill_linux_supervisor_tree,
+    _install_linux_parent_death_guard,
+    _kill_adopted_linux_descendants,
     _record_verified_read_audit,
+    _run_child_process,
+    _validate_child_environment,
+    _validate_child_home,
     _verify_child_release,
     load_runtime_config,
     run_odoo_shell,
@@ -38,6 +50,70 @@ MARKER_TOKEN = "1" * 48
 MARKER = f"__ODOO_ACCOUNTING_CLI_V3_RESULT_{MARKER_TOKEN}__:"
 
 
+def test_fixed_child_home_is_the_managed_private_state_directory() -> None:
+    assert FIXED_CHILD_ENVIRONMENT["HOME"] == "/var/lib/odoo-accounting-cli-v3"
+
+
+def test_child_home_rejects_missing_file_symlink_and_non_private_mode(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing"
+    with pytest.raises(OdooRunnerError, match="HOME directory is not trustworthy"):
+        _validate_child_home(str(missing))
+
+    regular_file = tmp_path / "regular-file"
+    regular_file.write_text("not a directory", encoding="utf-8")
+    with pytest.raises(OdooRunnerError, match="HOME directory is not trustworthy"):
+        _validate_child_home(str(regular_file))
+
+    private_home = tmp_path / "private-home"
+    private_home.mkdir(mode=0o700)
+    private_home.chmod(0o700)
+    _validate_child_home(str(private_home))
+
+    if os.name == "posix":
+        private_home.chmod(0o750)
+        try:
+            with pytest.raises(OdooRunnerError, match="mode 0700"):
+                _validate_child_home(str(private_home))
+        finally:
+            private_home.chmod(0o700)
+
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    target.chmod(0o700)
+    linked_home = tmp_path / "linked-home"
+    try:
+        linked_home.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    with pytest.raises(OdooRunnerError, match="HOME directory is not trustworthy"):
+        _validate_child_home(str(linked_home))
+
+
+def test_child_environment_rejects_mutation_before_spawn(
+    tmp_path: Path,
+) -> None:
+    mutated = dict(FIXED_CHILD_ENVIRONMENT)
+    mutated["UNTRUSTED"] = "1"
+    with pytest.raises(OdooRunnerError, match="environment is invalid"):
+        _validate_child_environment(mutated)
+
+    with patch("odoo_accounting_cli_v3.odoo.runner.sys.platform", "linux"), patch(
+        "odoo_accounting_cli_v3.odoo.runner.subprocess.Popen"
+    ) as spawn:
+        with pytest.raises(OdooRunnerError, match="environment is invalid"):
+            _run_child_process(
+                [sys.executable, "-c", "pass"],
+                source="# trusted bootstrap\n",
+                payload_fd=3,
+                timeout_seconds=1,
+                cwd=str(tmp_path),
+                env=mutated,
+            )
+    spawn.assert_not_called()
+
+
 def request_document():
     return {
         "capability_id": "acct.gl.trial_balance.v1",
@@ -55,6 +131,159 @@ def request_document():
             "currency_id": 12,
         },
     }
+
+
+def test_linux_parent_death_guard_arms_before_parent_recheck() -> None:
+    events: list[str] = []
+
+    class FakePrctl:
+        argtypes = None
+        restype = None
+
+        def __call__(self, option, signum, arg3, arg4, arg5):
+            events.append(f"prctl:{option}")
+            expected = (
+                (1, signal.SIGTERM, 0, 0, 0)
+                if option == 1
+                else (36, 1, 0, 0, 0)
+            )
+            assert (option, signum, arg3, arg4, arg5) == expected
+            return 0
+
+    libc = SimpleNamespace(prctl=FakePrctl())
+
+    def install_handler(signum, _handler):
+        events.append("handler")
+        assert signum == signal.SIGTERM
+
+    def current_parent():
+        events.append("getppid")
+        return 4321
+
+    with patch("odoo_accounting_cli_v3.odoo.runner.sys.platform", "linux"), patch(
+        "ctypes.CDLL", return_value=libc
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.signal",
+        side_effect=install_handler,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.pthread_sigmask",
+        return_value=set(),
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.SIG_UNBLOCK",
+        1,
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.os.getppid",
+        side_effect=current_parent,
+    ):
+        _install_linux_parent_death_guard(4321)
+
+    assert events == ["handler", "prctl:1", "getppid", "prctl:36"]
+
+
+def test_linux_parent_death_guard_kills_group_if_parent_changed() -> None:
+    class GroupKilled(Exception):
+        pass
+
+    class FakePrctl:
+        argtypes = None
+        restype = None
+
+        def __call__(self, *_args):
+            return 0
+
+    libc = SimpleNamespace(prctl=FakePrctl())
+    with patch("odoo_accounting_cli_v3.odoo.runner.sys.platform", "linux"), patch(
+        "ctypes.CDLL", return_value=libc
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.signal"
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.pthread_sigmask",
+        return_value=set(),
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.SIG_UNBLOCK",
+        1,
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.os.getppid", return_value=4322
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner._request_supervised_tree_termination"
+    ) as request_termination:
+        request_termination.side_effect = GroupKilled
+        with pytest.raises(GroupKilled):
+            _install_linux_parent_death_guard(4321)
+
+    request_termination.assert_called_once_with(signal.SIGTERM, None)
+
+
+def test_adopted_descendant_cleanup_retries_and_has_no_count_escape() -> None:
+    children = tuple(range(10_000, 14_097))
+    listed = " ".join(str(pid) for pid in children)
+    with patch(
+        "odoo_accounting_cli_v3.odoo.runner.Path.read_text",
+        side_effect=[OSError("transient procfs read"), listed, ""],
+    ) as read_children, patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.SIGKILL",
+        9,
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.os.kill"
+    ) as kill, patch(
+        "odoo_accounting_cli_v3.odoo.runner.os.waitpid",
+        side_effect=lambda pid, _options: (pid, 0),
+    ) as waitpid:
+        _kill_adopted_linux_descendants()
+
+    assert read_children.call_count == 3
+    assert kill.call_count == len(children)
+    assert waitpid.call_count == len(children)
+
+
+def test_timeout_fallback_kills_cross_session_child_before_supervisor() -> None:
+    events: list[str] = []
+    process = SimpleNamespace(
+        pid=5000,
+        send_signal=Mock(side_effect=lambda _signal: events.append("stop")),
+        poll=Mock(side_effect=[None, None, None]),
+        wait=Mock(return_value=-9),
+    )
+    reads = [
+        OSError("transient procfs read"),
+        "6000",
+        "6000 (escaped child) S 1 2 3",
+        "6000",
+        "6000 (escaped child) Z 1 2 3",
+    ]
+    with patch(
+        "odoo_accounting_cli_v3.odoo.runner.Path.read_text",
+        side_effect=reads,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.SIGSTOP",
+        19,
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.SIGKILL",
+        9,
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.os.pidfd_open",
+        return_value=77,
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.signal.pidfd_send_signal",
+        side_effect=lambda _fd, _signal: events.append("child"),
+        create=True,
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner.os.killpg",
+        side_effect=lambda _pid, _signal: events.append("supervisor"),
+        create=True,
+    ), patch("odoo_accounting_cli_v3.odoo.runner.os.close"):
+        _force_kill_linux_supervisor_tree(process)
+
+    assert events == ["stop", "child", "supervisor"]
+    process.wait.assert_called_once_with(timeout=5)
 
 
 def response(runtime, result=None):
@@ -651,6 +880,256 @@ class OdooRunnerTest(unittest.TestCase):
             release_digest=RELEASE_DIGEST,
             timeout_seconds=10,
         )
+
+
+_NESTED_ODOO_RUNNER_SOURCE = r"""
+import os
+import sys
+
+from odoo_accounting_cli_v3.odoo.runner import (
+    FIXED_CHILD_ENVIRONMENT,
+    OdooRunnerError,
+    _run_child_process,
+)
+
+payload_fd = int(sys.argv[1])
+commit_path = sys.argv[2]
+timeout_seconds = float(sys.argv[3])
+direct_exit_code = int(sys.argv[4])
+grandchild_source = (
+    "import os,socket,sys\n"
+    "payload_fd=int(sys.argv[1])\n"
+    "commit_path=sys.argv[2]\n"
+    "ready_fd=int(sys.argv[3])\n"
+    "os.setsid()\n"
+    "for descriptor in (0,1,2):\n"
+    "    try:\n"
+    "        os.close(descriptor)\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "stream=socket.socket(fileno=payload_fd)\n"
+    "stream.sendall(f'READY:{os.getpid()}:{os.getpgrp()}\\n'.encode('ascii'))\n"
+    "if stream.recv(1) != b'A':\n"
+    "    raise SystemExit(90)\n"
+    "os.write(ready_fd, b'R')\n"
+    "os.close(ready_fd)\n"
+    "if stream.recv(1) == b'C':\n"
+    "    with open(commit_path, 'xb') as output:\n"
+    "        output.write(b'committed')\n"
+    "    stream.sendall(b'COMMITTED\\n')\n"
+)
+inner_source = (
+    "import os,subprocess,sys\n"
+    f"payload_fd={payload_fd!r}\n"
+    f"commit_path={commit_path!r}\n"
+    f"direct_exit_code={direct_exit_code!r}\n"
+    f"grandchild_source={grandchild_source!r}\n"
+    "ready_read,ready_write=os.pipe()\n"
+    "child=subprocess.Popen(\n"
+    "    [sys.executable, '-c', grandchild_source, str(payload_fd), "
+    "commit_path, str(ready_write)],\n"
+    "    close_fds=True, pass_fds=(payload_fd,ready_write),\n"
+    ")\n"
+    "os.close(ready_write)\n"
+    "if os.read(ready_read, 1) != b'R':\n"
+    "    raise SystemExit(91)\n"
+    "os.close(ready_read)\n"
+    "os.close(payload_fd)\n"
+    "if direct_exit_code >= 0:\n"
+    "    raise SystemExit(direct_exit_code)\n"
+    "if direct_exit_code < -1:\n"
+    "    os.kill(os.getpid(), -direct_exit_code)\n"
+    "raise SystemExit(child.wait())\n"
+)
+try:
+    completed = _run_child_process(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; "
+                "exec(compile(sys.stdin.buffer.read(), '<odoo-test-child>', 'exec'))"
+            ),
+        ],
+        source=inner_source,
+        payload_fd=payload_fd,
+        timeout_seconds=timeout_seconds,
+        cwd="/",
+        env=dict(FIXED_CHILD_ENVIRONMENT),
+    )
+except OdooRunnerError as exc:
+    os.write(payload_fd, f"RUNNER_ERROR:{exc}\n".encode("utf-8", "replace"))
+    raise SystemExit(23)
+os.write(
+    payload_fd,
+    f"CHILD_RESULT:{completed.returncode}\n".encode("utf-8", "replace"),
+)
+if completed.returncode < 0:
+    os.kill(os.getpid(), -completed.returncode)
+raise SystemExit(completed.returncode)
+"""
+
+
+def _start_nested_odoo_runner(
+    commit_marker: Path,
+    *,
+    timeout_seconds: float,
+    direct_exit_code: int = -1,
+) -> tuple[subprocess.Popen[bytes], socket.socket]:
+    control, inherited_control = socket.socketpair()
+    caller = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _NESTED_ODOO_RUNNER_SOURCE,
+            str(inherited_control.fileno()),
+            str(commit_marker),
+            str(timeout_seconds),
+            str(direct_exit_code),
+        ],
+        close_fds=True,
+        pass_fds=(inherited_control.fileno(),),
+        start_new_session=True,
+    )
+    inherited_control.close()
+    return caller, control
+
+
+def _read_control_line(control: socket.socket, *, timeout_seconds: float) -> bytes:
+    control.settimeout(timeout_seconds)
+    result = bytearray()
+    while not result.endswith(b"\n"):
+        chunk = control.recv(128)
+        assert chunk, f"nested process tree closed before a full message: {bytes(result)!r}"
+        result.extend(chunk)
+    return bytes(result)
+
+
+def _ready_process_handles(control: socket.socket) -> tuple[int, int]:
+    ready = _read_control_line(control, timeout_seconds=10.0)
+    assert ready.startswith(b"READY:"), ready
+    label, inner_pid_text, inner_group_text = ready.strip().split(b":")
+    assert label == b"READY"
+    inner_pid = int(inner_pid_text)
+    inner_process_group = int(inner_group_text)
+    assert inner_pid > 1
+    assert inner_process_group != os.getpgrp()
+    inner_pidfd = os.pidfd_open(inner_pid)
+    try:
+        group_leader_pidfd = os.pidfd_open(inner_process_group)
+    except BaseException:
+        os.close(inner_pidfd)
+        raise
+    control.sendall(b"A")
+    return inner_pidfd, group_leader_pidfd
+
+
+def _assert_tree_closed_without_commit(
+    control: socket.socket, commit_marker: Path
+) -> None:
+    readable, _writable, _exceptional = select.select([control], [], [], 5.0)
+    if not readable:
+        # A surviving Odoo grandchild receives an explicit commit gate, making
+        # the old orphan behavior observable without any timing sleep.
+        control.sendall(b"C")
+        evidence = _read_control_line(control, timeout_seconds=5.0)
+        pytest.fail(
+            "escaped Odoo grandchild survived and replied "
+            f"{evidence!r}; commit_exists={commit_marker.exists()}"
+        )
+    assert control.recv(1) == b""
+    assert not commit_marker.exists()
+
+
+def _cleanup_nested_processes(
+    caller: subprocess.Popen[bytes], process_pidfds: tuple[int, int] | None
+) -> None:
+    if caller.poll() is None:
+        try:
+            os.killpg(caller.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        caller.wait(timeout=5.0)
+    if process_pidfds is not None:
+        for descriptor in process_pidfds:
+            try:
+                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                os.close(descriptor)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="parent-death process-tree boundary is Linux-only"
+)
+def test_outer_historical_kill_cannot_leave_odoo_grandchild_to_commit(
+    tmp_path: Path,
+) -> None:
+    """Kill a historical parent and prove an Odoo grandchild cannot commit."""
+
+    commit_marker = tmp_path / "outer-timeout-orphan-commit"
+    historical, control = _start_nested_odoo_runner(
+        commit_marker, timeout_seconds=30.0
+    )
+    process_pidfds: tuple[int, int] | None = None
+    try:
+        process_pidfds = _ready_process_handles(control)
+        os.killpg(historical.pid, signal.SIGKILL)
+        historical.wait(timeout=5.0)
+        _assert_tree_closed_without_commit(control, commit_marker)
+    finally:
+        control.close()
+        _cleanup_nested_processes(historical, process_pidfds)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="Odoo timeout process-tree boundary is Linux-only"
+)
+def test_inner_runner_timeout_kills_odoo_grandchild_process_tree(
+    tmp_path: Path,
+) -> None:
+    """Preserve runner timeout cleanup after adding the persistent supervisor."""
+
+    commit_marker = tmp_path / "inner-timeout-orphan-commit"
+    caller, control = _start_nested_odoo_runner(commit_marker, timeout_seconds=2.0)
+    process_pidfds: tuple[int, int] | None = None
+    try:
+        process_pidfds = _ready_process_handles(control)
+        error = _read_control_line(control, timeout_seconds=10.0)
+        assert error == b"RUNNER_ERROR:Odoo shell timed out\n"
+        assert caller.wait(timeout=5.0) == 23
+        _assert_tree_closed_without_commit(control, commit_marker)
+    finally:
+        control.close()
+        _cleanup_nested_processes(caller, process_pidfds)
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux", reason="Odoo descendant reaping boundary is Linux-only"
+)
+@pytest.mark.parametrize("direct_exit_code", [0, 7, -9])
+def test_direct_odoo_exit_reaps_daemonized_grandchild_and_preserves_status(
+    tmp_path: Path, direct_exit_code: int
+) -> None:
+    """Do not report the direct child status until adopted descendants are gone."""
+
+    commit_marker = tmp_path / f"direct-{direct_exit_code}-orphan-commit"
+    caller, control = _start_nested_odoo_runner(
+        commit_marker,
+        timeout_seconds=5.0,
+        direct_exit_code=direct_exit_code,
+    )
+    process_pidfds: tuple[int, int] | None = None
+    try:
+        process_pidfds = _ready_process_handles(control)
+        result = _read_control_line(control, timeout_seconds=5.0)
+        assert result == f"CHILD_RESULT:{direct_exit_code}\n".encode("ascii")
+        assert caller.wait(timeout=5.0) == direct_exit_code
+        _assert_tree_closed_without_commit(control, commit_marker)
+    finally:
+        control.close()
+        _cleanup_nested_processes(caller, process_pidfds)
 
 
 class CanonicalPackageVerificationTest(unittest.TestCase):

@@ -64,13 +64,15 @@ ALLOWED_TRANSITIONS: dict[State, frozenset[State]] = {
 
 MAX_APPROVAL_TTL = timedelta(minutes=15)
 MIN_HMAC_SECRET_BYTES = 32
-APPROVAL_SIGNATURE_VERSION = 2
-APPROVAL_PURPOSE = "approval_v2"
+APPROVAL_SIGNATURE_VERSION = 3
+APPROVAL_PURPOSE = "approval_v3"
 RESULT_SIGNATURE_VERSION = 2
 EXECUTION_RESULT_PURPOSE = "execution_result_v2"
 VERIFICATION_RESULT_PURPOSE = "verification_result_v2"
+RECOVERY_RESULT_PURPOSE = "recovery_result_v2"
 
 _GUARDED_TARGETS: dict[State, str] = {
+    State.PRECHECKED: "record_precheck",
     State.APPROVED: "approve_operation",
     State.EXECUTING: "begin_execution",
     State.VERIFYING: "record_execution_result",
@@ -144,6 +146,8 @@ class Operation:
     registry_digest: str
     release_digest: str
     digest: str
+    protocol_version: int = 4
+    precheck_digest: str | None = None
     state: State = State.PREPARED
     revision: int = 0
     approval_signature: str | None = None
@@ -219,6 +223,25 @@ class Operation:
             or self.revision < 0
         ):
             raise IntegrityRejected("operation state metadata is invalid")
+        if (
+            type(self.protocol_version) is not int
+            or self.protocol_version not in {3, 4}
+            or (
+                self.protocol_version == 3
+                and self.precheck_digest is not None
+            )
+            or (
+                self.protocol_version == 4
+                and self.state == State.PREPARED
+                and self.precheck_digest is not None
+            )
+            or (
+                self.protocol_version == 4
+                and self.state != State.PREPARED
+                and not _is_sha256(self.precheck_digest)
+            )
+        ):
+            raise IntegrityRejected("operation precheck metadata is invalid")
         approval_values = (
             self.approval_signature,
             self.approval_nonce_digest,
@@ -418,11 +441,30 @@ class Operation:
         return replace(self, state=target, revision=self.revision + 1, **changes)
 
 
+def record_precheck(
+    operation: Operation,
+    *,
+    precheck_digest: str,
+    expected_revision: int,
+) -> Operation:
+    operation._check_transition(
+        State.PRECHECKED, expected_revision=expected_revision
+    )
+    if operation.protocol_version != 4:
+        raise OperationError("legacy operations cannot accept a native precheck")
+    if not _is_sha256(precheck_digest):
+        raise OperationError("precheck_digest must be a SHA-256 digest")
+    return operation._apply_transition(
+        State.PRECHECKED, precheck_digest=precheck_digest
+    )
+
+
 @dataclass(frozen=True)
 class Approval:
     operation_id: str
     request_id: str
     operation_digest: str
+    precheck_digest: str
     user_id: int
     company_id: int
     operation_revision: int
@@ -444,6 +486,7 @@ class Approval:
             "key_id": self.key_id,
             "nonce": self.nonce,
             "operation_digest": self.operation_digest,
+            "precheck_digest": self.precheck_digest,
             "operation_id": self.operation_id,
             "operation_revision": self.operation_revision,
             "purpose": self.signature_purpose,
@@ -456,6 +499,7 @@ class Approval:
 class ResultKind(StrEnum):
     EXECUTION = "execution"
     VERIFICATION = "verification"
+    RECOVERY = "recovery"
 
 
 @dataclass(frozen=True)
@@ -524,37 +568,37 @@ def _is_strong_hmac_secret(value: object) -> bool:
 
 
 def _operation_state_digest(operation: Operation) -> str:
-    return hashlib.sha256(
-        canonical_json(
-            {
-                "approval_expires_at": (
-                    None
-                    if operation.approval_expires_at is None
-                    else operation.approval_expires_at.astimezone(
-                        timezone.utc
-                    ).isoformat()
-                ),
-                "approval_issued_at": (
-                    None
-                    if operation.approval_issued_at is None
-                    else operation.approval_issued_at.astimezone(
-                        timezone.utc
-                    ).isoformat()
-                ),
-                "approval_nonce_digest": operation.approval_nonce_digest,
-                "approval_revision": operation.approval_revision,
-                "approval_signature": operation.approval_signature,
-                "approver_user_id": operation.approver_user_id,
-                "execution_result_digest": operation.execution_result_digest,
-                "operation_digest": operation.digest,
-                "operation_id": operation.operation_id,
-                "request_id": operation.request_id,
-                "revision": operation.revision,
-                "state": operation.state.value,
-                "verification_result_digest": operation.verification_result_digest,
-            }
-        )
-    ).hexdigest()
+    state = {
+        "approval_expires_at": (
+            None
+            if operation.approval_expires_at is None
+            else operation.approval_expires_at.astimezone(
+                timezone.utc
+            ).isoformat()
+        ),
+        "approval_issued_at": (
+            None
+            if operation.approval_issued_at is None
+            else operation.approval_issued_at.astimezone(
+                timezone.utc
+            ).isoformat()
+        ),
+        "approval_nonce_digest": operation.approval_nonce_digest,
+        "approval_revision": operation.approval_revision,
+        "approval_signature": operation.approval_signature,
+        "approver_user_id": operation.approver_user_id,
+        "execution_result_digest": operation.execution_result_digest,
+        "operation_digest": operation.digest,
+        "operation_id": operation.operation_id,
+        "request_id": operation.request_id,
+        "revision": operation.revision,
+        "state": operation.state.value,
+        "verification_result_digest": operation.verification_result_digest,
+    }
+    if operation.protocol_version >= 4:
+        state["precheck_digest"] = operation.precheck_digest
+        state["protocol_version"] = operation.protocol_version
+    return hashlib.sha256(canonical_json(state)).hexdigest()
 
 
 def _validate_approval_ttl(approval: Approval, approval_ttl_seconds: int) -> None:
@@ -599,6 +643,13 @@ def sign_approval(
     operation.assert_integrity()
     if operation.state != State.AWAITING_APPROVAL:
         raise ApprovalRejected("operation is not awaiting approval")
+    if (
+        operation.protocol_version != 4
+        or not _is_sha256(operation.precheck_digest)
+    ):
+        raise ApprovalRejected(
+            "operation has no native precheck digest"
+        )
     if not _is_strong_hmac_secret(secret):
         raise ApprovalRejected("approval HMAC secret must be bytes of at least 32 bytes")
     if (
@@ -623,6 +674,7 @@ def sign_approval(
         operation_id=operation.operation_id,
         request_id=operation.request_id,
         operation_digest=operation.digest,
+        precheck_digest=operation.precheck_digest,
         user_id=operation.user_id,
         company_id=operation.company_id,
         operation_revision=operation.revision,
@@ -683,6 +735,7 @@ def approve_operation(
         approval.operation_id == operation.operation_id
         and approval.request_id == operation.request_id
         and approval.operation_digest == operation.digest
+        and approval.precheck_digest == operation.precheck_digest
         and approval.user_id == operation.user_id
         and approval.company_id == operation.company_id
         and approval.operation_revision == operation.revision
@@ -770,11 +823,13 @@ def begin_execution(
         and operation.approval_expires_at == approval.expires_at
         and operation.approval_revision == approval.operation_revision
         and operation.approver_user_id == approval.approver_user_id
+        and approval.precheck_digest == operation.precheck_digest
     )
     approval_binding = (
         approval.operation_id == operation.operation_id
         and approval.request_id == operation.request_id
         and approval.operation_digest == operation.digest
+        and approval.precheck_digest == operation.precheck_digest
         and approval.user_id == operation.user_id
         and approval.company_id == operation.company_id
     )
@@ -805,9 +860,14 @@ def _sign_result(
     evidence_digest: str,
     issued_at: datetime,
     secret: bytes,
+    prior_evidence_digest: str | None = None,
 ) -> TrustedResult:
     operation.assert_integrity()
-    expected_state = State.EXECUTING if kind == ResultKind.EXECUTION else State.VERIFYING
+    expected_state = {
+        ResultKind.EXECUTION: State.EXECUTING,
+        ResultKind.VERIFICATION: State.VERIFYING,
+        ResultKind.RECOVERY: State.RECOVERING,
+    }[kind]
     if operation.state != expected_state:
         raise TrustedResultRejected(
             f"operation is not ready for a {kind} result"
@@ -827,13 +887,18 @@ def _sign_result(
         raise TrustedResultRejected("evidence_digest must be a SHA-256 digest")
     if not _is_aware(issued_at):
         raise TrustedResultRejected("result timestamp must be timezone-aware")
-    prior_digest = (
-        operation.execution_result_digest
-        if kind == ResultKind.VERIFICATION
-        else None
-    )
+    if kind == ResultKind.EXECUTION:
+        prior_digest = None
+    elif kind == ResultKind.VERIFICATION:
+        prior_digest = operation.execution_result_digest
+    else:
+        prior_digest = prior_evidence_digest
     if kind == ResultKind.VERIFICATION and not prior_digest:
         raise TrustedResultRejected("verification requires an accepted execution result")
+    if kind == ResultKind.RECOVERY and not _is_sha256(prior_digest):
+        raise TrustedResultRejected(
+            "recovery requires a SHA-256 recovery plan digest"
+        )
     unsigned = TrustedResult(
         kind=kind,
         operation_id=operation.operation_id,
@@ -852,7 +917,11 @@ def _sign_result(
         signature_purpose=(
             EXECUTION_RESULT_PURPOSE
             if kind == ResultKind.EXECUTION
-            else VERIFICATION_RESULT_PURPOSE
+            else (
+                VERIFICATION_RESULT_PURPOSE
+                if kind == ResultKind.VERIFICATION
+                else RECOVERY_RESULT_PURPOSE
+            )
         ),
         signature="",
     )
@@ -904,6 +973,30 @@ def sign_verification_result(
     )
 
 
+def sign_recovery_result(
+    *,
+    operation: Operation,
+    recovery_plan_digest: str,
+    issuer: str,
+    key_id: str,
+    succeeded: bool,
+    evidence_digest: str,
+    issued_at: datetime,
+    secret: bytes,
+) -> TrustedResult:
+    return _sign_result(
+        operation=operation,
+        kind=ResultKind.RECOVERY,
+        issuer=issuer,
+        key_id=key_id,
+        succeeded=succeeded,
+        evidence_digest=evidence_digest,
+        issued_at=issued_at,
+        secret=secret,
+        prior_evidence_digest=recovery_plan_digest,
+    )
+
+
 def _verify_result(
     *,
     operation: Operation,
@@ -913,6 +1006,7 @@ def _verify_result(
     secret: bytes,
     expected_key_id: str,
     allowed_issuers: frozenset[str],
+    prior_evidence_digest: str | None = None,
 ) -> None:
     if not _is_aware(now):
         raise TrustedResultRejected("current time must be timezone-aware")
@@ -937,11 +1031,17 @@ def _verify_result(
     )
     if kind == ResultKind.EXECUTION:
         bindings = bindings and result.prior_evidence_digest is None
-    else:
+    elif kind == ResultKind.VERIFICATION:
         bindings = (
             bindings
             and operation.execution_result_digest is not None
             and result.prior_evidence_digest == operation.execution_result_digest
+        )
+    else:
+        bindings = (
+            bindings
+            and _is_sha256(prior_evidence_digest)
+            and result.prior_evidence_digest == prior_evidence_digest
         )
     if not bindings:
         raise TrustedResultRejected("trusted result binding mismatch")
@@ -957,7 +1057,11 @@ def _verify_result(
         != (
             EXECUTION_RESULT_PURPOSE
             if kind == ResultKind.EXECUTION
-            else VERIFICATION_RESULT_PURPOSE
+            else (
+                VERIFICATION_RESULT_PURPOSE
+                if kind == ResultKind.VERIFICATION
+                else RECOVERY_RESULT_PURPOSE
+            )
         )
         or not _is_identifier(result.request_id)
         or not _is_sha256(result.operation_state_digest)
@@ -1032,3 +1136,57 @@ def complete_operation(
     return operation._apply_transition(
         target, verification_result_digest=result.evidence_digest
     )
+
+
+def begin_recovery(
+    operation: Operation,
+    *,
+    recovery_plan_digest: str,
+    actor_principal: str,
+    actor_user_id: int,
+    actor_company_id: int,
+    expected_revision: int,
+) -> Operation:
+    operation._check_transition(
+        State.RECOVERING, expected_revision=expected_revision
+    )
+    if not _is_sha256(recovery_plan_digest):
+        raise OperationError("recovery_plan_digest must be a SHA-256 digest")
+    if (
+        type(actor_principal) is not str
+        or actor_principal != operation.principal
+        or type(actor_user_id) is not int
+        or actor_user_id != operation.user_id
+        or type(actor_company_id) is not int
+        or actor_company_id != operation.company_id
+    ):
+        raise OperationError("recovery actor identity binding mismatch")
+    if operation.approval_signature is None:
+        raise OperationError("recovery requires a previously approved operation")
+    return operation._apply_transition(State.RECOVERING)
+
+
+def complete_recovery(
+    operation: Operation,
+    result: TrustedResult,
+    *,
+    recovery_plan_digest: str,
+    now: datetime,
+    secret: bytes,
+    expected_key_id: str,
+    allowed_issuers: frozenset[str],
+    expected_revision: int,
+) -> Operation:
+    target = State.RECOVERED if result.succeeded else State.FAILED
+    operation._check_transition(target, expected_revision=expected_revision)
+    _verify_result(
+        operation=operation,
+        result=result,
+        kind=ResultKind.RECOVERY,
+        now=now,
+        secret=secret,
+        expected_key_id=expected_key_id,
+        allowed_issuers=allowed_issuers,
+        prior_evidence_digest=recovery_plan_digest,
+    )
+    return operation._apply_transition(target)

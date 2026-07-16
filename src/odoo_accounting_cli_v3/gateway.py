@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable
 
 from .contracts import validate_value
+from .domain.write_semantics import WriteSemanticError, validate_write_semantics
 from .operations import Operation, canonical_json
 from .registry import Capability, registry_digest
 
@@ -21,6 +22,14 @@ class GatewayError(ValueError):
 
 AUTH_SIGNATURE_VERSION = 1
 AUTH_SIGNATURE_PURPOSE = "auth_context_v1"
+WRITE_AUTH_SIGNATURE_VERSION = 2
+WRITE_AUTH_SIGNATURE_PURPOSE = "write_action_context_v2"
+AUTH_SIGNATURE_PROTOCOLS = frozenset(
+    {
+        (AUTH_SIGNATURE_VERSION, AUTH_SIGNATURE_PURPOSE),
+        (WRITE_AUTH_SIGNATURE_VERSION, WRITE_AUTH_SIGNATURE_PURPOSE),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -60,11 +69,11 @@ class RequestContext:
             raise GatewayError("authentication timestamps must be timezone-aware and increasing")
         if (
             type(self.auth_signature_version) is not int
-            or self.auth_signature_version != AUTH_SIGNATURE_VERSION
+            or not isinstance(self.auth_signature_purpose, str)
+            or (self.auth_signature_version, self.auth_signature_purpose)
+            not in AUTH_SIGNATURE_PROTOCOLS
         ):
-            raise GatewayError("authentication signature version is unsupported")
-        if self.auth_signature_purpose != AUTH_SIGNATURE_PURPOSE:
-            raise GatewayError("authentication signature purpose is invalid")
+            raise GatewayError("authentication signature version-purpose pair is unsupported")
         if not isinstance(self.auth_key_id, str) or not self.auth_key_id.strip():
             raise GatewayError("authentication key ID is required")
         if (
@@ -82,7 +91,10 @@ class RequestContext:
             not isinstance(self.database_name, str)
             or not self.database_name.strip()
             or len(self.database_name) > 128
-            or any(ord(character) < 32 for character in self.database_name)
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in self.database_name
+            )
         ):
             raise GatewayError("database_name is invalid")
         try:
@@ -156,12 +168,15 @@ class CapabilityGateway:
         if not self._authenticate_context(context):
             raise GatewayError("request context authentication failed")
 
-    def _available(self, context: RequestContext, capability_id: str) -> Capability:
+    def _known(self, context: RequestContext, capability_id: str) -> Capability:
         self._authenticate(context)
         try:
-            capability = self._capabilities[capability_id]
+            return self._capabilities[capability_id]
         except KeyError as exc:
             raise GatewayError("unknown capability") from exc
+
+    def _available(self, context: RequestContext, capability_id: str) -> Capability:
+        capability = self._known(context, capability_id)
         environment_field = (
             "enabled_environments"
             if self._availability_channel == "enabled"
@@ -253,11 +268,25 @@ class CapabilityGateway:
         context: RequestContext,
         capability_id: str,
         parameters: dict[str, Any],
+        *,
+        enforce_acl: bool = True,
+        enforce_availability: bool = True,
     ) -> Capability:
-        capability = self._available(context, capability_id)
+        if type(enforce_acl) is not bool or type(enforce_availability) is not bool:
+            raise GatewayError("request enforcement flags must be boolean")
+        capability = (
+            self._available(context, capability_id)
+            if enforce_availability
+            else self._known(context, capability_id)
+        )
         validate_value(parameters, capability.data["input_schema"])
         self._validate_company_scope(context, capability, parameters)
-        if not self._acl_check(context, capability, parameters):
+        if capability.data["access"] == "write":
+            try:
+                validate_write_semantics(capability_id, parameters)
+            except WriteSemanticError as exc:
+                raise GatewayError("write semantic precheck rejected request") from exc
+        if enforce_acl and not self._acl_check(context, capability, parameters):
             raise GatewayError("Odoo ACL rejected capability")
         return capability
 
@@ -272,12 +301,12 @@ class CapabilityGateway:
             value = {"line_ids": sorted(parameters["line_ids"])}
         elif scope == "company_source_line":
             value = {"source_move_line_id": parameters["source_move_line_id"]}
-        elif scope == "company_depreciation_line":
-            value = {"depreciation_line_id": parameters["depreciation_line_id"]}
+        elif scope == "company_depreciation_move":
+            value = {"depreciation_move_id": parameters["depreciation_move_id"]}
         elif scope == "company_origin_move":
             value = {"move_id": parameters.get("origin_move_id", parameters.get("move_id"))}
         elif scope == "company_origin_operation":
-            value = {"operation_id": parameters["operation_id"]}
+            value = {"operation_id": parameters["origin_operation_id"]}
         else:  # Registry validation makes this unreachable.
             raise GatewayError("unsupported idempotency scope")
         return hashlib.sha256(canonical_json(value)).hexdigest()
@@ -355,6 +384,9 @@ class CapabilityGateway:
     def preview(self, context: RequestContext, operation_id: str) -> dict[str, Any]:
         operation = self.status(context, operation_id)
         capability = self._authorized(context, operation.capability_id)
+        semantic_precheck = validate_write_semantics(
+            operation.capability_id, operation.parameters
+        )
         return {
             "operation_id": operation.operation_id,
             "capability_id": operation.capability_id,
@@ -364,6 +396,7 @@ class CapabilityGateway:
             "risk_level": capability.data["risk_level"],
             "approval": capability.data["approval"].copy(),
             "recovery": capability.data["recovery"].copy(),
+            "semantic_precheck": semantic_precheck,
         }
 
     def status(self, context: RequestContext, operation_id: str) -> Operation:

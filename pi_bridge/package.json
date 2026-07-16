@@ -1,0 +1,14 @@
+{
+  "name": "odoo-accounting-cli-v3-pi-bridge",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test tests/odoo-v3-cli.test.mjs tests/trusted-broker.test.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.6"
+  }
+}

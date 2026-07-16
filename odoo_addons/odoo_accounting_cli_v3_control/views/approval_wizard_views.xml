@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_odoo_accounting_cli_v3_approval_wizard_form" model="ir.ui.view">
+        <field name="name">odoo.accounting.cli.v3.approval.wizard.form</field>
+        <field name="model">odoo.accounting.cli.v3.approval.wizard</field>
+        <field name="arch" type="xml">
+            <form string="V3 Approval Review" create="true" edit="true" delete="false">
+                <header>
+                    <field name="state" widget="statusbar" statusbar_visible="pending,approved,denied,expired,stale" readonly="1"/>
+                </header>
+                <sheet>
+                    <div class="alert alert-warning" role="alert">
+                        Review the complete canonical parameters and precheck evidence before deciding. Amounts, dates, partners, suppliers, currencies, lines, and company bindings are not summarized or omitted.
+                    </div>
+                    <group>
+                        <group string="Challenge">
+                            <field name="challenge_id" readonly="state"/>
+                            <field name="operation_id" readonly="1"/>
+                            <field name="request_id" readonly="1"/>
+                            <field name="capability_id" readonly="1"/>
+                            <field name="company_id" readonly="1"/>
+                            <field name="requester_user_id" readonly="1"/>
+                            <field name="approver_user_id" readonly="1"/>
+                        </group>
+                        <group string="Validity">
+                            <field name="issued_at" readonly="1"/>
+                            <field name="expires_at" readonly="1"/>
+                            <field name="operation_revision" readonly="1"/>
+                            <field name="last_checked_at" readonly="1"/>
+                            <field name="status_message" readonly="1" nolabel="1"/>
+                        </group>
+                    </group>
+                    <group string="Immutable digests" col="2">
+                        <field name="operation_digest" readonly="1"/>
+                        <field name="parameters_digest" readonly="1"/>
+                        <field name="precheck_digest" readonly="1"/>
+                        <field name="preview_digest" readonly="1"/>
+                        <field name="inspection_digest" readonly="1"/>
+                    </group>
+                    <notebook>
+                        <page string="Business parameters" name="business_parameters">
+                            <field name="parameters_json" readonly="1" nolabel="1"/>
+                        </page>
+                        <page string="Precheck evidence" name="precheck_evidence">
+                            <field name="precheck_json" readonly="1" nolabel="1"/>
+                        </page>
+                        <page string="Complete authoritative snapshot" name="authoritative_snapshot">
+                            <field name="snapshot_json" readonly="1" nolabel="1"/>
+                        </page>
+                    </notebook>
+                    <group string="Denial">
+                        <field name="denial_reason" readonly="state != 'pending'" placeholder="Required only when denying the pending challenge."/>
+                    </group>
+                </sheet>
+                <footer>
+                    <button name="action_approve" string="Approve" type="object" class="btn-primary" groups="odoo_accounting_cli_v3_control.group_approver" invisible="state != 'pending'"/>
+                    <button name="action_deny" string="Deny" type="object" class="btn-danger" groups="odoo_accounting_cli_v3_control.group_approver" invisible="state != 'pending'"/>
+                    <button name="action_refresh" string="Refresh authoritative preview" type="object" class="btn-secondary" groups="odoo_accounting_cli_v3_control.group_approver" invisible="not state"/>
+                    <button string="Close" special="cancel" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_odoo_accounting_cli_v3_approval_wizard" model="ir.actions.act_window">
+        <field name="name">V3 Approval Review</field>
+        <field name="res_model">odoo.accounting.cli.v3.approval.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="view_id" ref="view_odoo_accounting_cli_v3_approval_wizard_form"/>
+        <field name="target">new</field>
+        <field name="group_ids" eval="[(4, ref('odoo_accounting_cli_v3_control.group_approver'))]"/>
+    </record>
+
+    <menuitem
+        id="menu_odoo_accounting_cli_v3_root"
+        name="Accounting CLI V3"
+        sequence="95"
+        groups="odoo_accounting_cli_v3_control.group_approver"
+    />
+    <menuitem
+        id="menu_odoo_accounting_cli_v3_approval"
+        name="Review approval"
+        parent="menu_odoo_accounting_cli_v3_root"
+        action="action_odoo_accounting_cli_v3_approval_wizard"
+        sequence="10"
+        groups="odoo_accounting_cli_v3_control.group_approver"
+    />
+</odoo>

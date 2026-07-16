@@ -15,12 +15,16 @@ from odoo_accounting_cli_v3.operations import (
     State,
     TrustedResultRejected,
     approve_operation,
+    begin_recovery,
     begin_execution,
     canonical_json,
+    complete_recovery,
     complete_operation,
+    record_precheck,
     record_execution_result,
     sign_approval,
     sign_execution_result,
+    sign_recovery_result,
     sign_verification_result,
 )
 
@@ -29,11 +33,15 @@ APPROVAL_SECRET = b"a" * 32
 APPROVAL_KEY_ID = "approval-key-v1"
 EXECUTION_SECRET = b"e" * 32
 VERIFICATION_SECRET = b"v" * 32
+RECOVERY_SECRET = b"r" * 32
 SECRET = APPROVAL_SECRET
 EXECUTION_KEY_ID = "execution-key-v1"
 VERIFICATION_KEY_ID = "verification-key-v1"
+RECOVERY_KEY_ID = "recovery-key-v1"
 EXECUTION_ISSUERS = frozenset({"odoo-adapter"})
 VERIFICATION_ISSUERS = frozenset({"odoo-verifier"})
+RECOVERY_ISSUERS = frozenset({"odoo-recovery-verifier"})
+PRECHECK_DIGEST = "9" * 64
 NOW = datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc)
 DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
 REGISTRY_DIGEST = "c" * 64
@@ -65,7 +73,11 @@ def awaiting_operation() -> Operation:
         idempotency_key="idem-1",
         **RUNTIME_BINDING,
     )
-    operation = operation.transition(State.PRECHECKED, expected_revision=0)
+    operation = record_precheck(
+        operation,
+        precheck_digest=PRECHECK_DIGEST,
+        expected_revision=0,
+    )
     return operation.transition(State.AWAITING_APPROVAL, expected_revision=1)
 
 
@@ -109,11 +121,59 @@ def executing_operation() -> Operation:
 
 
 class OperationTest(unittest.TestCase):
+    def test_precheck_is_guarded_and_digest_is_required_after_prepared(self) -> None:
+        prepared = Operation.prepare(
+            operation_id="op-precheck-guard",
+            request_id="request-precheck-guard",
+            capability_id="acct.invoice.customer_create.v1",
+            parameters={"company_id": 7},
+            user_id=42,
+            company_id=7,
+            idempotency_key="idem-precheck-guard",
+            **RUNTIME_BINDING,
+        )
+        with self.assertRaisesRegex(OperationError, "record_precheck"):
+            prepared.transition(State.PRECHECKED, expected_revision=0)
+        with self.assertRaisesRegex(OperationError, "SHA-256"):
+            record_precheck(
+                prepared,
+                precheck_digest="invalid",
+                expected_revision=0,
+            )
+        prechecked = record_precheck(
+            prepared,
+            precheck_digest=PRECHECK_DIGEST,
+            expected_revision=0,
+        )
+        self.assertEqual(prechecked.precheck_digest, PRECHECK_DIGEST)
+        self.assertEqual(prechecked.protocol_version, 4)
+        prechecked.assert_integrity()
+
+    def test_approval_signature_binds_the_precheck_digest(self) -> None:
+        operation = awaiting_operation()
+        approval = valid_approval(operation)
+        self.assertEqual(approval.precheck_digest, PRECHECK_DIGEST)
+        self.assertEqual(
+            approval.payload()["precheck_digest"], PRECHECK_DIGEST
+        )
+        with self.assertRaisesRegex(ApprovalRejected, "binding mismatch"):
+            approve_operation(
+                operation,
+                replace(approval, precheck_digest="8" * 64),
+                now=NOW,
+                secret=APPROVAL_SECRET,
+                expected_key_id=APPROVAL_KEY_ID,
+                is_approver_authorized=AUTHORIZED,
+                consume_nonce=lambda *_: True,
+                approval_ttl_seconds=900,
+                expected_revision=2,
+            )
+
     def test_approval_protocol_metadata_and_expected_key_are_enforced(self) -> None:
         operation = awaiting_operation()
         approval = valid_approval(operation)
-        self.assertEqual(approval.signature_version, 2)
-        self.assertEqual(approval.signature_purpose, "approval_v2")
+        self.assertEqual(approval.signature_version, 3)
+        self.assertEqual(approval.signature_purpose, "approval_v3")
         self.assertEqual(approval.key_id, APPROVAL_KEY_ID)
 
         for changed, message in (
@@ -167,8 +227,8 @@ class OperationTest(unittest.TestCase):
     def test_approval_signature_is_purpose_bound(self) -> None:
         operation = awaiting_operation()
         approval = valid_approval(operation)
-        self.assertEqual(approval.payload()["purpose"], "approval_v2")
-        self.assertEqual(approval.payload()["version"], 2)
+        self.assertEqual(approval.payload()["purpose"], "approval_v3")
+        self.assertEqual(approval.payload()["version"], 3)
         wrong_payload = {**approval.payload(), "purpose": "execution_result_v1"}
         wrong_signature = hmac.new(
             APPROVAL_SECRET, canonical_json(wrong_payload), hashlib.sha256
@@ -960,6 +1020,128 @@ class OperationTest(unittest.TestCase):
                         allowed_issuers=EXECUTION_ISSUERS,
                         expected_revision=4,
                     )
+
+    def test_recovery_is_identity_plan_and_signed_result_bound(self) -> None:
+        operation = executing_operation()
+        failed_result = sign_execution_result(
+            operation=operation,
+            issuer="odoo-adapter",
+            key_id=EXECUTION_KEY_ID,
+            succeeded=False,
+            evidence_digest="a" * 64,
+            issued_at=NOW,
+            secret=EXECUTION_SECRET,
+        )
+        failed = record_execution_result(
+            operation,
+            failed_result,
+            now=NOW,
+            secret=EXECUTION_SECRET,
+            expected_key_id=EXECUTION_KEY_ID,
+            allowed_issuers=EXECUTION_ISSUERS,
+            expected_revision=4,
+        )
+        plan_digest = "b" * 64
+        with self.assertRaisesRegex(OperationError, "identity binding"):
+            begin_recovery(
+                failed,
+                recovery_plan_digest=plan_digest,
+                actor_principal=failed.principal,
+                actor_user_id=failed.user_id + 1,
+                actor_company_id=failed.company_id,
+                expected_revision=5,
+            )
+
+        recovering = begin_recovery(
+            failed,
+            recovery_plan_digest=plan_digest,
+            actor_principal=failed.principal,
+            actor_user_id=failed.user_id,
+            actor_company_id=failed.company_id,
+            expected_revision=5,
+        )
+        recovery_result = sign_recovery_result(
+            operation=recovering,
+            recovery_plan_digest=plan_digest,
+            issuer="odoo-recovery-verifier",
+            key_id=RECOVERY_KEY_ID,
+            succeeded=True,
+            evidence_digest="c" * 64,
+            issued_at=NOW,
+            secret=RECOVERY_SECRET,
+        )
+        with self.assertRaisesRegex(TrustedResultRejected, "binding mismatch"):
+            complete_recovery(
+                recovering,
+                recovery_result,
+                recovery_plan_digest="d" * 64,
+                now=NOW,
+                secret=RECOVERY_SECRET,
+                expected_key_id=RECOVERY_KEY_ID,
+                allowed_issuers=RECOVERY_ISSUERS,
+                expected_revision=6,
+            )
+        recovered = complete_recovery(
+            recovering,
+            recovery_result,
+            recovery_plan_digest=plan_digest,
+            now=NOW,
+            secret=RECOVERY_SECRET,
+            expected_key_id=RECOVERY_KEY_ID,
+            allowed_issuers=RECOVERY_ISSUERS,
+            expected_revision=6,
+        )
+        self.assertEqual(recovered.state, State.RECOVERED)
+
+    def test_failed_recovery_cannot_be_reported_as_recovered(self) -> None:
+        failed = executing_operation()
+        failed = record_execution_result(
+            failed,
+            sign_execution_result(
+                operation=failed,
+                issuer="odoo-adapter",
+                key_id=EXECUTION_KEY_ID,
+                succeeded=False,
+                evidence_digest="a" * 64,
+                issued_at=NOW,
+                secret=EXECUTION_SECRET,
+            ),
+            now=NOW,
+            secret=EXECUTION_SECRET,
+            expected_key_id=EXECUTION_KEY_ID,
+            allowed_issuers=EXECUTION_ISSUERS,
+            expected_revision=4,
+        )
+        plan_digest = "b" * 64
+        recovering = begin_recovery(
+            failed,
+            recovery_plan_digest=plan_digest,
+            actor_principal=failed.principal,
+            actor_user_id=failed.user_id,
+            actor_company_id=failed.company_id,
+            expected_revision=5,
+        )
+        negative = sign_recovery_result(
+            operation=recovering,
+            recovery_plan_digest=plan_digest,
+            issuer="odoo-recovery-verifier",
+            key_id=RECOVERY_KEY_ID,
+            succeeded=False,
+            evidence_digest="c" * 64,
+            issued_at=NOW,
+            secret=RECOVERY_SECRET,
+        )
+        still_failed = complete_recovery(
+            recovering,
+            negative,
+            recovery_plan_digest=plan_digest,
+            now=NOW,
+            secret=RECOVERY_SECRET,
+            expected_key_id=RECOVERY_KEY_ID,
+            allowed_issuers=RECOVERY_ISSUERS,
+            expected_revision=6,
+        )
+        self.assertEqual(still_failed.state, State.FAILED)
 
 
 if __name__ == "__main__":
