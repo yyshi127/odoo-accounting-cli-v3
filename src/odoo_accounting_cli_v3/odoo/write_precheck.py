@@ -20,7 +20,10 @@ from ..domain.write_semantics import validate_write_semantics
 from ..gateway import RequestContext
 from ..operations import canonical_json
 from ..registry import Capability, registry_digest
-from ..write_receipts import validate_recovery_plan
+from ..write_receipts import (
+    index_recovery_guard_graph,
+    validate_executable_recovery_plan,
+)
 from .bootstrap import (
     bind_non_superuser_environment,
     database_uuid,
@@ -137,23 +140,22 @@ def _trusted_recovery_plan(
         )
     try:
         plan = json.loads(canonical_json(value))
-        validate_recovery_plan(plan)
+        validate_executable_recovery_plan(plan)
     except (TypeError, ValueError, UnicodeError) as exc:
         raise OdooWritePrecheckError("trusted recovery plan is invalid") from exc
-    targets = plan["target_records"]
-    target_keys = {(item["model"], item["record_id"]) for item in targets}
     if (
         plan["origin_operation_id"] != parameters["origin_operation_id"]
         or plan["plan_digest"] != parameters["expected_recovery_plan_digest"]
-        or plan["status"] != "available"
-        or plan["requires_approval"] is not True
-        or not targets
-        or len(target_keys) != len(targets)
-        or any(item["company_id"] != company_id for item in targets)
     ):
         raise OdooWritePrecheckError(
             "trusted recovery plan is unavailable or outside the bound operation"
         )
+    try:
+        index_recovery_guard_graph(plan, expected_company_id=company_id)
+    except ValueError as exc:
+        raise OdooWritePrecheckError(
+            "trusted recovery plan is unavailable or outside the bound operation"
+        ) from exc
     return plan
 
 

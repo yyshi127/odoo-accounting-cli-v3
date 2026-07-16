@@ -42,10 +42,12 @@ from ..write_protocol import (
     trusted_result_to_mapping,
 )
 from ..write_receipts import (
+    WriteReceiptError,
     create_difference,
     create_record_snapshot,
-    create_recovery_plan,
-    validate_recovery_plan,
+    create_recovery_plan_v2,
+    index_recovery_guard_graph,
+    validate_executable_recovery_plan,
 )
 from ..write_service import write_idempotency_scope
 from .bootstrap import (
@@ -235,8 +237,16 @@ def _resource_lock_digests(
         )
 
     if capability_id == "acct.recovery.execute.v1" and trusted_recovery_plan:
-        for target in trusted_recovery_plan.get("target_records", []):
-            add(target.get("model"), target.get("record_id"))
+        try:
+            graph = index_recovery_guard_graph(
+                trusted_recovery_plan, expected_company_id=company_id
+            )
+        except WriteReceiptError as exc:
+            raise OdooWriteBootstrapError(
+                "trusted recovery guard graph is invalid"
+            ) from exc
+        for model_name, record_id in graph:
+            add(model_name, record_id)
 
     if len(resources) > 2000:
         raise OdooWriteBootstrapError("write request requires too many resource locks")
@@ -431,7 +441,7 @@ def _trusted_recovery_plan(
         # Sever all caller-owned mutable references before the plan reaches a
         # handler.  Its digest is already bound by authentication and approval.
         plan = json.loads(canonical_json(value).decode("utf-8"))
-        validate_recovery_plan(plan)
+        validate_executable_recovery_plan(plan)
     except (TypeError, ValueError, UnicodeError) as exc:
         raise OdooWriteBootstrapError("trusted recovery plan is invalid") from exc
 
@@ -444,20 +454,14 @@ def _trusted_recovery_plan(
         raise OdooWriteBootstrapError(
             "trusted recovery plan origin, digest, or company binding mismatch"
         )
-    if plan["status"] != "available" or plan["requires_approval"] is not True:
-        raise OdooWriteBootstrapError(
-            "trusted recovery plan is not an approved executable plan"
+    try:
+        index_recovery_guard_graph(
+            plan, expected_company_id=operation.company_id
         )
-    targets = plan["target_records"]
-    target_keys = {(item["model"], item["record_id"]) for item in targets}
-    if (
-        not targets
-        or len(target_keys) != len(targets)
-        or any(item["company_id"] != operation.company_id for item in targets)
-    ):
+    except WriteReceiptError as exc:
         raise OdooWriteBootstrapError(
-            "trusted recovery plan targets are not uniquely company-bound"
-        )
+            "trusted recovery plan graph is not uniquely company-bound"
+        ) from exc
     return plan
 
 
@@ -692,6 +696,12 @@ def _difference(
         set(after_keys)
     ):
         raise OdooWriteBootstrapError("handler snapshots contain a duplicate record")
+    omitted_after = set(before_keys) - set(after_keys)
+    if omitted_after:
+        raise OdooWriteBootstrapError(
+            "handler after snapshots omitted a prechecked record; "
+            "an explicit company-bound tombstone protocol is required"
+        )
     keyed_before = {
         (item["model"], item["record_id"]): item for item in before_values
     }
@@ -763,7 +773,7 @@ def _execution_evidence(
     ):
         raise OdooWriteBootstrapError("write handler recovery result is invalid")
     by_key = {(item["model"], item["record_id"]): item for item in records}
-    target_records = []
+    target_records: list[dict[str, Any]] = []
     for target in targets:
         if not isinstance(target, Mapping):
             raise OdooWriteBootstrapError("write recovery target is invalid")
@@ -771,22 +781,36 @@ def _execution_evidence(
         if reference is None:
             raise OdooWriteBootstrapError("write recovery target was not read back")
         target_records.append(dict(reference))
+    if status == "available":
+        raise OdooWriteBootstrapError(
+            "an available recovery requires the explicit V2 action/guard contract"
+        )
+    guard_records = [
+        {**item, "expected_outcome": "manual_review"}
+        for item in target_records
+    ]
     recovery_parameters = {
         "company_id": operation.company_id,
         "origin_operation_id": operation.operation_id,
         "method": method,
-        "target_records": [
+        "action_targets": [],
+        "guard_records": [
             {"model": item["model"], "record_id": item["record_id"]}
-            for item in target_records
+            for item in guard_records
         ],
+        "oracle_id": (
+            "not_applicable" if status == "not_applicable" else "manual_escalation"
+        ),
     }
-    plan = create_recovery_plan(
+    plan = create_recovery_plan_v2(
         origin_operation_id=operation.operation_id,
         recovery_capability_id="acct.recovery.execute.v1",
         status=status,
         method=method,
         requires_approval=True,
-        target_records=target_records,
+        action_targets=[],
+        guard_records=guard_records,
+        oracle_id=recovery_parameters["oracle_id"],
         parameters=recovery_parameters,
     )
     return {
@@ -815,13 +839,15 @@ def _no_effect_failure_evidence(
         "succeeded": False,
         "odoo_records": [],
         "difference": create_difference(before=[], after=[], changed_fields=[]),
-        "recovery_plan": create_recovery_plan(
+        "recovery_plan": create_recovery_plan_v2(
             origin_operation_id=operation.operation_id,
             recovery_capability_id="acct.recovery.execute.v1",
             status="manual_escalation",
             method="inspect_signed_failed_execution",
             requires_approval=True,
-            target_records=[],
+            action_targets=[],
+            guard_records=[],
+            oracle_id="manual_escalation",
             parameters=recovery_parameters,
         ),
         "recovery_parameters": recovery_parameters,

@@ -18,8 +18,12 @@ from odoo_accounting_cli_v3.historical_router import (
     _run_bounded_child,
     load_historical_routing_manifest,
 )
-from odoo_accounting_cli_v3.operations import Operation, canonical_json
+from odoo_accounting_cli_v3.operations import Operation, State, canonical_json
 from odoo_accounting_cli_v3.persistence import OperationNotFound
+from odoo_accounting_cli_v3.write_receipts import (
+    create_recovery_plan,
+    create_recovery_plan_v2,
+)
 
 
 CURRENT_RELEASE = "a" * 64
@@ -113,12 +117,16 @@ class FakeOperation:
     database_name: str = "odoo_v3_sandbox"
     database_uuid: str = "11111111-1111-4111-8111-111111111111"
     environment: str = "sandbox"
+    capability_id: str = "acct.invoice.customer_create.v1"
+    digest: str = "6" * 64
+    state: State = State.COMPLETED
 
 
 class FakeStore:
     def __init__(self) -> None:
         self.operations: dict[str, FakeOperation] = {}
         self.bindings: dict[str, Any] = {}
+        self.final_receipts: dict[str, tuple[Any, ...]] = {}
 
     def get_operation(self, operation_id: str) -> FakeOperation:
         try:
@@ -131,6 +139,71 @@ class FakeStore:
             return self.bindings[recovery_operation_id]
         except KeyError as exc:
             raise OperationNotFound("recovery binding does not exist") from exc
+
+    def recovery_plan(self, operation_id: str) -> dict[str, Any]:
+        operation = self.operations[operation_id]
+        return create_recovery_plan_v2(
+            origin_operation_id=operation_id,
+            recovery_capability_id="acct.recovery.execute.v1",
+            status="available",
+            method="cancel draft move",
+            requires_approval=True,
+            action_targets=[
+                {
+                    "company_id": operation.company_id,
+                    "model": "account.move",
+                    "record_fingerprint": "7" * 64,
+                    "record_id": 100,
+                    "record_state": "draft",
+                }
+            ],
+            guard_records=[
+                {
+                    "company_id": operation.company_id,
+                    "expected_outcome": "survive_exact",
+                    "model": "account.move.line",
+                    "record_fingerprint": "8" * 64,
+                    "record_id": 101,
+                    "record_state": "draft",
+                }
+            ],
+            oracle_id="cancel_draft_move_exact_v1",
+            parameters={"company_id": operation.company_id, "move_id": 100},
+        )
+
+    def receipt(self, operation_id: str, plan: dict[str, Any]) -> Any:
+        operation = self.operations[operation_id]
+        return SimpleNamespace(
+            operation_id=operation.operation_id,
+            operation_digest=operation.digest,
+            operation_revision=operation.revision,
+            terminal_state=operation.state.value,
+            principal=operation.principal,
+            user_id=operation.user_id,
+            company_id=operation.company_id,
+            body={
+                "capability_id": operation.capability_id,
+                "company_id": operation.company_id,
+                "database_name": operation.database_name,
+                "database_uuid": operation.database_uuid,
+                "environment": operation.environment,
+                "odoo_instance_id": operation.odoo_instance_id,
+                "operation_digest": operation.digest,
+                "operation_id": operation.operation_id,
+                "operation_revision": operation.revision,
+                "principal": operation.principal,
+                "receipt_details": {"recovery_plan": plan},
+                "registry_digest": operation.registry_digest,
+                "release_digest": operation.release_digest,
+                "terminal_state": operation.state.value,
+                "user_id": operation.user_id,
+            },
+        )
+
+    def get_final_write_receipts(self, operation_id: str) -> tuple[Any, ...]:
+        if operation_id in self.final_receipts:
+            return self.final_receipts[operation_id]
+        return (self.receipt(operation_id, self.recovery_plan(operation_id)),)
 
 
 def _write(path: Path, value: bytes) -> str:
@@ -671,9 +744,10 @@ def test_recover_lost_response_accepts_only_exact_bound_recovery_operation(
     request = _request("operation.recover")
     origin = FakeOperation("op-origin", OLD_RELEASE, OLD_REGISTRY)
     store.operations[origin.operation_id] = origin
+    plan_digest = store.recovery_plan(origin.operation_id)["plan_digest"]
     recovery_parameters = {
         "company_id": 7,
-        "expected_recovery_plan_digest": "8" * 64,
+        "expected_recovery_plan_digest": plan_digest,
         "idempotency_key": request["idempotency_key"],
         "origin_operation_id": origin.operation_id,
         "reason": request["reason"],
@@ -694,6 +768,7 @@ def test_recover_lost_response_accepts_only_exact_bound_recovery_operation(
             origin_operation_id=origin.operation_id,
             origin_operation_revision=origin.revision,
             recovery_operation_id=recovery.operation_id,
+            plan_digest=plan_digest,
             registry_digest=OLD_REGISTRY,
             release_digest=OLD_RELEASE,
         )
@@ -794,6 +869,7 @@ def test_recover_routes_by_origin_then_requires_durable_recovery_binding(
     store = FakeStore()
     origin = FakeOperation("op-origin", OLD_RELEASE, OLD_REGISTRY)
     store.operations[origin.operation_id] = origin
+    plan_digest = store.recovery_plan(origin.operation_id)["plan_digest"]
     calls: list[list[str]] = []
 
     def run(argv, **_kwargs):
@@ -804,6 +880,7 @@ def test_recover_routes_by_origin_then_requires_durable_recovery_binding(
             origin_operation_id=origin.operation_id,
             origin_operation_revision=origin.revision,
             recovery_operation_id=recovery.operation_id,
+            plan_digest=plan_digest,
             registry_digest=OLD_REGISTRY,
             release_digest=OLD_RELEASE,
         )
@@ -825,6 +902,308 @@ def test_recover_routes_by_origin_then_requires_durable_recovery_binding(
     router.dispatch("operation.recover", _request("operation.recover"))
 
     assert calls == [[old["executable_path"], "operation", "recover"]]
+
+
+def test_recover_rejects_receipt_bound_v1_before_successful_old_child_starts(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = FakeOperation("op-origin", OLD_RELEASE, OLD_REGISTRY)
+    store.operations[origin.operation_id] = origin
+    v1_plan = create_recovery_plan(
+        origin_operation_id=origin.operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method="legacy flat target recovery",
+        requires_approval=True,
+        target_records=[
+            {
+                "company_id": origin.company_id,
+                "model": "account.move",
+                "record_fingerprint": "7" * 64,
+                "record_id": 100,
+                "record_state": "draft",
+            }
+        ],
+        parameters={"company_id": origin.company_id, "move_id": 100},
+    )
+    store.final_receipts[origin.operation_id] = (
+        store.receipt(origin.operation_id, v1_plan),
+    )
+    called = False
+
+    def successful_old_child(argv, **_kwargs):
+        nonlocal called
+        called = True
+        return _completed(
+            argv,
+            _response(
+                "operation.recover",
+                operation_id="op-recovery",
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child",
+        successful_old_child,
+    )
+    router = HistoricalReleaseRouter(manifest, store, require_root_owner=False)
+
+    with pytest.raises(HistoricalRouterError, match="executable V2"):
+        router.dispatch("operation.recover", _request("operation.recover"))
+
+    assert called is False
+
+
+@pytest.mark.parametrize("receipt_state", ["missing", "tampered"])
+def test_recover_rejects_missing_or_tampered_v2_receipt_before_child(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    receipt_state: str,
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = FakeOperation("op-origin", OLD_RELEASE, OLD_REGISTRY)
+    store.operations[origin.operation_id] = origin
+    if receipt_state == "missing":
+        store.final_receipts[origin.operation_id] = ()
+    else:
+        plan = store.recovery_plan(origin.operation_id)
+        plan["method"] = "tampered after digest"
+        store.final_receipts[origin.operation_id] = (
+            store.receipt(origin.operation_id, plan),
+        )
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(manifest, store, require_root_owner=False)
+
+    with pytest.raises(HistoricalRouterError, match="recovery receipt|executable V2"):
+        router.dispatch("operation.recover", _request("operation.recover"))
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "action", ["operation.preview", "operation.approve_execute"]
+)
+def test_bound_v1_recovery_cannot_advance_lifecycle_before_child(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    action: str,
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = FakeOperation("op-origin", OLD_RELEASE, OLD_REGISTRY)
+    recovery = FakeOperation(
+        "op-recovery",
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        revision=0,
+        capability_id="acct.recovery.execute.v1",
+        state=State.PREPARED,
+    )
+    store.operations = {
+        origin.operation_id: origin,
+        recovery.operation_id: recovery,
+    }
+    v1_plan = create_recovery_plan(
+        origin_operation_id=origin.operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method="legacy flat target recovery",
+        requires_approval=True,
+        target_records=[
+            {
+                "company_id": origin.company_id,
+                "model": "account.move",
+                "record_fingerprint": "7" * 64,
+                "record_id": 100,
+                "record_state": "draft",
+            }
+        ],
+        parameters={"company_id": origin.company_id, "move_id": 100},
+    )
+    store.final_receipts[origin.operation_id] = (
+        store.receipt(origin.operation_id, v1_plan),
+    )
+    store.bindings[recovery.operation_id] = SimpleNamespace(
+        origin_operation_id=origin.operation_id,
+        origin_operation_revision=origin.revision,
+        recovery_operation_id=recovery.operation_id,
+        plan_digest=v1_plan["plan_digest"],
+        registry_digest=OLD_REGISTRY,
+        release_digest=OLD_RELEASE,
+    )
+    called = False
+
+    def successful_old_child(argv, **_kwargs):
+        nonlocal called
+        called = True
+        return _completed(
+            argv,
+            _response(
+                action,
+                operation_id=recovery.operation_id,
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child",
+        successful_old_child,
+    )
+    router = HistoricalReleaseRouter(manifest, store, require_root_owner=False)
+
+    with pytest.raises(HistoricalRouterError, match="executable V2"):
+        router.dispatch(
+            action, _request(action, operation_id=recovery.operation_id)
+        )
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "action", ["operation.preview", "operation.approve_execute"]
+)
+def test_bound_v2_recovery_can_advance_through_its_origin_release(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    action: str,
+) -> None:
+    manifest, _current, old = router_files
+    store = FakeStore()
+    origin = FakeOperation("op-origin", OLD_RELEASE, OLD_REGISTRY)
+    recovery = FakeOperation(
+        "op-recovery",
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        revision=0,
+        capability_id="acct.recovery.execute.v1",
+        state=State.PREPARED,
+    )
+    store.operations = {
+        origin.operation_id: origin,
+        recovery.operation_id: recovery,
+    }
+    plan = store.recovery_plan(origin.operation_id)
+    store.bindings[recovery.operation_id] = SimpleNamespace(
+        origin_operation_id=origin.operation_id,
+        origin_operation_revision=origin.revision,
+        recovery_operation_id=recovery.operation_id,
+        plan_digest=plan["plan_digest"],
+        registry_digest=OLD_REGISTRY,
+        release_digest=OLD_RELEASE,
+    )
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        return _completed(
+            argv,
+            _response(
+                action,
+                operation_id=recovery.operation_id,
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(manifest, store, require_root_owner=False)
+
+    response = router.dispatch(
+        action, _request(action, operation_id=recovery.operation_id)
+    )
+
+    assert response["ok"] is True
+    assert calls == [
+        [
+            old["executable_path"],
+            "operation",
+            {
+                "operation.preview": "preview",
+                "operation.approve_execute": "approve-execute",
+            }[action],
+        ]
+    ]
+
+
+@pytest.mark.parametrize("action", ["operation.status", "operation.result"])
+def test_bound_v1_recovery_status_and_result_remain_historically_readable(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    action: str,
+) -> None:
+    manifest, _current, old = router_files
+    store = FakeStore()
+    recovery = FakeOperation(
+        "op-recovery",
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        capability_id="acct.recovery.execute.v1",
+    )
+    store.operations[recovery.operation_id] = recovery
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(argv)
+        return _completed(
+            argv,
+            _response(
+                action,
+                operation_id=recovery.operation_id,
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(manifest, store, require_root_owner=False)
+
+    response = router.dispatch(
+        action, _request(action, operation_id=recovery.operation_id)
+    )
+
+    assert response["ok"] is True
+    assert calls == [[old["executable_path"], "operation", action.split(".")[1]]]
+
+
+def test_direct_recovery_capability_prepare_is_rejected_before_child(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    request = _request("operation.prepare", operation_id="op-recovery")
+    request["capability_id"] = "acct.recovery.execute.v1"
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(manifest, store, require_root_owner=False)
+
+    with pytest.raises(HistoricalRouterError, match="origin receipt"):
+        router.dispatch("operation.prepare", request)
+    assert called is False
 
 
 def test_recover_rejects_orphan_or_mismatched_recovery_before_dispatch(
@@ -858,6 +1237,19 @@ def test_recover_rejects_orphan_or_mismatched_recovery_before_dispatch(
         origin_operation_id="different-origin",
         origin_operation_revision=6,
         recovery_operation_id="op-recovery",
+        plan_digest=store.recovery_plan("op-origin")["plan_digest"],
+        registry_digest=OLD_REGISTRY,
+        release_digest=OLD_RELEASE,
+    )
+    with pytest.raises(HistoricalRouterError, match="recovery binding mismatch"):
+        router.dispatch("operation.recover", _request("operation.recover"))
+    assert called is False
+
+    store.bindings["op-recovery"] = SimpleNamespace(
+        origin_operation_id="op-origin",
+        origin_operation_revision=6,
+        recovery_operation_id="op-recovery",
+        plan_digest="e" * 64,
         registry_digest=OLD_REGISTRY,
         release_digest=OLD_RELEASE,
     )

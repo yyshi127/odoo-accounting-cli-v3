@@ -10,12 +10,15 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
-import hmac
 import json
 from typing import Any, Mapping
 
 from ..domain.write_semantics import WriteSemanticError, validate_write_semantics
-from ..write_receipts import create_record_snapshot, validate_record_snapshot
+from ..write_receipts import (
+    WriteReceiptError,
+    validate_executable_recovery_plan,
+    validate_record_snapshot,
+)
 
 
 class OdooWriteHandlerError(RuntimeError):
@@ -49,23 +52,9 @@ _CAPABILITIES = frozenset(
     }
 )
 
-_RECOVERY_ACTIONS = frozenset(
-    {
-        "reverse_posted_move",
-        "cancel_draft_move",
-        "cancel_payment",
-        "recover_accrual_schedule",
-    }
-)
-
-_RECOVERY_TARGET_MODELS = {
-    "reverse_posted_move": frozenset({"account.move"}),
-    "cancel_draft_move": frozenset({"account.move"}),
-    "cancel_payment": frozenset(
-        {"account.payment", "account.move", "account.move.line"}
-    ),
-    "recover_accrual_schedule": frozenset({"account.move"}),
-}
+# Automatic recovery stays closed until each active Odoo module override and
+# its complete side-effect graph have passed a real sandbox oracle.
+_RECOVERY_ACTIONS = frozenset()
 
 _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "account.move": (
@@ -733,6 +722,7 @@ class OdooWriteHandlers:
             "acct.depreciation.post.v1",
             "acct.deferred.create.v1",
             "acct.move.reverse.v1",
+            "acct.recovery.execute.v1",
         }:
             checks = method(
                 parameters,
@@ -5640,347 +5630,32 @@ class OdooWriteHandlers:
         plan = self.context.trusted_recovery_plan
         if not isinstance(plan, Mapping):
             raise OdooWriteHandlerError("trusted recovery plan is unavailable")
-        if plan.get("origin_operation_id") != p["origin_operation_id"]:
-            raise OdooWriteHandlerError("recovery plan origin differs")
-        if plan.get("plan_digest") != p["expected_recovery_plan_digest"]:
-            raise OdooWriteHandlerError("recovery plan digest differs")
-        if plan.get("company_id", p["company_id"]) != p["company_id"]:
-            raise OdooWriteHandlerError("recovery plan company differs")
-        action = plan.get("action") or plan.get("method")
-        if action not in _RECOVERY_ACTIONS:
-            raise OdooWriteHandlerError("recovery action is not allowlisted")
-        targets = plan.get("targets") or plan.get("target_records")
-        if not isinstance(targets, list) or not targets:
-            raise OdooWriteHandlerError("recovery plan has no targets")
-        target_records, before = self.validated_recovery_targets(
-            action, targets, company
-        )
-        if action == "recover_accrual_schedule" and len(target_records) != 2:
+        try:
+            validate_executable_recovery_plan(plan)
+        except WriteReceiptError as exc:
             raise OdooWriteHandlerError(
-                "accrual recovery requires exactly two target moves"
-            )
-        return {
-            "checks": [
-                "trusted_plan",
-                "digest",
-                "origin",
-                "company",
-                "allowlist",
-                "target_state",
-                "target_fingerprint",
-            ],
-            "before": before,
-            "recovery_action": action,
-        }
-
-    def live_recovery_target(
-        self, model_name: str, record: Any, company: Any
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        raw = self.snapshot(model_name, record, company)
-        state = raw["state"]
-        snapshot = create_record_snapshot(
-            model=model_name,
-            record_id=record.id,
-            exists=True,
-            record_state=state,
-            values=raw["values"],
+                "trusted recovery plan is not executable"
+            ) from exc
+        if plan["origin_operation_id"] != p["origin_operation_id"]:
+            raise OdooWriteHandlerError("recovery plan origin differs")
+        if plan["plan_digest"] != p["expected_recovery_plan_digest"]:
+            raise OdooWriteHandlerError("recovery plan digest differs")
+        raise OdooWriteHandlerError(
+            "automatic recovery is disabled until the active Odoo module "
+            "side-effect graph passes a real sandbox oracle"
         )
-        return raw, {
-            "model": model_name,
-            "record_id": record.id,
-            "company_id": company.id,
-            "record_state": state,
-            "record_fingerprint": _digest(snapshot),
-        }
-
-    def validated_recovery_targets(
-        self,
-        action: str,
-        targets: list[Mapping[str, Any]],
-        company: Any,
-    ) -> tuple[list[tuple[str, Any]], list[dict[str, Any]]]:
-        allowed_models = _RECOVERY_TARGET_MODELS[action]
-        expected_fields = {
-            "model",
-            "record_id",
-            "company_id",
-            "record_state",
-            "record_fingerprint",
-        }
-        records: list[tuple[str, Any]] = []
-        before: list[dict[str, Any]] = []
-        seen: set[tuple[str, int]] = set()
-        for target in targets:
-            if not isinstance(target, Mapping) or set(target) != expected_fields:
-                raise OdooWriteHandlerError("recovery target fields are invalid")
-            model_name = target["model"]
-            record_id = target["record_id"]
-            key = (model_name, record_id)
-            if (
-                model_name not in allowed_models
-                or isinstance(record_id, bool)
-                or not isinstance(record_id, int)
-                or record_id <= 0
-                or target["company_id"] != company.id
-                or key in seen
-            ):
-                raise OdooWriteHandlerError(
-                    "recovery target model, identity, or company is invalid"
-                )
-            record = self.record(
-                model_name, record_id, company, write=True
-            )
-            raw, live = self.live_recovery_target(model_name, record, company)
-            if (
-                live["record_state"] != target["record_state"]
-                or not isinstance(target["record_fingerprint"], str)
-                or not hmac.compare_digest(
-                    live["record_fingerprint"], target["record_fingerprint"]
-                )
-            ):
-                raise OdooWriteHandlerError(
-                    "recovery target state or fingerprint changed"
-                )
-            seen.add(key)
-            records.append((model_name, record))
-            before.append(raw)
-        return records, before
 
     def execute_recovery(self, p, company, checked):
-        plan = self.context.trusted_recovery_plan
-        action = checked["recovery_action"]
-        targets = plan.get("targets") or plan.get("target_records")
-        target_records, _before = self.validated_recovery_targets(
-            action, targets, company
+        raise OdooWriteHandlerError(
+            "automatic recovery is disabled until the active Odoo module "
+            "side-effect graph passes a real sandbox oracle"
         )
-        if action == "cancel_payment":
-            payments = [
-                record
-                for model_name, record in target_records
-                if model_name == "account.payment"
-            ]
-            if len(payments) != 1:
-                raise OdooWriteHandlerError(
-                    "payment recovery requires exactly one payment"
-                )
-            payment = payments[0]
-            binding = self.validated_payment_binding(
-                getattr(payment, "odoo_cli_v3_payment_binding", None),
-                parameters=None,
-                complete=True,
-            )
-            if binding["payment_id"] != payment.id:
-                raise OdooWriteHandlerError("payment recovery binding identity differs")
-            expected_keys = {
-                ("account.payment", payment.id),
-                ("account.move", binding["payment_move_id"]),
-                *(
-                    ("account.move", move_id)
-                    for move_id in binding["target_move_ids"]
-                ),
-                *(
-                    ("account.move.line", line_id)
-                    for line_id in binding["payment_line_ids"]
-                ),
-                *(
-                    ("account.move.line", item["line_id"])
-                    for item in binding["target_line_before"]
-                ),
-            }
-            actual_keys = {
-                (model_name, record.id)
-                for model_name, record in target_records
-            }
-            if actual_keys != expected_keys:
-                raise OdooWriteHandlerError(
-                    "payment recovery target graph is incomplete or changed"
-                )
-            if payment.state not in {"in_process", "paid"}:
-                raise OdooWriteHandlerError("payment is not in a cancellable state")
-            if _record_id(payment.move_id) != binding["payment_move_id"]:
-                raise OdooWriteHandlerError("payment move link changed before recovery")
-            payment.action_draft()
-            if payment.state != "draft":
-                raise OdooWriteHandlerError("payment did not return to draft")
-            payment.action_cancel()
-            if payment.state != "canceled":
-                raise OdooWriteHandlerError("payment did not reach canceled state")
-            recovered_payment = self.record(
-                "account.payment", payment.id, company
-            )
-            target_moves = [
-                self.record("account.move", move_id, company)
-                for move_id in binding["target_move_ids"]
-            ]
-            target_lines = [
-                line
-                for move in target_moves
-                for line in self.checked_move_lines(move, company)
-            ]
-            return self.unique_records(
-                [("account.payment", recovered_payment)]
-                + [("account.move", move) for move in target_moves]
-                + [("account.move.line", line) for line in target_lines]
-            ), {
-                "status": "not_applicable",
-                "method": "recovery_completed",
-                "targets": [],
-            }
-        if action == "recover_accrual_schedule":
-            moves = [record for model_name, record in target_records if model_name == "account.move"]
-            if len(moves) != 2:
-                raise OdooWriteHandlerError("accrual recovery requires origin and scheduled reversal")
-            scheduled_candidates = [
-                move for move in moves
-                if move.state == "draft"
-                and _record_id(getattr(move, "reversed_entry_id", None)) in {item.id for item in moves}
-            ]
-            if len(scheduled_candidates) != 1:
-                raise OdooWriteHandlerError("scheduled accrual reversal is not uniquely cancellable")
-            scheduled = scheduled_candidates[0]
-            origin = next(move for move in moves if move.id != scheduled.id)
-            if origin.state != "posted":
-                raise OdooWriteHandlerError("accrual origin is not posted")
-            scheduled.button_cancel()
-            recovered_move = self.reverse_for_recovery(origin, p, company)
-            return [
-                ("account.move", scheduled), ("account.move", recovered_move)
-            ], {"status": "not_applicable", "method": "recovery_completed", "targets": []}
-        result = []
-        for model_name, record in target_records:
-            if action == "reverse_posted_move":
-                if model_name != "account.move" or record.state != "posted":
-                    raise OdooWriteHandlerError("recovery move is not posted")
-                result.append(("account.move", self.reverse_for_recovery(record, p, company)))
-            elif action == "cancel_draft_move":
-                if model_name != "account.move" or record.state not in {"draft", "cancel", "cancelled"}:
-                    raise OdooWriteHandlerError("recovery target is not a draft move")
-                if record.state == "draft":
-                    record.button_cancel()
-                result.append((model_name, record))
-        return result, {"status": "not_applicable", "method": "recovery_completed", "targets": []}
 
-    def reverse_for_recovery(self, move: Any, p: dict[str, Any], company: Any) -> Any:
-        self.assert_open_date(
-            company, p["recovery_date"], "recovery_date", journal=move.journal_id, taxes=True
+    def verify_recovery(self, p, company, records, before):
+        raise OdooWriteHandlerError(
+            "automatic recovery is disabled until the active Odoo module "
+            "side-effect graph passes a real sandbox oracle"
         )
-        wizard = self.create_model(
-            "account.move.reversal", company,
-            context={"active_model": "account.move", "active_ids": [move.id]},
-        ).create({
-            "date": p["recovery_date"], "journal_id": move.journal_id.id,
-            "reason": p["reason"],
-        })
-        reversed_move = self.record_from_action(
-            "account.move", wizard.reverse_moves(is_modify=False), company
-        )
-        if reversed_move.state != "posted":
-            reversed_move.action_post()
-        if reversed_move.state != "posted":
-            raise OdooWriteHandlerError("recovery reversal did not reach posted state")
-        return reversed_move
-
-    def verify_recovery(self, p, company, records):
-        action = (self.context.trusted_recovery_plan or {}).get("action") or (
-            self.context.trusted_recovery_plan or {}
-        ).get("method")
-        if action == "cancel_payment":
-            payment = self.only_record(records, "account.payment")
-            binding = self.validated_payment_binding(
-                getattr(payment, "odoo_cli_v3_payment_binding", None),
-                parameters=None,
-                complete=True,
-            )
-            if binding["payment_id"] != payment.id or payment.state != "canceled":
-                raise OdooWriteHandlerError("payment recovery state differs")
-            if _record_id(getattr(payment, "move_id", None)) is not None:
-                raise OdooWriteHandlerError("canceled payment retained an accounting move")
-            if _ids(payment.reconciled_invoice_ids) or _ids(payment.reconciled_bill_ids):
-                raise OdooWriteHandlerError("canceled payment retained document links")
-            keyed: dict[tuple[str, int], Any] = {}
-            for model_name, record in records:
-                key = (model_name, record.id)
-                if key in keyed:
-                    raise OdooWriteHandlerError(
-                        "payment recovery read-back is duplicated"
-                    )
-                keyed[key] = record
-            expected_keys = {
-                ("account.payment", payment.id),
-                *(
-                    ("account.move", move_id)
-                    for move_id in binding["target_move_ids"]
-                ),
-                *(
-                    ("account.move.line", item["line_id"])
-                    for item in binding["target_line_before"]
-                ),
-            }
-            if set(keyed) != expected_keys:
-                raise OdooWriteHandlerError(
-                    "payment recovery read-back graph differs"
-                )
-            line_ids_by_move: dict[int, list[int]] = {
-                move_id: [] for move_id in binding["target_move_ids"]
-            }
-            for item in binding["target_line_before"]:
-                line_ids_by_move[item["move_id"]].append(item["line_id"])
-            for before in binding["target_before"]:
-                move = keyed[("account.move", before["move_id"])]
-                if move.state != "posted":
-                    raise OdooWriteHandlerError(
-                        "payment target was not restored as posted"
-                    )
-                if _ids(move.line_ids) != line_ids_by_move[move.id]:
-                    raise OdooWriteHandlerError(
-                        "payment target line set was not restored"
-                    )
-                if _decimal(move.amount_residual, "amount_residual") != _decimal(
-                    before["amount_residual"], "amount_residual"
-                ):
-                    raise OdooWriteHandlerError(
-                        "payment target residual was not restored"
-                    )
-            for before in binding["target_line_before"]:
-                line = keyed[("account.move.line", before["line_id"])]
-                if (
-                    _record_id(line.move_id) != before["move_id"]
-                    or _decimal(line.amount_residual, "amount_residual")
-                    != _decimal(before["amount_residual"], "amount_residual")
-                    or _decimal(
-                        line.amount_residual_currency,
-                        "amount_residual_currency",
-                    )
-                    != _decimal(
-                        before["amount_residual_currency"],
-                        "amount_residual_currency",
-                    )
-                    or bool(line.reconciled) is not before["reconciled"]
-                    or _record_id(line.full_reconcile_id)
-                    != before["full_reconcile_id"]
-                    or _ids(line.matched_debit_ids)
-                    != before["matched_debit_ids"]
-                    or _ids(line.matched_credit_ids)
-                    != before["matched_credit_ids"]
-                ):
-                    raise OdooWriteHandlerError(
-                        "payment target journal item was not exactly restored"
-                    )
-            return [
-                "trusted_plan_reused", "payment_canceled",
-                "payment_move_removed", "document_links_removed",
-                "target_residuals_restored", "target_graph_restored",
-            ]
-        for model_name, record in records:
-            if action == "reverse_posted_move" and record.state != "posted":
-                raise OdooWriteHandlerError("recovery reversal is not posted")
-            if action == "cancel_draft_move" and record.state not in {"cancel", "cancelled"}:
-                raise OdooWriteHandlerError("draft move recovery did not cancel")
-        if action == "recover_accrual_schedule":
-            states = [record.state for model_name, record in records if model_name == "account.move"]
-            if len(states) != 2 or not any(state in {"cancel", "cancelled"} for state in states) or "posted" not in states:
-                raise OdooWriteHandlerError("accrual schedule recovery states differ")
-        return ["trusted_plan_reused", "targets_readable", "recovery_state_matches"]
 
     def require_created(self, record: Any, model_name: str, company: Any) -> None:
         identifier = _record_id(record)
@@ -6015,10 +5690,9 @@ class OdooWriteHandlers:
 
     @staticmethod
     def move_recovery(move: Any) -> dict[str, Any]:
-        state = str(getattr(move, "state", ""))
         return _recovery(
-            "available",
-            "cancel_draft_move" if state == "draft" else "reverse_posted_move",
+            "manual_escalation",
+            "manual_review_move_recovery",
             [{"model": "account.move", "record_id": move.id}],
         )
 

@@ -39,7 +39,7 @@ from odoo_accounting_cli_v3.write_protocol import (
     operation_to_mapping,
     trusted_result_from_mapping,
 )
-from odoo_accounting_cli_v3.write_receipts import create_recovery_plan
+from odoo_accounting_cli_v3.write_receipts import create_recovery_plan_v2
 
 
 NOW = datetime(2026, 7, 15, 4, 0, tzinfo=timezone.utc)
@@ -215,19 +215,37 @@ def _recovery_case(
             f"account.move:{target_record_id}:{target_company_id}".encode()
         ).hexdigest(),
     }
-    plan = create_recovery_plan(
+    guard = {
+        "model": "account.move.line",
+        "record_id": target_record_id + 1,
+        "company_id": target_company_id,
+        "record_state": "unknown",
+        "record_fingerprint": hashlib.sha256(
+            f"account.move.line:{target_record_id + 1}:{target_company_id}".encode()
+        ).hexdigest(),
+        "expected_outcome": "survive_exact",
+    }
+    plan = create_recovery_plan_v2(
         origin_operation_id=origin_operation_id,
         recovery_capability_id="acct.recovery.execute.v1",
         status="available",
-        method="reverse_posted_move",
+        method="cancel_draft_move",
         requires_approval=True,
-        target_records=[target],
+        action_targets=[target],
+        guard_records=[guard],
+        oracle_id="cancel_draft_move_exact_v1",
         parameters={
             "company_id": company_id,
             "origin_operation_id": origin_operation_id,
-            "method": "reverse_posted_move",
-            "target_records": [
+            "method": "cancel_draft_move",
+            "action_targets": [
                 {"model": "account.move", "record_id": target_record_id}
+            ],
+            "guard_records": [
+                {
+                    "model": "account.move.line",
+                    "record_id": target_record_id + 1,
+                }
             ],
         },
     )
@@ -690,7 +708,8 @@ class Handler:
             }],
             "records": [{"model": "account.move", "record_id": 501}],
             "recovery": {
-                "status": "available", "method": "reverse_posted_move",
+                "status": "manual_escalation",
+                "method": "manual_review_move_recovery",
                 "targets": [{"model": "account.move", "record_id": 501}],
             },
         }
@@ -1796,7 +1815,7 @@ def test_recovery_requires_separately_supplied_valid_receipt_plan():
         execute_write_from_odoo_shell(root, missing_field, **kwargs)
 
     tampered = copy.deepcopy(plan)
-    tampered["target_records"][0]["record_id"] = 999
+    tampered["action_targets"][0]["record_id"] = 999
     with pytest.raises(OdooWriteBootstrapError, match="plan is invalid"):
         execute_write_from_odoo_shell(
             root,

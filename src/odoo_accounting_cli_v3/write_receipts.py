@@ -40,6 +40,13 @@ RECORD_REFERENCE_FIELDS = {
     "record_id",
 }
 RECOVERY_TARGET_FIELDS = {*RECORD_REFERENCE_FIELDS, "record_state"}
+RECOVERY_GUARD_FIELDS = {*RECOVERY_TARGET_FIELDS, "expected_outcome"}
+RECOVERY_GUARD_OUTCOMES = frozenset(
+    {"survive_exact", "survive_allowed_delta", "absent", "manual_review"}
+)
+NON_EXECUTABLE_ORACLES = frozenset(
+    {"manual", "manual_escalation", "not_applicable"}
+)
 DIFFERENCE_FIELDS = {
     "after",
     "after_digest",
@@ -56,6 +63,20 @@ RECOVERY_PLAN_FIELDS = {
     "requires_approval",
     "status",
     "target_records",
+}
+RECOVERY_PLAN_V2_FIELDS = {
+    "action_targets",
+    "guard_graph_digest",
+    "guard_records",
+    "method",
+    "oracle_id",
+    "origin_operation_id",
+    "parameters_digest",
+    "plan_digest",
+    "plan_version",
+    "recovery_capability_id",
+    "requires_approval",
+    "status",
 }
 VERIFICATION_FIELDS = {
     "checks",
@@ -243,6 +264,64 @@ def _validate_recovery_target(value: Any) -> None:
     _text(value["record_state"], "recovery target record_state", maximum=64)
 
 
+def _validate_recovery_guard(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != RECOVERY_GUARD_FIELDS:
+        raise WriteReceiptError("recovery guard record fields are invalid")
+    _validate_recovery_target({key: value[key] for key in RECOVERY_TARGET_FIELDS})
+    if (
+        not isinstance(value["expected_outcome"], str)
+        or value["expected_outcome"] not in RECOVERY_GUARD_OUTCOMES
+    ):
+        raise WriteReceiptError("recovery guard expected_outcome is invalid")
+
+
+def _recovery_record_identity(value: dict[str, Any]) -> tuple[str, int]:
+    return value["model"], value["record_id"]
+
+
+def _canonical_recovery_records(
+    value: Any,
+    *,
+    field: str,
+    guard: bool,
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise WriteReceiptError(f"recovery {field} must be an array")
+    records = [dict(record) if isinstance(record, dict) else record for record in value]
+    validator = _validate_recovery_guard if guard else _validate_recovery_target
+    for record in records:
+        validator(record)
+    identities = [_recovery_record_identity(record) for record in records]
+    if len(identities) != len(set(identities)):
+        raise WriteReceiptError(f"recovery {field} contains a duplicate record")
+    return sorted(records, key=canonical_json)
+
+
+def _guard_graph_digest(
+    action_targets: list[dict[str, Any]],
+    guard_records: list[dict[str, Any]],
+    oracle_id: str,
+) -> str:
+    return _digest(
+        {
+            "action_targets": action_targets,
+            "guard_records": guard_records,
+            "oracle_id": oracle_id,
+        }
+    )
+
+
+def _validate_recovery_graph_roles(
+    action_targets: list[dict[str, Any]], guard_records: list[dict[str, Any]]
+) -> None:
+    action_identities = {
+        _recovery_record_identity(record) for record in action_targets
+    }
+    guard_identities = {_recovery_record_identity(record) for record in guard_records}
+    if action_identities & guard_identities:
+        raise WriteReceiptError("a recovery record cannot be both action and guard")
+
+
 def create_difference(
     *,
     before: list[dict[str, Any]],
@@ -335,14 +414,94 @@ def create_recovery_plan(
     return {**unsigned, "plan_digest": _digest(unsigned)}
 
 
-def _validate_recovery_plan(value: Any) -> None:
+def create_recovery_plan_v2(
+    *,
+    origin_operation_id: str,
+    recovery_capability_id: str,
+    status: str,
+    method: str,
+    requires_approval: bool,
+    action_targets: list[dict[str, Any]],
+    guard_records: list[dict[str, Any]],
+    oracle_id: str,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    """Create a canonical role-separated recovery guard graph contract."""
+
+    _text(origin_operation_id, "origin_operation_id")
+    if recovery_capability_id != "acct.recovery.execute.v1":
+        raise WriteReceiptError("recovery_capability_id is invalid")
+    _text(method, "recovery method")
+    if not isinstance(status, str) or status not in {
+        "available",
+        "not_applicable",
+        "manual_escalation",
+    }:
+        raise WriteReceiptError("recovery status is invalid")
+    if type(requires_approval) is not bool:
+        raise WriteReceiptError("recovery approval flag must be boolean")
+    oracle_id = _text(oracle_id, "recovery oracle_id", maximum=128)
+    ordered_actions = _canonical_recovery_records(
+        action_targets, field="action_targets", guard=False
+    )
+    ordered_guards = _canonical_recovery_records(
+        guard_records, field="guard_records", guard=True
+    )
+    _validate_recovery_graph_roles(ordered_actions, ordered_guards)
+    if status == "available":
+        if not requires_approval:
+            raise WriteReceiptError("available recovery requires approval")
+        if not ordered_actions:
+            raise WriteReceiptError("available recovery requires an action target")
+        if not ordered_guards:
+            raise WriteReceiptError("available recovery requires a guard record")
+        if any(
+            record["expected_outcome"] == "manual_review"
+            for record in ordered_guards
+        ):
+            raise WriteReceiptError(
+                "available recovery cannot contain a manual_review guard"
+            )
+        if oracle_id in NON_EXECUTABLE_ORACLES:
+            raise WriteReceiptError("available recovery requires an executable oracle")
+    elif ordered_actions:
+        raise WriteReceiptError("non-available recovery action_targets must be empty")
+    if not isinstance(parameters, dict):
+        raise WriteReceiptError("recovery parameters must be an object")
+    try:
+        parameters_digest = _digest(parameters)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise WriteReceiptError("recovery parameters are not canonical JSON") from exc
+    unsigned = {
+        "plan_version": 2,
+        "origin_operation_id": origin_operation_id,
+        "recovery_capability_id": recovery_capability_id,
+        "status": status,
+        "method": method,
+        "requires_approval": requires_approval,
+        "action_targets": ordered_actions,
+        "guard_records": ordered_guards,
+        "oracle_id": oracle_id,
+        "guard_graph_digest": _guard_graph_digest(
+            ordered_actions, ordered_guards, oracle_id
+        ),
+        "parameters_digest": parameters_digest,
+    }
+    return {**unsigned, "plan_digest": _digest(unsigned)}
+
+
+def _validate_recovery_plan_v1(value: Any) -> None:
     if not isinstance(value, dict) or set(value) != RECOVERY_PLAN_FIELDS:
         raise WriteReceiptError("recovery plan fields are invalid")
     _text(value["origin_operation_id"], "origin_operation_id")
     if value["recovery_capability_id"] != "acct.recovery.execute.v1":
         raise WriteReceiptError("recovery_capability_id is invalid")
     _text(value["method"], "recovery method")
-    if value["status"] not in {"available", "not_applicable", "manual_escalation"}:
+    if not isinstance(value["status"], str) or value["status"] not in {
+        "available",
+        "not_applicable",
+        "manual_escalation",
+    }:
         raise WriteReceiptError("recovery plan status is invalid")
     if type(value["requires_approval"]) is not bool or not isinstance(
         value["target_records"], list
@@ -358,10 +517,109 @@ def _validate_recovery_plan(value: Any) -> None:
         raise WriteReceiptError("recovery plan digest mismatch")
 
 
+def _validate_recovery_plan_v2(value: Any) -> None:
+    if not isinstance(value, dict) or set(value) != RECOVERY_PLAN_V2_FIELDS:
+        raise WriteReceiptError("recovery plan V2 fields are invalid")
+    if type(value["plan_version"]) is not int or value["plan_version"] != 2:
+        raise WriteReceiptError("recovery plan version is invalid")
+    _text(value["origin_operation_id"], "origin_operation_id")
+    if value["recovery_capability_id"] != "acct.recovery.execute.v1":
+        raise WriteReceiptError("recovery_capability_id is invalid")
+    _text(value["method"], "recovery method")
+    if value["status"] not in {"available", "not_applicable", "manual_escalation"}:
+        raise WriteReceiptError("recovery plan status is invalid")
+    if type(value["requires_approval"]) is not bool:
+        raise WriteReceiptError("recovery approval flag must be boolean")
+    oracle_id = _text(value["oracle_id"], "recovery oracle_id", maximum=128)
+    ordered_actions = _canonical_recovery_records(
+        value["action_targets"], field="action_targets", guard=False
+    )
+    ordered_guards = _canonical_recovery_records(
+        value["guard_records"], field="guard_records", guard=True
+    )
+    if (
+        value["action_targets"] != ordered_actions
+        or value["guard_records"] != ordered_guards
+    ):
+        raise WriteReceiptError("recovery guard graph is not in canonical order")
+    _validate_recovery_graph_roles(ordered_actions, ordered_guards)
+    if value["status"] == "available":
+        if not value["requires_approval"]:
+            raise WriteReceiptError("available recovery requires approval")
+        if not ordered_actions:
+            raise WriteReceiptError("available recovery requires an action target")
+        if not ordered_guards:
+            raise WriteReceiptError("available recovery requires a guard record")
+        if any(
+            record["expected_outcome"] == "manual_review"
+            for record in ordered_guards
+        ):
+            raise WriteReceiptError(
+                "available recovery cannot contain a manual_review guard"
+            )
+        if oracle_id in NON_EXECUTABLE_ORACLES:
+            raise WriteReceiptError("available recovery requires an executable oracle")
+    elif ordered_actions:
+        raise WriteReceiptError("non-available recovery action_targets must be empty")
+    expected_guard_digest = _guard_graph_digest(
+        ordered_actions, ordered_guards, oracle_id
+    )
+    if (
+        _sha(value["guard_graph_digest"], "recovery guard_graph_digest")
+        != expected_guard_digest
+    ):
+        raise WriteReceiptError("recovery guard graph digest mismatch")
+    _sha(value["parameters_digest"], "recovery parameters_digest")
+    unsigned = {
+        key: value[key] for key in RECOVERY_PLAN_V2_FIELDS if key != "plan_digest"
+    }
+    if _sha(value["plan_digest"], "recovery plan_digest") != _digest(unsigned):
+        raise WriteReceiptError("recovery plan digest mismatch")
+
+
+def _validate_recovery_plan(value: Any) -> None:
+    if isinstance(value, dict) and "plan_version" in value:
+        _validate_recovery_plan_v2(value)
+        return
+    _validate_recovery_plan_v1(value)
+
+
 def validate_recovery_plan(value: Any) -> None:
-    """Validate a recovery plan before accepting signed execution evidence."""
+    """Strictly validate a historical V1 or role-separated V2 recovery plan."""
 
     _validate_recovery_plan(value)
+
+
+def validate_executable_recovery_plan(value: Any) -> None:
+    """Accept only an approved-by-contract, available V2 recovery plan."""
+
+    if not isinstance(value, dict) or value.get("plan_version") != 2:
+        raise WriteReceiptError("recovery execution requires an available V2 plan")
+    _validate_recovery_plan_v2(value)
+    if value["status"] != "available":
+        raise WriteReceiptError("recovery execution requires an available V2 plan")
+
+
+def index_recovery_guard_graph(
+    value: Any, *, expected_company_id: int | None = None
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Index V2 action and guard roles, optionally enforcing one company scope."""
+
+    if not isinstance(value, dict) or value.get("plan_version") != 2:
+        raise WriteReceiptError("recovery guard graph indexing requires a V2 plan")
+    _validate_recovery_plan_v2(value)
+    if expected_company_id is not None:
+        _positive_id(expected_company_id, "expected recovery company_id")
+    indexed: dict[tuple[str, int], dict[str, Any]] = {}
+    for role, field in (("action", "action_targets"), ("guard", "guard_records")):
+        for record in value[field]:
+            if (
+                expected_company_id is not None
+                and record["company_id"] != expected_company_id
+            ):
+                raise WriteReceiptError("recovery guard graph company mismatch")
+            indexed[_recovery_record_identity(record)] = {**record, "role": role}
+    return indexed
 
 
 def _validate_result_body(value: Any, operation_id: str) -> None:

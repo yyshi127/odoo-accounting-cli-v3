@@ -18,7 +18,7 @@ from odoo_accounting_cli_v3.odoo.write_precheck import (
 )
 from odoo_accounting_cli_v3.operations import canonical_json
 from odoo_accounting_cli_v3.registry import registry_digest, validate_registry
-from odoo_accounting_cli_v3.write_receipts import create_recovery_plan
+from odoo_accounting_cli_v3.write_receipts import create_recovery_plan_v2
 
 
 NOW = datetime(2026, 7, 15, 4, 0, tzinfo=timezone.utc)
@@ -123,13 +123,13 @@ def _recovery_parameters(plan_digest, *, company_id=7):
 
 
 def _recovery_plan():
-    return create_recovery_plan(
+    return create_recovery_plan_v2(
         origin_operation_id="origin-op-501",
         recovery_capability_id=RECOVERY_CAPABILITY_ID,
         status="available",
-        method="reverse_posted_move",
+        method="cancel_draft_move",
         requires_approval=True,
-        target_records=[
+        action_targets=[
             {
                 "model": "account.move",
                 "record_id": 501,
@@ -138,6 +138,17 @@ def _recovery_plan():
                 "record_fingerprint": "f" * 64,
             }
         ],
+        guard_records=[
+            {
+                "model": "account.move.line",
+                "record_id": 502,
+                "company_id": 7,
+                "record_state": "unknown",
+                "record_fingerprint": "e" * 64,
+                "expected_outcome": "survive_exact",
+            }
+        ],
+        oracle_id="cancel_draft_move_exact_v1",
         parameters={"move_id": 501},
     )
 
@@ -663,7 +674,7 @@ def test_recovery_plan_cannot_be_missing_tampered_or_injected_into_normal_write(
         )
 
     tampered = copy.deepcopy(plan)
-    tampered["target_records"][0]["record_id"] = 999
+    tampered["action_targets"][0]["record_id"] = 999
     with pytest.raises(OdooWritePrecheckError, match="plan is invalid"):
         execute_write_precheck_from_odoo_shell(
             root,

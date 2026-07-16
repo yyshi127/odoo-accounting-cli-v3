@@ -248,6 +248,24 @@ def _validate_json_schema(schema: Any, location: str) -> None:
 
 def _validate_schema_node(schema: Any, location: str) -> None:
     value = _require_object(schema, location)
+    if "oneOf" in value:
+        if set(value) != {"oneOf"}:
+            raise RegistryError(
+                f"{location}.oneOf cannot be combined with other schema keywords"
+            )
+        alternatives = value["oneOf"]
+        if (
+            not isinstance(alternatives, list)
+            or len(alternatives) < 2
+            or any(not isinstance(alternative, dict) for alternative in alternatives)
+        ):
+            raise RegistryError(
+                f"{location}.oneOf must contain at least two schema objects"
+            )
+        for index, alternative in enumerate(alternatives):
+            _validate_schema_node(alternative, f"{location}.oneOf[{index}]")
+        return
+
     declared = value.get("type")
     if declared is None:
         raise RegistryError(f"{location}.type is required")

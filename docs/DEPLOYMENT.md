@@ -84,6 +84,82 @@ extracting it.
 
 ## Side-by-side installation
 
+Use the installer from the exact target commit, but never execute it with root
+privileges from a developer- or service-writable checkout. First copy it to a
+new single-link path below a root-controlled, non-group/world-writable
+directory, mode it `0444`, and compare its SHA-256 with the independently
+retained `deployment/install-release.py` entry from that target release's
+manifest. Abort before Python starts if this bootstrap check differs. Supply
+all five release identity values from independently retained build evidence;
+none is inferred as an external trust decision from the archive being
+installed:
+
+```bash
+sudo install -d -o root -g root -m 0700 /root/odoo-v3-upload
+sudo install -o root -g root -m 0444 \
+  <exact-target-commit-checkout>/deployment/install-release.py \
+  /root/odoo-v3-upload/install-release.py
+test "$(sudo /usr/bin/sha256sum /root/odoo-v3-upload/install-release.py)" = \
+  "<expected-installer-sha256>  /root/odoo-v3-upload/install-release.py"
+sudo /usr/bin/python3 /root/odoo-v3-upload/install-release.py \
+  --archive /root/odoo-v3-upload/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz \
+  --expected-package-sha256 <64-lowercase-hex> \
+  --expected-manifest-sha256 <64-lowercase-hex> \
+  --expected-version <version> \
+  --expected-commit <full-40-character-lowercase-commit> \
+  --expected-release <version>-<commit12>
+```
+
+Production mode has no configurable installation root: it always targets
+`/opt/odoo-accounting-cli-v3` and requires root. The uploaded archive must be
+an absolute-path with the canonical release filename, root-owned, root-group,
+single-link regular file that is not group/world writable. The running
+installer must also be single-link, root-owned, non-group/world-writable,
+located under a fully root-controlled physical ancestor chain, and byte-equal
+to its entry in the target manifest. The installer takes an exclusive root-owned lock,
+creates package, release, and anchor staging objects inside their respective
+final directories, and refuses links, unsafe tar paths/types, duplicate
+members, non-root archive ownership, unexpected build modes, incomplete
+manifests, or any identity mismatch. It publishes the package and external
+anchor with exclusive hard-link creation and the release with Linux
+`renameat2(RENAME_NOREPLACE)`. The three executable release members are frozen
+mode `0555`; every other release file is `0444`, every release directory is
+`0555`, and all production objects are root-owned.
+
+The extracted `tools/verify_release.py` and the frozen broker launcher's exact
+`--help` probe run with bytecode disabled against the sealed tree. In
+production both run after dropping to the unprivileged `nobody` identity, with
+bounded memory, CPU time, output size, file descriptors, wall time, and a
+killable private process group. A before/after byte-and-metadata inventory must
+remain identical.
+The external anchor is published last and contains exactly `commit`,
+`manifest_sha256`, `package_sha256`, and `release`. A second invocation is a
+success only when the complete installed package, release, and anchor verify
+exactly; a partial or changed existing installation is rejected without
+repair. On failure the installer removes only staging paths bearing its own
+random transaction identity and inode. It never removes an existing or already
+published object.
+
+The archive is capped at 10,000 members, 512 MiB compressed and 512 MiB total
+declared extracted content, with a 64 MiB per-file ceiling. Before package copy
+and again before extraction, the installer requires the target filesystem to
+retain at least 2 GiB free after the next allocation. These are refusal limits,
+not sizing recommendations.
+
+`--test-mode --root-prefix ABSOLUTE_PRIVATE_DIRECTORY` exists only for the
+non-root automated installer tests. Both flags are required together, root
+execution and `/` are forbidden, and that mode must never be used as an
+operational deployment override.
+
+The installer only side-loads immutable artifacts. It does not create or
+change `current`, runtime configuration, state, secrets, systemd units, Pi
+Bridge files/routes, Odoo add-ons/configuration, or any service; it never
+starts, stops, reloads, or restarts a process. A successfully side-loaded
+release remains unrouted.
+
+The numbered controls below are the installer's required verification and
+publication contract, not permission to replace it with ad hoc extraction.
+
 1. Copy the verified archive to a new root-owned, mode `0444` canonical path
    under `packages/`. Refuse links, an existing destination, a filename that
    does not match the release, or any digest mismatch.

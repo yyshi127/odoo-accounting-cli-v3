@@ -29,6 +29,7 @@ from odoo_accounting_cli_v3.write_receipts import (
     create_difference,
     create_record_snapshot,
     create_recovery_plan,
+    create_recovery_plan_v2,
 )
 from odoo_accounting_cli_v3.write_service import (
     _ALLOWED_MODELS,
@@ -246,27 +247,67 @@ def _execution_evidence(operation_id: str, *, succeeded: bool = True) -> dict[st
         "record_state": "posted",
         "record_fingerprint": hashlib.sha256(canonical_json(after)).hexdigest(),
     }
-    recovery = create_recovery_plan(
+    guard_before = create_record_snapshot(
+        model="account.move.line",
+        record_id=502,
+        exists=False,
+        record_state="absent",
+        values={},
+    )
+    guard_after = create_record_snapshot(
+        model="account.move.line",
+        record_id=502,
+        exists=True,
+        record_state="unknown",
+        values={"company_id": 7, "move_id": 501},
+    )
+    guard = {
+        "model": "account.move.line",
+        "record_id": 502,
+        "company_id": 7,
+        "record_state": "unknown",
+        "record_fingerprint": hashlib.sha256(
+            canonical_json(guard_after)
+        ).hexdigest(),
+        "expected_outcome": "survive_exact" if succeeded else "manual_review",
+    }
+    recovery_parameters = (
+        {
+            "move_id": 501,
+            "action_targets": [{"model": "account.move", "record_id": 501}],
+            "guard_records": [
+                {"model": "account.move.line", "record_id": 502}
+            ],
+            "oracle_id": "cancel_draft_move_exact_v1",
+        }
+        if succeeded
+        else {"operation_id": operation_id}
+    )
+    recovery = create_recovery_plan_v2(
         origin_operation_id=operation_id,
         recovery_capability_id="acct.recovery.execute.v1",
         status="available" if succeeded else "manual_escalation",
-        method="reverse_move" if succeeded else "inspect_ambiguous_execution",
+        method="cancel_draft_move" if succeeded else "inspect_ambiguous_execution",
         requires_approval=True,
-        target_records=[target] if succeeded else [],
-        parameters={"move_id": 501} if succeeded else {"operation_id": operation_id},
+        action_targets=[target] if succeeded else [],
+        guard_records=[guard] if succeeded else [],
+        oracle_id=(
+            "cancel_draft_move_exact_v1" if succeeded else "manual_escalation"
+        ),
+        parameters=recovery_parameters,
     )
     return {
         "operation_id": operation_id,
         "capability_id": "acct.invoice.customer_create.v1",
         "succeeded": succeeded,
-        "odoo_records": [target] if succeeded else [],
+        "odoo_records": [target, {key: guard[key] for key in target}] if succeeded else [],
         "difference": create_difference(
-            before=[before] if succeeded else [],
-            after=[after] if succeeded else [],
-            changed_fields=["amount_total", "company_id", "state"] if succeeded else [],
+            before=[before, guard_before] if succeeded else [],
+            after=[after, guard_after] if succeeded else [],
+            changed_fields=["amount_total", "company_id", "move_id", "state"] if succeeded else [],
         ),
         "recovery_plan": recovery,
-        "recovery_parameters": {"move_id": 501} if succeeded else {"operation_id": operation_id},
+        "recovery_parameters": recovery_parameters,
         "failure_checks": [] if succeeded else ["execution_rejected_before_verified_effect"],
     }
 

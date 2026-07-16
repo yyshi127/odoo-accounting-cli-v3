@@ -39,7 +39,9 @@ from .persistence import OperationNotFound, SQLitePersistence
 from .registry import Capability, registry_digest
 from .write_receipts import (
     create_write_audit_receipt,
+    index_recovery_guard_graph,
     validate_record_snapshot,
+    validate_executable_recovery_plan,
     validate_recovery_plan,
     validate_write_difference,
     validate_write_result_body,
@@ -791,7 +793,12 @@ class DurableWriteService:
             or plan["parameters_digest"] != _digest(evidence["recovery_parameters"])
         ):
             raise WriteServiceError("recovery plan is not bound to the execution evidence")
-        for target in plan["target_records"]:
+        plan_targets = (
+            [*plan["action_targets"], *plan["guard_records"]]
+            if plan.get("plan_version") == 2
+            else plan["target_records"]
+        )
+        for target in plan_targets:
             key = DurableWriteService._validate_record(
                 {field: target[field] for field in _RECORD_FIELDS},
                 operation=operation,
@@ -1368,19 +1375,20 @@ class DurableWriteService:
         output = self.result(context, origin_operation.operation_id)
         plan = output.get("recovery_plan")
         try:
-            validate_recovery_plan(plan)
+            validate_executable_recovery_plan(plan)
         except Exception as exc:
             raise WriteServiceError("origin recovery plan is invalid") from exc
+        try:
+            index_recovery_guard_graph(
+                plan, expected_company_id=origin_operation.company_id
+            )
+        except Exception as exc:
+            raise WriteServiceError(
+                "origin recovery plan is unavailable or outside the bound company"
+            ) from exc
         if (
             plan["origin_operation_id"] != origin_operation.operation_id
             or plan["recovery_capability_id"] != "acct.recovery.execute.v1"
-            or plan["status"] != "available"
-            or plan["requires_approval"] is not True
-            or not plan["target_records"]
-            or any(
-                target.get("company_id") != origin_operation.company_id
-                for target in plan["target_records"]
-            )
             or (
                 expected_plan_digest is not None
                 and not hmac.compare_digest(

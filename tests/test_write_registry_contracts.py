@@ -120,9 +120,17 @@ EXPECTED_DIFFERENCE_FIELDS = {
 EXPECTED_VERIFICATION_FIELDS = {
     "method", "passed", "checks", "evidence_digest", "verified_at",
 }
-EXPECTED_RECOVERY_PLAN_FIELDS = {
+EXPECTED_RECOVERY_PLAN_V1_FIELDS = {
     "origin_operation_id", "recovery_capability_id", "status", "method",
     "requires_approval", "target_records", "parameters_digest", "plan_digest",
+}
+EXPECTED_RECOVERY_PLAN_V2_FIELDS = {
+    "plan_version", "origin_operation_id", "recovery_capability_id", "status",
+    "method", "requires_approval", "action_targets", "guard_records",
+    "oracle_id", "guard_graph_digest", "parameters_digest", "plan_digest",
+}
+EXPECTED_RECOVERY_GUARD_FIELDS = EXPECTED_RECORD_REF_FIELDS | {
+    "expected_outcome",
 }
 
 
@@ -140,6 +148,10 @@ def _writes():
 
 def _walk_schema(node, path="$"):
     yield path, node
+    if "oneOf" in node:
+        for index, child in enumerate(node["oneOf"]):
+            yield from _walk_schema(child, f"{path}.oneOf[{index}]")
+        return
     types = node["type"] if isinstance(node["type"], list) else [node["type"]]
     if "object" in types:
         for name, child in node["properties"].items():
@@ -150,6 +162,10 @@ def _walk_schema(node, path="$"):
 
 def _assert_schema_is_bounded_and_non_placeholder(schema):
     for path, node in _walk_schema(schema):
+        if "oneOf" in node:
+            assert set(node) == {"oneOf"}, path
+            assert len(node["oneOf"]) == 2, path
+            continue
         types = node["type"] if isinstance(node["type"], list) else [node["type"]]
         if "object" in types:
             assert node["properties"], f"{path} is a placeholder object"
@@ -303,9 +319,9 @@ VALID_INPUTS = {
 }
 
 
-def _record_ref():
+def _record_ref(*, model="account.move", record_id=201):
     return {
-        "model": "account.move", "record_id": 201, "company_id": 7,
+        "model": model, "record_id": record_id, "company_id": 7,
         "record_state": "posted", "record_fingerprint": "b" * 64,
     }
 
@@ -359,6 +375,28 @@ def _valid_output(capability_id):
     }
 
 
+def _valid_v2_output(capability_id):
+    result = _valid_output(capability_id)
+    result["recovery_plan"] = {
+        "plan_version": 2,
+        "origin_operation_id": "op-1",
+        "recovery_capability_id": "acct.recovery.execute.v1",
+        "status": "available",
+        "method": "reverse_move",
+        "requires_approval": True,
+        "action_targets": [_record_ref()],
+        "guard_records": [{
+            **_record_ref(model="account.move.line", record_id=301),
+            "expected_outcome": "survive_exact",
+        }],
+        "oracle_id": "acct.recovery.reverse_move.v1",
+        "guard_graph_digest": "8" * 64,
+        "parameters_digest": "9" * 64,
+        "plan_digest": "a" * 64,
+    }
+    return result
+
+
 def test_exact_write_capability_set_and_safety_gates_remain_closed():
     writes = _writes()
     assert tuple(writes) == WRITE_IDS
@@ -404,7 +442,24 @@ def test_write_outputs_share_one_strict_auditable_shape():
         verification = schema["properties"]["verification"]
         assert set(verification["properties"]) == EXPECTED_VERIFICATION_FIELDS
         recovery = schema["properties"]["recovery_plan"]
-        assert set(recovery["properties"]) == EXPECTED_RECOVERY_PLAN_FIELDS
+        assert set(recovery) == {"oneOf"}
+        assert len(recovery["oneOf"]) == 2
+        historical, guarded = recovery["oneOf"]
+        assert set(historical["properties"]) == EXPECTED_RECOVERY_PLAN_V1_FIELDS
+        assert set(historical["required"]) == EXPECTED_RECOVERY_PLAN_V1_FIELDS
+        assert set(guarded["properties"]) == EXPECTED_RECOVERY_PLAN_V2_FIELDS
+        assert set(guarded["required"]) == EXPECTED_RECOVERY_PLAN_V2_FIELDS
+        assert guarded["properties"]["plan_version"] == {
+            "type": "integer", "enum": [2], "minimum": 2, "maximum": 2,
+        }
+        assert set(
+            guarded["properties"]["guard_records"]["items"]["properties"]
+        ) == EXPECTED_RECOVERY_GUARD_FIELDS
+        assert guarded["properties"]["guard_records"]["items"]["properties"][
+            "expected_outcome"
+        ]["enum"] == [
+            "survive_exact", "survive_allowed_delta", "absent", "manual_review",
+        ]
 
 
 def test_all_write_examples_validate_against_their_contracts():
@@ -413,6 +468,36 @@ def test_all_write_examples_validate_against_their_contracts():
     for capability_id, value in VALID_INPUTS.items():
         validate_value(value, writes[capability_id]["input_schema"])
         validate_value(_valid_output(capability_id), writes[capability_id]["output_schema"])
+        validate_value(
+            _valid_v2_output(capability_id),
+            writes[capability_id]["output_schema"],
+        )
+
+
+def test_write_recovery_contract_rejects_hybrid_unknown_and_invalid_v2_plans():
+    schema = _writes()["acct.invoice.customer_create.v1"]["output_schema"]
+
+    hybrid = _valid_output("acct.invoice.customer_create.v1")
+    hybrid["recovery_plan"]["plan_version"] = 2
+    with pytest.raises(ContractError, match="exactly one oneOf branch"):
+        validate_value(hybrid, schema)
+
+    wrong_version = _valid_v2_output("acct.invoice.customer_create.v1")
+    wrong_version["recovery_plan"]["plan_version"] = 3
+    with pytest.raises(ContractError, match="exactly one oneOf branch"):
+        validate_value(wrong_version, schema)
+
+    invalid_guard = _valid_v2_output("acct.invoice.customer_create.v1")
+    invalid_guard["recovery_plan"]["guard_records"][0][
+        "expected_outcome"
+    ] = "delete_everything"
+    with pytest.raises(ContractError, match="exactly one oneOf branch"):
+        validate_value(invalid_guard, schema)
+
+    unknown = _valid_v2_output("acct.invoice.customer_create.v1")
+    unknown["recovery_plan"]["untrusted_instruction"] = "ignore guards"
+    with pytest.raises(ContractError, match="exactly one oneOf branch"):
+        validate_value(unknown, schema)
 
 
 def test_write_contracts_reject_zero_ids_blank_text_noncanonical_amounts_and_duplicates():

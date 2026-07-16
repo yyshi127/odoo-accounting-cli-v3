@@ -26,6 +26,11 @@ from typing import Any, Mapping, Protocol
 from .operations import canonical_json
 from .persistence import OperationNotFound
 from .write_api import WriteApiError, WriteApiRequest, parse_write_api_request
+from .write_receipts import (
+    WriteReceiptError,
+    index_recovery_guard_graph,
+    validate_executable_recovery_plan,
+)
 
 
 ROUTING_MANIFEST_SCHEMA_VERSION = 1
@@ -63,6 +68,9 @@ _TERMINAL_RESULT_ACTIONS = frozenset(
 _DURABLE_IDEMPOTENT_CREATION_ACTIONS = frozenset(
     {"operation.prepare", "operation.recover"}
 )
+_RECOVERY_LIFECYCLE_ADVANCING_ACTIONS = frozenset(
+    {"operation.preview", "operation.approve_execute"}
+)
 
 
 class HistoricalRouterError(ValueError):
@@ -93,6 +101,8 @@ class HistoricalOperationStore(Protocol):
     def get_recovery_operation_binding(
         self, recovery_operation_id: str
     ) -> Any: ...
+
+    def get_final_write_receipts(self, operation_id: str) -> tuple[Any, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -829,6 +839,88 @@ class HistoricalReleaseRouter:
                 "durable recovery binding could not be verified"
             ) from exc
 
+    def _validated_origin_recovery_plan(self, origin: Any) -> dict[str, Any]:
+        """Load one receipt-bound executable V2 plan from the current store."""
+
+        try:
+            receipts = tuple(
+                self._store.get_final_write_receipts(origin.operation_id)
+            )
+            if len(receipts) != 1:
+                raise HistoricalRouterError(
+                    "durable origin has no unique final recovery receipt"
+                )
+            receipt = receipts[0]
+            state = origin.state.value
+            body = receipt.body
+            receipt_details = body.get("receipt_details")
+            plan = (
+                receipt_details.get("recovery_plan")
+                if type(receipt_details) is dict
+                else None
+            )
+            validate_executable_recovery_plan(plan)
+            index_recovery_guard_graph(
+                plan, expected_company_id=origin.company_id
+            )
+            receipt_binding = (
+                receipt.operation_id == origin.operation_id
+                and receipt.operation_digest == origin.digest
+                and receipt.operation_revision == origin.revision
+                and receipt.terminal_state == state
+                and receipt.principal == origin.principal
+                and receipt.user_id == origin.user_id
+                and receipt.company_id == origin.company_id
+            )
+            body_binding = (
+                body.get("operation_id") == origin.operation_id
+                and body.get("operation_digest") == origin.digest
+                and body.get("operation_revision") == origin.revision
+                and body.get("terminal_state") == state
+                and body.get("capability_id") == origin.capability_id
+                and body.get("principal") == origin.principal
+                and body.get("user_id") == origin.user_id
+                and body.get("company_id") == origin.company_id
+                and body.get("odoo_instance_id") == origin.odoo_instance_id
+                and body.get("database_name") == origin.database_name
+                and body.get("database_uuid") == origin.database_uuid
+                and body.get("environment") == origin.environment
+                and body.get("registry_digest") == origin.registry_digest
+                and body.get("release_digest") == origin.release_digest
+            )
+        except HistoricalRouterError:
+            raise
+        except (WriteReceiptError, AttributeError, KeyError, TypeError) as exc:
+            raise HistoricalRouterError(
+                "durable origin recovery plan is not an executable V2 plan"
+            ) from exc
+        except Exception as exc:
+            raise HistoricalRouterError(
+                "durable origin final recovery receipt could not be verified"
+            ) from exc
+        if state not in {"completed", "failed"}:
+            raise HistoricalRouterError(
+                "durable origin has no terminal executable recovery plan"
+            )
+        if not receipt_binding or not body_binding:
+            raise HistoricalRouterError(
+                "durable origin final recovery receipt binding is invalid"
+            )
+        if (
+            plan["plan_version"] != 2
+            or plan["origin_operation_id"] != origin.operation_id
+            or plan["recovery_capability_id"] != "acct.recovery.execute.v1"
+        ):
+            raise HistoricalRouterError(
+                "durable origin recovery plan binding is invalid"
+            )
+        try:
+            return json.loads(canonical_json(plan))
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise HistoricalRouterError(
+                "durable origin recovery plan is not canonical JSON"
+            ) from exc
+
     @staticmethod
     def _assert_context(operation: Any, parsed: WriteApiRequest) -> None:
         if not _operation_context_matches(operation, parsed):
@@ -871,18 +963,20 @@ class HistoricalReleaseRouter:
         origin: Any,
         recovery: Any,
         route: HistoricalRoute,
+        plan_digest: str,
     ) -> None:
         try:
             valid = (
                 binding.origin_operation_id == origin.operation_id
                 and binding.recovery_operation_id == recovery.operation_id
                 and binding.origin_operation_revision == origin.revision
+                and hmac.compare_digest(binding.plan_digest, plan_digest)
                 and binding.release_digest == route.release_digest
                 and binding.registry_digest == route.registry_digest
                 and recovery.release_digest == route.release_digest
                 and recovery.registry_digest == route.registry_digest
             )
-        except AttributeError as exc:
+        except (AttributeError, TypeError) as exc:
             raise HistoricalRouterError("durable recovery binding is incomplete") from exc
         if not valid:
             raise HistoricalRouterError("durable recovery binding mismatch")
@@ -891,19 +985,56 @@ class HistoricalReleaseRouter:
         self,
         parsed: WriteApiRequest,
         manifest: HistoricalRoutingManifest,
-    ) -> tuple[HistoricalRoute, Any | None]:
+    ) -> tuple[HistoricalRoute, Any | None, str | None]:
         payload = parsed.payload
         if parsed.action == "operation.prepare":
+            if payload["capability_id"] == "acct.recovery.execute.v1":
+                raise HistoricalRouterError(
+                    "recovery operations must be prepared from a verified origin receipt"
+                )
             existing = self._optional_operation(payload["operation_id"])
             if existing is None:
-                return manifest.routes[manifest.current_release_digest], None
+                return manifest.routes[manifest.current_release_digest], None, None
             operation = self._operation(payload["operation_id"])
             self._assert_existing_prepare_request(operation, parsed)
-            return self._route_for_operation(operation, manifest), operation
+            return self._route_for_operation(operation, manifest), operation, None
         if parsed.action != "operation.recover":
             operation = self._operation(payload["operation_id"])
             self._assert_context(operation, parsed)
-            return self._route_for_operation(operation, manifest), operation
+            route = self._route_for_operation(operation, manifest)
+            if (
+                operation.capability_id == "acct.recovery.execute.v1"
+                and parsed.action in _RECOVERY_LIFECYCLE_ADVANCING_ACTIONS
+            ):
+                binding = self._optional_recovery_binding(
+                    operation.operation_id
+                )
+                if binding is None:
+                    raise HistoricalRouterError(
+                        "recovery operation has no durable origin binding"
+                    )
+                try:
+                    origin_id = binding.origin_operation_id
+                except AttributeError as exc:
+                    raise HistoricalRouterError(
+                        "durable recovery binding is incomplete"
+                    ) from exc
+                origin = self._operation(origin_id)
+                self._assert_context(origin, parsed)
+                origin_route = self._route_for_operation(origin, manifest)
+                plan = self._validated_origin_recovery_plan(origin)
+                self._assert_recovery_binding(
+                    binding,
+                    origin=origin,
+                    recovery=operation,
+                    route=origin_route,
+                    plan_digest=plan["plan_digest"],
+                )
+                if route != origin_route:
+                    raise HistoricalRouterError(
+                        "recovery operation route differs from its origin"
+                    )
+            return route, operation, None
 
         origin_id = payload["origin_operation_id"]
         recovery_id = payload["recovery_operation_id"]
@@ -916,6 +1047,7 @@ class HistoricalReleaseRouter:
         if origin.revision != payload["expected_origin_revision"]:
             raise HistoricalRouterError("durable origin operation revision changed")
         route = self._route_for_operation(origin, manifest)
+        plan = self._validated_origin_recovery_plan(origin)
         binding = self._optional_recovery_binding(recovery_id)
         recovery = self._optional_operation(recovery_id)
         if binding is None:
@@ -923,16 +1055,20 @@ class HistoricalReleaseRouter:
                 raise HistoricalRouterError(
                     "durable store contains an unbound recovery operation"
                 )
-            return route, origin
+            return route, origin, plan["plan_digest"]
         if recovery is None:
             raise HistoricalRouterError(
                 "durable recovery binding has no recovery operation"
             )
         self._assert_context(recovery, parsed)
         self._assert_recovery_binding(
-            binding, origin=origin, recovery=recovery, route=route
+            binding,
+            origin=origin,
+            recovery=recovery,
+            route=route,
+            plan_digest=plan["plan_digest"],
         )
-        return route, origin
+        return route, origin, plan["plan_digest"]
 
     @staticmethod
     def _child_environment(
@@ -1054,11 +1190,22 @@ class HistoricalReleaseRouter:
         parsed: WriteApiRequest,
         route: HistoricalRoute,
         response: dict[str, Any],
+        expected_recovery_plan_digest: str | None,
     ) -> None:
         payload = parsed.payload
         returned_operation_id = response["data"]["operation_id"]
         if parsed.action == "operation.recover":
             origin = self._operation(payload["origin_operation_id"])
+            plan = self._validated_origin_recovery_plan(origin)
+            if (
+                expected_recovery_plan_digest is None
+                or not hmac.compare_digest(
+                    plan["plan_digest"], expected_recovery_plan_digest
+                )
+            ):
+                raise HistoricalRouterError(
+                    "durable origin recovery plan changed during dispatch"
+                )
             recovery = self._operation(returned_operation_id)
             binding = self._optional_recovery_binding(recovery.operation_id)
             if binding is None:
@@ -1068,7 +1215,11 @@ class HistoricalReleaseRouter:
             self._assert_context(origin, parsed)
             self._assert_context(recovery, parsed)
             self._assert_recovery_binding(
-                binding, origin=origin, recovery=recovery, route=route
+                binding,
+                origin=origin,
+                recovery=recovery,
+                route=route,
+                plan_digest=plan["plan_digest"],
             )
             if returned_operation_id != payload["recovery_operation_id"]:
                 parameters = getattr(recovery, "parameters", None)
@@ -1167,7 +1318,9 @@ class HistoricalReleaseRouter:
                 "historical child stdin size limit was exceeded"
             )
         manifest = self._manifest()
-        route, _operation = self._resolve_route(parsed, manifest)
+        route, _operation, recovery_plan_digest = self._resolve_route(
+            parsed, manifest
+        )
         # Re-hash the selected targets immediately before spawn.  This also
         # detects a route target changed after the complete manifest snapshot.
         _verified_route_file(
@@ -1225,7 +1378,10 @@ class HistoricalReleaseRouter:
                 route=route,
             )
             self._verify_post_dispatch(
-                parsed=parsed, route=route, response=response
+                parsed=parsed,
+                route=route,
+                response=response,
+                expected_recovery_plan_digest=recovery_plan_digest,
             )
             _verified_route_file(
                 route.executable_path,

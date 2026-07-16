@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 import re
 import subprocess
 import sys
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from odoo_accounting_cli_v3.release import (
     ReleaseError,
     ReleaseIdentity,
     sha256_file,
-    source_manifest,
 )
 
 
@@ -68,17 +68,30 @@ SENSITIVE_CONTENT_PATTERNS = (
 )
 
 
-def git(*args: str) -> str:
+def git_bytes(*args: str) -> bytes:
     result = subprocess.run(
-        ["git", *args], cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8"
+        ["git", *args], cwd=ROOT, check=True, capture_output=True
     )
-    return result.stdout.strip()
+    return result.stdout
 
 
-def tracked_sources() -> list[Path]:
-    names = git("ls-files").splitlines()
+def git(*args: str) -> str:
+    return git_bytes(*args).decode("utf-8").strip()
+
+
+def tracked_sources(revision: str | None = None) -> list[Path]:
+    command = (
+        ("ls-files", "-z")
+        if revision is None
+        else ("ls-tree", "-r", "--name-only", "-z", revision)
+    )
+    names = git_bytes(*command).decode("utf-8").split("\0")
     excluded = {"dist"}
-    return [ROOT / name for name in names if not excluded.intersection(Path(name).parts)]
+    return [
+        ROOT / name
+        for name in names
+        if name and not excluded.intersection(PurePosixPath(name).parts)
+    ]
 
 
 def validate_release_member(relative: Path, payload: bytes) -> None:
@@ -123,19 +136,79 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
             )
 
 
-def validate_release_sources(sources: list[Path]) -> None:
-    for path in sources:
-        validate_release_member(path.relative_to(ROOT), path.read_bytes())
+def committed_source_payloads(
+    sources: list[Path], *, revision: str = "HEAD"
+) -> dict[str, bytes]:
+    """Capture exact worktree bytes only when they equal their HEAD blobs."""
+
+    payloads: dict[str, bytes] = {}
+    resolved_root = ROOT.resolve()
+    for path in sorted(sources, key=lambda item: item.as_posix()):
+        if path.is_symlink():
+            raise ReleaseError(f"release source is a symlink: {path}")
+        try:
+            resolved = path.resolve(strict=True)
+            relative = resolved.relative_to(resolved_root)
+        except (OSError, ValueError) as exc:
+            raise ReleaseError("release source escapes or is missing from the worktree") from exc
+        if not resolved.is_file() or ".git" in relative.parts:
+            raise ReleaseError(f"invalid release source: {relative.as_posix()}")
+        portable = relative.as_posix()
+        if portable in payloads:
+            raise ReleaseError(f"duplicate release source: {portable}")
+        worktree_payload = resolved.read_bytes()
+        committed_payload = git_bytes("cat-file", "blob", f"{revision}:{portable}")
+        if worktree_payload != committed_payload:
+            raise ReleaseError(
+                "worktree bytes differ from committed blob: " + portable
+            )
+        payloads[portable] = worktree_payload
+    if not payloads:
+        raise ReleaseError("release source set is empty")
+    return payloads
+
+
+def validate_release_payloads(payloads: dict[str, bytes]) -> None:
+    for name, payload in payloads.items():
+        validate_release_member(Path(name), payload)
+
+
+def payload_manifest(
+    payloads: dict[str, bytes], identity: ReleaseIdentity
+) -> dict[str, object]:
+    files = [
+        {
+            "path": name,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+        for name, payload in payloads.items()
+    ]
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "version": identity.version,
+        "commit": identity.commit,
+        "files": files,
+    }
+    manifest["manifest_sha256"] = hashlib.sha256(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return manifest
 
 
 def build() -> Path:
-    if git("status", "--porcelain"):
+    if git_bytes("status", "--porcelain"):
         raise ReleaseError("refusing release from a dirty worktree")
-    version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
-    identity = ReleaseIdentity(version=version, commit=git("rev-parse", "HEAD"))
-    sources = tracked_sources()
-    validate_release_sources(sources)
-    manifest = source_manifest(ROOT, sources, identity)
+    commit = git("rev-parse", "HEAD")
+    sources = tracked_sources(commit)
+    payloads = committed_source_payloads(sources, revision=commit)
+    try:
+        version = payloads["VERSION"].decode("utf-8").strip()
+    except (KeyError, UnicodeDecodeError) as exc:
+        raise ReleaseError("committed VERSION is missing or not UTF-8") from exc
+    identity = ReleaseIdentity(version=version, commit=commit)
+    validate_release_payloads(payloads)
+    manifest = payload_manifest(payloads, identity)
     manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
@@ -143,17 +216,16 @@ def build() -> Path:
     with output.open("wb") as raw:
         with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
             with tarfile.open(mode="w", fileobj=compressed, format=tarfile.PAX_FORMAT) as archive:
-                for path in sources:
-                    relative = path.relative_to(ROOT).as_posix()
-                    info = archive.gettarinfo(str(path), arcname=relative)
+                for relative, payload in payloads.items():
+                    info = tarfile.TarInfo(relative)
+                    info.size = len(payload)
                     info.mode = (
                         0o755 if relative in EXECUTABLE_RELEASE_MEMBERS else 0o644
                     )
                     info.uid = info.gid = 0
                     info.uname = info.gname = "root"
                     info.mtime = 0
-                    with path.open("rb") as stream:
-                        archive.addfile(info, stream)
+                    archive.addfile(info, io.BytesIO(payload))
                 info = tarfile.TarInfo("RELEASE-MANIFEST.json")
                 info.size = len(manifest_bytes)
                 info.mode = 0o644

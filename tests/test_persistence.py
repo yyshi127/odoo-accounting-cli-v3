@@ -66,9 +66,13 @@ from odoo_accounting_cli_v3.persistence import (
     _operation_payload,
     _operation_record_hash,
     _recovery_operation_binding_event_id,
+    _recovery_operation_binding_payload,
 )
 from odoo_accounting_cli_v3.receipts import create_read_receipt
-from odoo_accounting_cli_v3.write_receipts import create_recovery_plan
+from odoo_accounting_cli_v3.write_receipts import (
+    create_recovery_plan,
+    create_recovery_plan_v2,
+)
 
 
 NOW = datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
@@ -87,6 +91,79 @@ RECEIPT_KEY_ID = "receipt-key-v1"
 
 def content_digest(value: dict) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
+
+
+def recovery_plan_v2(
+    origin_operation_id: str,
+    *,
+    status: str = "available",
+    requires_approval: bool = True,
+    company_id: int = 7,
+    record_id: int = 9101,
+    method: str = "cancel_draft_move",
+) -> dict:
+    available = status == "available"
+    action_target = {
+        "model": "account.move",
+        "record_id": record_id,
+        "company_id": company_id,
+        "record_state": "draft",
+        "record_fingerprint": "e" * 64,
+    }
+    guard = {
+        "model": "account.move.line",
+        "record_id": record_id + 1,
+        "company_id": company_id,
+        "record_state": "unknown",
+        "record_fingerprint": "f" * 64,
+        "expected_outcome": "survive_exact" if available else "manual_review",
+    }
+    plan = create_recovery_plan_v2(
+        origin_operation_id=origin_operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status=status,
+        method=method,
+        requires_approval=True if available else requires_approval,
+        action_targets=[action_target] if available else [],
+        guard_records=[guard],
+        oracle_id=(
+            "cancel_draft_move_exact_v1" if available else "manual_escalation"
+        ),
+        parameters={"move_id": record_id, "company_id": company_id},
+    )
+    if available and not requires_approval:
+        plan["requires_approval"] = False
+        unsigned = {key: value for key, value in plan.items() if key != "plan_digest"}
+        plan["plan_digest"] = content_digest(unsigned)
+    return plan
+
+
+def recovery_plan_v1(
+    origin_operation_id: str,
+    *,
+    status: str = "available",
+    requires_approval: bool = True,
+    company_id: int = 7,
+    record_id: int = 9101,
+    method: str = "cancel_draft_move",
+) -> dict:
+    return create_recovery_plan(
+        origin_operation_id=origin_operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status=status,
+        method=method,
+        requires_approval=requires_approval,
+        target_records=[
+            {
+                "model": "account.move",
+                "record_id": record_id,
+                "company_id": company_id,
+                "record_state": "draft",
+                "record_fingerprint": "e" * 64,
+            }
+        ],
+        parameters={"move_id": record_id, "company_id": company_id},
+    )
 
 
 def precheck_evidence(operation: Operation) -> dict:
@@ -293,38 +370,30 @@ def persist_completed_with_recovery_plan(
     status: str = "available",
     requires_approval: bool = True,
     target_company_id: int = 7,
-    signed_plan_method: str = "reverse_move",
+    signed_plan_method: str = "cancel_draft_move",
+    plan_version: int = 2,
+    tamper_plan: bool = False,
 ):
     started = persist_executing(store, suffix)
     origin = started.operation
-    recovery_plan = create_recovery_plan(
-        origin_operation_id=origin.operation_id,
-        recovery_capability_id="acct.recovery.execute.v1",
+    plan_factory = recovery_plan_v1 if plan_version == 1 else recovery_plan_v2
+    recovery_plan = plan_factory(
+        origin.operation_id,
         status=status,
-        method="reverse_move",
         requires_approval=requires_approval,
-        target_records=[
-            {
-                "model": "account.move",
-                "record_id": 9101,
-                "company_id": target_company_id,
-                "record_state": "posted",
-                "record_fingerprint": "e" * 64,
-            }
-        ],
-        parameters={"move_id": 9101, "company_id": target_company_id},
+        company_id=target_company_id,
     )
+    if tamper_plan:
+        recovery_plan["method"] = "tampered without updating plan digest"
     signed_recovery_plan = (
         recovery_plan
-        if signed_plan_method == "reverse_move"
-        else create_recovery_plan(
-            origin_operation_id=origin.operation_id,
-            recovery_capability_id="acct.recovery.execute.v1",
+        if signed_plan_method == "cancel_draft_move"
+        else plan_factory(
+            origin.operation_id,
             status=status,
             method=signed_plan_method,
             requires_approval=requires_approval,
-            target_records=recovery_plan["target_records"],
-            parameters={"move_id": 9101, "company_id": target_company_id},
+            company_id=target_company_id,
         )
     )
     execution_evidence = {
@@ -420,6 +489,38 @@ def prepared_recovery_operation(
         registry_digest=origin.registry_digest,
         release_digest=origin.release_digest,
     )
+
+
+def append_historical_recovery_binding(
+    store: SQLitePersistence,
+    origin: Operation,
+    recovery: Operation,
+    plan: dict,
+) -> None:
+    receipt = store.get_final_write_receipts(origin.operation_id)[0]
+    execution = next(
+        record
+        for record in store.get_trusted_result_records(origin.operation_id)
+        if record.kind == "execution"
+    )
+    payload = _recovery_operation_binding_payload(
+        origin=origin,
+        recovery=recovery,
+        origin_receipt=receipt,
+        origin_execution=execution,
+        plan_digest=plan["plan_digest"],
+    )
+    with store._transaction() as connection:
+        store._append_audit_event(
+            connection,
+            event_id=_recovery_operation_binding_event_id(
+                recovery.operation_id
+            ),
+            event_type="recovery.binding.created",
+            operation_id=recovery.operation_id,
+            occurred_at=NOW + timedelta(seconds=1),
+            payload=payload,
+        )
 
 
 def create_v1_schema(path: Path) -> None:
@@ -3446,23 +3547,69 @@ class SQLitePersistenceTest(unittest.TestCase):
                 occurred_at=NOW + timedelta(seconds=2),
             )
 
+    def test_historical_v1_recovery_binding_reopens_and_reads_but_new_bind_is_rejected(self) -> None:
+        origin, plan = persist_completed_with_recovery_plan(
+            self.store,
+            "historical-v1-binding",
+            plan_version=1,
+        )
+        recovery = prepared_recovery_operation(origin, plan, "historical-v1")
+        self.store.get_or_create_operation(
+            recovery, scope="recovery-historical-v1"
+        )
+
+        with self.assertRaisesRegex(PersistenceIntegrityError, "V2 plan"):
+            self.store.bind_recovery_operation(
+                origin_operation_id=origin.operation_id,
+                recovery_operation_id=recovery.operation_id,
+                expected_origin_revision=origin.revision,
+                plan_digest=plan["plan_digest"],
+                occurred_at=NOW + timedelta(seconds=1),
+            )
+
+        append_historical_recovery_binding(
+            self.store, origin, recovery, plan
+        )
+        restarted = SQLitePersistence(self.path)
+        binding = restarted.get_recovery_operation_binding(
+            recovery.operation_id
+        )
+
+        self.assertEqual(binding.origin_operation_id, origin.operation_id)
+        self.assertEqual(binding.recovery_operation_id, recovery.operation_id)
+        self.assertEqual(binding.plan_digest, plan["plan_digest"])
+        self.assertEqual(restarted.get_operation(origin.operation_id), origin)
+
+    def test_historical_v1_recovery_binding_rejects_internally_rehashed_plan_tamper(self) -> None:
+        path = Path(self.directory.name) / "historical-v1-tamper.sqlite3"
+        store = SQLitePersistence(path)
+        origin, plan = persist_completed_with_recovery_plan(
+            store,
+            "historical-v1-tamper",
+            plan_version=1,
+            tamper_plan=True,
+        )
+        recovery = prepared_recovery_operation(
+            origin, plan, "historical-v1-tamper"
+        )
+        store.get_or_create_operation(
+            recovery, scope="recovery-historical-v1-tamper"
+        )
+        append_historical_recovery_binding(store, origin, recovery, plan)
+
+        with self.assertRaisesRegex(
+            PersistenceIntegrityError, "receipt plan is invalid"
+        ):
+            SQLitePersistence(path)
+
     def test_recovery_operation_binding_accepts_failed_origin_with_signed_plan(self) -> None:
         started = persist_executing(self.store, "failed-origin-binding")
         origin = started.operation
-        plan = create_recovery_plan(
-            origin_operation_id=origin.operation_id,
-            recovery_capability_id="acct.recovery.execute.v1",
-            status="available",
-            method="cancel_partial_write",
-            requires_approval=True,
-            target_records=[{
-                "model": "account.move",
-                "record_id": 9201,
-                "company_id": origin.company_id,
-                "record_state": "draft",
-                "record_fingerprint": "f" * 64,
-            }],
-            parameters={"move_id": 9201, "company_id": origin.company_id},
+        plan = recovery_plan_v2(
+            origin.operation_id,
+            company_id=origin.company_id,
+            record_id=9201,
+            method="cancel_draft_move",
         )
         execution_evidence = {
             "error": "posting failed after a durable draft was created",
@@ -3584,20 +3731,10 @@ class SQLitePersistenceTest(unittest.TestCase):
             idempotency_key="idem-nonterminal-origin",
         )
         self.store.get_or_create_operation(nonterminal, scope="nonterminal-origin")
-        nonterminal_plan = create_recovery_plan(
-            origin_operation_id=nonterminal.operation_id,
-            recovery_capability_id="acct.recovery.execute.v1",
-            status="available",
-            method="reverse_move",
-            requires_approval=True,
-            target_records=[{
-                "model": "account.move",
-                "record_id": 9102,
-                "company_id": nonterminal.company_id,
-                "record_state": "posted",
-                "record_fingerprint": "e" * 64,
-            }],
-            parameters={"move_id": 9102},
+        nonterminal_plan = recovery_plan_v2(
+            nonterminal.operation_id,
+            company_id=nonterminal.company_id,
+            record_id=9102,
         )
         nonterminal_recovery = prepared_recovery_operation(
             nonterminal, nonterminal_plan, "guard-nonterminal"

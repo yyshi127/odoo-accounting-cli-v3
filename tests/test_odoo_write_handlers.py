@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,11 @@ from odoo_accounting_cli_v3.odoo.write_handlers import (
     OdooWriteContext,
     OdooWriteHandlerError,
     OdooWriteHandlers,
+)
+from odoo_accounting_cli_v3.operations import canonical_json
+from odoo_accounting_cli_v3.write_receipts import (
+    create_record_snapshot,
+    create_recovery_plan_v2,
 )
 
 
@@ -182,15 +188,51 @@ class Harness(OdooWriteHandlers):
             "company_id": company.id,
             "state": str(getattr(record, "state", "unknown") or "unknown"),
             "values": values,
-            "values_digest": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+            "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
         }
 
 
 def recovery_target(model_name, record):
     handler = Harness()
-    return handler.live_recovery_target(
-        model_name, record, handler.test_company
-    )[1]
+    raw = handler.snapshot(model_name, record, handler.test_company)
+    snapshot = create_record_snapshot(
+        model=model_name,
+        record_id=record.id,
+        exists=True,
+        record_state=raw["state"],
+        values=raw["values"],
+    )
+    return {
+        "model": model_name,
+        "record_id": record.id,
+        "company_id": handler.test_company.id,
+        "record_state": raw["state"],
+        "record_fingerprint": hashlib.sha256(canonical_json(snapshot)).hexdigest(),
+    }
+
+
+def executable_recovery_plan(
+    *,
+    origin_operation_id="op-1",
+    action_targets,
+    guard_records,
+    method="cancel_draft_move",
+    oracle_id="cancel_draft_move_exact_v1",
+):
+    return create_recovery_plan_v2(
+        origin_operation_id=origin_operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method=method,
+        requires_approval=True,
+        action_targets=action_targets,
+        guard_records=[
+            {**record, "expected_outcome": "survive_exact"}
+            for record in guard_records
+        ],
+        oracle_id=oracle_id,
+        parameters={"origin_operation_id": origin_operation_id},
+    )
 
 
 def payment_binding(
@@ -4002,160 +4044,191 @@ def test_reversal_verification_requires_exact_linewise_graph_and_approved_origin
         )
 
 
-def test_recovery_action_and_targets_come_only_from_trusted_allowlisted_plan():
-    move = Record(1101, state="draft", company_id=Record(7))
+def draft_move_recovery_fixture():
+    journal = Record(2, type="general")
+    move = Record(
+        1101,
+        state="draft",
+        move_type="entry",
+        company_id=Record(7),
+        journal_id=journal,
+        line_ids=[],
+        auto_post="no",
+    )
+    line1 = Record(
+        1102,
+        state="unknown",
+        company_id=Record(7),
+        move_id=move,
+        full_reconcile_id=None,
+        matched_debit_ids=[],
+        matched_credit_ids=[],
+        asset_ids=[],
+        tax_ids=[],
+        tax_line_id=None,
+        tax_repartition_line_id=None,
+        deferred_start_date=None,
+        deferred_end_date=None,
+        statement_line_id=None,
+    )
+    line2 = Record(
+        1103,
+        state="unknown",
+        company_id=Record(7),
+        move_id=move,
+        full_reconcile_id=None,
+        matched_debit_ids=[],
+        matched_credit_ids=[],
+        asset_ids=[],
+        tax_ids=[],
+        tax_line_id=None,
+        tax_repartition_line_id=None,
+        deferred_start_date=None,
+        deferred_end_date=None,
+        statement_line_id=None,
+    )
+    move.line_ids = [line1, line2]
+    move.snapshot_values = {
+        "state": "draft",
+        "move_type": "entry",
+        "journal_id": 2,
+        "line_ids": [1102, 1103],
+        "ref": "DRAFT-RECOVERY-1",
+    }
+    line1.snapshot_values = {
+        "move_id": 1101,
+        "account_id": 10,
+        "debit": "100",
+        "credit": "0",
+    }
+    line2.snapshot_values = {
+        "move_id": 1101,
+        "account_id": 20,
+        "debit": "0",
+        "credit": "100",
+    }
 
     def button_cancel():
         move.state = "cancel"
+        move.snapshot_values["state"] = "cancel"
 
     move.button_cancel = button_cancel
-    plan = {
-        "origin_operation_id": "op-1", "plan_digest": "a" * 64,
-        "company_id": 7, "action": "cancel_draft_move",
-        "targets": [recovery_target("account.move", move)],
+    records = {
+        ("account.move", move.id): move,
+        ("account.move.line", line1.id): line1,
+        ("account.move.line", line2.id): line2,
     }
-    handler = Harness(recovery_plan=plan, records={("account.move", 1101): move})
-    checked = {"recovery_action": "cancel_draft_move"}
-    records, recovery = handler.execute_recovery(
-        {"recovery_date": "2026-07-10", "reason": "undo"},
-        handler.test_company,
-        checked,
+    plan = executable_recovery_plan(
+        action_targets=[recovery_target("account.move", move)],
+        guard_records=[
+            recovery_target("account.move.line", line1),
+            recovery_target("account.move.line", line2),
+        ],
     )
-    assert records == [("account.move", move)]
-    assert move.state == "cancel"
-    assert recovery["status"] == "not_applicable"
+    return move, line1, line2, records, plan
+
+
+def test_cancel_draft_recovery_stays_closed_until_active_module_graph_is_proven():
+    move, line1, line2, records_by_key, plan = draft_move_recovery_fixture()
+    write_checks = []
+
+    class AccessHarness(Harness):
+        def record(self, model_name, record_id, company, *, write=False, shared=False):
+            write_checks.append((model_name, record_id, write))
+            return super().record(
+                model_name, record_id, company, write=write, shared=shared
+            )
+
+    handler = AccessHarness(recovery_plan=plan, records=records_by_key)
+    parameters = {
+        "origin_operation_id": "op-1",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "company_id": 7,
+        "recovery_date": "2026-07-10",
+        "reason": "undo duplicate draft",
+    }
+    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+        handler.precheck_recovery(parameters, handler.test_company)
+    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+        handler.execute_recovery(parameters, handler.test_company, {})
+
+    assert move.state == "draft"
+    assert write_checks == []
+
+
+def test_cancel_draft_recovery_rejects_incomplete_line_guard_closure():
+    move, line1, _line2, records_by_key, _plan = draft_move_recovery_fixture()
+    plan = executable_recovery_plan(
+        action_targets=[recovery_target("account.move", move)],
+        guard_records=[recovery_target("account.move.line", line1)],
+    )
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
 
 
 def test_every_advertised_available_recovery_method_has_an_execute_allowlist_branch():
-    assert _RECOVERY_ACTIONS == {
-        "reverse_posted_move", "cancel_draft_move", "cancel_payment",
-        "recover_accrual_schedule",
-    }
+    assert _RECOVERY_ACTIONS == set()
 
 
-def test_payment_recovery_cancels_payment_and_exactly_restores_target_graph():
-    target_line = Record(
-        111,
-        state="unknown",
-        company_id=Record(7),
-        move_id=Record(11),
-        amount_residual=50,
-        amount_residual_currency=50,
-        reconciled=False,
-        full_reconcile_id=None,
-        matched_debit_ids=[],
-        matched_credit_ids=[Record(501)],
+def test_payment_and_posted_reversal_recovery_remain_fail_closed():
+    payment = Record(1201, state="paid", company_id=Record(7))
+    guard = Record(1202, state="posted", company_id=Record(7))
+    plan = executable_recovery_plan(
+        action_targets=[recovery_target("account.payment", payment)],
+        guard_records=[recovery_target("account.move", guard)],
+        method="cancel_payment",
+        oracle_id="cancel_payment_unverified",
     )
-    target = Record(
-        11,
-        state="posted",
-        company_id=Record(7),
-        amount_residual=50,
-        line_ids=[target_line],
-    )
-    payment_line = Record(1211, state="unknown", company_id=Record(7))
-    payment_move = Record(
-        1202,
-        state="posted",
-        company_id=Record(7),
-        line_ids=[payment_line],
-    )
-    payment = Record(
-        1201,
-        state="paid",
-        company_id=Record(7),
-        move_id=payment_move,
-        reconciled_invoice_ids=[target],
-        reconciled_bill_ids=[],
-        odoo_cli_v3_payment_binding=payment_binding(
-            payment_id=1201,
-            payment_move_id=1202,
-            payment_line_ids=[1211],
-        ),
-    )
-
-    def action_draft():
-        payment.state = "draft"
-        payment_move.state = "draft"
-        target.amount_residual = 100
-        target_line.amount_residual = 100
-        target_line.amount_residual_currency = 100
-        target_line.matched_credit_ids = []
-
-    def action_cancel():
-        payment.state = "canceled"
-        payment.move_id = None
-        payment.reconciled_invoice_ids = []
-        payment.reconciled_bill_ids = []
-
-    payment.action_draft = action_draft
-    payment.action_cancel = action_cancel
-    targets = [
-        ("account.payment", payment),
-        ("account.move", payment_move),
-        ("account.move", target),
-        ("account.move.line", payment_line),
-        ("account.move.line", target_line),
-    ]
-    plan = {
-        "action": "cancel_payment",
-        "targets": [recovery_target(model, record) for model, record in targets],
-    }
     handler = Harness(
         recovery_plan=plan,
         records={
-            ("account.payment", 1201): payment,
-            ("account.move", 1202): payment_move,
-            ("account.move", 11): target,
-            ("account.move.line", 1211): payment_line,
-            ("account.move.line", 111): target_line,
+            ("account.payment", payment.id): payment,
+            ("account.move", guard.id): guard,
         },
     )
-    records, _ = handler.execute_recovery(
-        {"recovery_date": "2026-07-10", "reason": "duplicate payment"},
-        handler.test_company,
-        {"recovery_action": "cancel_payment"},
-    )
-    assert {(model, record.id) for model, record in records} == {
-        ("account.payment", 1201),
-        ("account.move", 11),
-        ("account.move.line", 111),
-    }
-    assert "target_graph_restored" in handler.verify_recovery(
-        {}, handler.test_company, records
-    )
-    target_line.amount_residual_currency = 99
-    with pytest.raises(OdooWriteHandlerError, match="exactly restored"):
-        handler.verify_recovery({}, handler.test_company, records)
+    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
 
 
 def test_bank_recovery_is_not_executable_until_precise_compensation_exists():
     bank_line = Record(1301, company_id=Record(7), is_reconciled=True)
-    bank_plan = {
-        "origin_operation_id": "op-bank",
-        "plan_digest": "a" * 64,
-        "company_id": 7,
-        "action": "undo_bank_reconciliation",
-        "targets": [
-            {
-                "model": "account.bank.statement.line",
-                "record_id": 1301,
-                "company_id": 7,
-                "record_state": "unknown",
-                "record_fingerprint": "b" * 64,
-            }
+    guard = Record(1300, company_id=Record(7), state="posted")
+    bank_plan = executable_recovery_plan(
+        origin_operation_id="op-bank",
+        action_targets=[
+            recovery_target("account.bank.statement.line", bank_line)
         ],
-    }
+        guard_records=[recovery_target("account.move", guard)],
+        method="undo_bank_reconciliation",
+        oracle_id="bank_recovery_unverified",
+    )
     handler = Harness(
-        recovery_plan=bank_plan,
-        records={("account.bank.statement.line", 1301): bank_line},
+        recovery_plan=bank_plan, records={
+            ("account.bank.statement.line", 1301): bank_line,
+            ("account.move", 1300): guard,
+        },
     )
 
-    with pytest.raises(OdooWriteHandlerError, match="allowlisted"):
+    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
         handler.precheck_recovery(
             {
                 "origin_operation_id": "op-bank",
-                "expected_recovery_plan_digest": "a" * 64,
+                "expected_recovery_plan_digest": bank_plan["plan_digest"],
                 "company_id": 7,
             },
             handler.test_company,
@@ -4164,21 +4237,26 @@ def test_bank_recovery_is_not_executable_until_precise_compensation_exists():
 
 def test_asset_recovery_is_closed_until_full_schedule_compensation_is_verified():
     asset = Record(1302, company_id=Record(7), state="open")
-    asset_plan = {
-        "origin_operation_id": "op-asset",
-        "plan_digest": "a" * 64,
-        "company_id": 7,
-        "action": "cancel_asset",
-        "targets": [recovery_target("account.asset", asset)],
-    }
-    handler = Harness(
-        recovery_plan=asset_plan, records={("account.asset", 1302): asset}
+    guard = Record(1303, company_id=Record(7), state="posted")
+    asset_plan = executable_recovery_plan(
+        origin_operation_id="op-asset",
+        action_targets=[recovery_target("account.asset", asset)],
+        guard_records=[recovery_target("account.move", guard)],
+        method="cancel_asset",
+        oracle_id="asset_recovery_unverified",
     )
-    with pytest.raises(OdooWriteHandlerError, match="allowlisted"):
+    handler = Harness(
+        recovery_plan=asset_plan,
+        records={
+            ("account.asset", 1302): asset,
+            ("account.move", 1303): guard,
+        },
+    )
+    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
         handler.precheck_recovery(
             {
                 "origin_operation_id": "op-asset",
-                "expected_recovery_plan_digest": "a" * 64,
+                "expected_recovery_plan_digest": asset_plan["plan_digest"],
                 "company_id": 7,
             },
             handler.test_company,
@@ -4192,54 +4270,41 @@ def test_recovery_precheck_rejects_user_when_trusted_plan_is_missing_or_action_n
             {"origin_operation_id": "op-1", "expected_recovery_plan_digest": "a" * 64, "company_id": 7},
             handler.test_company,
         )
-    plan = {
-        "origin_operation_id": "op-1", "plan_digest": "a" * 64,
-        "company_id": 7, "action": "unlink_anything",
-        "targets": [{"model": "account.move", "record_id": 1}],
-    }
-    handler = Harness(recovery_plan=plan)
-    with pytest.raises(OdooWriteHandlerError, match="allowlisted"):
+    move = Record(1, company_id=Record(7), state="draft")
+    guard = Record(2, company_id=Record(7), state="unknown")
+    plan = executable_recovery_plan(
+        action_targets=[recovery_target("account.move", move)],
+        guard_records=[recovery_target("account.move.line", guard)],
+        method="unlink_anything",
+        oracle_id="untrusted_oracle",
+    )
+    handler = Harness(
+        recovery_plan=plan,
+        records={
+            ("account.move", 1): move,
+            ("account.move.line", 2): guard,
+        },
+    )
+    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
         handler.precheck_recovery(
-            {"origin_operation_id": "op-1", "expected_recovery_plan_digest": "a" * 64, "company_id": 7},
+            {"origin_operation_id": "op-1", "expected_recovery_plan_digest": plan["plan_digest"], "company_id": 7},
             handler.test_company,
         )
 
 
-def test_recovery_precheck_rejects_changed_target_state_or_fingerprint():
-    move = Record(1401, state="posted", company_id=Record(7))
-    target = recovery_target("account.move", move)
+def test_recovery_precheck_rejects_tampering_before_closed_oracle_gate():
+    _move, _line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
     parameters = {
-        "origin_operation_id": "op-1401",
-        "expected_recovery_plan_digest": "a" * 64,
+        "origin_operation_id": "op-1",
+        "expected_recovery_plan_digest": plan["plan_digest"],
         "company_id": 7,
     }
-    plan = {
-        "origin_operation_id": "op-1401",
-        "plan_digest": "a" * 64,
-        "company_id": 7,
-        "action": "reverse_posted_move",
-        "targets": [target],
+    tampered = {
+        **plan,
+        "action_targets": [
+            {**plan["action_targets"][0], "record_fingerprint": "f" * 64}
+        ],
     }
-    handler = Harness(
-        recovery_plan=plan,
-        records={("account.move", 1401): move},
-    )
-
-    checked = handler.precheck_recovery(
-        parameters, handler.test_company
-    )
-    assert "target_fingerprint" in checked["checks"]
-
-    changed_target = {**target, "record_fingerprint": "f" * 64}
-    changed_handler = Harness(
-        recovery_plan={**plan, "targets": [changed_target]},
-        records={("account.move", 1401): move},
-    )
-    with pytest.raises(OdooWriteHandlerError, match="fingerprint changed"):
-        changed_handler.precheck_recovery(
-            parameters, changed_handler.test_company
-        )
-
-    move.state = "cancel"
-    with pytest.raises(OdooWriteHandlerError, match="state or fingerprint changed"):
+    handler = Harness(recovery_plan=tampered, records=records_by_key)
+    with pytest.raises(OdooWriteHandlerError, match="not executable"):
         handler.precheck_recovery(parameters, handler.test_company)

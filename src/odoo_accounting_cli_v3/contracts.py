@@ -34,6 +34,29 @@ def _matches_type(value: Any, kind: str) -> bool:
 
 
 def validate_value(value: Any, schema: dict[str, Any], path: str = "$") -> None:
+    if "oneOf" in schema:
+        if set(schema) != {"oneOf"}:
+            raise ContractError("oneOf cannot be combined with other schema keywords")
+        alternatives = schema["oneOf"]
+        if (
+            not isinstance(alternatives, list)
+            or len(alternatives) < 2
+            or any(not isinstance(alternative, dict) for alternative in alternatives)
+        ):
+            raise ContractError("oneOf must contain at least two schema objects")
+        matches = 0
+        for alternative in alternatives:
+            try:
+                validate_value(value, alternative, path)
+            except ContractError:
+                continue
+            matches += 1
+        if matches != 1:
+            raise ContractError(
+                f"{path} must match exactly one oneOf branch; matched {matches}"
+            )
+        return
+
     declared = schema.get("type")
     types = declared if isinstance(declared, list) else [declared]
     if not types or not any(_matches_type(value, kind) for kind in types):

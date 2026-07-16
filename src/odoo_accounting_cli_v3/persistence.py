@@ -49,7 +49,12 @@ from .receipts import (
     valid_read_runtime_binding,
     verify_read_receipt,
 )
-from .write_receipts import WriteReceiptError, validate_recovery_plan
+from .write_receipts import (
+    WriteReceiptError,
+    index_recovery_guard_graph,
+    validate_executable_recovery_plan,
+    validate_recovery_plan,
+)
 
 
 LEGACY_SCHEMA_VERSION = 1
@@ -4759,6 +4764,7 @@ class SQLitePersistence:
         origin_receipt: StoredFinalWriteReceipt,
         *,
         expected_plan_digest: str,
+        require_executable: bool,
     ) -> StoredTrustedResultRecord:
         receipt_details = origin_receipt.body.get("receipt_details")
         plan = (
@@ -4768,9 +4774,11 @@ class SQLitePersistence:
         )
         try:
             validate_recovery_plan(plan)
+            if require_executable:
+                validate_executable_recovery_plan(plan)
         except WriteReceiptError as exc:
             raise PersistenceIntegrityError(
-                "recovery operation binding receipt plan is invalid"
+                "recovery operation binding receipt plan is invalid: " + str(exc)
             ) from exc
         if plan["status"] != "available":
             raise PersistenceIntegrityError(
@@ -4790,7 +4798,16 @@ class SQLitePersistence:
             raise PersistenceIntegrityError(
                 "recovery operation binding plan does not match its origin"
             )
-        if any(
+        if plan.get("plan_version") == 2:
+            try:
+                index_recovery_guard_graph(
+                    plan, expected_company_id=origin.company_id
+                )
+            except WriteReceiptError as exc:
+                raise PersistenceIntegrityError(
+                    "recovery operation binding target company differs from its origin"
+                ) from exc
+        elif any(
             target["company_id"] != origin.company_id
             for target in plan["target_records"]
         ):
@@ -4968,6 +4985,7 @@ class SQLitePersistence:
                 origin,
                 origin_receipt,
                 expected_plan_digest=plan_digest,
+                require_executable=False,
             )
             if event.occurred_at < origin_receipt.recorded_at:
                 raise PersistenceIntegrityError(
@@ -6589,6 +6607,7 @@ class SQLitePersistence:
                 origin,
                 origin_receipt,
                 expected_plan_digest=plan_digest,
+                require_executable=True,
             )
             if normalized_occurred_at < origin_receipt.recorded_at:
                 raise PersistenceIntegrityError(

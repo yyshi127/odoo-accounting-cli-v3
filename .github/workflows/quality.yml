@@ -35,6 +35,13 @@ jobs:
       - name: Run the Python test suite
         id: python_tests
         run: python -m pytest --junitxml="$RUNNER_TEMP/pytest.xml"
+      - name: Prove the production installer verifier drops to nobody
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo "$(command -v python)" -m pytest -q \
+            tests/test_release_installer.py \
+            -k production_candidate_runner_drops_to_nobody
       - name: Publish exact pytest failures as check annotations
         if: ${{ failure() && steps.python_tests.outcome == 'failure' }}
         shell: bash

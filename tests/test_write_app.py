@@ -33,7 +33,7 @@ from odoo_accounting_cli_v3.write_protocol import (
 from odoo_accounting_cli_v3.write_receipts import (
     create_difference,
     create_record_snapshot,
-    create_recovery_plan,
+    create_recovery_plan_v2,
 )
 
 
@@ -242,19 +242,49 @@ class FakeOdoo:
                 canonical_json(after)
             ).hexdigest(),
         }
+        guard_before = create_record_snapshot(
+            model="account.move.line",
+            record_id=record_id + 1,
+            exists=False,
+            record_state="absent",
+            values={},
+        )
+        guard_after = create_record_snapshot(
+            model="account.move.line",
+            record_id=record_id + 1,
+            exists=True,
+            record_state="unknown",
+            values={"company_id": operation.company_id, "move_id": record_id},
+        )
+        guard_reference = {
+            "model": "account.move.line",
+            "record_id": record_id + 1,
+            "company_id": operation.company_id,
+            "record_state": "unknown",
+            "record_fingerprint": hashlib.sha256(
+                canonical_json(guard_after)
+            ).hexdigest(),
+        }
         recovery_parameters = (
             {"origin_operation_id": operation.parameters["origin_operation_id"]}
             if is_recovery
-            else {"move_id": 501}
+            else {
+                "move_id": 501,
+                "action_targets": [{"model": "account.move", "record_id": 501}],
+                "guard_records": [
+                    {"model": "account.move.line", "record_id": 502}
+                ],
+                "oracle_id": "cancel_draft_move_exact_v1",
+            }
         )
         return {
             "operation_id": operation.operation_id,
             "capability_id": operation.capability_id,
             "succeeded": True,
-            "odoo_records": [target],
+            "odoo_records": [target, guard_reference],
             "difference": create_difference(
-                before=[before],
-                after=[after],
+                before=[before, guard_before],
+                after=[after, guard_after],
                 changed_fields=[
                     *(
                         ["company_id", "origin_operation_id", "state"]
@@ -264,18 +294,33 @@ class FakeOdoo:
                             "currency_id",
                             "invoice_date",
                             "partner_id",
-                            "state",
+                            "state", "move_id",
                         ]
                     ),
                 ],
             ),
-            "recovery_plan": create_recovery_plan(
+            "recovery_plan": create_recovery_plan_v2(
                 origin_operation_id=operation.operation_id,
                 recovery_capability_id="acct.recovery.execute.v1",
                 status="not_applicable" if is_recovery else "available",
-                method="recovery_completed" if is_recovery else "reverse_posted_move",
+                method="recovery_completed" if is_recovery else "cancel_draft_move",
                 requires_approval=not is_recovery,
-                target_records=[] if is_recovery else [target],
+                action_targets=[] if is_recovery else [target],
+                guard_records=(
+                    [
+                        {
+                            **guard_reference,
+                            "expected_outcome": "survive_exact",
+                        }
+                    ]
+                    if not is_recovery
+                    else []
+                ),
+                oracle_id=(
+                    "not_applicable"
+                    if is_recovery
+                    else "cancel_draft_move_exact_v1"
+                ),
                 parameters=recovery_parameters,
             ),
             "recovery_parameters": recovery_parameters,

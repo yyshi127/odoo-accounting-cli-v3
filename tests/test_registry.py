@@ -206,6 +206,31 @@ class RegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(RegistryError, "type is required"):
             validate_registry(invalid)
 
+    def test_one_of_schema_nodes_are_strictly_structured(self) -> None:
+        write = next(
+            item for item in self.document["capabilities"] if item["access"] == "write"
+        )
+        recovery = write["output_schema"]["properties"]["recovery_plan"]
+        self.assertEqual(len(recovery["oneOf"]), 2)
+
+        combined = copy.deepcopy(self.document)
+        combined_write = next(
+            item for item in combined["capabilities"] if item["access"] == "write"
+        )
+        combined_write["output_schema"]["properties"]["recovery_plan"]["type"] = "object"
+        with self.assertRaisesRegex(RegistryError, "cannot be combined"):
+            validate_registry(combined)
+
+        single = copy.deepcopy(self.document)
+        single_write = next(
+            item for item in single["capabilities"] if item["access"] == "write"
+        )
+        single_write["output_schema"]["properties"]["recovery_plan"]["oneOf"] = [
+            recovery["oneOf"][0]
+        ]
+        with self.assertRaisesRegex(RegistryError, "at least two"):
+            validate_registry(single)
+
     def test_unsupported_schema_keyword_is_rejected(self) -> None:
         invalid = copy.deepcopy(self.document)
         invalid["capabilities"][0]["input_schema"]["properties"]["company_id"]["coerce"] = True

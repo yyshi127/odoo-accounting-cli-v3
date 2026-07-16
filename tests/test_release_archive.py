@@ -10,6 +10,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from tools import build_release as release_builder
@@ -523,6 +524,59 @@ class ReleaseArchiveTest(unittest.TestCase):
                         "usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH",
                         completed.stdout.splitlines(),
                     )
+
+    def test_release_rejects_clean_filtered_bytes_that_differ_from_head(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "repository"
+            root.mkdir()
+            (root / ".gitattributes").write_bytes(b"* text=auto eol=lf\n")
+            source = root / "source.txt"
+            source.write_bytes(b"first\nsecond\n")
+            for command in (
+                ["git", "init", "-q"],
+                ["git", "config", "user.email", "release-test@example.invalid"],
+                ["git", "config", "user.name", "Release Test"],
+                ["git", "add", "--all"],
+                ["git", "commit", "-qm", "release byte test"],
+            ):
+                subprocess.run(command, cwd=root, check=True, capture_output=True)
+
+            source.write_bytes(b"first\r\nsecond\r\n")
+            subprocess.run(
+                ["git", "add", "--", "source.txt"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            status = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            )
+            self.assertEqual(status.stdout, b"")
+            head_blob = subprocess.run(
+                ["git", "rev-parse", "HEAD:source.txt"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            ).stdout
+            index_blob = subprocess.run(
+                ["git", "rev-parse", ":source.txt"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+            ).stdout
+            self.assertEqual(index_blob, head_blob)
+            self.assertIn(b"\r\n", source.read_bytes())
+
+            with mock.patch.object(release_builder, "ROOT", root):
+                sources = release_builder.tracked_sources()
+                with self.assertRaisesRegex(
+                    release_builder.ReleaseError,
+                    "worktree bytes differ from committed blob: source.txt",
+                ):
+                    release_builder.committed_source_payloads(sources)
 
 
 if __name__ == "__main__":
