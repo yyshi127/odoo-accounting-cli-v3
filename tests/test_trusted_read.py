@@ -97,6 +97,8 @@ class Harness:
             company_id=7,
             allowed_company_ids=frozenset({7, 8}),
             environment=self.config.environment,
+            release_digest=RELEASE_DIGEST,
+            registry_digest=self.registry_digest,
             issued_at=NOW - timedelta(minutes=2),
             expires_at=NOW + timedelta(minutes=10),
         )

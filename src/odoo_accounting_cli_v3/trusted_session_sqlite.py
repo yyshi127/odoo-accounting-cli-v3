@@ -44,7 +44,7 @@ from .operations import canonical_json
 from .trusted_authority import AuthorityError, TrustedSession
 
 
-TRUSTED_SESSION_STORE_SCHEMA_VERSION = 1
+TRUSTED_SESSION_STORE_SCHEMA_VERSION = 2
 _HANDLE_BYTES = 32
 _HANDLE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -105,6 +105,8 @@ class TrustedSessionIdentity:
     company_id: int
     allowed_company_ids: frozenset[int]
     environment: str
+    release_digest: str
+    registry_digest: str
 
     def __post_init__(self) -> None:
         try:
@@ -118,6 +120,8 @@ class TrustedSessionIdentity:
                 company_id=self.company_id,
                 allowed_company_ids=self.allowed_company_ids,
                 environment=self.environment,
+                release_digest=self.release_digest,
+                registry_digest=self.registry_digest,
                 issued_at=datetime(2000, 1, 1, tzinfo=timezone.utc),
                 expires_at=datetime(2000, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
             )
@@ -186,6 +190,8 @@ _TABLES = {
             environment TEXT NOT NULL CHECK (
                 environment IN ('test', 'sandbox', 'production')
             ),
+            release_digest TEXT NOT NULL CHECK (length(release_digest) = 64),
+            registry_digest TEXT NOT NULL CHECK (length(registry_digest) = 64),
             issued_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             max_uses INTEGER NOT NULL CHECK (max_uses > 0),
@@ -258,6 +264,8 @@ _TRIGGERS = {
           OR NEW.company_id IS NOT OLD.company_id
           OR NEW.allowed_company_ids_json IS NOT OLD.allowed_company_ids_json
           OR NEW.environment IS NOT OLD.environment
+          OR NEW.release_digest IS NOT OLD.release_digest
+          OR NEW.registry_digest IS NOT OLD.registry_digest
           OR NEW.issued_at IS NOT OLD.issued_at
           OR NEW.expires_at IS NOT OLD.expires_at
           OR NEW.max_uses IS NOT OLD.max_uses
@@ -323,6 +331,8 @@ _EXPECTED_COLUMNS = {
         "company_id",
         "allowed_company_ids_json",
         "environment",
+        "release_digest",
+        "registry_digest",
         "issued_at",
         "expires_at",
         "max_uses",
@@ -454,7 +464,7 @@ def _allowed_companies(value: object) -> frozenset[int]:
 
 def _binding_payload(session: TrustedSession, max_uses: int) -> dict[str, Any]:
     return {
-        "schema": "odoo-accounting-cli-v3/trusted-session-binding/v1",
+        "schema": "odoo-accounting-cli-v3/trusted-session-binding/v2",
         "session_id": session.session_id,
         "principal": session.principal,
         "odoo_instance_id": session.odoo_instance_id,
@@ -464,6 +474,8 @@ def _binding_payload(session: TrustedSession, max_uses: int) -> dict[str, Any]:
         "company_id": session.company_id,
         "allowed_company_ids": sorted(session.allowed_company_ids),
         "environment": session.environment,
+        "release_digest": session.release_digest,
+        "registry_digest": session.registry_digest,
         "issued_at": _utc_text(session.issued_at, "session issued_at"),
         "expires_at": _utc_text(session.expires_at, "session expires_at"),
         "max_uses": max_uses,
@@ -472,6 +484,16 @@ def _binding_payload(session: TrustedSession, max_uses: int) -> dict[str, Any]:
 
 def _binding_digest(session: TrustedSession, max_uses: int) -> str:
     return hashlib.sha256(canonical_json(_binding_payload(session, max_uses))).hexdigest()
+
+
+def _session_event_details(
+    stored: _StoredSession, details: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        **details,
+        "release_digest": stored.session.release_digest,
+        "registry_digest": stored.session.registry_digest,
+    }
 
 
 def _event_hash(event: TrustedSessionSecurityEvent) -> str:
@@ -1249,6 +1271,20 @@ class SQLiteTrustedSessionStore:
         }
         if set(tables) != set(_TABLES) or set(triggers) != set(_TRIGGERS):
             raise TrustedSessionStoreError("trusted session database schema is invalid")
+        metadata = tuple(
+            connection.execute("SELECT key, value FROM trusted_session_schema_meta")
+        )
+        if len(metadata) != 1 or tuple(metadata[0]) != (
+            "schema_version",
+            str(TRUSTED_SESSION_STORE_SCHEMA_VERSION),
+        ):
+            # Session bindings from schema v1 contain no release route.  They
+            # are deliberately not upgraded or reused: startup fails before
+            # any schema or row mutation and the operator must rotate the
+            # short-lived session store.
+            raise TrustedSessionStoreError(
+                "trusted session database schema version is invalid"
+            )
         for name, expected in _TABLES.items():
             if not isinstance(tables[name], str) or _normalize_schema_sql(
                 tables[name]
@@ -1272,16 +1308,6 @@ class SQLiteTrustedSessionStore:
                 raise TrustedSessionStoreError(
                     "trusted session database columns changed"
                 )
-        metadata = tuple(
-            connection.execute("SELECT key, value FROM trusted_session_schema_meta")
-        )
-        if len(metadata) != 1 or tuple(metadata[0]) != (
-            "schema_version",
-            str(TRUSTED_SESSION_STORE_SCHEMA_VERSION),
-        ):
-            raise TrustedSessionStoreError(
-                "trusted session database schema version is invalid"
-            )
         unexpected = connection.execute(
             "SELECT name FROM sqlite_master "
             "WHERE name NOT LIKE 'sqlite_%' "
@@ -1329,6 +1355,8 @@ class SQLiteTrustedSessionStore:
                     row["allowed_company_ids_json"]
                 ),
                 environment=row["environment"],
+                release_digest=row["release_digest"],
+                registry_digest=row["registry_digest"],
                 issued_at=issued_at,
                 expires_at=expires_at,
             )
@@ -1521,7 +1549,7 @@ class SQLiteTrustedSessionStore:
                 or _canonical_object(
                     issued[0].details_json, "session issued event details"
                 )
-                != {"max_uses": stored.max_uses}
+                != _session_event_details(stored, {"max_uses": stored.max_uses})
                 or len(resolved) != stored.use_count
                 or len(revoked) != (1 if stored.revoked_at is not None else 0)
             ):
@@ -1533,7 +1561,7 @@ class SQLiteTrustedSessionStore:
                     _canonical_object(
                         event.details_json, "session resolved event details"
                     )
-                    != {"use_number": use_number}
+                    != _session_event_details(stored, {"use_number": use_number})
                     or event.occurred_at < stored.session.issued_at
                     or event.occurred_at >= stored.session.expires_at
                 ):
@@ -1546,7 +1574,10 @@ class SQLiteTrustedSessionStore:
                 )
                 if (
                     revoked[0].occurred_at != stored.revoked_at
-                    or details != {"reason": stored.revocation_reason}
+                    or details
+                    != _session_event_details(
+                        stored, {"reason": stored.revocation_reason}
+                    )
                 ):
                     raise TrustedSessionStoreError(
                         "trusted session revocation evidence is inconsistent"
@@ -1574,6 +1605,8 @@ class SQLiteTrustedSessionStore:
     ) -> TrustedSessionSecurityEvent:
         if event_type not in _EVENT_OUTCOMES or outcome not in _EVENT_OUTCOMES[event_type]:
             raise TrustedSessionStoreError("trusted session security event is invalid")
+        if session is not None:
+            details = _session_event_details(session, details)
         details_json = canonical_json(details).decode("utf-8")
         previous = connection.execute(
             "SELECT sequence, occurred_at, event_hash "
@@ -1684,6 +1717,8 @@ class SQLiteTrustedSessionStore:
                     company_id=identity.company_id,
                     allowed_company_ids=identity.allowed_company_ids,
                     environment=identity.environment,
+                    release_digest=identity.release_digest,
+                    registry_digest=identity.registry_digest,
                     issued_at=now,
                     expires_at=now + timedelta(seconds=ttl_seconds),
                 )
@@ -1706,10 +1741,11 @@ class SQLiteTrustedSessionStore:
                     "INSERT INTO trusted_sessions("
                     "session_id, handle_digest, binding_digest, principal, "
                     "odoo_instance_id, database_name, database_uuid, user_id, "
-                    "company_id, allowed_company_ids_json, environment, issued_at, "
+                    "company_id, allowed_company_ids_json, environment, "
+                    "release_digest, registry_digest, issued_at, "
                     "expires_at, max_uses, use_count, revoked_at, "
                     "revocation_reason, version"
-                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         session.session_id,
                         handle_digest,
@@ -1722,6 +1758,8 @@ class SQLiteTrustedSessionStore:
                         session.company_id,
                         _allowed_companies_json(session.allowed_company_ids),
                         session.environment,
+                        session.release_digest,
+                        session.registry_digest,
                         _utc_text(session.issued_at, "session issued_at"),
                         _utc_text(session.expires_at, "session expires_at"),
                         max_uses,

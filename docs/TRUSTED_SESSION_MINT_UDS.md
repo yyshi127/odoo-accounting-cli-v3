@@ -7,9 +7,12 @@ exactly `{ "handle": "..." }`, applies the fixed audit reason
 `odoo_request_completed`, and never echoes the handle.
 
 The root-owned launcher fixes the Odoo issuer UID, Pi Bridge UID, socket group,
-session TTL, and maximum resolution count. The HTTP request cannot select or
-override TTL, use count, session ID, or handle. The socket admits only the
-configured Odoo issuer UID using Linux `SO_PEERCRED`.
+session TTL, maximum resolution count, and the broker's current release and
+registry digests. Those route digests are injected into the mint configuration
+from the already validated top-level broker route; they are not duplicated in
+the `session_mint_uds` JSON object. The HTTP request cannot select or override
+TTL, use count, session ID, or handle. The socket admits only the configured
+Odoo issuer UID using Linux `SO_PEERCRED`.
 
 The durable store defaults to one resolution as a fail-safe primitive, but that
 value is not a valid production mint budget. Broker authentication plus
@@ -55,6 +58,26 @@ the request inside trusted server-side model code:
 - `allowed_company_ids` from `env.companies`;
 - database UUID, Odoo instance ID, and environment from trusted database/server
   configuration, not request context supplied by a browser or Pi.
+- release-manifest and capability-registry digests from an independent check of
+  the exact add-on files executing under `__file__`, not an environment value,
+  add-on version string, browser field, or Pi header.
+
+Before contacting the mint socket, the client requires the canonical source
+path
+`<release>/odoo_addons/odoo_accounting_cli_v3_control/models/session_client.py`.
+The release must be under the fixed `releases/<version>-<commit12>` layout. On
+Linux, the release, add-on files, manifest, registry, external anchor, and their
+relevant ancestors must be canonical non-symlink objects, root-owned, and not
+writable by the Odoo identity; immutable release members are required to have
+no write bit and exactly one hard link. The verifier opens files with
+`O_NOFOLLOW`, compares path and descriptor identity before and after a bounded
+read, and rejects runtime bytecode, missing files, or any extra add-on member.
+
+It then verifies the exact four-field external anchor, the canonical unsigned
+`RELEASE-MANIFEST.json` digest, release directory name, commit, every manifest
+entry for the control add-on, and the manifest-bound registry bytes. The
+registry digest uses the same canonical ordered `capabilities` array algorithm
+as `registry.registry_digest`. A failure prevents both mint and Pi calls.
 
 The client accepts exactly `{ "message": "..." }` as its business input. It
 rejects identity, company, database, environment, TTL, use-budget, header, and
@@ -89,9 +112,27 @@ The strict JSON request contains exactly these fields:
   "environment": "sandbox",
   "odoo_instance_id": "odoo-prod-01",
   "principal": "odoo:user:42",
+  "registry_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "release_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "user_id": 42
 }
 ```
+
+Mint compares both request digests with its root-composed current route before
+calling the durable store, so a different but valid retained add-on release
+cannot create a session or security event. The digests are immutable columns in
+trusted-session store schema v2 and are covered by the binding digest and
+hash-chained issue/resolve events. Broker authentication rechecks them against
+the current route after every handle resolution, before parsing or executing
+read, prepare, preview, approve-execute, status, result, recovery, or any of the
+three independent approval calls.
+
+Schema v1 sessions have no release identity. They are intentionally not
+migrated: opening a v1 store rejects startup without modifying the database.
+Because sessions are short-lived bearer credentials, the upgrade procedure is
+to stop the broker, retain the v1 file as audit evidence, initialize a new v2
+session store at the configured private path, and require callers to mint new
+sessions. Never add default route digests to old rows.
 
 Successful responses return the server-generated opaque handle, session ID,
 issue/expiry timestamps, and root-configured use count. Errors are fixed safe

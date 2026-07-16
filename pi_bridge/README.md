@@ -1,16 +1,55 @@
 # Odoo Accounting CLI V3 Pi Bridge
 
-This directory is the release-owned Pi Agent gateway for V3. It keeps the V2
-tools available while exposing capability discovery and a business-only V3
-tool surface. The model never receives fields for user/database context,
+This directory is the release-owned Pi Agent gateway for V3. Legacy direct
+startup can retain the five V2 tools for the separately running V2 service,
+but the canonical/bootstrap Dev11 sidecar is strictly V3-only. Without a
+broker session it exposes only the two V3 registry queries; with a session it
+adds only the seven V3 broker tools. It never passes legacy `ODOO_TOOL_*`
+credentials or selectors to that hardened Pi child. The model never receives fields for user/database context,
 authentication signatures, approval signatures, approver identity, or signing
 keys.
+The legacy unauthenticated `/session/delete` maintenance route is not exposed
+by the hardened sidecar because conversation IDs are not ownership credentials.
+Every caller message is passed as one fixed-prefix literal argument, so leading
+`@file` and `--option` text cannot activate Pi file or CLI argument syntax.
 
-The service obtains the release and registry digests from the fixed V3 CLI's
-verified `release identity` response. It passes those digests to the Pi process,
-and the V3 runner rejects every call when either digest is missing or when a
-registry, read receipt, release identity, or write audit receipt does not match.
-Production service configuration must set `PI_BRIDGE_REQUIRE_V3_IDENTITY=1`.
+Production starts the canonical release's `pi_bridge/bootstrap.mjs`, never a
+copied `server.mjs`. Before importing any Bridge runtime code, that built-ins-
+only bootstrap verifies its root-managed Node interpreter, the external release
+anchor, canonical manifest digest, complete immutable release file set, every
+release file hash, and canonical package hash. It then verifies the separate
+external Pi runtime anchor, exact Node bytes/version/platform/architecture and
+the complete `node_modules` file/symlink inventory. Only then may it invoke the
+already verified CLI's `release identity`; that response must exactly match the
+anchor rather than becoming a new trust root.
+
+The bootstrap next compares every executing Bridge runtime member (server,
+extension, runner, session boundary, release verifier, package declaration,
+and lockfile) with its manifest size and SHA-256 before dynamically importing
+the server. The bootstrap attestation is held in the canonical bootstrap
+module's private closure, not a public global; runtime server code can only read
+it from that exact module instance. The server repeats the canonical release,
+Node, dependency and Bridge checks before selecting tools; the Pi
+extension repeats it before registering them. A direct server start, stale or
+partially copied Bridge, changed file, symlink, hard link, or writable runtime
+therefore fails closed; when optional V2-only startup is allowed, it exposes
+only the retained V2 tools. On Linux the interpreter, manifest, package,
+release, runtime files, and ancestors must be canonical, root-owned, and not
+group/world writable. The bootstrap-derived manifest path is passed to the Pi
+child as `ODOO_ACCOUNTING_CLI_V3_RELEASE_MANIFEST`; it is not a caller setting.
+
+After this self-binding succeeds, the service passes the release and registry
+digests to the Pi process. The V3 runner rejects every call when either digest
+is missing or when a registry, read receipt, release identity, or write audit
+receipt does not match. Production service configuration must set
+`PI_BRIDGE_REQUIRE_V3_IDENTITY=1`; this now requires both the externally
+anchored CLI identity and the executing Bridge self-binding.
+
+Pi is invoked with `--no-extensions` plus the one explicit manifest-bound
+extension, so project/global extension discovery cannot pre-register an
+allowlisted V3 tool name. `NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`,
+`LD_LIBRARY_PATH`, `LD_AUDIT`, and Jiti/ts-node loader settings are rejected or
+removed before the child starts.
 
 Authenticated V3 reads and writes never spawn the CLI from the Pi extension.
 They cross the root-configured Unix-domain socket in
@@ -33,11 +72,11 @@ with exactly one `resolveAuthenticatedSession` or default export. V3 opens it
 with `O_NOFOLLOW`, binds the opened inode and exact bytes to the configured
 digest, verifies every ancestor is root-owned and not group/world writable,
 and imports the verified bytes rather than reopening the configured path.
-Without that injected resolver, without a valid resolved session, or without
-the broker socket, V3 read/write tools are omitted from the Pi invocation and
-the broker client also rejects direct calls before any CLI can run. The
-caller-supplied `session_id` remains conversation-memory naming only and is
-never an identity source.
+Without the release self-binding, every V3 tool is omitted. Without the
+injected resolver, a valid resolved session, or the broker socket, V3
+read/write tools are omitted from the Pi invocation and the broker client also
+rejects direct calls before any CLI can run. The caller-supplied `session_id`
+remains conversation-memory naming only and is never an identity source.
 
 Approval is a separate authenticated product channel, not a Pi tool and not a
 route in this bridge. `odoo_v3_operation_approve_execute` exposes only

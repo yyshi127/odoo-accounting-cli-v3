@@ -101,6 +101,8 @@ def _session(
         company_id=company_id,
         allowed_company_ids=frozenset({company_id}),
         environment="sandbox",
+        release_digest=CURRENT_RELEASE,
+        registry_digest=CURRENT_REGISTRY,
         issued_at=NOW - timedelta(minutes=5),
         expires_at=NOW + timedelta(hours=2),
     )
@@ -762,6 +764,86 @@ class Harness:
 @pytest.fixture
 def harness() -> Harness:
     return Harness()
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "read",
+        "operation.prepare",
+        "operation.preview",
+        "operation.approve_execute",
+        "operation.status",
+        "operation.result",
+        "operation.recover",
+    ],
+)
+@pytest.mark.parametrize(
+    "route_override",
+    [
+        {"release_digest": OLD_RELEASE},
+        {"registry_digest": OLD_REGISTRY},
+    ],
+)
+def test_every_pi_entry_rejects_session_from_a_noncurrent_addon_route(
+    harness: Harness, action: str, route_override: dict[str, str]
+) -> None:
+    handle = "requester-session-0123456789abcdef"
+    harness.sessions[handle] = replace(harness.sessions[handle], **route_override)
+
+    result = harness.dispatch(action, {}, session=handle)
+
+    assert result.status_code == 401
+    assert result.authority_verified is False
+    assert result.body["error"]["code"] == "broker_session_rejected"
+    assert harness.read_authorizations == 0
+    assert harness.read_executions == 0
+    assert harness.executor.calls == []
+    assert harness.audit.events() == ()
+
+
+@pytest.mark.parametrize("approval_entry", ["request", "inspect", "decide"])
+@pytest.mark.parametrize(
+    "route_override",
+    [
+        {"release_digest": OLD_RELEASE},
+        {"registry_digest": OLD_REGISTRY},
+    ],
+)
+def test_every_approval_entry_rejects_session_from_a_noncurrent_addon_route(
+    harness: Harness,
+    approval_entry: str,
+    route_override: dict[str, str],
+) -> None:
+    handle = (
+        "requester-session-0123456789abcdef"
+        if approval_entry == "request"
+        else "approver-session-0123456789abcdef"
+    )
+    harness.sessions[handle] = replace(harness.sessions[handle], **route_override)
+
+    with pytest.raises(TrustedBrokerError) as rejected:
+        if approval_entry == "request":
+            harness.broker.request_approval(
+                session_handle=handle,
+                operation_id="unreachable-operation",
+            )
+        elif approval_entry == "inspect":
+            harness.broker.inspect_approval(
+                session_handle=handle,
+                challenge_id="unreachable-challenge",
+            )
+        else:
+            harness.broker.decide_approval(
+                session_handle=handle,
+                challenge_id="unreachable-challenge",
+                decision=ApprovalDecision.APPROVE,
+            )
+
+    assert rejected.value.code == "broker_session_rejected"
+    assert rejected.value.status_code == 401
+    assert harness.executor.calls == []
+    assert harness.audit.events() == ()
 
 
 def test_write_forwards_the_exact_outer_deadline_to_historical_execution(

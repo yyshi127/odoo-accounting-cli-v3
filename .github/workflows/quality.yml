@@ -24,7 +24,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          child_home=/var/lib/odoo-accounting-cli-v3
+          child_home=/var/lib/odoo-accounting-cli-v3-broker
           sudo install -d \
             -m 0700 \
             -o "$(id -u)" \
@@ -96,7 +96,16 @@ jobs:
           sudo chmod -R u=rwX,go=rX "$stage_root"
 
           python_bin="$(command -v python)"
-          report=/var/lib/odoo-accounting-cli-v3/non-root-linux-process-tree.xml
+          historical_root=/var/lib/odoo-accounting-cli-v3
+          historical_evidence="$historical_root/evidence"
+          historical_sentinel="$historical_evidence/state-directory-sentinel"
+          sudo install -d -m 0755 -o root -g root "$historical_root"
+          sudo install -d -m 0755 -o root -g root "$historical_evidence"
+          printf 'retained evidence\n' > "$RUNNER_TEMP/state-directory-sentinel"
+          sudo install -m 0444 -o root -g root \
+            "$RUNNER_TEMP/state-directory-sentinel" "$historical_sentinel"
+          broker_home=/var/lib/odoo-accounting-cli-v3-broker
+          report="$broker_home/non-root-linux-process-tree.xml"
           sudo systemd-run \
             --unit=odoo-accounting-cli-v3-home-gate \
             --service-type=exec \
@@ -111,10 +120,11 @@ jobs:
             --property=PrivateTmp=yes \
             --property=ProtectHome=yes \
             --property=ProtectSystem=strict \
-            --property=StateDirectory=odoo-accounting-cli-v3 \
+            --property=StateDirectory=odoo-accounting-cli-v3-broker \
             --property=StateDirectoryMode=0700 \
+            --property=ReadWritePaths=/var/lib/odoo-accounting-cli-v3 \
             --working-directory="$stage_root" \
-            --setenv=HOME=/var/lib/odoo-accounting-cli-v3 \
+            --setenv=HOME=/var/lib/odoo-accounting-cli-v3-broker \
             --setenv=ODOO_CLI_V3_LINUX_GATE=1 \
             --setenv=PYTHONDONTWRITEBYTECODE=1 \
             --setenv=PYTHONPATH="$stage_root/src" \
@@ -123,9 +133,16 @@ jobs:
               tests/test_odoo_runner.py \
               tests/test_odoo_runner_linux.py
 
-          test "$(sudo stat -c %U:%G /var/lib/odoo-accounting-cli-v3)" = \
+          test "$(sudo stat -c %U:%G "$broker_home")" = \
             odoo-v3-broker:odoo-v3-broker
-          test "$(sudo stat -c %a /var/lib/odoo-accounting-cli-v3)" = 700
+          test "$(sudo stat -c %a "$broker_home")" = 700
+          test "$(sudo stat -c %U:%G "$historical_root")" = root:root
+          test "$(sudo stat -c %a "$historical_root")" = 755
+          test "$(sudo stat -c %U:%G "$historical_evidence")" = root:root
+          test "$(sudo stat -c %a "$historical_evidence")" = 755
+          test "$(sudo stat -c %U:%G "$historical_sentinel")" = root:root
+          test "$(sudo stat -c %a "$historical_sentinel")" = 444
+          test "$(sudo cat "$historical_sentinel")" = "retained evidence"
           sudo REPORT="$report" "$python_bin" - <<'PY'
           import os
           import xml.etree.ElementTree as ET
@@ -235,6 +252,15 @@ jobs:
             tests/test_trusted_broker_uds.py::test_server_close_never_unlinks_a_replacement_socket \
             tests/test_trusted_broker_uds.py::test_root_launcher_rejects_a_symlinked_socket_parent \
             tests/test_trusted_approval_uds.py::test_real_linux_root_factory_secures_and_cleans_socket
+      - name: Exercise the root-owned Odoo add-on release binding
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python)"
+          sudo env \
+            PYTHONPATH="$GITHUB_WORKSPACE/src" \
+            ODOO_RELEASE_BINDING_RUN_ROOT_INTEGRATION=1 \
+            "$python_bin" -m pytest -q \
+            tests/test_odoo_release_binding.py::test_root_owned_release_verifies_in_real_linux_process
       - name: Verify the shipped systemd unit graph
         run: |
           set -euo pipefail
@@ -260,6 +286,19 @@ jobs:
               "odoo-accounting-cli-v3-trusted-approval.socket",
           ):
               (target / name).write_bytes((source / name).read_bytes())
+
+          pi_source = Path(os.environ["GITHUB_WORKSPACE"]) / "deployment/dev11/systemd"
+          pi_service = (pi_source / "odoo-accounting-cli-v3-pi-bridge.service").read_text()
+          assert pi_service.count("@V3_RELEASE@") == 5
+          assert pi_service.count("@V3_NODE@") == 1
+          (target / "odoo-accounting-cli-v3-pi-bridge.service").write_text(
+              pi_service.replace("@V3_RELEASE@", os.environ["RELEASE_NAME"]).replace(
+                  "@V3_NODE@", "/usr/bin/node"
+              )
+          )
+          (target / "odoo-accounting-cli-v3-pi-bridge.socket").write_bytes(
+              (pi_source / "odoo-accounting-cli-v3-pi-bridge.socket").read_bytes()
+          )
           PY
           for group in \
             odoo-v3-broker \
@@ -278,8 +317,21 @@ jobs:
               --shell /usr/sbin/nologin \
               odoo-v3-broker
           fi
+          if ! getent passwd odoo-v3-pi-broker >/dev/null; then
+            sudo useradd --system \
+              --gid odoo-v3-pi-broker \
+              --groups odoo-v3-runtime \
+              --home-dir /nonexistent \
+              --shell /usr/sbin/nologin \
+              odoo-v3-pi-broker
+          fi
           sudo install -d -m 0755 "$(dirname "$broker_bin")"
           sudo install -m 0755 /bin/true "$broker_bin"
+          if [ ! -x /usr/bin/node ]; then
+            sudo install -m 0755 /bin/true /usr/bin/node
+          fi
+          sudo install -d -m 0755 \
+            "/opt/odoo-accounting-cli-v3/pi-runtime/$release_name/pi_bridge"
           systemd-analyze \
             --recursive-errors=yes \
             --man=no \
@@ -287,7 +339,9 @@ jobs:
             "$rendered_root/odoo-accounting-cli-v3-broker.service" \
             "$rendered_root/odoo-accounting-cli-v3-pi-broker.socket" \
             "$rendered_root/odoo-accounting-cli-v3-session-mint.socket" \
-            "$rendered_root/odoo-accounting-cli-v3-trusted-approval.socket"
+            "$rendered_root/odoo-accounting-cli-v3-trusted-approval.socket" \
+            "$rendered_root/odoo-accounting-cli-v3-pi-bridge.service" \
+            "$rendered_root/odoo-accounting-cli-v3-pi-bridge.socket"
 
   pi-bridge:
     name: Pi trusted broker contracts
@@ -306,11 +360,49 @@ jobs:
       - name: Verify Pi bridge syntax and security contracts
         working-directory: pi_bridge
         run: |
+          node --check bootstrap.mjs
+          node --check create-runtime-binding.mjs
+          node --check release-binding.mjs
           node --check server.mjs
+          node --check tool-policy.mjs
           node --check trusted-session.mjs
           node --check odoo-session-header-resolver.mjs
           node --check extensions/odoo-v3-cli.mjs
-          npm test
+          PI_BRIDGE_RUN_ROOT_INTEGRATION=1 npm test
+      - name: Verify the locked Pi CLI treats caller text literally
+        working-directory: pi_bridge
+        run: |
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import { parseArgs } from "./node_modules/@earendil-works/pi-coding-agent/dist/cli/args.js";
+          import { literalPiUserPrompt } from "./tool-policy.mjs";
+
+          const contextPath = "/var/lib/odoo-accounting-cli-v3-pi-bridge/sessions/contexts/fixed.md";
+          const prompt = literalPiUserPrompt("@/etc/passwd");
+          const parsed = parseArgs([
+            "--print",
+            "--no-builtin-tools",
+            "--no-context-files",
+            "--no-extensions",
+            "--extension", "/canonical/odoo-tools.ts",
+            "--tools", "odoo_v3_capability_list",
+            "--session-dir", "/state",
+            "--session-id", "--tools",
+            "--provider", "@/etc/passwd",
+            "--model", "--extension",
+            "--system-prompt", "@/etc/shadow",
+            `@${contextPath}`,
+            prompt,
+          ]);
+          assert.deepEqual(parsed.extensions, ["/canonical/odoo-tools.ts"]);
+          assert.deepEqual(parsed.tools, ["odoo_v3_capability_list"]);
+          assert.deepEqual(parsed.fileArgs, [contextPath]);
+          assert.deepEqual(parsed.messages, [prompt]);
+          assert.equal(parsed.sessionId, "--tools");
+          assert.equal(parsed.provider, "@/etc/passwd");
+          assert.equal(parsed.model, "--extension");
+          assert.equal(parsed.systemPrompt, "@/etc/shadow");
+          JS
 
   deployment-toolchain:
     name: dev8 deployment toolchain

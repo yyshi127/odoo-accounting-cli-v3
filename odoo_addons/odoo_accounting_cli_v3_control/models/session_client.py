@@ -19,6 +19,8 @@ from typing import Any
 from odoo import api, models
 from odoo.exceptions import AccessError, UserError
 
+from .release_binding import VerifiedAddonRelease, verify_addon_release
+
 
 _MINT_PATH = "/v1/trusted-session/mint"
 _REVOKE_PATH = "/v1/trusted-session/revoke"
@@ -442,7 +444,11 @@ class OdooAccountingCliV3SessionClient(models.AbstractModel):
     _name = "odoo.accounting.cli.v3.session.client"
     _description = "Private Odoo Accounting CLI V3 Session Client"
 
-    def _trusted_identity_payload(self, settings: _RootSettings) -> dict[str, Any]:
+    def _trusted_identity_payload(
+        self,
+        settings: _RootSettings,
+        release: VerifiedAddonRelease,
+    ) -> dict[str, Any]:
         env = self.env
         database_name = env.cr.dbname
         user_id = env.user.id
@@ -456,7 +462,8 @@ class OdooAccountingCliV3SessionClient(models.AbstractModel):
         except (AttributeError, TypeError, ValueError) as exc:
             raise SessionClientError("current Odoo identity is invalid") from exc
         if (
-            not isinstance(database_name, str)
+            type(release) is not VerifiedAddonRelease
+            or not isinstance(database_name, str)
             or not database_name
             or len(database_name) > 512
             or type(user_id) is not int
@@ -482,6 +489,8 @@ class OdooAccountingCliV3SessionClient(models.AbstractModel):
             "company_id": company_id,
             "allowed_company_ids": allowed_company_ids,
             "environment": settings.environment,
+            "release_digest": release.release_digest,
+            "registry_digest": release.registry_digest,
         }
 
     @api.model
@@ -500,7 +509,8 @@ class OdooAccountingCliV3SessionClient(models.AbstractModel):
         answer: str | None = None
         try:
             settings = _root_settings()
-            identity = self._trusted_identity_payload(settings)
+            release = verify_addon_release(__file__)
+            identity = self._trusted_identity_payload(settings, release)
             mint_status, mint_value = _post_uds_json(settings, _MINT_PATH, identity)
             handle = _candidate_handle(mint_status, mint_value)
             handle = _validated_mint_handle(mint_status, mint_value)

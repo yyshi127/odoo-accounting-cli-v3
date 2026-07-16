@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -29,6 +30,8 @@ else:  # pragma: no cover - POSIX-only lock tests are skipped on Windows
 
 
 DATABASE_UUID = "f1d2d2f9-8d43-4b2f-a36c-64c76df38f81"
+RELEASE_DIGEST = "a" * 64
+REGISTRY_DIGEST = "b" * 64
 
 
 class MutableClock:
@@ -55,6 +58,8 @@ def _identity(
             else allowed_company_ids
         ),
         environment="sandbox",
+        release_digest=RELEASE_DIGEST,
+        registry_digest=REGISTRY_DIGEST,
     )
 
 
@@ -122,6 +127,8 @@ def test_issue_is_server_generated_opaque_and_survives_restart(tmp_path: Path) -
     assert issued.session.expires_at == now + timedelta(seconds=120)
     assert issued.session.company_id == 7
     assert issued.session.allowed_company_ids == frozenset({7, 9})
+    assert issued.session.release_digest == RELEASE_DIGEST
+    assert issued.session.registry_digest == REGISTRY_DIGEST
 
     with sqlite3.connect(path) as connection:
         row = connection.execute(
@@ -138,6 +145,11 @@ def test_issue_is_server_generated_opaque_and_survives_restart(tmp_path: Path) -
     restarted = SQLiteTrustedSessionStore(path, clock=clock)
     resolved = restarted.resolve(issued.handle)
     assert resolved == issued.session
+    for event in restarted.security_events():
+        if event.session_id == issued.session.session_id:
+            details = json.loads(event.details_json)
+            assert details["release_digest"] == RELEASE_DIGEST
+            assert details["registry_digest"] == REGISTRY_DIGEST
     assert restarted.verify_integrity() is True
 
 
@@ -201,6 +213,49 @@ def test_nonempty_wal_header_without_committed_schema_is_initialized(
     store = SQLiteTrustedSessionStore(path)
 
     assert store.verify_integrity() is True
+
+
+def test_v1_store_is_rejected_without_in_place_mutation(tmp_path: Path) -> None:
+    path = (tmp_path / "sessions-v1.sqlite3").resolve()
+    old_tables = dict(trusted_session_sqlite._TABLES)
+    old_tables["trusted_sessions"] = old_tables["trusted_sessions"].replace(
+        "            release_digest TEXT NOT NULL CHECK (length(release_digest) = 64),\n"
+        "            registry_digest TEXT NOT NULL CHECK (length(registry_digest) = 64),\n",
+        "",
+    )
+    old_triggers = dict(trusted_session_sqlite._TRIGGERS)
+    old_triggers["trusted_sessions_immutable"] = old_triggers[
+        "trusted_sessions_immutable"
+    ].replace(
+        "          OR NEW.release_digest IS NOT OLD.release_digest\n"
+        "          OR NEW.registry_digest IS NOT OLD.registry_digest\n",
+        "",
+    )
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+        for statement in old_tables.values():
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO trusted_session_schema_meta(key, value) VALUES(?, ?)",
+            ("schema_version", "1"),
+        )
+        for statement in old_triggers.values():
+            connection.execute(statement)
+    path.chmod(0o600)
+    before = path.read_bytes()
+    before_stat = path.stat()
+    siblings = tuple(sorted(item.name for item in path.parent.iterdir()))
+
+    with pytest.raises(TrustedSessionStoreError, match="schema version"):
+        SQLiteTrustedSessionStore(path)
+
+    after_stat = path.stat()
+    assert path.read_bytes() == before
+    assert (after_stat.st_size, after_stat.st_mtime_ns) == (
+        before_stat.st_size,
+        before_stat.st_mtime_ns,
+    )
+    assert tuple(sorted(item.name for item in path.parent.iterdir())) == siblings
 
 
 def test_empty_store_initialization_is_atomic_across_processes(tmp_path: Path) -> None:

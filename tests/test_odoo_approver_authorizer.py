@@ -50,6 +50,8 @@ def _session(
         company_id=company_id,
         allowed_company_ids=frozenset({company_id}),
         environment="sandbox",
+        release_digest=RELEASE,
+        registry_digest=REGISTRY,
         issued_at=NOW - timedelta(minutes=1),
         expires_at=expires_at,
     )

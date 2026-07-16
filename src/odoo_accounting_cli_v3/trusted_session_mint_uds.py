@@ -20,6 +20,7 @@ request body, exception traceback, secret, or opaque handle to logs.
 from __future__ import annotations
 
 import errno
+import hmac
 import http.client
 import json
 import math
@@ -69,6 +70,8 @@ _IDENTITY_FIELDS: Final = frozenset(
         "company_id",
         "allowed_company_ids",
         "environment",
+        "release_digest",
+        "registry_digest",
     }
 )
 _ALLOWED_HEADERS: Final = frozenset(
@@ -104,6 +107,8 @@ class TrustedSessionMintUdsConfig:
     pi_bridge_uid: int
     socket_group_gid: int
     max_inflight_requests: int
+    current_release_digest: str
+    current_registry_digest: str
     session_ttl_seconds: int = 60
     session_max_uses: int = 32
     socket_mode: int = 0o660
@@ -149,6 +154,15 @@ class TrustedSessionMintUdsConfig:
             raise TrustedSessionMintUdsError(
                 "Pi Bridge must run under a different UID from the Odoo issuer; "
                 "same-UID processes cannot be distinguished by SO_PEERCRED"
+            )
+        if (
+            type(self.current_release_digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", self.current_release_digest) is None
+            or type(self.current_registry_digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", self.current_registry_digest) is None
+        ):
+            raise TrustedSessionMintUdsError(
+                "current release route digests are invalid"
             )
         if (
             isinstance(self.session_ttl_seconds, bool)
@@ -337,6 +351,8 @@ def _decode_identity_request(body: bytes) -> TrustedSessionIdentity:
             company_id=value["company_id"],
             allowed_company_ids=frozenset(allowed),
             environment=value["environment"],
+            release_digest=value["release_digest"],
+            registry_digest=value["registry_digest"],
         )
     except (TrustedSessionStoreError, TypeError, ValueError) as exc:
         raise TrustedSessionMintUdsError("mint Odoo identity is invalid") from exc
@@ -387,6 +403,17 @@ def _issue_session(
         raise TrustedSessionMintUdsError("trusted session store is invalid")
     if type(identity) is not TrustedSessionIdentity:
         raise TrustedSessionMintUdsError("server-established identity is invalid")
+    if (
+        not hmac.compare_digest(
+            identity.release_digest, config.current_release_digest
+        )
+        or not hmac.compare_digest(
+            identity.registry_digest, config.current_registry_digest
+        )
+    ):
+        raise TrustedSessionMintUdsError(
+            "executing Odoo add-on does not match the current release route"
+        )
     try:
         return store.issue(
             identity,

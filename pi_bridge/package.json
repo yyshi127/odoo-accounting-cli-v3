@@ -6,7 +6,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --test tests/odoo-v3-cli.test.mjs tests/trusted-broker.test.mjs"
+    "test": "node --test tests/bootstrap.test.mjs tests/odoo-v3-cli.test.mjs tests/release-binding.test.mjs tests/tool-policy.test.mjs tests/trusted-broker.test.mjs"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6"

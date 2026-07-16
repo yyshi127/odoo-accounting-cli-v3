@@ -1,9 +1,16 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { V3_TOOL_NAMES } from "./extensions/odoo-v3-cli.mjs";
+import { spawn } from "node:child_process";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { verifyPiBridgeReleaseBinding } from "./release-binding.mjs";
+import {
+  enabledPiToolNames,
+  legacyOdooEnvironment,
+  LEGACY_ODOO_ENVIRONMENT_NAMES,
+  literalPiUserPrompt,
+  sessionDeletionAllowed,
+} from "./tool-policy.mjs";
 import {
   loadAuthenticatedSessionResolver,
   resolveAuthenticatedBrokerSession,
@@ -11,6 +18,70 @@ import {
 } from "./trusted-session.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function rootOwnedCanonicalFile(filePath) {
+  if (
+    process.platform !== "linux"
+    || typeof filePath !== "string"
+    || !path.isAbsolute(filePath)
+    || filePath.includes("\0")
+    || path.resolve(filePath) !== filePath
+    || fs.realpathSync.native(filePath) !== filePath
+  ) {
+    return false;
+  }
+  const file = fs.lstatSync(filePath, { bigint: true });
+  if (
+    file.isSymbolicLink()
+    || !file.isFile()
+    || file.nlink !== 1n
+    || file.uid !== 0n
+    || (file.mode & 0o022n) !== 0n
+  ) {
+    return false;
+  }
+  let current = path.dirname(filePath);
+  for (;;) {
+    const directory = fs.lstatSync(current, { bigint: true });
+    if (
+      directory.isSymbolicLink()
+      || !directory.isDirectory()
+      || directory.uid !== 0n
+      || (directory.mode & 0o022n) !== 0n
+    ) {
+      return false;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return true;
+    current = parent;
+  }
+}
+
+async function loadBootstrapContext() {
+  try {
+    const manifestPath = process.env.ODOO_ACCOUNTING_CLI_V3_RELEASE_MANIFEST || "";
+    if (
+      !path.isAbsolute(manifestPath)
+      || manifestPath.includes("\0")
+      || path.basename(manifestPath) !== "RELEASE-MANIFEST.json"
+    ) {
+      return null;
+    }
+    const releaseRoot = path.dirname(manifestPath);
+    const bootstrapPath = path.join(releaseRoot, "pi_bridge", "bootstrap.mjs");
+    if (!rootOwnedCanonicalFile(bootstrapPath)) return null;
+    const bootstrapModule = await import(pathToFileURL(bootstrapPath).href);
+    const attestation = bootstrapModule.getPiBridgeBootstrapAttestation?.();
+    return attestation === undefined
+      ? null
+      : { attestation, bootstrapModule, releaseRoot };
+  } catch {
+    return null;
+  }
+}
+
+const bootstrapContext = await loadBootstrapContext();
+const bootstrapAttestation = bootstrapContext?.attestation;
 const host = process.env.PI_AGENT_BRIDGE_HOST || "127.0.0.1";
 const port = Number(process.env.PI_AGENT_BRIDGE_PORT || 18787);
 const packageJsonPath = path.join(__dirname, "package.json");
@@ -18,12 +89,16 @@ const packageJson = fs.existsSync(packageJsonPath)
   ? JSON.parse(fs.readFileSync(packageJsonPath, "utf8"))
   : {};
 const piVersion = packageJson.dependencies?.["@earendil-works/pi-coding-agent"] || "unknown";
-const piBin = path.join(__dirname, "node_modules", ".bin", "pi");
+const piBin = typeof bootstrapAttestation?.piEntrypoint === "string"
+  ? bootstrapAttestation.piEntrypoint
+  : "";
 const chatTimeoutMs = Number(process.env.PI_AGENT_BRIDGE_TIMEOUT_MS || 120000);
 const sessionDir = process.env.PI_AGENT_SESSION_DIR || "/home/odoo/.pi/sdoobot-sessions";
 const contextDir = path.join(sessionDir, "contexts");
 const sha256 = /^[0-9a-f]{64}$/;
-const v3CliBin = process.env.ODOO_ACCOUNTING_CLI_V3_BIN || "";
+const v3CliBin = typeof bootstrapAttestation?.cliPath === "string"
+  ? bootstrapAttestation.cliPath
+  : "";
 const v3BrokerSocketPath = process.env.ODOO_ACCOUNTING_CLI_V3_BROKER_SOCKET || "";
 const authenticatedSessionResolverModule =
   process.env.PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_MODULE || "";
@@ -42,64 +117,195 @@ const authenticatedSessionResolver = await loadAuthenticatedSessionResolver(
 );
 
 function loadV3Identity() {
-  if (!path.isAbsolute(v3CliBin) || v3CliBin.includes("\0")) {
-    return { verified: false, error: "V3 CLI launcher is not configured" };
-  }
-  const completed = spawnSync(v3CliBin, ["release", "identity"], {
-    cwd: path.dirname(v3CliBin),
-    encoding: "utf8",
-    env: process.env,
-    timeout: 30000,
-    windowsHide: true,
-  });
-  if (completed.status !== 0 || completed.signal !== null || completed.stderr.trim()) {
-    return { verified: false, error: "V3 release identity is unavailable" };
-  }
   try {
-    const envelope = JSON.parse(completed.stdout.trim());
-    const identity = envelope?.data;
+    const identity = bootstrapAttestation?.identity;
+    const binding = bootstrapAttestation?.binding;
+    const runtimeBinding = bootstrapAttestation?.runtimeBinding;
     if (
-      envelope?.ok !== true
-      || envelope?.command !== "release.identity"
-      || identity?.verified !== true
+      bootstrapAttestation === null
+      || typeof bootstrapAttestation !== "object"
+      || Array.isArray(bootstrapAttestation)
+      || JSON.stringify(Object.keys(bootstrapAttestation).sort()) !== JSON.stringify([
+        "binding",
+        "cliPath",
+        "identity",
+        "manifestPath",
+        "nonce",
+        "piEntrypoint",
+        "runtimeBinding",
+        "runtimeRoot",
+      ])
+      || bootstrapAttestation.runtimeRoot !== __dirname
+      || !sha256.test(bootstrapAttestation.nonce)
+      || !path.isAbsolute(bootstrapAttestation.manifestPath)
+      || bootstrapAttestation.manifestPath.includes("\0")
+      || !path.isAbsolute(v3CliBin)
+      || v3CliBin.includes("\0")
+      || !path.isAbsolute(piBin)
+      || piBin.includes("\0")
+      || piBin !== path.join(
+        __dirname,
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "cli.js",
+      )
+      || JSON.stringify(Object.keys(identity ?? {}).sort()) !== JSON.stringify([
+        "commit",
+        "manifest_sha256",
+        "package_sha256",
+        "registry_digest",
+        "release",
+        "verified",
+        "version",
+      ])
+      || JSON.stringify(Object.keys(binding ?? {}).sort()) !== JSON.stringify([
+        "commit",
+        "manifest_sha256",
+        "runtime_file_count",
+        "verified",
+        "version",
+      ])
+      || JSON.stringify(Object.keys(runtimeBinding ?? {}).sort()) !== JSON.stringify([
+        "anchorPath",
+        "manifestPath",
+        "node_sha256",
+        "node_version",
+        "piEntrypoint",
+        "pi_version",
+        "release",
+        "release_manifest_sha256",
+        "runtime_manifest_sha256",
+        "verified",
+      ])
+      || identity.verified !== true
+      || binding.verified !== true
+      || runtimeBinding.verified !== true
       || !sha256.test(identity.manifest_sha256)
       || !sha256.test(identity.registry_digest)
       || !sha256.test(identity.package_sha256)
+      || binding.manifest_sha256 !== identity.manifest_sha256
+      || binding.commit !== identity.commit
+      || binding.version !== identity.version
+      || runtimeBinding.release !== identity.release
+      || runtimeBinding.release_manifest_sha256 !== identity.manifest_sha256
+      || runtimeBinding.piEntrypoint !== piBin
+      || runtimeBinding.manifestPath !== path.join(
+        __dirname,
+        "PI-RUNTIME-MANIFEST.json",
+      )
+      || !sha256.test(runtimeBinding.node_sha256)
+      || !sha256.test(runtimeBinding.runtime_manifest_sha256)
       || typeof identity.version !== "string"
       || !identity.version
       || typeof identity.commit !== "string"
       || !identity.commit
+      || bootstrapAttestation.manifestPath !== path.join(
+        path.dirname(path.dirname(v3CliBin)),
+        "RELEASE-MANIFEST.json",
+      )
+      || bootstrapContext?.releaseRoot !== path.dirname(
+        bootstrapAttestation.manifestPath,
+      )
     ) {
       throw new Error("invalid identity");
     }
     return Object.freeze({ ...identity });
   } catch {
-    return { verified: false, error: "V3 release identity response is invalid" };
+    return { verified: false, error: "V3 bootstrap attestation is unavailable" };
   }
 }
 
 const v3Identity = loadV3Identity();
-if (process.env.PI_BRIDGE_REQUIRE_V3_IDENTITY === "1" && v3Identity.verified !== true) {
-  throw new Error(v3Identity.error || "V3 release identity verification failed");
+function loadV3ReleaseBinding() {
+  if (v3Identity.verified !== true) {
+    return { verified: false, error: "V3 release identity is unavailable" };
+  }
+  try {
+    if (
+      path.basename(v3CliBin) !== "odoo-accounting-cli-v3"
+      || path.resolve(v3CliBin) !== v3CliBin
+      || fs.realpathSync.native(v3CliBin) !== v3CliBin
+    ) {
+      throw new Error("invalid V3 launcher path");
+    }
+    const manifestPath = bootstrapAttestation.manifestPath;
+    const binding = verifyPiBridgeReleaseBinding({
+      bridgeRoot: __dirname,
+      expectedManifestSha256: v3Identity.manifest_sha256,
+      manifestPath,
+      requireRootOwned: process.platform === "linux",
+    });
+    if (
+      binding.version !== v3Identity.version
+      || binding.commit !== v3Identity.commit
+    ) {
+      throw new Error("V3 identity and Pi Bridge binding differ");
+    }
+    const runtimeBinding = bootstrapContext.bootstrapModule.verifyPiRuntimeBinding({
+      releaseRoot: bootstrapContext.releaseRoot,
+      runtimeRoot: __dirname,
+    });
+    if (
+      runtimeBinding.release !== v3Identity.release
+      || runtimeBinding.release_manifest_sha256 !== v3Identity.manifest_sha256
+      || runtimeBinding.node_sha256
+        !== bootstrapAttestation.runtimeBinding.node_sha256
+      || runtimeBinding.runtime_manifest_sha256
+        !== bootstrapAttestation.runtimeBinding.runtime_manifest_sha256
+      || runtimeBinding.piEntrypoint !== piBin
+    ) {
+      throw new Error("V3 runtime binding and bootstrap attestation differ");
+    }
+    return Object.freeze({ ...binding, manifestPath, runtimeBinding });
+  } catch {
+    return { verified: false, error: "V3 Pi Bridge release binding is invalid" };
+  }
 }
-const alwaysAvailableToolNames = [
-  "odoo_get_context",
-  "odoo_list_skills",
-  "odoo_execute_skill",
-  "odoo_list_reports",
-  "odoo_export_report",
-  V3_TOOL_NAMES.capabilityList,
-  V3_TOOL_NAMES.capabilityGet,
-];
-const authenticatedV3BrokerToolNames = [
-  V3_TOOL_NAMES.read,
-  V3_TOOL_NAMES.prepare,
-  V3_TOOL_NAMES.preview,
-  V3_TOOL_NAMES.approveExecute,
-  V3_TOOL_NAMES.status,
-  V3_TOOL_NAMES.result,
-  V3_TOOL_NAMES.recover,
-];
+
+const v3ReleaseBinding = loadV3ReleaseBinding();
+const v3Ready = v3Identity.verified === true && v3ReleaseBinding.verified === true;
+if (process.env.PI_BRIDGE_REQUIRE_V3_IDENTITY === "1" && !v3Ready) {
+  throw new Error(
+    v3Identity.verified === true
+      ? v3ReleaseBinding.error
+      : (v3Identity.error || "V3 release identity verification failed"),
+  );
+}
+
+function inheritedSystemdSocket() {
+  const listenPid = process.env.LISTEN_PID || "";
+  const listenFds = process.env.LISTEN_FDS || "";
+  const listenFdNames = process.env.LISTEN_FDNAMES || "";
+  const configured = Boolean(listenPid || listenFds || listenFdNames);
+  if (!configured) {
+    if (process.env.PI_BRIDGE_REQUIRE_SYSTEMD_SOCKET === "1") {
+      throw new Error("V3 Pi Bridge systemd socket is unavailable");
+    }
+    return null;
+  }
+  if (
+    process.platform !== "linux"
+    || listenPid !== String(process.pid)
+    || listenFds !== "1"
+    || listenFdNames !== "odoo-v3-pi-http"
+    || !fs.fstatSync(3).isSocket()
+  ) {
+    throw new Error("V3 Pi Bridge systemd socket activation is invalid");
+  }
+  delete process.env.LISTEN_PID;
+  delete process.env.LISTEN_FDS;
+  delete process.env.LISTEN_FDNAMES;
+  return 3;
+}
+
+const systemdListenFd = inheritedSystemdSocket();
+let socketBoundaryReady = systemdListenFd === null;
+const hardenedV3Only = process.env.PI_BRIDGE_HARDENED_V3_ONLY === "1";
+if (hardenedV3Only && !v3Ready) {
+  throw new Error("Hardened Pi Bridge requires a verified V3 release");
+}
 
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
@@ -228,30 +434,41 @@ function piChildEnvironment() {
     ...process.env,
     PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR || "/home/odoo/.pi/agent",
     PI_CODING_AGENT_SESSION_DIR: sessionDir,
-    ODOO_TOOL_URL: process.env.ODOO_TOOL_URL || "http://127.0.0.1:8069/sudo_ai_bot/pi_tool_call",
-    ODOO_TOOL_TOKEN: process.env.ODOO_TOOL_TOKEN || "",
-    ODOO_TOOL_DATABASE: process.env.ODOO_TOOL_DATABASE || "",
-    ODOO_TOOL_USER_ID: process.env.ODOO_TOOL_USER_ID || "",
-    ODOO_TOOL_COMPANY_ID: process.env.ODOO_TOOL_COMPANY_ID || "",
     ODOO_ACCOUNTING_CLI_V3_BROKER_SOCKET: v3BrokerSocketPath,
     ODOO_ACCOUNTING_CLI_V3_RELEASE_DIGEST:
-      v3Identity.verified === true ? v3Identity.manifest_sha256 : "",
+      v3Ready ? v3Identity.manifest_sha256 : "",
     ODOO_ACCOUNTING_CLI_V3_REGISTRY_DIGEST:
-      v3Identity.verified === true ? v3Identity.registry_digest : "",
+      v3Ready ? v3Identity.registry_digest : "",
+    ODOO_ACCOUNTING_CLI_V3_RELEASE_MANIFEST:
+      v3Ready ? v3ReleaseBinding.manifestPath : "",
   };
+  for (const name of LEGACY_ODOO_ENVIRONMENT_NAMES) delete environment[name];
+  Object.assign(
+    environment,
+    legacyOdooEnvironment(process.env, hardenedV3Only),
+  );
   delete environment.PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_MODULE;
   delete environment.PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_SHA256;
+  delete environment.NODE_OPTIONS;
+  delete environment.NODE_PATH;
+  delete environment.LD_AUDIT;
+  delete environment.LD_LIBRARY_PATH;
+  delete environment.LD_PRELOAD;
   const allowedV3Environment = new Set([
     "ODOO_ACCOUNTING_CLI_V3_BIN",
     "ODOO_ACCOUNTING_CLI_V3_BROKER_SOCKET",
     "ODOO_ACCOUNTING_CLI_V3_REGISTRY_DIGEST",
     "ODOO_ACCOUNTING_CLI_V3_RELEASE_DIGEST",
+    "ODOO_ACCOUNTING_CLI_V3_RELEASE_MANIFEST",
   ]);
   for (const name of Object.keys(environment)) {
     if (
       name.startsWith("ODOO_ACCOUNTING_CLI_V3_")
       && !allowedV3Environment.has(name)
     ) {
+      delete environment[name];
+    }
+    if (name.startsWith("JITI_") || name.startsWith("TS_NODE_")) {
       delete environment[name];
     }
   }
@@ -288,16 +505,19 @@ function runPiChat({
       conversationContext,
     }) : "";
     const brokerEnabled =
-      v3Identity.verified === true
+      v3Ready
       && v3BrokerSocketConfigured
       && validBrokerSessionHandle(brokerSessionHandle);
-    const enabledToolNames = brokerEnabled
-      ? [...alwaysAvailableToolNames, ...authenticatedV3BrokerToolNames]
-      : alwaysAvailableToolNames;
+    const enabledToolNames = enabledPiToolNames({
+      brokerEnabled,
+      hardenedV3Only,
+      v3Ready,
+    });
     const args = [
       "--print",
       "--no-builtin-tools",
       "--no-context-files",
+      "--no-extensions",
       "--extension",
       path.join(__dirname, "extensions", "odoo-tools.ts"),
       "--tools",
@@ -320,9 +540,9 @@ function runPiChat({
     if (contextFile) {
       args.push(`@${contextFile}`);
     }
-    args.push(prompt);
+    args.push(literalPiUserPrompt(prompt));
 
-    const child = spawn(piBin, args, {
+    const child = spawn(process.execPath, [piBin, ...args], {
       cwd: __dirname,
       env: piChildEnvironment(),
       stdio: ["ignore", "pipe", "pipe", "pipe"],
@@ -372,12 +592,35 @@ async function authenticatedBrokerSession(req) {
 }
 
 const server = http.createServer((req, res) => {
+  if (!socketBoundaryReady) {
+    req.socket.destroy();
+    return;
+  }
   if (req.method === "GET" && req.url === "/health") {
     json(res, 200, {
       ok: true,
-      service: "sudo-pi-agent-bridge",
+      mode: hardenedV3Only ? "v3-hardened" : "legacy",
+      service: hardenedV3Only
+        ? "odoo-accounting-cli-v3-pi-bridge"
+        : "sudo-pi-agent-bridge",
       piAgent: piVersion,
       v3Identity,
+      v3ReleaseBinding: v3ReleaseBinding.verified === true
+        ? {
+            commit: v3ReleaseBinding.commit,
+            manifest_sha256: v3ReleaseBinding.manifest_sha256,
+            runtime_file_count: v3ReleaseBinding.runtime_file_count,
+            runtime: {
+              node_sha256: v3ReleaseBinding.runtimeBinding.node_sha256,
+              node_version: v3ReleaseBinding.runtimeBinding.node_version,
+              pi_version: v3ReleaseBinding.runtimeBinding.pi_version,
+              runtime_manifest_sha256:
+                v3ReleaseBinding.runtimeBinding.runtime_manifest_sha256,
+            },
+            verified: true,
+            version: v3ReleaseBinding.version,
+          }
+        : v3ReleaseBinding,
       v3Broker: {
         authenticatedSessionResolverConfigured:
           authenticatedSessionResolver !== null,
@@ -408,6 +651,10 @@ const server = http.createServer((req, res) => {
     return;
   }
   if (req.method === "POST" && req.url === "/session/delete") {
+    if (!sessionDeletionAllowed(hardenedV3Only)) {
+      json(res, 404, { ok: false, error: "Not found" });
+      return;
+    }
     readRequestJson(req)
       .then((payload) => deletePiSessions(payload.session_ids || []))
       .then((deleted) => json(res, 200, { ok: true, deleted }))
@@ -424,8 +671,28 @@ const server = http.createServer((req, res) => {
   json(res, 404, { ok: false, error: "Not found" });
 });
 
-server.listen(port, host, () => {
-  console.log(`sudo-pi-agent-bridge listening on http://${host}:${port}`);
+const listenOptions = systemdListenFd === null
+  ? { host, port }
+  : { exclusive: true, fd: systemdListenFd };
+server.listen(listenOptions, () => {
+  if (systemdListenFd !== null) {
+    const address = server.address();
+    if (
+      address === null
+      || typeof address === "string"
+      || address.address !== "127.0.0.1"
+      || address.family !== "IPv4"
+      || address.port !== 18788
+    ) {
+      server.close(() => process.exit(1));
+      return;
+    }
+    socketBoundaryReady = true;
+  }
+  const serviceName = hardenedV3Only
+    ? "odoo-accounting-cli-v3-pi-bridge"
+    : "sudo-pi-agent-bridge";
+  console.log(`${serviceName} listening on http://${host}:${port}`);
 });
 
 process.on("SIGTERM", () => {

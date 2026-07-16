@@ -27,13 +27,23 @@ verified.
 - `/run/odoo-accounting-cli-v3` is created by the supplied tmpfiles rule as
   `root:odoo-v3-runtime`, mode `0750`. Each socket remains root-owned, mode
   `0660`, and protected by its distinct client group.
-- systemd creates `/var/lib/odoo-accounting-cli-v3` for the broker as mode
+- systemd creates the non-overlapping
+  `/var/lib/odoo-accounting-cli-v3-broker` directory for the broker as mode
   `0700`, owns it as the broker service UID, and sets the broker's `HOME` to
-  that exact path. `ProtectSystem=strict` leaves only that managed state
-  directory writable, and `ProtectHome=yes` hides every ordinary home
-  directory. Before any Odoo process is spawned, the runner requires this
-  fixed `HOME` to be an absolute, existing, canonical non-symlink directory
-  owned by its effective UID with exact mode `0700`; any drift fails closed.
+  that exact path. It must never use `/var/lib/odoo-accounting-cli-v3` as a
+  `StateDirectory`: systemd would recursively change the ownership of retained
+  candidate state and historical evidence below that existing root. The unit's
+  explicit `ReadWritePaths=/var/lib/odoo-accounting-cli-v3` mount exception
+  does not change discretionary ownership or modes. That historical root must
+  already be a canonical, non-symlink directory with safe root-managed
+  metadata, while every exact read, write, session, and audit store parent
+  named by the root-managed runtime configurations remains service-owned mode
+  `0700`. The example root composition uses the explicit
+  `/var/lib/odoo-accounting-cli-v3/broker-state` parent; it is not a managed
+  `StateDirectory`. `ProtectHome=yes` hides every ordinary home directory.
+  Before any Odoo process is spawned, the runner requires the fixed broker
+  `HOME` to be an absolute, existing, canonical non-symlink directory owned by
+  its effective UID with exact mode `0700`; any drift fails closed.
 - The broker must start through
   `/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3-broker`,
   inside the same root-owned, immutable, non-symlink release tree selected by
@@ -53,7 +63,10 @@ release/registry digest, file digest, and release path from verified host and
 immutable-package evidence. Keep JSON `socket_mode` at decimal `432` (octal
 `0660`). The production loader rejects missing or extra fields, unsafe aliases,
 untrusted ownership, digest drift, identity overlap, deadline inversion, and
-capacity values outside their bounds.
+capacity values outside their bounds. Its three SQLite paths remain explicit
+configuration values below the operator-created, broker-owned mode-`0700`
+`broker-state` directory; systemd does not infer or create those stores from
+the broker HOME.
 
 The root composition and every retained authority runtime must use the same
 SQLite busy timeout, capped at `1000` ms. The loader also reserves the declared
@@ -90,7 +103,12 @@ before `sqlite3.connect`.
    `odoo-accounting-cli-v3-tmpfiles.conf` under `/etc/tmpfiles.d/`, then run
    `systemd-tmpfiles --create /etc/tmpfiles.d/odoo-accounting-cli-v3-tmpfiles.conf`
    and verify the runtime directory owner and mode.
-3. Run `systemd-analyze verify` on all four installed units. Then run
+3. Before starting the service, verify that
+   `/var/lib/odoo-accounting-cli-v3` already exists with its established safe
+   root metadata and that only the exact runtime-configured store parents are
+   broker-owned mode `0700`. Verify that the sibling broker `StateDirectory`
+   cannot overlap or contain that historical root. Run `systemd-analyze
+   verify` on all four installed units. Then run
    `systemctl daemon-reload`. The release CI additionally executes the real
    Odoo child-process boundary from outside `/home` in a transient service
    with `ProtectHome=yes`, `ProtectSystem=strict`, and the same managed

@@ -301,7 +301,8 @@ class OdooAccountingCliV3ApprovalClient(models.AbstractModel):
 
     def _identity(self, settings: sessions._RootSettings) -> dict[str, Any]:
         issuer = self.env["odoo.accounting.cli.v3.session.client"]
-        return issuer._trusted_identity_payload(settings)
+        release = sessions.verify_addon_release(sessions.__file__)
+        return issuer._trusted_identity_payload(settings, release)
 
     def _call_with_session(
         self,

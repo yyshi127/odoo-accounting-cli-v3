@@ -84,6 +84,16 @@ def _strong_secret(value: object) -> bool:
     return isinstance(value, bytes) and len(value) >= 32
 
 
+def _release_digest(value: object, field_name: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise AuthorityError(f"{field_name} is invalid")
+    return value
+
+
 @dataclass(frozen=True)
 class TrustedSession:
     """Identity returned by a trusted session resolver, never by the caller."""
@@ -97,6 +107,8 @@ class TrustedSession:
     company_id: int
     allowed_company_ids: frozenset[int]
     environment: str
+    release_digest: str
+    registry_digest: str
     issued_at: datetime
     expires_at: datetime
 
@@ -129,6 +141,8 @@ class TrustedSession:
             raise AuthorityError("trusted allowed companies are invalid")
         if self.environment not in {"test", "sandbox", "production"}:
             raise AuthorityError("trusted environment is invalid")
+        _release_digest(self.release_digest, "trusted release digest")
+        _release_digest(self.registry_digest, "trusted registry digest")
         if (
             not _aware(self.issued_at)
             or not _aware(self.expires_at)

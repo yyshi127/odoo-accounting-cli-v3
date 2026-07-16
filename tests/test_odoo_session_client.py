@@ -17,6 +17,8 @@ ADDON = ROOT / "odoo_addons" / "odoo_accounting_cli_v3_control"
 MODEL = ADDON / "models" / "session_client.py"
 DATABASE_UUID = "f1d2d2f9-8d43-4b2f-a36c-64c76df38f81"
 HANDLE = "A" * 43
+RELEASE_DIGEST = "a" * 64
+REGISTRY_DIGEST = "b" * 64
 
 
 class FakeAccessError(Exception):
@@ -40,12 +42,29 @@ def _load_client_module(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     exceptions.UserError = FakeUserError
     monkeypatch.setitem(sys.modules, "odoo", odoo)
     monkeypatch.setitem(sys.modules, "odoo.exceptions", exceptions)
-    name = "test_odoo_accounting_cli_v3_session_client"
+    package = types.ModuleType("odoo_accounting_cli_v3_control")
+    package.__path__ = [str(ADDON)]
+    models_package = types.ModuleType("odoo_accounting_cli_v3_control.models")
+    models_package.__path__ = [str(ADDON / "models")]
+    monkeypatch.setitem(sys.modules, package.__name__, package)
+    monkeypatch.setitem(sys.modules, models_package.__name__, models_package)
+    name = "odoo_accounting_cli_v3_control.models.session_client"
     spec = importlib.util.spec_from_file_location(name, MODEL)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(
+        module,
+        "verify_addon_release",
+        lambda _path: module.VerifiedAddonRelease(
+            release_digest=RELEASE_DIGEST,
+            registry_digest=REGISTRY_DIGEST,
+            release="0.1.0.dev10-0123456789ab",
+            version="0.1.0.dev10",
+            commit="0123456789abcdef0123456789abcdef01234567",
+        ),
+    )
     return module
 
 
@@ -104,7 +123,7 @@ def root_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 def test_manifest_init_and_acl_keep_client_internal() -> None:
     manifest = ast.literal_eval((ADDON / "__manifest__.py").read_text(encoding="utf-8"))
-    assert manifest["version"] == "19.0.0.4.0"
+    assert manifest["version"] == "19.0.0.5.0"
     assert "server-side" in manifest["summary"].lower()
     assert "from . import session_client" in (
         ADDON / "models" / "__init__.py"
@@ -132,6 +151,9 @@ def test_source_has_private_abstract_model_and_no_public_http_boundary() -> None
     assert '"ODOO_V3_BROKER_UID"' in source
     assert '"127.0.0.1"' in source
     assert '"/chat"' in source
+    assert "verify_addon_release(__file__)" in source
+    assert "ODOO_ACCOUNTING_CLI_V3_RELEASE_DIGEST" not in source
+    assert "ODOO_ACCOUNTING_CLI_V3_REGISTRY_DIGEST" not in source
     assert "logging" not in source
     assert "trusted_broker" not in source
 
@@ -145,7 +167,8 @@ def test_identity_is_derived_only_from_current_env_and_root_config(
     settings = module._root_settings()
     assert settings.broker_uid == 2101
 
-    assert client._trusted_identity_payload(settings) == {
+    release = module.verify_addon_release(MODEL)
+    assert client._trusted_identity_payload(settings, release) == {
         "principal": "odoo:user:42",
         "odoo_instance_id": "odoo-prod-01",
         "database_name": "accounting",
@@ -154,6 +177,8 @@ def test_identity_is_derived_only_from_current_env_and_root_config(
         "company_id": 7,
         "allowed_company_ids": [7, 9],
         "environment": "sandbox",
+        "release_digest": RELEASE_DIGEST,
+        "registry_digest": REGISTRY_DIGEST,
     }
 
 
@@ -167,6 +192,8 @@ def test_identity_is_derived_only_from_current_env_and_root_config(
         "database_uuid",
         "odoo_instance_id",
         "environment",
+        "release_digest",
+        "registry_digest",
         "ttl_seconds",
         "max_uses",
         "headers",
@@ -223,11 +250,37 @@ def test_executor_only_chat_mints_calls_loopback_and_always_revokes(
     assert client._odoo_v3_chat({"message": "show trial balance"}) == "verified answer"
     assert calls[0][0] == module._MINT_PATH
     assert calls[0][1]["user_id"] == 42
+    assert calls[0][1]["release_digest"] == RELEASE_DIGEST
+    assert calls[0][1]["registry_digest"] == REGISTRY_DIGEST
     assert calls[1] == (
         "pi",
         (8787, {"message": "show trial balance"}, HANDLE),
     )
     assert calls[2] == (module._REVOKE_PATH, {"handle": HANDLE})
+
+
+def test_unverified_executing_addon_cannot_reach_mint_or_pi(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+) -> None:
+    module = _load_client_module(monkeypatch)
+    client = _client(module)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        module,
+        "verify_addon_release",
+        lambda _path: (_ for _ in ()).throw(
+            RuntimeError("private path detail")
+        ),
+    )
+    monkeypatch.setattr(module, "_post_uds_json", lambda *args: calls.append(args))
+    monkeypatch.setattr(module, "_post_pi_chat", lambda *args: calls.append(args))
+
+    with pytest.raises(FakeUserError, match="could not be completed safely") as caught:
+        client._odoo_v3_chat({"message": "show trial balance"})
+
+    assert calls == []
+    assert "private path detail" not in str(caught.value)
 
 
 def test_pi_failure_still_revokes_and_never_exposes_handle(

@@ -47,6 +47,12 @@ archive.
   receipt.sqlite3
 /var/lib/odoo-accounting-cli-v3/sandbox/candidates/<version>-<commit12>/
   write.sqlite3
+/var/lib/odoo-accounting-cli-v3/broker-state/
+  write-state.sqlite3
+  trusted-sessions.sqlite3
+  broker-audit.sqlite3
+/var/lib/odoo-accounting-cli-v3-broker/
+  # systemd-managed private broker HOME only; no accounting state is implicit
 ```
 
 The V2 tree under `/mnt/odoo/odoo19/custom/tools/` and the Pi Bridge copy of V2
@@ -159,7 +165,12 @@ dedicated service group. Record only Key IDs and restricted file hashes in
 operator evidence. Never record secret contents or pass a signed write request
 on argv.
 
-Create each candidate state directory service-owned mode `0700`. SQLite
+The existing `/var/lib/odoo-accounting-cli-v3` root retains safe root-managed
+ownership and is never a systemd `StateDirectory`. The broker unit uses the
+non-overlapping sibling `/var/lib/odoo-accounting-cli-v3-broker` as its private
+mode-`0700` HOME and grants a mount-namespace write exception to the historical
+root without changing its ownership. Create only each exact runtime-configured
+store parent service-owned mode `0700`. SQLite
 database, WAL, and shared-memory files remain service-owned mode `0600`. The
 write state path must differ by path and inode from both read stores. Preserve
 every store through upgrade and rollback; never delete, truncate, replace, or
@@ -292,12 +303,32 @@ does not enable another read or any write.
 Before exposing authenticated V3 tools, pin the independently reviewed,
 dependency-free session-resolver module with
 `PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_SHA256`, require the verified V3
-identity, and prove the root-managed module path plus every ancestor cannot be
-replaced by the Pi service identity. Prove the Pi process receives only the
-opaque session handle on inherited descriptor 3, the resolver path/hash are
-absent from its environment, and an unsafe path, changed module, missing hash,
-wrong UDS peer, mismatched action/protocol, or caller-selected release is
-rejected before execution.
+identity, and install the executing Pi Bridge runtime files byte-for-byte from
+that exact release. Follow `deployment/dev11/README.md` to run
+`npm ci --ignore-scripts --omit=dev` in a new root-owned staging runtime and
+create the one external Pi runtime anchor. Bootstrap must match every tracked
+Bridge member to the release manifest and match the exact Node executable plus
+the complete installed dependency file/symlink set to that external runtime
+anchor. All paths are canonical, single-link where regular, root-owned, and
+non-writable by the Pi identity. Render the independent Dev11 unit so its fixed
+`/usr/bin/node` executes the canonical release's `pi_bridge/bootstrap.mjs`
+with the separate runtime path as its only argument; never execute copied
+`server.mjs` directly or modify `sudo-pi-agent-bridge.service`. Clear
+`NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and `LD_AUDIT`,
+and reject an NVM/user-owned or digest-mismatched Node binary. Prove health
+reports the same version, commit, release manifest, Node and runtime-manifest
+digests as the CLI/anchors, and prove changing any one Node, dependency or
+Bridge runtime file removes every V3 tool. Prove Pi is
+started with `--no-extensions` and only the explicit release-bound extension,
+so global/project extension discovery cannot shadow a V3 tool name. Also prove
+the hardened sidecar's tool allowlist contains no V2 tool and its child
+environment contains no `ODOO_TOOL_*` value (the separate retained V2 service
+is the only legacy route). Prove
+the root-managed session resolver path plus every ancestor cannot be replaced
+by the Pi service identity, the Pi process receives only the opaque session
+handle on inherited descriptor 3, the resolver path/hash are absent from its environment, and an
+unsafe path, changed module, missing hash, wrong UDS peer, mismatched
+action/protocol, or caller-selected release is rejected before execution.
 For a write capability, the reviewed promotion input must include its dedicated
 sandbox create/verify/repeat/failure/recovery receipts and negative-security
 evidence. Until then its `enabled_environments` remains empty. Production also

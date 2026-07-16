@@ -12,9 +12,10 @@ Type=simple
 User=odoo-v3-broker
 Group=odoo-v3-broker
 SupplementaryGroups=odoo-v3-runtime
-StateDirectory=odoo-accounting-cli-v3
+StateDirectory=odoo-accounting-cli-v3-broker
 StateDirectoryMode=0700
-Environment=HOME=/var/lib/odoo-accounting-cli-v3
+Environment=HOME=/var/lib/odoo-accounting-cli-v3-broker
+ReadWritePaths=/var/lib/odoo-accounting-cli-v3
 Sockets=odoo-accounting-cli-v3-pi-broker.socket
 Sockets=odoo-accounting-cli-v3-session-mint.socket
 Sockets=odoo-accounting-cli-v3-trusted-approval.socket

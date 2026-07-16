@@ -38,7 +38,9 @@ class LinuxRunnerGateTest(unittest.TestCase):
             raise AssertionError("the target runner gate requires memfd_create")
         if not Path(FIXED_CHILD_ENVIRONMENT["HOME"]).is_dir():
             raise AssertionError("the fixed Odoo HOME directory does not exist")
-        if FIXED_CHILD_ENVIRONMENT["HOME"] != "/var/lib/odoo-accounting-cli-v3":
+        if FIXED_CHILD_ENVIRONMENT["HOME"] != (
+            "/var/lib/odoo-accounting-cli-v3-broker"
+        ):
             raise AssertionError("the fixed Odoo HOME is not the managed StateDirectory")
         if os.environ.get("HOME") != FIXED_CHILD_ENVIRONMENT["HOME"]:
             raise AssertionError("the service HOME does not match the child HOME")

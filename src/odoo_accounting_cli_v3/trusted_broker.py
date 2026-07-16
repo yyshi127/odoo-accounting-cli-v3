@@ -942,6 +942,12 @@ class TrustedBroker:
             or now.utcoffset() is None
             or now < session.issued_at
             or now >= session.expires_at
+            or not hmac.compare_digest(
+                session.release_digest, self._current_release_digest
+            )
+            or not hmac.compare_digest(
+                session.registry_digest, self._current_registry_digest
+            )
         ):
             raise TrustedBrokerError("broker_session_rejected", status_code=401)
         return session

@@ -29,6 +29,8 @@ def _session(*, company_id: int = 7) -> TrustedSession:
         company_id=company_id,
         allowed_company_ids=frozenset({company_id}),
         environment="sandbox",
+        release_digest=RELEASE_A,
+        registry_digest=REGISTRY_A,
         issued_at=now,
         expires_at=now + timedelta(minutes=5),
     )

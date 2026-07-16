@@ -33,7 +33,12 @@ SOCKETS = {
 }
 TMPFILES_NAME = "odoo-accounting-cli-v3-tmpfiles.conf"
 RENDERER = PROJECT_ROOT / "deployment" / "dev9" / "render-systemd-service.py"
+BROKER_RUNTIME_EXAMPLE = PROJECT_ROOT / "deployment" / "dev9" / (
+    "broker-runtime.example.json"
+)
 PRODUCTION_RELEASES_ROOT = Path("/opt/odoo-accounting-cli-v3/releases")
+HISTORICAL_STATE_ROOT = PurePosixPath("/var/lib/odoo-accounting-cli-v3")
+BROKER_HOME = PurePosixPath("/var/lib/odoo-accounting-cli-v3-broker")
 
 
 def _unit(path: Path) -> dict[str, dict[str, list[str]]]:
@@ -216,14 +221,36 @@ def test_service_consumes_only_the_three_named_sockets_as_dedicated_user() -> No
     assert _one(service, "RestrictAddressFamilies") == "AF_UNIX AF_INET AF_INET6"
     assert _one(service, "ProtectSystem") == "strict"
     assert _one(service, "ProtectHome") == "yes"
-    assert _one(service, "StateDirectory") == "odoo-accounting-cli-v3"
+    assert _one(service, "StateDirectory") == BROKER_HOME.name
     assert _one(service, "StateDirectoryMode") == "0700"
-    assert _one(service, "Environment") == (
-        "HOME=/var/lib/odoo-accounting-cli-v3"
-    )
+    assert _one(service, "Environment") == f"HOME={BROKER_HOME}"
+    assert _one(service, "ReadWritePaths") == str(HISTORICAL_STATE_ROOT)
+    assert BROKER_HOME != HISTORICAL_STATE_ROOT
+    assert HISTORICAL_STATE_ROOT not in BROKER_HOME.parents
+    assert BROKER_HOME not in HISTORICAL_STATE_ROOT.parents
     assert _one(service, "UMask") == "0077"
     assert _one(service, "TimeoutStopSec") == "135s"
     assert all("%" not in item for values in service.values() for item in values)
+
+
+def test_configured_store_paths_are_explicit_and_outside_managed_broker_home() -> None:
+    config = json.loads(BROKER_RUNTIME_EXAMPLE.read_text("utf-8"))
+    paths = {
+        PurePosixPath(config[field])
+        for field in (
+            "shared_write_state_path",
+            "trusted_session_state_path",
+            "broker_audit_state_path",
+        )
+    }
+
+    assert len(paths) == 3
+    assert {path.parent for path in paths} == {
+        HISTORICAL_STATE_ROOT / "broker-state"
+    }
+    assert all(path.is_absolute() for path in paths)
+    assert all(HISTORICAL_STATE_ROOT in path.parents for path in paths)
+    assert all(BROKER_HOME not in path.parents for path in paths)
 
 
 def test_service_renderer_requires_an_anchored_release_and_removes_token(

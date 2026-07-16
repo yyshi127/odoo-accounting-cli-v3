@@ -352,10 +352,19 @@ def _broker_uds(value: object) -> TrustedBrokerUdsConfig:
         raise TrustedBrokerRuntimeError("Pi broker UDS is invalid") from exc
 
 
-def _mint_uds(value: object) -> TrustedSessionMintUdsConfig:
+def _mint_uds(
+    value: object,
+    *,
+    current_release_digest: str,
+    current_registry_digest: str,
+) -> TrustedSessionMintUdsConfig:
     item = _mapping(value, _MINT_UDS_FIELDS, "session mint UDS")
     try:
-        return TrustedSessionMintUdsConfig(**item)
+        return TrustedSessionMintUdsConfig(
+            **item,
+            current_release_digest=current_release_digest,
+            current_registry_digest=current_registry_digest,
+        )
     except Exception as exc:
         raise TrustedBrokerRuntimeError("session mint UDS is invalid") from exc
 
@@ -499,7 +508,11 @@ def load_trusted_broker_runtime_config(
     sqlite_busy_timeout_seconds = sqlite_busy_timeout_ms / 1000.0
 
     pi_uds = _broker_uds(document["pi_broker_uds"])
-    mint_uds = _mint_uds(document["session_mint_uds"])
+    mint_uds = _mint_uds(
+        document["session_mint_uds"],
+        current_release_digest=current_release,
+        current_registry_digest=current_registry,
+    )
     approval_uds = _approval_uds(document["trusted_approval_uds"])
     _assert_transport_topology(
         broker_service_uid=service_uid,

@@ -130,17 +130,51 @@ Odoo evidence, and the durable final audit receipt.
 ## Pi authenticated-session and broker boundary
 
 The Pi service does not derive accounting identity from a conversation ID or
-model parameter. Its root-managed service environment supplies the immutable
-V3 launcher, broker socket, and one independently authenticated session
-adapter:
+model parameter. Deploy the independent Dev11 sidecar described in
+`deployment/dev11/README.md`; do not retrofit the V2 service. Its root-only
+environment file supplies model/provider credentials and only the digest of
+the independently authenticated session adapter:
 
 ```text
-ODOO_ACCOUNTING_CLI_V3_BIN=/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3
-ODOO_ACCOUNTING_CLI_V3_BROKER_SOCKET=/run/odoo-accounting-cli-v3/pi-broker.sock
-PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_MODULE=/etc/odoo-accounting-cli-v3/pi/session-resolver.mjs
 PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_SHA256=<lowercase-sha256-of-exact-module>
-PI_BRIDGE_REQUIRE_V3_IDENTITY=1
 ```
+
+The rendered unit fixes the canonical Node, bootstrap and runtime paths in
+`ExecStart`. Bootstrap derives/overwrites the V3 binary, manifest, broker
+socket, resolver path, loopback host, sidecar port, service HOME, session and
+agent directories, and `PI_BRIDGE_REQUIRE_V3_IDENTITY=1`. Do not place those
+reserved fields in the environment file; environment values cannot select a
+different boundary.
+
+`PI_BRIDGE_REQUIRE_V3_IDENTITY=1` requires more than a successful CLI identity
+response. The service must invoke a fixed, canonical, root-owned Node binary
+with `/opt/odoo-accounting-cli-v3/releases/<release>/pi_bridge/bootstrap.mjs`;
+invoking the runtime copy of `server.mjs` directly is forbidden. The bootstrap
+derives `RELEASE-MANIFEST.json` from its own exact release, checks the complete
+release and canonical package against the root-managed external anchor. It
+then requires the independent `<release>.pi-runtime.json` anchor and verifies
+the exact Node SHA-256/path/version/platform/architecture plus every regular
+file and in-tree symlink in `node_modules`. Finally it binds the executing
+`pi_bridge` server, extensions, session boundary, resolver, verifier,
+`package.json`, and lockfile bytes to their entries in that same release
+manifest.
+Linux production requires canonical, non-symlink, single-link, root-owned,
+non-group/world-writable files and root-managed ancestors. Only after that gate
+does the parent inject `ODOO_ACCOUNTING_CLI_V3_RELEASE_MANIFEST` and the release
+and registry digests into the Pi child. Operators and HTTP callers must not
+supply or override that derived manifest path. The extension independently
+repeats the binding before registering any V3 tool. In the hardened Dev11
+sidecar, a binding failure exposes no legacy V2 tool and prevents V3
+execution-tool registration; V2 remains available only through its separate
+retained service.
+
+The Node interpreter path itself must be canonical, root-owned, below
+root-managed non-writable ancestors, and byte-for-byte equal to the external
+runtime anchor; an NVM/user-owned binary or a symlink to one is not admissible.
+The release's minimum Node engine must also pass. The unit clears and bootstrap
+rejects `NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, and
+`LD_AUDIT`. The Pi child additionally uses `--no-extensions` while scrubbing
+Node, dynamic-loader, Jiti, and ts-node injection variables.
 
 The resolver is a dependency-free single-file ESM adapter with exactly one
 default or `resolveAuthenticatedSession` export. On Linux the bridge requires

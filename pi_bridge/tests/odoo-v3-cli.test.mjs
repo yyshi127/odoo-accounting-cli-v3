@@ -1005,7 +1005,7 @@ test("all other unauthenticated or non-200 broker responses stay untrusted", asy
 	}
 });
 
-test("the bridge exposes capability/read/write V3 tools while retaining all five V2 tools", async () => {
+test("the extension retains legacy registration while hardened policy grants only V3", async () => {
 	assert.deepEqual(Object.values(V3_TOOL_NAMES), [
 		"odoo_v3_capability_list",
 		"odoo_v3_capability_get",
@@ -1019,6 +1019,7 @@ test("the bridge exposes capability/read/write V3 tools while retaining all five
 	]);
 	const extension = await readFile(path.join(root, "extensions", "odoo-tools.ts"), "utf8");
 	const server = await readFile(path.join(root, "server.mjs"), "utf8");
+	const policy = await readFile(path.join(root, "tool-policy.mjs"), "utf8");
 	for (const v2Tool of [
 		"odoo_get_context",
 		"odoo_list_skills",
@@ -1027,8 +1028,12 @@ test("the bridge exposes capability/read/write V3 tools while retaining all five
 		"odoo_export_report",
 	]) {
 		assert.match(extension, new RegExp(`name: "${v2Tool}"`));
-		assert.match(server, new RegExp(`"${v2Tool}"`));
+		assert.match(policy, new RegExp(`"${v2Tool}"`));
 	}
+	assert.match(server, /enabledPiToolNames/);
+	assert.match(server, /PI_BRIDGE_HARDENED_V3_ONLY/);
+	assert.match(extension, /if \(!hardenedV3Only\)/);
+	assert.match(extension, /PI_BRIDGE_HARDENED_V3_ONLY/);
 	for (const registration of [
 		"v3CapabilityListTool",
 		"v3CapabilityGetTool",

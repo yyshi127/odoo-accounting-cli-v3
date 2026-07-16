@@ -51,7 +51,9 @@ MARKER = f"__ODOO_ACCOUNTING_CLI_V3_RESULT_{MARKER_TOKEN}__:"
 
 
 def test_fixed_child_home_is_the_managed_private_state_directory() -> None:
-    assert FIXED_CHILD_ENVIRONMENT["HOME"] == "/var/lib/odoo-accounting-cli-v3"
+    assert FIXED_CHILD_ENVIRONMENT["HOME"] == (
+        "/var/lib/odoo-accounting-cli-v3-broker"
+    )
 
 
 def test_child_home_rejects_missing_file_symlink_and_non_private_mode(

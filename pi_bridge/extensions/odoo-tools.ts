@@ -1,11 +1,14 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	V3_TOOL_NAMES,
 	addUnknownEffectGuidance,
 	runV3BrokerOperation,
 	runV3Query,
 } from "./odoo-v3-cli.mjs";
+import { verifyPiBridgeReleaseBinding } from "../release-binding.mjs";
 
 type JsonValue = unknown;
 
@@ -14,6 +17,25 @@ const token = process.env.ODOO_TOOL_TOKEN || "";
 const database = process.env.ODOO_TOOL_DATABASE || "";
 const userId = process.env.ODOO_TOOL_USER_ID || "";
 const companyId = process.env.ODOO_TOOL_COMPANY_ID || "";
+
+function v3ReleaseIsSelfBound() {
+	try {
+		const extensionDirectory = path.dirname(fileURLToPath(import.meta.url));
+		const binding = verifyPiBridgeReleaseBinding({
+			bridgeRoot: path.resolve(extensionDirectory, ".."),
+			expectedManifestSha256:
+				process.env.ODOO_ACCOUNTING_CLI_V3_RELEASE_DIGEST || "",
+			manifestPath:
+				process.env.ODOO_ACCOUNTING_CLI_V3_RELEASE_MANIFEST || "",
+			requireRootOwned: process.platform === "linux",
+		});
+		return binding.verified === true;
+	} catch {
+		return false;
+	}
+}
+
+const exposeV3Tools = v3ReleaseIsSelfBound();
 
 async function callOdoo(tool: string, params: Record<string, JsonValue> = {}) {
 	const response = await fetch(endpoint, {
@@ -276,18 +298,23 @@ const v3RecoverTool = defineTool({
 });
 
 export default function (pi: ExtensionAPI) {
-	pi.registerTool(getContextTool);
-	pi.registerTool(listSkillsTool);
-	pi.registerTool(executeSkillTool);
-	pi.registerTool(listReportsTool);
-	pi.registerTool(exportReportTool);
-	pi.registerTool(v3CapabilityListTool);
-	pi.registerTool(v3CapabilityGetTool);
-	pi.registerTool(v3ReadTool);
-	pi.registerTool(v3PrepareTool);
-	pi.registerTool(v3PreviewTool);
-	pi.registerTool(v3ApproveExecuteTool);
-	pi.registerTool(v3StatusTool);
-	pi.registerTool(v3ResultTool);
-	pi.registerTool(v3RecoverTool);
+	const hardenedV3Only = process.env.PI_BRIDGE_HARDENED_V3_ONLY === "1";
+	if (!hardenedV3Only) {
+		pi.registerTool(getContextTool);
+		pi.registerTool(listSkillsTool);
+		pi.registerTool(executeSkillTool);
+		pi.registerTool(listReportsTool);
+		pi.registerTool(exportReportTool);
+	}
+	if (exposeV3Tools) {
+		pi.registerTool(v3CapabilityListTool);
+		pi.registerTool(v3CapabilityGetTool);
+		pi.registerTool(v3ReadTool);
+		pi.registerTool(v3PrepareTool);
+		pi.registerTool(v3PreviewTool);
+		pi.registerTool(v3ApproveExecuteTool);
+		pi.registerTool(v3StatusTool);
+		pi.registerTool(v3ResultTool);
+		pi.registerTool(v3RecoverTool);
+	}
 }

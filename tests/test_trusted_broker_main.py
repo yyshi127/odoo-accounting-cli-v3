@@ -360,8 +360,10 @@ def test_systemd_service_is_dedicated_nonroot_and_passes_exact_three_sockets() -
     assert "TimeoutStopSec=135s\n" in text
     assert "ProtectSystem=strict\n" in text
     assert "ProtectHome=yes\n" in text
-    assert "StateDirectory=odoo-accounting-cli-v3\n" in text
+    assert "StateDirectory=odoo-accounting-cli-v3-broker\n" in text
     assert "StateDirectoryMode=0700\n" in text
+    assert "Environment=HOME=/var/lib/odoo-accounting-cli-v3-broker\n" in text
+    assert "ReadWritePaths=/var/lib/odoo-accounting-cli-v3\n" in text
     assert "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6\n" in text
     assert "current" not in text
     assert "/releases/@V3_RELEASE@/bin/odoo-accounting-cli-v3-broker" in text

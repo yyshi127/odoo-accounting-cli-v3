@@ -86,7 +86,7 @@ CHILD_FIELDS = frozenset(
 )
 RESPONSE_FIELDS = frozenset({"ok", "runtime", "result"})
 FIXED_CHILD_ENVIRONMENT = {
-    "HOME": "/var/lib/odoo-accounting-cli-v3",
+    "HOME": "/var/lib/odoo-accounting-cli-v3-broker",
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",

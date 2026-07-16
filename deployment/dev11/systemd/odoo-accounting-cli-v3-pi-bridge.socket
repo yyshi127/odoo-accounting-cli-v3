@@ -1,0 +1,14 @@
+[Unit]
+Description=Odoo Accounting CLI V3 Pi Bridge loopback socket
+
+[Socket]
+ListenStream=127.0.0.1:18788
+Accept=no
+Service=odoo-accounting-cli-v3-pi-bridge.service
+FileDescriptorName=odoo-v3-pi-http
+Backlog=128
+NoDelay=yes
+ReusePort=no
+
+[Install]
+WantedBy=sockets.target

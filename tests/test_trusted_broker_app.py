@@ -215,6 +215,8 @@ def test_exact_root_snapshot_binds_three_separate_uds_and_deadlines(
     assert config.pi_broker_uds.max_inflight_requests == 16
     assert config.session_mint_uds.odoo_issuer_uid == 1101
     assert config.session_mint_uds.max_inflight_requests == 4
+    assert config.session_mint_uds.current_release_digest == CURRENT_RELEASE
+    assert config.session_mint_uds.current_registry_digest == CURRENT_REGISTRY
     assert config.trusted_approval_uds.odoo_client_uid == 1101
     assert config.trusted_approval_uds.max_inflight_broker_calls == 4
     assert config.broker_service_uid == 1301

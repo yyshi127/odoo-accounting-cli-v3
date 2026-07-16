@@ -4,6 +4,7 @@ import inspect
 import json
 import os
 import socket
+import sqlite3
 import struct
 import sys
 import tempfile
@@ -29,6 +30,8 @@ from odoo_accounting_cli_v3.trusted_session_sqlite import (
 
 
 DATABASE_UUID = "f1d2d2f9-8d43-4b2f-a36c-64c76df38f81"
+RELEASE_DIGEST = "a" * 64
+REGISTRY_DIGEST = "b" * 64
 
 
 def test_request_handlers_are_non_daemon_and_joined_on_server_close() -> None:
@@ -60,6 +63,8 @@ def _config(**overrides: Any) -> mint_uds.TrustedSessionMintUdsConfig:
         "session_ttl_seconds": 45,
         "session_max_uses": 16,
         "max_inflight_requests": 4,
+        "current_release_digest": RELEASE_DIGEST,
+        "current_registry_digest": REGISTRY_DIGEST,
     }
     values.update(overrides)
     return mint_uds.TrustedSessionMintUdsConfig(**values)
@@ -75,6 +80,8 @@ def _identity_payload(**overrides: Any) -> dict[str, Any]:
         "company_id": 7,
         "allowed_company_ids": [7, 9],
         "environment": "sandbox",
+        "release_digest": RELEASE_DIGEST,
+        "registry_digest": REGISTRY_DIGEST,
     }
     value.update(overrides)
     return value
@@ -112,6 +119,8 @@ def test_config_keeps_ttl_and_use_budget_root_controlled() -> None:
         pi_bridge_uid=1201,
         socket_group_gid=1101,
         max_inflight_requests=4,
+        current_release_digest=RELEASE_DIGEST,
+        current_registry_digest=REGISTRY_DIGEST,
     ).session_max_uses == 32
 
 
@@ -145,6 +154,8 @@ def test_request_accepts_only_exact_server_identity_fields() -> None:
     assert identity.user_id == 42
     assert identity.company_id == 7
     assert identity.allowed_company_ids == frozenset({7, 9})
+    assert identity.release_digest == RELEASE_DIGEST
+    assert identity.registry_digest == REGISTRY_DIGEST
 
     for forbidden in (
         {"ttl_seconds": 999},
@@ -195,6 +206,35 @@ def test_store_issue_uses_only_fixed_config_budget(tmp_path: Path) -> None:
     for _ in range(16):
         assert store.resolve(issued.handle) == issued.session
     assert store.resolve(issued.handle) is None
+
+
+@pytest.mark.parametrize(
+    "forged",
+    [
+        {"release_digest": "e" * 64},
+        {"registry_digest": "f" * 64},
+    ],
+)
+def test_route_mismatch_is_rejected_before_any_session_or_event_insert(
+    tmp_path: Path, forged: dict[str, str]
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    identity = mint_uds._decode_identity_request(
+        _json_bytes(_identity_payload(**forged))
+    )
+
+    with pytest.raises(
+        mint_uds.TrustedSessionMintUdsError, match="current release route"
+    ):
+        mint_uds._issue_session(store, _config(), identity)
+
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT count(*) FROM trusted_sessions").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT count(*) FROM trusted_session_security_events"
+        ).fetchone()[0] == 0
+    assert store.verify_integrity() is True
 
 
 @pytest.mark.parametrize(
@@ -275,7 +315,9 @@ def test_revoke_request_accepts_only_handle_and_never_echoes_it(tmp_path: Path) 
         if event.event_type == "session.revoked"
     )
     assert json.loads(accepted.details_json) == {
-        "reason": "odoo_request_completed"
+        "reason": "odoo_request_completed",
+        "release_digest": RELEASE_DIGEST,
+        "registry_digest": REGISTRY_DIGEST,
     }
     assert issued.handle not in json.dumps(
         mint_uds._safe_error("session_revoke_rejected")
@@ -411,6 +453,8 @@ def _linux_server(
         session_ttl_seconds=45,
         session_max_uses=16,
         max_inflight_requests=max_inflight_requests,
+        current_release_digest=RELEASE_DIGEST,
+        current_registry_digest=REGISTRY_DIGEST,
         request_timeout_seconds=request_timeout_seconds,
     )
     server = mint_uds._TrustedUnixHTTPServer(

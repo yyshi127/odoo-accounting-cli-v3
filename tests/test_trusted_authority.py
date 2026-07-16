@@ -76,6 +76,8 @@ def session(
         company_id=company_id,
         allowed_company_ids=allowed_company_ids,
         environment="sandbox",
+        release_digest="c" * 64,
+        registry_digest="b" * 64,
         issued_at=NOW - timedelta(minutes=5),
         expires_at=expires_at,
     )

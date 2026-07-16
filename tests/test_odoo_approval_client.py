@@ -18,6 +18,8 @@ SESSION_MODEL = ADDON / "models" / "session_client.py"
 APPROVAL_MODEL = ADDON / "models" / "approval_client.py"
 HANDLE = "A" * 43
 DATABASE_UUID = "f1d2d2f9-8d43-4b2f-a36c-64c76df38f81"
+RELEASE_DIGEST = "a" * 64
+REGISTRY_DIGEST = "b" * 64
 
 
 class FakeAccessError(Exception):
@@ -62,6 +64,17 @@ def _load_modules(
         return module
 
     session = load(f"{models_name}.session_client", SESSION_MODEL)
+    monkeypatch.setattr(
+        session,
+        "verify_addon_release",
+        lambda _path: session.VerifiedAddonRelease(
+            release_digest=RELEASE_DIGEST,
+            registry_digest=REGISTRY_DIGEST,
+            release="0.1.0.dev10-0123456789ab",
+            version="0.1.0.dev10",
+            commit="0123456789abcdef0123456789abcdef01234567",
+        ),
+    )
     approval = load(f"{models_name}.approval_client", APPROVAL_MODEL)
     return session, approval
 
@@ -181,7 +194,7 @@ def test_addon_registers_private_approval_client_without_acl_or_controller() -> 
     init = (ADDON / "models" / "__init__.py").read_text("utf-8")
     acl = (ADDON / "security" / "ir.model.access.csv").read_text("utf-8")
 
-    assert manifest["version"] == "19.0.0.4.0"
+    assert manifest["version"] == "19.0.0.5.0"
     assert "from . import approval_client" in init
     assert "models.AbstractModel" in source
     assert "def _odoo_v3_request_approval(" in source
@@ -195,6 +208,7 @@ def test_addon_registers_private_approval_client_without_acl_or_controller() -> 
     assert ".sudo(" not in source
     assert "logging" not in source
     assert "approval_client" not in acl
+    assert "sessions.verify_addon_release(sessions.__file__)" in source
 
 
 @pytest.mark.parametrize(
@@ -297,6 +311,8 @@ def test_requester_mints_from_odoo_identity_calls_fixed_route_and_revokes(
         "company_id": 7,
         "allowed_company_ids": [7, 9],
         "environment": "sandbox",
+        "release_digest": RELEASE_DIGEST,
+        "registry_digest": REGISTRY_DIGEST,
     }
     assert calls[1] == (
         "approval",
@@ -310,6 +326,28 @@ def test_requester_mints_from_odoo_identity_calls_fixed_route_and_revokes(
     )
     assert calls[2] == (session._REVOKE_PATH, {"handle": HANDLE})
     assert HANDLE not in json.dumps(result)
+
+
+def test_unverified_addon_cannot_mint_or_call_independent_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+) -> None:
+    session, approval = _load_modules(monkeypatch)
+    value = _client(session, approval)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        session,
+        "verify_addon_release",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("private release path")),
+    )
+    monkeypatch.setattr(session, "_post_uds_json", lambda *args: calls.append(args))
+    monkeypatch.setattr(approval, "_post_approval", lambda *args: calls.append(args))
+
+    with pytest.raises(FakeUserError, match="could not be completed safely") as caught:
+        value._odoo_v3_request_approval({"operation_id": "operation-1"})
+
+    assert calls == []
+    assert "private release path" not in str(caught.value)
 
 
 @pytest.mark.parametrize(

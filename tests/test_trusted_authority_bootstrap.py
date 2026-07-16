@@ -171,6 +171,8 @@ def _sessions(operation: Operation) -> dict[str, TrustedSession]:
         company_id=operation.company_id,
         allowed_company_ids=frozenset({operation.company_id}),
         environment=operation.environment,
+        release_digest=operation.release_digest,
+        registry_digest=operation.registry_digest,
         issued_at=NOW - timedelta(minutes=1),
         expires_at=NOW + timedelta(minutes=10),
     )
