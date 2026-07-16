@@ -46,6 +46,12 @@ from odoo_accounting_cli_v3.trusted_broker_uds import (
     BrokerDispatchRequest,
     BrokerDispatchResult,
 )
+from odoo_accounting_cli_v3.trusted_session_sqlite import (
+    TrustedSessionCommitOutcomeUnknownError,
+    TrustedSessionKnownCommittedError,
+    TrustedSessionReconciliationRequiredError,
+    TrustedSessionStoreError,
+)
 from odoo_accounting_cli_v3.write_protocol import approval_from_mapping
 
 
@@ -772,6 +778,232 @@ def test_write_forwards_the_exact_outer_deadline_to_historical_execution(
 
     assert result.body["ok"] is True
     assert harness.executor.deadlines[-1] == deadline
+
+
+@pytest.mark.parametrize(
+    "reconciliation_error",
+    [
+        TrustedSessionKnownCommittedError,
+        TrustedSessionCommitOutcomeUnknownError,
+    ],
+)
+def test_session_reconciliation_error_is_safe_non_authoritative_and_stops_before_executor(
+    harness: Harness,
+    reconciliation_error: type[TrustedSessionReconciliationRequiredError],
+) -> None:
+    backend_secret = "private-session-backend-state"
+    session_handle = "requester-session-0123456789abcdef"
+
+    def wrapped_failure(_handle: str) -> TrustedSession:
+        try:
+            raise reconciliation_error(backend_secret)
+        except TrustedSessionStoreError as exc:
+            raise TrustedSessionStoreError("private-wrapper") from exc
+
+    harness.broker._session_resolver = wrapped_failure
+    result = harness.dispatch(
+        "operation.prepare",
+        {
+            "capability_id": "acct.invoice.customer_create.v1",
+            "parameters": {
+                "company_id": 7,
+                "idempotency_key": "session-reconciliation-required",
+            },
+        },
+        session=session_handle,
+    )
+
+    assert result.status_code == 503
+    assert result.authority_verified is False
+    assert result.executed_release_digest is None
+    assert result.executed_registry_digest is None
+    assert result.body["error"] == {
+        "code": "broker_session_reconciliation_required",
+        "message": "The trusted V3 broker rejected the request.",
+        "odoo_effect": "none",
+        "reconciliation_required": True,
+        "retryable": False,
+    }
+    serialized = json.dumps(result.body, sort_keys=True)
+    assert session_handle not in serialized
+    assert backend_secret not in serialized
+    assert "private-wrapper" not in serialized
+    assert harness.executor.calls == []
+    assert harness.read_authorizations == 0
+    assert harness.audit.events() == ()
+
+
+@pytest.mark.parametrize(
+    "reconciliation_error",
+    [
+        TrustedSessionKnownCommittedError,
+        TrustedSessionCommitOutcomeUnknownError,
+    ],
+)
+def test_authenticated_read_reconciliation_keeps_authority_envelope_and_stops_executor(
+    harness: Harness,
+    reconciliation_error: type[TrustedSessionReconciliationRequiredError],
+) -> None:
+    backend_secret = "private-read-authority-state"
+
+    def fail_authorization(*_args, **_kwargs) -> AuthorizedReadAction:
+        try:
+            raise reconciliation_error(backend_secret)
+        except TrustedSessionReconciliationRequiredError as exc:
+            raise TrustedSessionStoreError("private-wrapper") from exc
+
+    harness.broker._read_authorizer = fail_authorization
+    result = harness.dispatch(
+        "read",
+        {
+            "capability_id": "acct.gl.trial_balance.v1",
+            "parameters": {"company_id": 7},
+        },
+    )
+
+    assert result.status_code == 200
+    assert result.authority_verified is True
+    assert result.executed_release_digest is None
+    assert result.executed_registry_digest is None
+    assert result.body["error"] == {
+        "code": "broker_session_reconciliation_required",
+        "message": "The trusted V3 broker rejected the request.",
+        "odoo_effect": "none",
+        "reconciliation_required": True,
+        "retryable": False,
+    }
+    serialized = json.dumps(result.body, sort_keys=True)
+    assert backend_secret not in serialized
+    assert "private-wrapper" not in serialized
+    assert harness.read_executions == 0
+    assert harness.executor.calls == []
+
+
+@pytest.mark.parametrize(
+    "reconciliation_error",
+    [
+        TrustedSessionKnownCommittedError,
+        TrustedSessionCommitOutcomeUnknownError,
+    ],
+)
+@pytest.mark.parametrize(
+    ("approval_action", "authority_method"),
+    [
+        ("request", "request_approval"),
+        ("inspect", "inspect_approval"),
+        ("decide", "decide_approval"),
+    ],
+)
+def test_independent_approval_reconciliation_has_one_safe_non_retryable_mapping(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    reconciliation_error: type[TrustedSessionReconciliationRequiredError],
+    approval_action: str,
+    authority_method: str,
+) -> None:
+    operation_id = harness.prepare()
+    challenge = harness.preview(operation_id)
+    executor_calls = len(harness.executor.calls)
+    backend_secret = f"private-{approval_action}-authority-state"
+
+    def fail_authority(*_args, **_kwargs):
+        try:
+            raise reconciliation_error(backend_secret)
+        except TrustedSessionReconciliationRequiredError as exc:
+            raise TrustedSessionStoreError("private-wrapper") from exc
+
+    monkeypatch.setattr(TrustedAuthority, authority_method, fail_authority)
+    with pytest.raises(TrustedBrokerError) as rejected:
+        if approval_action == "request":
+            harness.broker.request_approval(
+                session_handle="requester-session-0123456789abcdef",
+                operation_id=operation_id,
+            )
+        elif approval_action == "inspect":
+            harness.broker.inspect_approval(
+                session_handle="approver-session-0123456789abcdef",
+                challenge_id=challenge["challenge_id"],
+            )
+        else:
+            harness.broker.decide_approval(
+                session_handle="approver-session-0123456789abcdef",
+                challenge_id=challenge["challenge_id"],
+                decision=ApprovalDecision.APPROVE,
+            )
+
+    error = rejected.value
+    assert error.code == "broker_session_reconciliation_required"
+    assert error.status_code == 503
+    assert error.odoo_effect == "none"
+    assert error.retryable is False
+    assert error.reconciliation_required is True
+    assert backend_secret not in str(error)
+    assert "private-wrapper" not in str(error)
+    assert len(harness.executor.calls) == executor_calls
+    event = harness.audit.events()[-1]
+    assert event.action == f"approval.{approval_action}"
+    assert event.outcome_code == "broker_session_reconciliation_required"
+
+
+@pytest.mark.parametrize(
+    "reconciliation_error",
+    [
+        TrustedSessionKnownCommittedError,
+        TrustedSessionCommitOutcomeUnknownError,
+    ],
+)
+def test_approve_execute_session_reconciliation_never_claims_unknown_odoo_effect(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    reconciliation_error: type[TrustedSessionReconciliationRequiredError],
+) -> None:
+    operation_id = harness.prepare()
+    challenge = harness.preview(operation_id)
+    harness.broker.decide_approval(
+        session_handle="approver-session-0123456789abcdef",
+        challenge_id=challenge["challenge_id"],
+        decision=ApprovalDecision.APPROVE,
+    )
+    executor_calls = len(harness.executor.calls)
+    execution_effects = harness.executor.execution_effects
+    backend_secret = "private-approved-execute-authority-state"
+
+    def fail_authority(*_args, **_kwargs):
+        try:
+            raise reconciliation_error(backend_secret)
+        except TrustedSessionReconciliationRequiredError as exc:
+            raise TrustedSessionStoreError("private-wrapper") from exc
+
+    monkeypatch.setattr(
+        TrustedAuthority,
+        "issue_approved_execute_for_operation",
+        fail_authority,
+    )
+    result = harness.dispatch(
+        "operation.approve_execute", {"operation_id": operation_id}
+    )
+
+    assert result.status_code == 200
+    assert result.authority_verified is True
+    assert result.executed_release_digest is None
+    assert result.executed_registry_digest is None
+    assert result.body["error"] == {
+        "code": "broker_session_reconciliation_required",
+        "message": "The trusted V3 broker rejected the request.",
+        "odoo_effect": "none",
+        "reconciliation_required": True,
+        "retryable": False,
+    }
+    assert result.body["error"]["odoo_effect"] != "unknown"
+    serialized = json.dumps(result.body, sort_keys=True)
+    assert backend_secret not in serialized
+    assert "private-wrapper" not in serialized
+    assert len(harness.executor.calls) == executor_calls
+    assert harness.executor.execution_effects == execution_effects
+    event = harness.audit.events()[-1]
+    assert event.action == "operation.approve_execute"
+    assert event.operation_id == operation_id
+    assert event.outcome_code == "broker_session_reconciliation_required"
 
 
 def test_full_business_lifecycle_requires_independent_approval_and_is_replay_safe(

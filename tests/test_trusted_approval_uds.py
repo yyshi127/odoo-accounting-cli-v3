@@ -917,6 +917,61 @@ def test_broker_worker_explicitly_inherits_the_shortest_absolute_deadline() -> N
     assert current_monotonic_deadline() is None
 
 
+@pytest.mark.parametrize(
+    ("path", "payload", "error_attribute"),
+    [
+        (
+            approval_uds.APPROVAL_REQUEST_PATH,
+            _request_payload(),
+            "request_error",
+        ),
+        (
+            approval_uds.APPROVAL_INSPECT_PATH,
+            _inspect_payload(),
+            "inspect_error",
+        ),
+        (
+            approval_uds.APPROVAL_DECIDE_PATH,
+            _decide_payload(),
+            "decide_error",
+        ),
+    ],
+)
+def test_broker_session_reconciliation_outcome_is_not_collapsed_to_rejection(
+    path: str, payload: dict[str, Any], error_attribute: str
+) -> None:
+    broker = StubBroker()
+    setattr(
+        broker,
+        error_attribute,
+        TrustedBrokerError(
+            f"private-{SESSION_HANDLE}-backend-state",
+            status_code=403,
+            odoo_effect="unknown",
+            retryable=True,
+            reconciliation_required=True,
+        ),
+    )
+    invoker = approval_uds._BoundedBrokerInvoker(broker, max_inflight=1)
+    call = approval_uds._decode_call(path, _json_bytes(payload))
+
+    result = invoker.invoke(
+        call, deadline_monotonic=time.monotonic() + 1
+    )
+
+    assert result.status == "reconciliation_required"
+    assert result.view is None
+    safe = approval_uds._safe_error(
+        "approval_session_reconciliation_required",
+        reconciliation_required=True,
+    )
+    assert safe["error"]["retryable"] is False
+    assert safe["error"]["reconciliation_required"] is True
+    serialized = json.dumps(safe)
+    assert SESSION_HANDLE not in serialized
+    assert "backend-state" not in serialized
+
+
 def test_hung_broker_is_time_bounded_and_consumes_only_one_bounded_slot() -> None:
     release = threading.Event()
 
@@ -1341,6 +1396,32 @@ def test_real_linux_broker_failures_are_closed_and_sanitized(failure: str) -> No
     status, _, body = _response(response)
     assert status == 403
     assert body == approval_uds._safe_error("approval_broker_rejected")
+    assert SESSION_HANDLE.encode() not in response
+    assert b"backend-secret" not in response
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="real Linux approval UDS")
+def test_real_linux_session_reconciliation_outcome_is_safe_http_503() -> None:
+    broker = StubBroker()
+    broker.request_error = TrustedBrokerError(
+        f"private-{SESSION_HANDLE}-backend-secret",
+        status_code=503,
+        odoo_effect="none",
+        retryable=False,
+        reconciliation_required=True,
+    )
+    with _linux_server(broker) as config:
+        response = _exchange(config.socket_path, _raw_request())
+
+    status, headers, body = _response(response)
+    assert status == 503
+    assert headers["cache-control"] == "no-store"
+    assert body == approval_uds._safe_error(
+        "approval_session_reconciliation_required",
+        reconciliation_required=True,
+    )
+    assert body["error"]["retryable"] is False
+    assert body["error"]["reconciliation_required"] is True
     assert SESSION_HANDLE.encode() not in response
     assert b"backend-secret" not in response
 

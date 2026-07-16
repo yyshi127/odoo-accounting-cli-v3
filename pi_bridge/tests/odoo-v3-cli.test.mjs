@@ -17,6 +17,7 @@ import {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const EXPECTED_RELEASE_DIGEST = "7".repeat(64);
 const EXPECTED_REGISTRY_DIGEST = "a".repeat(64);
+const TEST_BROKER_SESSION_HANDLE = "test-broker-session-0123456789abcdef";
 let fixtureDir;
 let successFixture;
 let trustedFixture;
@@ -223,7 +224,7 @@ function createBoundRunner(options = {}) {
 		brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
 		expectedReleaseDigest,
 		expectedRegistryDigest,
-		sessionHandleProvider: () => "test-broker-session-0123456789abcdef",
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
 		transport,
 	});
 	return async (action, request) => (
@@ -231,6 +232,16 @@ function createBoundRunner(options = {}) {
 			? cli(action, request)
 			: broker(action, request)
 	);
+}
+
+function createStaticBrokerRunner(response) {
+	return createV3BrokerClient({
+		brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		transport: async () => response,
+	});
 }
 
 function writeParameterFixtures() {
@@ -802,6 +813,196 @@ test("unknown Odoo effect preserves the complete CLI error and forbids blind rep
 		next_action: "operation.status",
 		operation_id: "op-1",
 	});
+});
+
+test("authenticated broker reconciliation errors enforce the optional boolean contract", async (t) => {
+	const action = "operation.status";
+	const request = requests()[action];
+	const runError = async (error) => {
+		const envelope = { command: action, error, ok: false };
+		const run = createStaticBrokerRunner({
+			authorityVerified: true,
+			body: JSON.stringify(envelope),
+			statusCode: 200,
+		});
+		return { envelope, result: await run(action, request) };
+	};
+	const baseError = {
+		code: "broker_session_rejected",
+		message: "The trusted V3 broker rejected the request.",
+		odoo_effect: "none",
+		retryable: false,
+	};
+
+	for (const [name, error] of [
+		["absent", { ...baseError }],
+		["false", {
+			...baseError,
+			odoo_effect: "unknown",
+			reconciliation_required: false,
+			retryable: true,
+		}],
+		["true with safe denial", {
+			...baseError,
+			reconciliation_required: true,
+		}],
+	]) {
+		await t.test(`accepts ${name}`, async () => {
+			const { envelope, result } = await runError(error);
+			assert.deepEqual(result, envelope);
+			assert.equal(Object.hasOwn(result, "business_succeeded"), false);
+			assert.equal(Object.hasOwn(result, "data"), false);
+		});
+	}
+
+	for (const [name, error] of [
+		["wrong type", { ...baseError, reconciliation_required: "true" }],
+		["true and retryable", {
+			...baseError,
+			reconciliation_required: true,
+			retryable: true,
+		}],
+		["true and unknown effect", {
+			...baseError,
+			odoo_effect: "unknown",
+			reconciliation_required: true,
+		}],
+		["an extra error field", {
+			...baseError,
+			reconciliation_required: true,
+			unexpected: true,
+		}],
+	]) {
+		await t.test(`rejects ${name}`, async () => {
+			const { result } = await runError(error);
+			assert.equal(result.ok, false);
+			assert.equal(result.error.code, "bridge_invalid_v3_broker_response");
+			assert.equal(Object.hasOwn(result.error, "reconciliation_required"), false);
+		});
+	}
+});
+
+test("the exact pre-auth broker reconciliation denial is returned unchanged", async () => {
+	const action = "operation.approve_execute";
+	const request = requests()[action];
+	const envelope = {
+		command: action,
+		error: {
+			code: "broker_session_reconciliation_required",
+			message: "The trusted V3 broker rejected the request.",
+			odoo_effect: "none",
+			reconciliation_required: true,
+			retryable: false,
+		},
+		ok: false,
+	};
+	const run = createStaticBrokerRunner({
+		authorityVerified: false,
+		body: JSON.stringify(envelope),
+		statusCode: 503,
+	});
+
+	const result = await run(action, request);
+
+	assert.deepEqual(result, envelope);
+	assert.deepEqual(Object.keys(result).sort(), ["command", "error", "ok"]);
+	assert.equal(Object.hasOwn(result, "business_succeeded"), false);
+	assert.equal(Object.hasOwn(result, "data"), false);
+	assert.equal(Object.hasOwn(result, "executedReleaseDigest"), false);
+	assert.equal(Object.hasOwn(result, "executedRegistryDigest"), false);
+});
+
+test("all other unauthenticated or non-200 broker responses stay untrusted", async (t) => {
+	const action = "operation.approve_execute";
+	const request = requests()[action];
+	const error = {
+		code: "broker_session_reconciliation_required",
+		message: "The trusted V3 broker rejected the request.",
+		odoo_effect: "none",
+		reconciliation_required: true,
+		retryable: false,
+	};
+	const envelope = { command: action, error, ok: false };
+	const response = {
+		authorityVerified: false,
+		body: JSON.stringify(envelope),
+		statusCode: 503,
+	};
+	const bodyWith = (overrides) => JSON.stringify({
+		...envelope,
+		...overrides,
+	});
+	const errorBodyWith = (overrides) => bodyWith({
+		error: { ...error, ...overrides },
+	});
+
+	for (const [name, unsafeResponse] of [
+		["wrong status", { ...response, statusCode: 500 }],
+		["authenticated 503", { ...response, authorityVerified: true }],
+		["unauthenticated 200", { ...response, statusCode: 200 }],
+		["executed release identity", {
+			...response,
+			executedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		}],
+		["executed registry identity", {
+			...response,
+			executedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		}],
+		["wrong command", {
+			...response,
+			body: bodyWith({ command: "operation.status" }),
+		}],
+		["wrong code", {
+			...response,
+			body: errorBodyWith({ code: "broker_session_rejected" }),
+		}],
+		["wrong flag", {
+			...response,
+			body: errorBodyWith({ reconciliation_required: false }),
+		}],
+		["retryable", {
+			...response,
+			body: errorBodyWith({ retryable: true }),
+		}],
+		["unknown effect", {
+			...response,
+			body: errorBodyWith({ odoo_effect: "unknown" }),
+		}],
+		["private message", {
+			...response,
+			body: errorBodyWith({ message: "private session-store failure" }),
+		}],
+		["extra error field", {
+			...response,
+			body: errorBodyWith({ unexpected: true }),
+		}],
+		["extra envelope field", {
+			...response,
+			body: bodyWith({ unexpected: true }),
+		}],
+		["session handle echo", {
+			...response,
+			body: errorBodyWith({
+				message: `Rejected ${TEST_BROKER_SESSION_HANDLE}`,
+			}),
+		}],
+	]) {
+		await t.test(name, async () => {
+			const run = createStaticBrokerRunner(unsafeResponse);
+			const result = await run(action, request);
+			assert.deepEqual(result, {
+				command: action,
+				error: {
+					code: "bridge_invalid_v3_broker_response",
+					message: "The V3 broker did not return its authenticated response contract.",
+					odoo_effect: "unknown",
+					operation_id: request.operation_id,
+					retryable: false,
+				},
+				ok: false,
+			});
+		});
+	}
 });
 
 test("the bridge exposes capability/read/write V3 tools while retaining all five V2 tools", async () => {

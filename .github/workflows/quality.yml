@@ -52,10 +52,26 @@ jobs:
           test "$(python -c 'import sys; print(sys.platform)')" = linux
           test "$(id -u)" -ne 0
           command -v systemd-run
-          systemd_state="$(sudo systemctl is-system-running || true)"
+          systemd_state=
+          for _attempt in $(seq 1 30); do
+            systemd_state="$(
+              sudo systemctl is-system-running 2>&1 || true
+            )"
+            case "$systemd_state" in
+              running|degraded) break ;;
+              initializing|starting) sleep 1 ;;
+              *) break ;;
+            esac
+          done
           case "$systemd_state" in
             running|degraded) ;;
-            *) echo "systemd manager is unavailable: $systemd_state" >&2; exit 1 ;;
+            *)
+              echo "systemd manager is unavailable: $systemd_state" >&2
+              sudo systemctl list-jobs --no-pager || true
+              sudo systemctl --failed --no-pager || true
+              sudo journalctl -b --no-pager -n 100 || true
+              exit 1
+              ;;
           esac
 
           for group in odoo-v3-broker odoo-v3-runtime; do
@@ -126,6 +142,43 @@ jobs:
                   f"errors={len(errors)} skipped={len(skipped)}"
               )
           print(f"non_root_linux_process_tests={len(tests)}")
+          PY
+      - name: Stress Linux UDS capacity and atomic session lifecycle
+        run: |
+          set -euo pipefail
+          test "$(python -c 'import sys; print(sys.platform)')" = linux
+          for attempt in $(seq 1 10); do
+            report="$RUNNER_TEMP/linux-concurrency-$attempt.xml"
+            python -m pytest -q --junitxml="$report" \
+              tests/test_trusted_broker_uds.py::test_real_linux_slow_client_consumes_one_bounded_slot_then_releases_it \
+              tests/test_trusted_session_sqlite.py::test_empty_store_initialization_is_atomic_across_processes \
+              tests/test_trusted_session_sqlite.py::test_single_use_resolution_is_atomic_across_processes
+          done
+          RUNNER_TEMP="$RUNNER_TEMP" python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          reports = sorted(
+              Path(os.environ["RUNNER_TEMP"]).glob("linux-concurrency-*.xml")
+          )
+          if len(reports) != 10:
+              raise SystemExit(
+                  f"Linux concurrency reports are incomplete: {len(reports)}"
+              )
+          for report in reports:
+              root = ET.parse(report).getroot()
+              tests = root.findall(".//testcase")
+              failures = root.findall(".//failure")
+              errors = root.findall(".//error")
+              skipped = root.findall(".//skipped")
+              if len(tests) != 3 or failures or errors or skipped:
+                  raise SystemExit(
+                      f"Linux concurrency gate failed for {report.name}: "
+                      f"tests={len(tests)} failures={len(failures)} "
+                      f"errors={len(errors)} skipped={len(skipped)}"
+                  )
+          print(f"linux_concurrency_repetitions={len(reports)}")
           PY
       - name: Gate reconciliation-only recovery without skips
         run: |

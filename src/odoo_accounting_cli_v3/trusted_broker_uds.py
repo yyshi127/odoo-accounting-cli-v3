@@ -84,6 +84,7 @@ _RESERVED_AUTHORITY_KEYS = frozenset(
     }
 )
 _MAX_JSON_DEPTH: Final = 64
+_MAX_HTTP_REQUEST_LINE_BYTES: Final = 65_536
 _PEER_CREDENTIAL_FORMAT: Final = "iII"
 _PEER_CREDENTIAL_SIZE = struct.calcsize(_PEER_CREDENTIAL_FORMAT)
 _MAX_LINUX_ID: Final = 2**32 - 2
@@ -836,15 +837,39 @@ if hasattr(socketserver, "UnixStreamServer"):
             if not self._handler_slots.acquire(blocking=False):
                 with self._credential_lock:
                     self._credentials.pop(id(request), None)
+                timeout_seconds = min(
+                    float(self.config.request_timeout_seconds), 0.05
+                )
+                drain_deadline = monotonic() + timeout_seconds
+                remaining = (
+                    _MAX_HTTP_REQUEST_LINE_BYTES
+                    + self.config.max_header_bytes
+                    + self.config.max_body_bytes
+                )
                 try:
-                    request.settimeout(
-                        min(float(self.config.request_timeout_seconds), 0.05)
-                    )
+                    request.settimeout(timeout_seconds)
                     request.sendall(_capacity_response())
+                    # Half-close only the response side, then consume the
+                    # already-sent bounded request.  Closing with unread bytes
+                    # can reset a Unix socket and discard the safe 503 before
+                    # the Pi client receives it.
+                    try:
+                        request.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    while remaining > 0:
+                        timeout_seconds = drain_deadline - monotonic()
+                        if timeout_seconds <= 0:
+                            break
+                        request.settimeout(timeout_seconds)
+                        chunk = request.recv(min(65_536, remaining))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
                 except (TimeoutError, socket.timeout, OSError):
                     pass
                 finally:
-                    self.shutdown_request(request)
+                    self.close_request(request)
                 return
             try:
                 super().process_request(request, client_address)

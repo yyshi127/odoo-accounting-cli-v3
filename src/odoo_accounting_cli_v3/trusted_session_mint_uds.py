@@ -46,6 +46,7 @@ from .trusted_session_sqlite import (
     IssuedTrustedSession,
     SQLiteTrustedSessionStore,
     TrustedSessionIdentity,
+    TrustedSessionReconciliationRequiredError,
     TrustedSessionStoreError,
 )
 
@@ -88,6 +89,10 @@ _MAX_LINUX_ID: Final = 2**32 - 2
 
 class TrustedSessionMintUdsError(RuntimeError):
     """The session-mint boundary rejected configuration or request state."""
+
+
+class _TrustedSessionReconciliationRequired(TrustedSessionMintUdsError):
+    """A session-store mutation must be reconciled and never replayed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,8 +393,16 @@ def _issue_session(
             ttl_seconds=config.session_ttl_seconds,
             max_uses=config.session_max_uses,
         )
-    except TrustedSessionStoreError as exc:
-        raise TrustedSessionMintUdsError("durable session mint failed") from exc
+    except Exception as exc:
+        if _session_reconciliation_required(exc):
+            raise _TrustedSessionReconciliationRequired(
+                "durable session mint requires reconciliation"
+            ) from None
+        if isinstance(exc, TrustedSessionStoreError):
+            raise TrustedSessionMintUdsError(
+                "durable session mint failed"
+            ) from exc
+        raise
 
 
 def _revoke_session(store: SQLiteTrustedSessionStore, handle: str) -> bool:
@@ -399,18 +412,55 @@ def _revoke_session(store: SQLiteTrustedSessionStore, handle: str) -> bool:
         raise TrustedSessionMintUdsError("trusted session store is invalid")
     try:
         return store.revoke(handle, reason="odoo_request_completed")
-    except TrustedSessionStoreError as exc:
-        raise TrustedSessionMintUdsError("durable session revoke failed") from exc
+    except Exception as exc:
+        if _session_reconciliation_required(exc):
+            raise _TrustedSessionReconciliationRequired(
+                "durable session revoke requires reconciliation"
+            ) from None
+        if isinstance(exc, TrustedSessionStoreError):
+            raise TrustedSessionMintUdsError(
+                "durable session revoke failed"
+            ) from exc
+        raise
 
 
-def _safe_error(code: str, *, retryable: bool = False) -> dict[str, Any]:
+def _session_reconciliation_required(exc: BaseException) -> bool:
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if (
+            isinstance(current, TrustedSessionReconciliationRequiredError)
+            and current.reconciliation_required is True
+            and current.retryable is False
+        ):
+            return True
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return False
+
+
+def _safe_error(
+    code: str,
+    *,
+    retryable: bool = False,
+    reconciliation_required: bool = False,
+) -> dict[str, Any]:
+    error: dict[str, Any] = {
+        "code": code,
+        "message": "The trusted session mint rejected the local request.",
+        "retryable": retryable,
+    }
+    if reconciliation_required:
+        error["reconciliation_required"] = True
     return {
         "ok": False,
-        "error": {
-            "code": code,
-            "message": "The trusted session mint rejected the local request.",
-            "retryable": retryable,
-        },
+        "error": error,
     }
 
 
@@ -670,6 +720,15 @@ class _MintRequestHandler(BaseHTTPRequestHandler):
                 except MonotonicDeadlineExceeded:
                     self._reject(408, "session_revoke_request_timeout")
                     return
+                except _TrustedSessionReconciliationRequired:
+                    self._send_json(
+                        503,
+                        _safe_error(
+                            "session_revoke_reconciliation_required",
+                            reconciliation_required=True,
+                        ),
+                    )
+                    return
                 except TrustedSessionMintUdsError:
                     self._reject(400, "session_revoke_request_rejected")
                     return
@@ -690,6 +749,15 @@ class _MintRequestHandler(BaseHTTPRequestHandler):
                 issued = _issue_session(self.server.store, self.server.config, identity)
             except MonotonicDeadlineExceeded:
                 self._reject(408, "session_mint_request_timeout")
+                return
+            except _TrustedSessionReconciliationRequired:
+                self._send_json(
+                    503,
+                    _safe_error(
+                        "session_mint_reconciliation_required",
+                        reconciliation_required=True,
+                    ),
+                )
                 return
             except Exception:
                 self._reject(503, "session_mint_failed")

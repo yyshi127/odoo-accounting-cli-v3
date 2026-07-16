@@ -20,7 +20,12 @@ import pytest
 
 import odoo_accounting_cli_v3.trusted_session_mint_uds as mint_uds
 from odoo_accounting_cli_v3.monotonic_deadline import current_monotonic_deadline
-from odoo_accounting_cli_v3.trusted_session_sqlite import SQLiteTrustedSessionStore
+from odoo_accounting_cli_v3.trusted_session_sqlite import (
+    SQLiteTrustedSessionStore,
+    TrustedSessionCommitOutcomeUnknownError,
+    TrustedSessionKnownCommittedError,
+    TrustedSessionReconciliationRequiredError,
+)
 
 
 DATABASE_UUID = "f1d2d2f9-8d43-4b2f-a36c-64c76df38f81"
@@ -190,6 +195,56 @@ def test_store_issue_uses_only_fixed_config_budget(tmp_path: Path) -> None:
     for _ in range(16):
         assert store.resolve(issued.handle) == issued.session
     assert store.resolve(issued.handle) is None
+
+
+@pytest.mark.parametrize(
+    "reconciliation_error",
+    [
+        TrustedSessionKnownCommittedError,
+        TrustedSessionCommitOutcomeUnknownError,
+    ],
+)
+@pytest.mark.parametrize("mutation", ["issue", "revoke"])
+def test_store_reconciliation_outcome_is_non_retryable_and_safely_classified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reconciliation_error: type[TrustedSessionReconciliationRequiredError],
+    mutation: str,
+) -> None:
+    store = SQLiteTrustedSessionStore((tmp_path / "sessions.sqlite3").resolve())
+    backend_secret = "private-session-store-state"
+
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        try:
+            raise reconciliation_error(backend_secret)
+        except TrustedSessionReconciliationRequiredError as exc:
+            raise RuntimeError("private-wrapper") from exc
+
+    monkeypatch.setattr(SQLiteTrustedSessionStore, mutation, fail)
+    with pytest.raises(
+        mint_uds._TrustedSessionReconciliationRequired
+    ) as rejected:
+        if mutation == "issue":
+            mint_uds._issue_session(
+                store,
+                _config(),
+                mint_uds._decode_identity_request(
+                    _json_bytes(_identity_payload())
+                ),
+            )
+        else:
+            mint_uds._revoke_session(store, "A" * 43)
+
+    assert backend_secret not in str(rejected.value)
+    assert "private-wrapper" not in str(rejected.value)
+    action = "mint" if mutation == "issue" else "revoke"
+    body = mint_uds._safe_error(
+        f"session_{action}_reconciliation_required",
+        reconciliation_required=True,
+    )
+    assert body["error"]["retryable"] is False
+    assert body["error"]["reconciliation_required"] is True
+    assert backend_secret not in json.dumps(body)
 
 
 def test_revoke_request_accepts_only_handle_and_never_echoes_it(tmp_path: Path) -> None:
@@ -427,6 +482,65 @@ def test_real_linux_fixed_route_mints_without_logging_handle(
     captured = capfd.readouterr()
     assert handle not in captured.out
     assert handle not in captured.err
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="real Linux mint UDS contract")
+@pytest.mark.parametrize(
+    "reconciliation_error",
+    [
+        TrustedSessionKnownCommittedError,
+        TrustedSessionCommitOutcomeUnknownError,
+    ],
+)
+@pytest.mark.parametrize(
+    ("mutation", "path", "code"),
+    [
+        ("issue", mint_uds.MINT_PATH, "session_mint_reconciliation_required"),
+        (
+            "revoke",
+            mint_uds.REVOKE_PATH,
+            "session_revoke_reconciliation_required",
+        ),
+    ],
+)
+def test_real_linux_reconciliation_outcome_is_distinct_safe_http_503(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reconciliation_error: type[TrustedSessionReconciliationRequiredError],
+    mutation: str,
+    path: str,
+    code: str,
+) -> None:
+    store = SQLiteTrustedSessionStore((tmp_path / "sessions.sqlite3").resolve())
+    backend_secret = "private-session-store-state"
+    handle = "A" * 43
+
+    def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise reconciliation_error(backend_secret)
+
+    monkeypatch.setattr(SQLiteTrustedSessionStore, mutation, fail)
+    body = (
+        _json_bytes(_identity_payload())
+        if mutation == "issue"
+        else _json_bytes({"handle": handle})
+    )
+    with _linux_server(store) as config:
+        response = _exchange(
+            config.socket_path,
+            _raw_request(path=path, body=body),
+        )
+
+    status, headers, response_body = _response(response)
+    assert status == 503
+    assert headers["cache-control"] == "no-store"
+    assert response_body == mint_uds._safe_error(
+        code, reconciliation_required=True
+    )
+    assert response_body["error"]["retryable"] is False
+    assert response_body["error"]["reconciliation_required"] is True
+    serialized = json.dumps(response_body)
+    assert backend_secret not in serialized
+    assert handle not in serialized
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real Linux mint UDS contract")

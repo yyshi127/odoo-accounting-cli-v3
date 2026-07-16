@@ -402,6 +402,36 @@ function bridgeFailure(action, request, { code, message, odooEffect, retryable }
 	return { command: action, error, ok: false };
 }
 
+function parseSafePreauthReconciliationEnvelope(raw, cliCommand) {
+	let payload;
+	try {
+		payload = JSON.parse(raw);
+	} catch {
+		return null;
+	}
+	const error = payload?.error;
+	if (
+		!exactKeys(payload, ["command", "error", "ok"])
+		|| payload.command !== cliCommand
+		|| payload.ok !== false
+		|| !exactKeys(error, [
+			"code",
+			"message",
+			"odoo_effect",
+			"reconciliation_required",
+			"retryable",
+		])
+		|| error.code !== "broker_session_reconciliation_required"
+		|| error.message !== "The trusted V3 broker rejected the request."
+		|| error.odoo_effect !== "none"
+		|| error.reconciliation_required !== true
+		|| error.retryable !== false
+	) {
+		return null;
+	}
+	return payload;
+}
+
 function parseCliEnvelope(
 	raw,
 	cliCommand,
@@ -474,12 +504,21 @@ function parseCliEnvelope(
 		|| !["none", "unknown"].includes(error.odoo_effect)
 		|| typeof error.retryable !== "boolean"
 		|| (error.operation_id !== undefined && typeof error.operation_id !== "string")
+		|| (
+			error.reconciliation_required !== undefined
+			&& typeof error.reconciliation_required !== "boolean"
+		)
+		|| (
+			error.reconciliation_required === true
+			&& (error.retryable !== false || error.odoo_effect !== "none")
+		)
 		|| (error.state !== undefined && typeof error.state !== "string")
 		|| errorKeys.some((key) => ![
 			"code",
 			"message",
 			"odoo_effect",
 			"operation_id",
+			"reconciliation_required",
 			"retryable",
 			"state",
 		].includes(key))
@@ -925,6 +964,26 @@ export function createV3BrokerClient(options = {}) {
 				odooEffect: action === "operation.approve_execute" ? "unknown" : "none",
 				retryable: true,
 			});
+		}
+		const responseBodyIsSafeToInspect =
+			isObject(response)
+			&& typeof response.body === "string"
+			&& Buffer.byteLength(response.body) <= maxOutputBytes
+			&& !response.body.includes(sessionHandle);
+		if (
+			responseBodyIsSafeToInspect
+			&& response.statusCode === 503
+			&& response.authorityVerified === false
+			&& response.executedReleaseDigest === undefined
+			&& response.executedRegistryDigest === undefined
+		) {
+			const preauthReconciliation = parseSafePreauthReconciliationEnvelope(
+				response.body,
+				action,
+			);
+			if (preauthReconciliation) {
+				return preauthReconciliation;
+			}
 		}
 		if (
 			!isObject(response)

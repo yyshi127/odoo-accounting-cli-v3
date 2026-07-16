@@ -641,19 +641,23 @@ def test_real_linux_slow_client_consumes_one_bounded_slot_then_releases_it() -> 
             slow.connect(config.socket_path)
             slow.sendall(b"POST ")
             time.sleep(0.05)
-            rejected = _unix_exchange(
-                config.socket_path,
-                _raw_request("/v1/read", "read"),
-            )
+            rejected_responses = [
+                _unix_exchange(
+                    config.socket_path,
+                    _raw_request("/v1/read", "read"),
+                )
+                for _ in range(20)
+            ]
         finally:
             slow.close()
 
-        status, headers, body = _response_headers(rejected)
-        assert status == 503
-        assert headers["cache-control"] == "no-store"
-        assert body == uds._safe_error(
-            "broker_capacity_exhausted", retryable=True
-        )
+        for rejected in rejected_responses:
+            status, headers, body = _response_headers(rejected)
+            assert status == 503
+            assert headers["cache-control"] == "no-store"
+            assert body == uds._safe_error(
+                "broker_capacity_exhausted", retryable=True
+            )
         assert calls == []
 
         recovered = b""

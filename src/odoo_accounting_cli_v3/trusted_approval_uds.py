@@ -52,6 +52,7 @@ from .monotonic_deadline import (
 )
 from .operations import MAX_APPROVAL_TTL, State, canonical_json, operation_digest
 from .trusted_authority import ApprovalDecision
+from .trusted_broker import TrustedBrokerError
 
 
 APPROVAL_REQUEST_PATH: Final = "/v1/approval/request"
@@ -202,6 +203,10 @@ _MAX_LINUX_ID: Final = 2**32 - 2
 
 class TrustedApprovalUdsError(RuntimeError):
     """The approval UDS boundary rejected configuration or request state."""
+
+
+class _TrustedApprovalSessionReconciliationRequired(TrustedApprovalUdsError):
+    """The broker consumed session state with a non-replayable outcome."""
 
 
 class TrustedApprovalBroker(Protocol):
@@ -1038,6 +1043,14 @@ def _invoke_broker(
                 or view["state"] != expected_state
             ):
                 raise ValueError("approval response decision mismatch")
+    except TrustedBrokerError as exc:
+        if (
+            exc.reconciliation_required is True
+            and exc.retryable is False
+            and exc.odoo_effect == "none"
+        ):
+            raise _TrustedApprovalSessionReconciliationRequired from None
+        failed = True
     except Exception:
         failed = True
     if failed or view is None:
@@ -1127,6 +1140,8 @@ class _BoundedBrokerInvoker:
                     peer=peer,
                 )
                 result["status"] = "ok"
+            except _TrustedApprovalSessionReconciliationRequired:
+                result["status"] = "reconciliation_required"
             except BaseException:
                 # Never let threading.excepthook print a handle/backend traceback.
                 pass
@@ -1163,19 +1178,31 @@ class _BoundedBrokerInvoker:
         view = result["view"]
         if status == "timeout":
             return _BrokerInvocation(status="timeout", view=None)
+        if status == "reconciliation_required":
+            return _BrokerInvocation(
+                status="reconciliation_required", view=None
+            )
         if status != "ok" or type(view) is not dict:
             return _BrokerInvocation(status="rejected", view=None)
         return _BrokerInvocation(status="ok", view=view)
 
 
-def _safe_error(code: str, *, retryable: bool = False) -> dict[str, Any]:
+def _safe_error(
+    code: str,
+    *,
+    retryable: bool = False,
+    reconciliation_required: bool = False,
+) -> dict[str, Any]:
+    error: dict[str, Any] = {
+        "code": code,
+        "message": "The trusted approval service rejected the local request.",
+        "retryable": retryable,
+    }
+    if reconciliation_required:
+        error["reconciliation_required"] = True
     return {
         "ok": False,
-        "error": {
-            "code": code,
-            "message": "The trusted approval service rejected the local request.",
-            "retryable": retryable,
-        },
+        "error": error,
     }
 
 
@@ -1483,6 +1510,15 @@ class _ApprovalRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 503,
                 _safe_error("approval_broker_unavailable", retryable=True),
+            )
+            return
+        if invocation.status == "reconciliation_required":
+            self._send_json(
+                503,
+                _safe_error(
+                    "approval_session_reconciliation_required",
+                    reconciliation_required=True,
+                ),
             )
             return
         if invocation.status != "ok" or invocation.view is None:

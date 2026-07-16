@@ -38,6 +38,7 @@ from .trusted_authority import (
     TrustedAuthority,
     TrustedSession,
 )
+from .trusted_session_sqlite import TrustedSessionReconciliationRequiredError
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -116,12 +117,18 @@ class TrustedBrokerError(ValueError):
         status_code: int = 403,
         odoo_effect: str = "none",
         retryable: bool = False,
+        reconciliation_required: bool = False,
     ) -> None:
+        if reconciliation_required:
+            status_code = 503
+            odoo_effect = "none"
+            retryable = False
         super().__init__(code)
         self.code = code
         self.status_code = status_code
         self.odoo_effect = odoo_effect
         self.retryable = retryable
+        self.reconciliation_required = reconciliation_required
 
 
 class HistoricalExecutor(Protocol):
@@ -256,6 +263,37 @@ class TrustedBrokerResult:
 
 def _is_digest(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+
+def _session_reconciliation_error(
+    exc: BaseException,
+) -> TrustedBrokerError | None:
+    """Classify a non-replayable session-store outcome through safe wrappers."""
+
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        identity = id(current)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if (
+            isinstance(current, TrustedSessionReconciliationRequiredError)
+            and current.reconciliation_required is True
+            and current.retryable is False
+        ):
+            return TrustedBrokerError(
+                "broker_session_reconciliation_required",
+                status_code=503,
+                odoo_effect="none",
+                retryable=False,
+                reconciliation_required=True,
+            )
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+    return None
 
 
 def _canonical_object(
@@ -747,14 +785,17 @@ def _inspection_with_precheck(
 
 
 def _safe_error_body(action: str, error: TrustedBrokerError) -> dict[str, Any]:
+    safe_error: dict[str, Any] = {
+        "code": error.code,
+        "message": "The trusted V3 broker rejected the request.",
+        "odoo_effect": error.odoo_effect,
+        "retryable": error.retryable,
+    }
+    if error.reconciliation_required:
+        safe_error["reconciliation_required"] = True
     return {
         "command": action,
-        "error": {
-            "code": error.code,
-            "message": "The trusted V3 broker rejected the request.",
-            "odoo_effect": error.odoo_effect,
-            "retryable": error.retryable,
-        },
+        "error": safe_error,
         "ok": False,
     }
 
@@ -853,6 +894,7 @@ class TrustedBroker:
                 status_code=error.status_code,
                 odoo_effect=error.odoo_effect,
                 retryable=True,
+                reconciliation_required=error.reconciliation_required,
             )
         return TrustedBrokerResult(
             # Once the independent session has been authenticated, failures
@@ -887,6 +929,9 @@ class TrustedBroker:
             now = self._utc_clock()
             session = self._session_resolver(session_handle)
         except Exception as exc:
+            reconciliation = _session_reconciliation_error(exc)
+            if reconciliation is not None:
+                raise reconciliation from None
             raise TrustedBrokerError(
                 "broker_session_rejected", status_code=401
             ) from exc
@@ -1080,6 +1125,9 @@ class TrustedBroker:
 
     @staticmethod
     def _authority_error(exc: Exception) -> TrustedBrokerError:
+        reconciliation = _session_reconciliation_error(exc)
+        if reconciliation is not None:
+            return reconciliation
         if isinstance(exc, (ChallengeExpired, ChallengeTerminal)):
             return TrustedBrokerError("broker_approval_not_executable", status_code=409)
         if isinstance(exc, AuthorityConcurrentUpdate):
@@ -1368,7 +1416,12 @@ class TrustedBroker:
                 raise TrustedBrokerError("broker_read_authority_rejected")
         except TrustedBrokerError as exc:
             return self._error(action, exc, authority_verified=True)
-        except Exception:
+        except Exception as exc:
+            reconciliation = _session_reconciliation_error(exc)
+            if reconciliation is not None:
+                return self._error(
+                    action, reconciliation, authority_verified=True
+                )
             return self._error(
                 action,
                 TrustedBrokerError("broker_read_authority_rejected", status_code=403),
@@ -1644,6 +1697,13 @@ class TrustedBroker:
             )
         except TrustedBrokerError as exc:
             return self._error(action, exc, authority_verified=True)
+        except Exception as exc:
+            reconciliation = _session_reconciliation_error(exc)
+            if reconciliation is not None:
+                return self._error(
+                    action, reconciliation, authority_verified=True
+                )
+            raise
         try:
             self._deadline(deadline_monotonic, action=action)
             response = _canonical_object(
@@ -1710,7 +1770,11 @@ class TrustedBroker:
                 route=route,
                 audit_metadata=audit_metadata,
             )
-            if action in {"operation.prepare", "operation.recover"} and not exc.retryable:
+            if (
+                action in {"operation.prepare", "operation.recover"}
+                and not exc.retryable
+                and not exc.reconciliation_required
+            ):
                 exc = TrustedBrokerError(
                     exc.code,
                     status_code=exc.status_code,
@@ -2170,10 +2234,12 @@ class TrustedBroker:
             challenge_id = challenge.challenge_id
         except TrustedBrokerError as exc:
             error = exc
-        except AuthorityError:
-            error = TrustedBrokerError("broker_approval_rejected", status_code=403)
-        except Exception:
-            error = TrustedBrokerError(
+        except AuthorityError as exc:
+            error = _session_reconciliation_error(exc) or TrustedBrokerError(
+                "broker_approval_rejected", status_code=403
+            )
+        except Exception as exc:
+            error = _session_reconciliation_error(exc) or TrustedBrokerError(
                 "broker_approval_rejected", status_code=500, retryable=True
             )
         else:
@@ -2290,10 +2356,12 @@ class TrustedBroker:
                 ) from exc
         except TrustedBrokerError as exc:
             error = exc
-        except AuthorityError:
-            error = TrustedBrokerError("broker_approval_rejected", status_code=403)
-        except Exception:
-            error = TrustedBrokerError(
+        except AuthorityError as exc:
+            error = _session_reconciliation_error(exc) or TrustedBrokerError(
+                "broker_approval_rejected", status_code=403
+            )
+        except Exception as exc:
+            error = _session_reconciliation_error(exc) or TrustedBrokerError(
                 "broker_approval_rejected", status_code=500, retryable=True
             )
         else:
@@ -2382,11 +2450,11 @@ class TrustedBroker:
         except TrustedBrokerError as exc:
             error = exc
         except AuthorityError as exc:
-            error = TrustedBrokerError(
+            error = _session_reconciliation_error(exc) or TrustedBrokerError(
                 "broker_approval_rejected", status_code=403
             )
         except Exception as exc:
-            error = TrustedBrokerError(
+            error = _session_reconciliation_error(exc) or TrustedBrokerError(
                 "broker_approval_rejected", status_code=403
             )
         else:

@@ -14,6 +14,7 @@ hash-chained, append-only security event trail in the same commit boundary.
 from __future__ import annotations
 
 import base64
+import errno
 import hashlib
 import hmac
 import json
@@ -22,12 +23,18 @@ import re
 import secrets
 import sqlite3
 import stat
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
+
+if os.name == "posix":
+    import fcntl
+else:  # pragma: no cover - exercised by the Windows test matrix
+    fcntl = None  # type: ignore[assignment]
 
 from .monotonic_deadline import (
     bounded_sqlite_busy_timeout_ms,
@@ -41,10 +48,44 @@ TRUSTED_SESSION_STORE_SCHEMA_VERSION = 1
 _HANDLE_BYTES = 32
 _HANDLE_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_RETRYABLE_SQLITE_SETUP_BASE_CODES = frozenset(
+    {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED, sqlite3.SQLITE_PROTOCOL}
+)
+_SQLITE_SETUP_RETRY_INITIAL_SECONDS = 0.001
+_SQLITE_SETUP_RETRY_MAX_SECONDS = 0.025
+_SQLITE_SETUP_ATTEMPT_MAX_BUSY_MS = 100
+_WRITER_LOCK_SUFFIX = ".writer.lock"
 
 
 class TrustedSessionStoreError(AuthorityError):
     """The trusted-session store rejected an unsafe or inconsistent action."""
+
+
+class TrustedSessionReconciliationRequiredError(TrustedSessionStoreError):
+    """A session mutation cannot be replayed until durable state is reconciled."""
+
+    retryable = False
+    reconciliation_required = True
+
+
+class TrustedSessionKnownCommittedError(TrustedSessionReconciliationRequiredError):
+    """A durable commit completed but cleanup now requires reconciliation.
+
+    Callers must not replay the write represented by this exception.  They must
+    reconcile the durable store state instead.
+    """
+
+    committed = True
+    commit_outcome = "committed"
+
+
+class TrustedSessionCommitOutcomeUnknownError(
+    TrustedSessionReconciliationRequiredError
+):
+    """Commit raised without a positively confirmed rollback."""
+
+    committed = None
+    commit_outcome = "unknown"
 
 
 @dataclass(frozen=True)
@@ -555,6 +596,10 @@ class SQLiteTrustedSessionStore:
                 raise TrustedSessionStoreError(
                     "trusted session database must be a regular non-symlink file"
                 )
+            if opened.st_nlink != 1 or metadata.st_nlink != 1:
+                raise TrustedSessionStoreError(
+                    "trusted session database must have exactly one hard link"
+                )
             if os.name == "posix" and (
                 opened.st_uid != os.geteuid()
                 or stat.S_IMODE(opened.st_mode) != 0o600
@@ -584,6 +629,10 @@ class SQLiteTrustedSessionStore:
             ):
                 raise TrustedSessionStoreError(
                     "trusted session database path changed while open"
+                )
+            if metadata.st_nlink != 1:
+                raise TrustedSessionStoreError(
+                    "trusted session database must have exactly one hard link"
                 )
             if os.name == "posix" and (
                 metadata.st_uid != os.geteuid()
@@ -640,55 +689,473 @@ class SQLiteTrustedSessionStore:
                 if descriptor is not None:
                     os.close(descriptor)
 
-    def _configure(self, connection: sqlite3.Connection, *, write: bool) -> None:
-        busy_timeout_ms = bounded_sqlite_busy_timeout_ms(self.busy_timeout_ms)
+    @property
+    def _writer_lock_path(self) -> Path:
+        return Path(f"{self.path}{_WRITER_LOCK_SUFFIX}")
+
+    def _verify_writer_lock_file(
+        self, descriptor: int, expected: tuple[int, int]
+    ) -> None:
+        self._secure_parent()
+        try:
+            opened = os.fstat(descriptor)
+            metadata = self._writer_lock_path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or self._writer_lock_path.is_symlink()
+                or (opened.st_dev, opened.st_ino) != expected
+                or (metadata.st_dev, metadata.st_ino) != expected
+                or opened.st_uid != os.geteuid()
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or metadata.st_nlink != 1
+            ):
+                raise TrustedSessionStoreError(
+                    "trusted session writer lock file is invalid"
+                )
+        except TrustedSessionStoreError:
+            raise
+        except OSError as exc:
+            raise TrustedSessionStoreError(
+                "trusted session writer lock file cannot be verified"
+            ) from exc
+
+    def _open_writer_lock_file(self) -> tuple[int, tuple[int, int]]:
+        self._secure_parent()
+        if os.name != "posix" or fcntl is None or not hasattr(os, "O_NOFOLLOW"):
+            raise TrustedSessionStoreError(
+                "trusted session writer lock requires POSIX flock and O_NOFOLLOW"
+        )
+        descriptor: int | None = None
+        succeeded = False
+        try:
+            flags = (
+                os.O_RDWR
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | os.O_NOFOLLOW
+            )
+            try:
+                descriptor = os.open(
+                    self._writer_lock_path,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+            except FileExistsError:
+                descriptor = os.open(self._writer_lock_path, flags)
+            else:
+                os.fchmod(descriptor, 0o600)
+            opened = os.fstat(descriptor)
+            expected = (opened.st_dev, opened.st_ino)
+            self._verify_writer_lock_file(descriptor, expected)
+            succeeded = True
+            return descriptor, expected
+        except TrustedSessionStoreError:
+            raise
+        except OSError as exc:
+            raise TrustedSessionStoreError(
+                "trusted session writer lock file cannot be secured"
+            ) from exc
+        finally:
+            if descriptor is not None and not succeeded:
+                os.close(descriptor)
+
+    def _acquire_writer_lock(
+        self, retry_deadline: float
+    ) -> tuple[int, tuple[int, int]] | None:
+        if os.name != "posix":
+            return None
+        assert fcntl is not None
+        descriptor, expected = self._open_writer_lock_file()
+        acquired = False
+        retry_delay = _SQLITE_SETUP_RETRY_INITIAL_SECONDS
+        try:
+            while True:
+                if retry_deadline - time.monotonic() <= 0:
+                    raise TrustedSessionStoreError(
+                        "trusted session writer lock deadline was exceeded"
+                    )
+                self._verify_writer_lock_file(descriptor, expected)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    self._verify_writer_lock_file(descriptor, expected)
+                    return descriptor, expected
+                except OSError as exc:
+                    if exc.errno == errno.EINTR:
+                        continue
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                        raise TrustedSessionStoreError(
+                            "trusted session writer lock acquisition failed"
+                        ) from exc
+                remaining_seconds = retry_deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise TrustedSessionStoreError(
+                        "trusted session writer lock deadline was exceeded"
+                    )
+                sleep_seconds = min(retry_delay, remaining_seconds)
+                time.sleep(sleep_seconds)
+                retry_delay = min(
+                    retry_delay * 2.0,
+                    _SQLITE_SETUP_RETRY_MAX_SECONDS,
+                )
+        except BaseException as exc:
+            if acquired:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except BaseException as cleanup_error:
+                    exc.add_note(
+                        "trusted session writer lock cleanup unlock also failed: "
+                        f"{cleanup_error}"
+                    )
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup_error:
+                exc.add_note(
+                    "trusted session writer lock cleanup close also failed: "
+                    f"{cleanup_error}"
+                )
+            raise
+
+    def _release_writer_lock(
+        self, lock: tuple[int, tuple[int, int]] | None
+    ) -> None:
+        if lock is None:
+            return
+        assert fcntl is not None
+        descriptor, expected = lock
+        failure: BaseException | None = None
+        try:
+            self._verify_writer_lock_file(descriptor, expected)
+        except BaseException as exc:
+            failure = exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError as exc:
+            unlock_error = TrustedSessionStoreError(
+                "trusted session writer lock release failed"
+            )
+            unlock_error.__cause__ = exc
+            if failure is None:
+                failure = unlock_error
+            else:
+                failure.add_note(str(unlock_error))
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            close_error = TrustedSessionStoreError(
+                "trusted session writer lock descriptor could not be closed"
+            )
+            close_error.__cause__ = exc
+            if failure is None:
+                failure = close_error
+            else:
+                failure.add_note(str(close_error))
+        if failure is not None:
+            raise failure
+
+    @contextmanager
+    def _writer_lock(
+        self, retry_deadline: float
+    ) -> Iterator[tuple[int, tuple[int, int]] | None]:
+        lock = self._acquire_writer_lock(retry_deadline)
+        try:
+            yield lock
+        except BaseException as body_error:
+            try:
+                self._release_writer_lock(lock)
+            except BaseException as cleanup_error:
+                body_error.add_note(
+                    "trusted session writer lock cleanup also failed: "
+                    f"{cleanup_error}"
+                )
+            raise
+        else:
+            self._release_writer_lock(lock)
+
+    def _remaining_transaction_busy_timeout_ms(
+        self, retry_deadline: float, *, maximum_ms: int
+    ) -> int:
+        remaining_seconds = retry_deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            raise TrustedSessionStoreError(
+                "trusted session SQLite transaction deadline was exceeded"
+            )
+        return min(maximum_ms, max(0, int(remaining_seconds * 1000.0)))
+
+    def _set_transaction_busy_timeout(
+        self,
+        connection: sqlite3.Connection,
+        retry_deadline: float,
+        *,
+        maximum_ms: int,
+    ) -> None:
+        busy_timeout_ms = self._remaining_transaction_busy_timeout_ms(
+            retry_deadline,
+            maximum_ms=maximum_ms,
+        )
         connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
-        if write:
-            mode = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+
+    def _execute_transaction_setup(
+        self,
+        connection: sqlite3.Connection,
+        statement: str,
+        retry_deadline: float,
+    ) -> sqlite3.Cursor:
+        self._set_transaction_busy_timeout(
+            connection,
+            retry_deadline,
+            maximum_ms=_SQLITE_SETUP_ATTEMPT_MAX_BUSY_MS,
+        )
+        # Setting the busy handler is itself a SQLite call.  Recheck before the
+        # requested setup statement so an expired budget never starts new work.
+        self._remaining_transaction_busy_timeout_ms(
+            retry_deadline,
+            maximum_ms=_SQLITE_SETUP_ATTEMPT_MAX_BUSY_MS,
+        )
+        return connection.execute(statement)
+
+    def _configure(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        write: bool,
+        retry_deadline: float | None = None,
+    ) -> None:
+        if retry_deadline is None:
+            busy_timeout_ms = bounded_sqlite_busy_timeout_ms(self.busy_timeout_ms)
+            connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+
+            def execute(statement: str) -> sqlite3.Cursor:
+                return connection.execute(statement)
+
+        else:
+
+            def execute(statement: str) -> sqlite3.Cursor:
+                return self._execute_transaction_setup(
+                    connection,
+                    statement,
+                    retry_deadline,
+                )
+
+        # Assigning journal_mode takes a database lock even when the persisted
+        # mode is already WAL.  Established stores only need to verify it.
+        mode = str(execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if write and mode != "wal":
+            mode = execute("PRAGMA journal_mode = WAL").fetchone()[0]
             if str(mode).lower() != "wal":
                 raise TrustedSessionStoreError(
                     "trusted session database requires SQLite WAL mode"
                 )
-            connection.execute("PRAGMA synchronous = FULL")
-        elif str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal":
+        elif mode != "wal":
             raise TrustedSessionStoreError(
                 "trusted session database requires SQLite WAL mode"
             )
-        connection.execute("PRAGMA foreign_keys = ON")
-        if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
+        if write:
+            execute("PRAGMA synchronous = FULL")
+        execute("PRAGMA foreign_keys = ON")
+        if execute("PRAGMA foreign_keys").fetchone()[0] != 1:
             raise TrustedSessionStoreError(
                 "trusted session database requires foreign keys"
             )
-        connection.execute("PRAGMA trusted_schema = OFF")
+        execute("PRAGMA trusted_schema = OFF")
+
+    @staticmethod
+    def _is_retryable_setup_error(exc: sqlite3.OperationalError) -> bool:
+        error_code = getattr(exc, "sqlite_errorcode", None)
+        return (
+            type(error_code) is int
+            and error_code & 0xFF in _RETRYABLE_SQLITE_SETUP_BASE_CODES
+        )
+
+    def _write_transaction_attempt(
+        self, *, retry_deadline: float
+    ) -> tuple[sqlite3.Connection, tuple[int, int]]:
+        expected = self._secure_database_file()
+        connection: sqlite3.Connection | None = None
+        phase = "connect"
+        try:
+            connect_timeout_ms = self._remaining_transaction_busy_timeout_ms(
+                retry_deadline,
+                maximum_ms=_SQLITE_SETUP_ATTEMPT_MAX_BUSY_MS,
+            )
+            connection = sqlite3.connect(
+                self.path,
+                timeout=connect_timeout_ms / 1000.0,
+                isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            phase = "configure"
+            self._configure(
+                connection,
+                write=True,
+                retry_deadline=retry_deadline,
+            )
+            phase = "sidecar verification"
+            self._verify_sidecars()
+            phase = "begin immediate"
+            self._execute_transaction_setup(
+                connection,
+                "BEGIN IMMEDIATE",
+                retry_deadline,
+            )
+            return connection, expected
+        except BaseException as exc:
+            cleanup_failure: BaseException | None = None
+            if connection is not None:
+                try:
+                    if connection.in_transaction:
+                        connection.rollback()
+                except BaseException as cleanup_error:
+                    cleanup_failure = cleanup_error
+                try:
+                    connection.close()
+                except BaseException as cleanup_error:
+                    if cleanup_failure is None:
+                        cleanup_failure = cleanup_error
+                    else:
+                        cleanup_failure.add_note(
+                            "trusted session SQLite setup close also failed: "
+                            f"{cleanup_error}"
+                        )
+            try:
+                self._verify_database_file(expected)
+            except BaseException as cleanup_error:
+                if cleanup_failure is None:
+                    cleanup_failure = cleanup_error
+                else:
+                    cleanup_failure.add_note(
+                        "trusted session database setup verification also failed: "
+                        f"{cleanup_error}"
+                    )
+            if cleanup_failure is not None:
+                cleanup_failure.add_note(
+                    "original trusted session SQLite setup failure: " f"{exc}"
+                )
+                raise TrustedSessionStoreError(
+                    "trusted session SQLite setup cleanup failed; retry was rejected"
+                ) from cleanup_failure
+            if isinstance(exc, sqlite3.OperationalError):
+                exc.add_note(f"trusted session write setup phase: {phase}")
+            raise
+
+    def _open_write_transaction(
+        self, *, retry_deadline: float
+    ) -> tuple[sqlite3.Connection, tuple[int, int]]:
+        retry_delay = _SQLITE_SETUP_RETRY_INITIAL_SECONDS
+        while True:
+            self._remaining_transaction_busy_timeout_ms(
+                retry_deadline,
+                maximum_ms=_SQLITE_SETUP_ATTEMPT_MAX_BUSY_MS,
+            )
+            try:
+                return self._write_transaction_attempt(
+                    retry_deadline=retry_deadline
+                )
+            except sqlite3.OperationalError as exc:
+                if not self._is_retryable_setup_error(exc):
+                    raise
+                remaining_seconds = retry_deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise
+                sleep_seconds = min(retry_delay, remaining_seconds)
+                time.sleep(sleep_seconds)
+                retry_delay = min(
+                    retry_delay * 2.0,
+                    _SQLITE_SETUP_RETRY_MAX_SECONDS,
+                )
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
-        expected = self._secure_database_file()
-        connection = sqlite3.connect(
-            self.path,
-            timeout=bounded_sqlite_connect_timeout_seconds(self.busy_timeout_ms),
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
+        total_budget_ms = bounded_sqlite_busy_timeout_ms(self.busy_timeout_ms)
+        retry_deadline = time.monotonic() + total_budget_ms / 1000.0
+        committed = False
         try:
-            self._configure(connection, write=True)
-            self._verify_sidecars()
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.commit()
-        except sqlite3.Error as exc:
-            if connection.in_transaction:
-                connection.rollback()
-            raise TrustedSessionStoreError(
-                "trusted session SQLite transaction failed"
-            ) from exc
-        except BaseException:
-            if connection.in_transaction:
-                connection.rollback()
+            with self._writer_lock(retry_deadline) as writer_lock:
+                try:
+                    connection, expected = self._open_write_transaction(
+                        retry_deadline=retry_deadline
+                    )
+                except sqlite3.Error as exc:
+                    raise TrustedSessionStoreError(
+                        "trusted session SQLite transaction failed"
+                    ) from exc
+                transaction_error: BaseException | None = None
+                commit_started = False
+                try:
+                    yield connection
+                    # Both path identities must still be stable while rollback
+                    # remains possible.  No integrity check after commit may
+                    # turn a known durable success into an ordinary failure.
+                    self._verify_database_file(expected)
+                    if writer_lock is not None:
+                        descriptor, lock_expected = writer_lock
+                        self._verify_writer_lock_file(descriptor, lock_expected)
+                    self._set_transaction_busy_timeout(
+                        connection,
+                        retry_deadline,
+                        maximum_ms=self.busy_timeout_ms,
+                    )
+                    self._remaining_transaction_busy_timeout_ms(
+                        retry_deadline,
+                        maximum_ms=self.busy_timeout_ms,
+                    )
+                    commit_started = True
+                    connection.commit()
+                    committed = True
+                except BaseException as exc:
+                    rollback_confirmed = False
+                    if connection.in_transaction:
+                        try:
+                            connection.rollback()
+                        except BaseException as rollback_error:
+                            exc.add_note(
+                                "trusted session SQLite rollback also failed: "
+                                f"{rollback_error}"
+                            )
+                        else:
+                            rollback_confirmed = not connection.in_transaction
+                    if commit_started and not rollback_confirmed:
+                        error = TrustedSessionCommitOutcomeUnknownError(
+                            "trusted session SQLite commit outcome is unknown; "
+                            "reconcile durable state and do not replay the request"
+                        )
+                        transaction_error = error
+                        raise error from exc
+                    if isinstance(exc, sqlite3.Error):
+                        error = TrustedSessionStoreError(
+                            "trusted session SQLite transaction failed"
+                        )
+                        transaction_error = error
+                        raise error from exc
+                    transaction_error = exc
+                    raise
+                finally:
+                    try:
+                        connection.close()
+                    except BaseException as close_error:
+                        if transaction_error is None:
+                            raise
+                        transaction_error.add_note(
+                            "trusted session SQLite connection close also failed: "
+                            f"{close_error}"
+                        )
+                # Retain the original post-close identity check while the
+                # coordinating writer lock is still held.  Any failure here is
+                # converted below into a known-committed reconciliation result.
+                self._verify_database_file(expected)
+        except TrustedSessionReconciliationRequiredError:
             raise
-        finally:
-            connection.close()
-            self._verify_database_file(expected)
+        except BaseException as exc:
+            if committed:
+                raise TrustedSessionKnownCommittedError(
+                    "trusted session SQLite commit completed but cleanup failed; "
+                    "reconcile durable state and do not replay the request"
+                ) from exc
+            raise
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
@@ -717,7 +1184,34 @@ class SQLiteTrustedSessionStore:
             connection.close()
             self._verify_database_file(expected)
 
+    def _database_has_content(self) -> bool:
+        expected = self._secure_database_file()
+        try:
+            has_content = self.path.stat().st_size > 0
+        except OSError as exc:
+            raise TrustedSessionStoreError(
+                "trusted session database path cannot be inspected"
+            ) from exc
+        self._verify_database_file(expected)
+        return has_content
+
     def _initialize(self) -> None:
+        if self._database_has_content():
+            with self._read_connection() as connection:
+                committed_tables = {
+                    row["name"]
+                    for row in connection.execute(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                    )
+                }
+                if committed_tables:
+                    self._verify_integrity_connection(connection)
+                    return
+            # A concurrent first initializer can make the SQLite/WAL header
+            # visible before its schema transaction commits.  With no
+            # committed user tables, join the serialized initialization path
+            # instead of misclassifying that transient state as corruption.
         with self._transaction() as connection:
             tables = {
                 row["name"]
@@ -1463,7 +1957,10 @@ __all__ = [
     "TRUSTED_SESSION_STORE_SCHEMA_VERSION",
     "IssuedTrustedSession",
     "SQLiteTrustedSessionStore",
+    "TrustedSessionCommitOutcomeUnknownError",
     "TrustedSessionIdentity",
+    "TrustedSessionKnownCommittedError",
+    "TrustedSessionReconciliationRequiredError",
     "TrustedSessionSecurityEvent",
     "TrustedSessionStoreError",
 ]
