@@ -75,6 +75,7 @@ _ALLOWED_MODELS = {
             "account.move",
             "account.move.line",
             "account.partial.reconcile",
+            "account.full.reconcile",
         }
     ),
     "acct.bank.statement_import.v1": frozenset(
@@ -225,6 +226,61 @@ def _digest(value: Any) -> str:
         return hashlib.sha256(canonical_json(value)).hexdigest()
     except (TypeError, ValueError, UnicodeError) as exc:
         raise WriteServiceError("backend evidence is not canonical JSON") from exc
+
+
+def _index_company_bound_fresh_snapshots(
+    snapshots: list[dict[str, Any]], company_id: int
+) -> dict[tuple[str, int], dict[str, Any]]:
+    """Validate and index fresh records, including company-less full reconciles."""
+
+    fresh_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    values_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    for snapshot in snapshots:
+        validate_record_snapshot(snapshot)
+        key = (snapshot["model"], snapshot["record_id"])
+        values = json.loads(snapshot["values_json"])
+        if key in fresh_by_key or not isinstance(values, dict):
+            raise WriteServiceError(
+                "fresh verification snapshot identity or company is invalid"
+            )
+        if key[0] != "account.full.reconcile" and (
+            values.get("company_id") != company_id
+        ):
+            raise WriteServiceError(
+                "fresh verification snapshot identity or company is invalid"
+            )
+        fresh_by_key[key] = snapshot
+        values_by_key[key] = values
+    for key, values in values_by_key.items():
+        if key[0] != "account.full.reconcile":
+            continue
+        for field_name, model_name in (
+            ("reconciled_line_ids", "account.move.line"),
+            ("partial_reconcile_ids", "account.partial.reconcile"),
+        ):
+            record_ids = values.get(field_name)
+            if (
+                not isinstance(record_ids, list)
+                or not record_ids
+                or any(
+                    isinstance(record_id, bool)
+                    or not isinstance(record_id, int)
+                    or record_id <= 0
+                    for record_id in record_ids
+                )
+                or len(record_ids) != len(set(record_ids))
+                or any(
+                    values_by_key.get((model_name, record_id), {}).get(
+                        "company_id"
+                    )
+                    != company_id
+                    for record_id in record_ids
+                )
+            ):
+                raise WriteServiceError(
+                    "fresh full reconcile snapshot is not bound to company graph"
+                )
+    return fresh_by_key
 
 
 def _utc_timestamp(value: datetime | str) -> str:
@@ -837,19 +893,9 @@ class DurableWriteService:
             raise WriteServiceError(
                 "failed verification cannot claim a successful fresh readback"
             )
-        fresh_by_key: dict[tuple[str, int], dict[str, Any]] = {}
-        for snapshot in readback["fresh_snapshots"]:
-            validate_record_snapshot(snapshot)
-            key = (snapshot["model"], snapshot["record_id"])
-            values = json.loads(snapshot["values_json"])
-            if (
-                key in fresh_by_key
-                or values.get("company_id") != operation.company_id
-            ):
-                raise WriteServiceError(
-                    "fresh verification snapshot identity or company is invalid"
-                )
-            fresh_by_key[key] = snapshot
+        fresh_by_key = _index_company_bound_fresh_snapshots(
+            readback["fresh_snapshots"], operation.company_id
+        )
         if payload.result.succeeded:
             if set(fresh_by_key) != {
                 (record["model"], record["record_id"])

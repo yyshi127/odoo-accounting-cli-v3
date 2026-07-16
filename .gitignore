@@ -36,3 +36,4 @@ id_rsa
 **/historical-routes.json
 **/read-runtime.json
 **/write-runtime.json
+**/pi-attestation-keys*.json

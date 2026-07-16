@@ -26,6 +26,9 @@ LAUNCHERS = frozenset(
         "bin/odoo-accounting-cli-v3-broker",
     }
 )
+EXECUTABLE_RELEASE_MEMBERS = LAUNCHERS | frozenset(
+    {"deployment/dev9/run-private-mount-gate.sh"}
+)
 LOCAL_RUNTIME_FILENAMES = frozenset(
     {
         "authority-runtime.json",
@@ -33,6 +36,7 @@ LOCAL_RUNTIME_FILENAMES = frozenset(
         "historical-routes.json",
         "read-runtime.json",
         "write-runtime.json",
+        "pi-attestation-keys.json",
     }
 )
 PRIVATE_KEY_FILENAMES = frozenset(
@@ -85,6 +89,7 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
         name == ".env"
         or name.startswith(".env.")
         or name in LOCAL_RUNTIME_FILENAMES
+        or (name.startswith("pi-attestation-keys") and name.endswith(".json"))
         or name in PRIVATE_KEY_FILENAMES
         or name.endswith((".key", ".pem", ".p12", ".pfx", ".ppk"))
         or name.endswith(".db")
@@ -95,6 +100,21 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
         raise ReleaseError(
             f"refusing host-local or credential filename in release: {relative.as_posix()}"
         )
+    if relative.suffix.lower() == ".json":
+        try:
+            document = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            document = None
+        if (
+            isinstance(document, dict)
+            and document.get("schema_version")
+            == "odoo-accounting-cli-v3.pi-attestation-keys.v1"
+            and isinstance(document.get("keys"), dict)
+        ):
+            raise ReleaseError(
+                "refusing Pi attestation key document in release: "
+                f"{relative.as_posix()}"
+            )
     for label, pattern in SENSITIVE_CONTENT_PATTERNS:
         if pattern.search(payload) is not None:
             raise ReleaseError(
@@ -126,7 +146,9 @@ def build() -> Path:
                 for path in sources:
                     relative = path.relative_to(ROOT).as_posix()
                     info = archive.gettarinfo(str(path), arcname=relative)
-                    info.mode = 0o755 if relative in LAUNCHERS else 0o644
+                    info.mode = (
+                        0o755 if relative in EXECUTABLE_RELEASE_MEMBERS else 0o644
+                    )
                     info.uid = info.gid = 0
                     info.uname = info.gname = "root"
                     info.mtime = 0

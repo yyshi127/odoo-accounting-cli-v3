@@ -189,6 +189,54 @@ requests across all enabled domains.
 | F07 | Denied requests | Unauthorized, cross-company, expired, replayed, and tampered requests are refused with safe actionable errors |
 | F08 | Recovery journey | Pi can diagnose a failed/incorrect operation, present its registered recovery, obtain approval, execute it, and report verified outcome |
 
+### Frozen F01-F03 scoring contract
+
+`tests/fixtures/pi_scenarios.v1.json` is the revision-1 frozen Chinese key
+scenario corpus. It covers every one of the 22 registered capabilities and the
+ordinary, ambiguous, adversarial, multi-company, multi-currency, and recovery
+classes. Environment-specific Odoo record IDs are named fixture bindings, so a
+capture run binds the same intent to its own sandbox fixtures without changing
+the frozen expectations.
+
+`tools/pi_scenario_gate.py` is an offline scorer. It requires an HMAC-attested
+Pi trace export and a host-local trusted key file; it does not invoke Pi, an
+LLM, Odoo, or any network service. The signed export binds the frozen corpus,
+the exact registry, the V3 release digest, Pi/Pi Bridge versions, fixture
+bindings, and every trace event. Each captured scenario retains the exact
+frozen user input, capability selection, questions and user answers for every
+clarified field, finalized parameters, CLI input, write preview and approval
+parameter digest when applicable, Odoo execution, Odoo result, and audit
+receipt. Every applicable stage carries the full parameters or their canonical
+SHA-256 binding.
+
+The scorer rejects unknown fields, duplicate IDs, unsigned or untrusted
+exports, signature/digest mismatches, wrong corpus or registry digests, empty
+trace sets, invalid fixture types, and traces not bound to the frozen input.
+Missing scenarios remain in every denominator and fail trace coverage. F01
+passes only when the exact integer ratio is at least 95%; F02 and F03 require
+100%. The JSON report retains the exact numerator, denominator, decimal
+percentage, capture/release/attestation identity, stage-level parameter
+failures, and scenario-level failures.
+
+Run it only with an actual capture artifact:
+
+```text
+PYTHONPATH=src python tools/pi_scenario_gate.py \
+  --traces /path/to/pi-traces.json \
+  --attestation-keys /host/private/pi-attestation-keys.json \
+  --expected-release-sha256 "$trusted_package_sha256"
+```
+
+The expected release digest must come from the independently trusted canonical
+package anchor; a signed capture from any other V3 build is rejected. Exit `0`
+means F01-F03 and full trace coverage passed, exit `1` means valid
+captured evidence was scored but a gate failed, and exit `2` means no score was
+issued because the corpus or evidence was invalid. The attestation key file is
+host-local, is never included in the release, and maps trusted key IDs to at
+least 32 bytes of hex-encoded HMAC secret. Unit tests use an explicit test-only
+key and build synthetic trace documents solely to verify scorer behavior; they
+are not Pi evidence and must never be reported as an F01-F03 acceptance pass.
+
 ## Gate G — promotion and rollback
 
 Promotion is capability-by-capability and environment-by-environment. Passing a

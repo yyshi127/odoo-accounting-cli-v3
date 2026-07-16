@@ -22,12 +22,16 @@ LAUNCHERS = frozenset(
         "bin/odoo-accounting-cli-v3-broker",
     }
 )
+EXECUTABLE_RELEASE_MEMBERS = LAUNCHERS | frozenset(
+    {"deployment/dev9/run-private-mount-gate.sh"}
+)
 DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3",
         "bin/odoo-accounting-cli-v3-broker",
         "deployment/dev9/README.md",
         "deployment/dev9/render-systemd-service.py",
+        "deployment/dev9/run-private-mount-gate.sh",
         "deployment/dev11/README.md",
         "tools/build_release.py",
         "tools/check_source_boundary.py",
@@ -42,6 +46,14 @@ PRODUCTION_TOOL_IMPORT_CLOSURE = frozenset(
         "tools/verify_release.py",
     }
 )
+PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS = frozenset(
+    {
+        "tests/TEST.md",
+        "tests/fixtures/pi_scenarios.v1.json",
+        "tests/test_pi_scenario_gate.py",
+        "tools/pi_scenario_gate.py",
+    }
+)
 DEV9_SECURITY_RELEASE_MEMBERS = frozenset(
     {
         ".github/workflows/quality.yml",
@@ -52,12 +64,14 @@ DEV9_SECURITY_RELEASE_MEMBERS = frozenset(
         "deployment/dev9/README.md",
         "deployment/dev9/broker-runtime.example.json",
         "deployment/dev9/render-systemd-service.py",
+        "deployment/dev9/run-private-mount-gate.sh",
         "deployment/dev9/systemd/odoo-accounting-cli-v3-broker.service",
         "deployment/dev9/systemd/odoo-accounting-cli-v3-pi-broker.socket",
         "deployment/dev9/systemd/odoo-accounting-cli-v3-session-mint.socket",
         "deployment/dev9/systemd/odoo-accounting-cli-v3-tmpfiles.conf",
         "deployment/dev9/systemd/odoo-accounting-cli-v3-trusted-approval.socket",
         "docs/HISTORICAL_RELEASE_ROUTING.md",
+        "docs/TARGET_HOST_INCIDENT_2026-07-16.md",
         "docs/TRUSTED_APPROVAL_UDS.md",
         "docs/TRUSTED_SESSION_MINT_UDS.md",
         "pi_bridge/bootstrap.mjs",
@@ -91,6 +105,7 @@ DEV9_SECURITY_RELEASE_MEMBERS = frozenset(
         "tests/test_broker_audit.py",
         "tests/test_dev11_pi_bridge_systemd.py",
         "tests/test_dev9_systemd_units.py",
+        "tests/test_dev9_private_mount_gate.py",
         "tests/test_historical_release_router.py",
         "tests/test_monotonic_deadline.py",
         "tests/test_odoo_approver_authorizer.py",
@@ -112,7 +127,7 @@ DEV9_SECURITY_RELEASE_MEMBERS = frozenset(
         "tests/test_verified_release.py",
     }
 )
-REQUIRED_WRITE_RELEASE_MEMBERS = DEV9_SECURITY_RELEASE_MEMBERS | frozenset(
+WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
     {
         "VERSION",
         "bin/odoo-accounting-cli-v3",
@@ -207,6 +222,11 @@ REQUIRED_WRITE_RELEASE_MEMBERS = DEV9_SECURITY_RELEASE_MEMBERS | frozenset(
         "pi_bridge/trusted-session.mjs",
     }
 )
+REQUIRED_WRITE_RELEASE_MEMBERS = (
+    DEV9_SECURITY_RELEASE_MEMBERS
+    | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
+    | WRITE_RUNTIME_RELEASE_MEMBERS
+)
 
 
 class ReleaseArchiveTest(unittest.TestCase):
@@ -291,6 +311,7 @@ class ReleaseArchiveTest(unittest.TestCase):
             (Path("local/private.pem"), b"private"),
             (Path("local/private.ppk"), b"private"),
             (Path("local/write-runtime.json"), b"{}"),
+            (Path("local/pi-attestation-keys.json"), b"{}"),
             (Path("local/state.sqlite3"), b"SQLite format 3"),
             (Path("local/state.sqlite3-wal"), b"mutable"),
             (Path("local/state.db"), b"SQLite format 3\x00mutable"),
@@ -302,6 +323,19 @@ class ReleaseArchiveTest(unittest.TestCase):
             with self.subTest(relative=relative):
                 with self.assertRaises(release_builder.ReleaseError):
                     release_builder.validate_release_member(relative, payload)
+
+        with self.assertRaises(release_builder.ReleaseError):
+            release_builder.validate_release_member(
+                Path("local/custom-trusted-capture.json"),
+                json.dumps(
+                    {
+                        "schema_version": (
+                            "odoo-accounting-cli-v3.pi-attestation-keys.v1"
+                        ),
+                        "keys": {"capture-v1": {"secret_hex": "a" * 64}},
+                    }
+                ).encode("utf-8"),
+            )
 
         release_builder.validate_release_member(
             Path("deployment/dev9/broker-runtime.example.json"),
@@ -326,6 +360,7 @@ class ReleaseArchiveTest(unittest.TestCase):
                 "**/broker-runtime.json",
                 "**/read-runtime.json",
                 "**/write-runtime.json",
+                "**/pi-attestation-keys*.json",
             }.issubset(ignored)
         )
         for name in (
@@ -337,6 +372,8 @@ class ReleaseArchiveTest(unittest.TestCase):
             "local/state.sqlite3-wal",
             "local/write-runtime.json",
             "local/broker-runtime.json",
+            "local/pi-attestation-keys.json",
+            "local/pi-attestation-keys-v2.json",
         ):
             with self.subTest(name=name):
                 completed = subprocess.run(
@@ -428,7 +465,9 @@ class ReleaseArchiveTest(unittest.TestCase):
                         self.assertEqual(member.mtime, 0)
                         self.assertEqual(
                             member.mode,
-                            0o755 if member.name in LAUNCHERS else 0o644,
+                            0o755
+                            if member.name in EXECUTABLE_RELEASE_MEMBERS
+                            else 0o644,
                         )
                 for launcher_name in LAUNCHERS:
                     launcher = archive.extractfile(launcher_name)
@@ -446,8 +485,8 @@ class ReleaseArchiveTest(unittest.TestCase):
                     for path in paths:
                         if path.is_file():
                             path.chmod(0o444)
-                    for launcher_name in LAUNCHERS:
-                        (candidate / launcher_name).chmod(0o555)
+                    for executable_name in EXECUTABLE_RELEASE_MEMBERS:
+                        (candidate / executable_name).chmod(0o555)
                     for path in sorted(
                         (item for item in paths if item.is_dir()),
                         key=lambda item: len(item.parts),

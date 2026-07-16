@@ -102,10 +102,12 @@ extracting it.
 
    Verification must not create files in the candidate.
 5. Make the entire candidate root-owned: directories mode `0555`, ordinary
-   files mode `0444`, and both canonical launchers
+   files mode `0444`, both canonical launchers
    `bin/odoo-accounting-cli-v3` and
-   `bin/odoo-accounting-cli-v3-broker` mode `0555`. Refuse the candidate if
-   either launcher is missing, linked, writable, or not executable. Exercise
+   `bin/odoo-accounting-cli-v3-broker`, and the target-Linux mount guard
+   `deployment/dev9/run-private-mount-gate.sh` mode `0555`. Refuse the candidate
+   if either launcher or the mount guard is missing, linked, writable, or not
+   executable. Exercise
    the broker from the frozen extracted tree before publishing it. Here
    `$temporary_evidence` is a new root-owned mode `0700` directory outside the
    candidate release:

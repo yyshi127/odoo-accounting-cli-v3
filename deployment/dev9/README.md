@@ -83,10 +83,36 @@ before `sqlite3.connect`.
 
 ## Installation gate
 
+### Target Linux mount-isolation gate
+
+Never bind-mount a fake `/var/lib`, `/etc`, `/run`, release root, or state root
+directly in the target host's mount namespace. A mount namespace is not safe
+merely because `unshare --mount` was requested: its propagation must be private
+before the first mount. A shared bind can propagate back to PID 1, hide live
+PostgreSQL state, and crash the database checkpointer.
+
+Any target-Linux test that creates a mount must run its complete command through
+`run-private-mount-gate.sh`:
+
+```sh
+deployment/dev9/run-private-mount-gate.sh bash -ceu '
+  # Test-only mounts and the test command belong here.
+'
+```
+
+The wrapper creates a distinct mount namespace with
+`--propagation private`, kills the child if the wrapper exits, verifies that the
+new namespace differs from PID 1, rejects shared/master propagation on `/`, and
+compares the outer `/var/lib` mount record before and after the command. It also
+refuses a pre-existing temporary, deleted, or fake `/var/lib` mount. Do not
+bypass the wrapper, invoke its private inside token, or let the child daemonize.
+The outer before/after check is required even when the inner test succeeds.
+
 1. Install the verified V3 release and configuration without changing V2.
-   Freeze directories at mode `0555`, ordinary files at `0444`, and both
-   `bin/odoo-accounting-cli-v3` and `bin/odoo-accounting-cli-v3-broker` at
-   `0555`. Run the extracted broker launcher with `--help` and require exit
+   Freeze directories at mode `0555`, ordinary files at `0444`, both
+   `bin/odoo-accounting-cli-v3` and `bin/odoo-accounting-cli-v3-broker`, and
+   `deployment/dev9/run-private-mount-gate.sh` at `0555`. Run the extracted
+   broker launcher with `--help` and require exit
    zero, empty stderr, and its exact usage line before publishing the release.
    Create the dedicated broker identity and all named V3 groups, add only the
    identities documented above, and verify their numeric IDs.

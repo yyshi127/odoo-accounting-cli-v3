@@ -32,6 +32,7 @@ from odoo_accounting_cli_v3.write_receipts import (
 )
 from odoo_accounting_cli_v3.write_service import (
     _ALLOWED_MODELS,
+    _index_company_bound_fresh_snapshots,
     BackendEvidence,
     BackendWriteOutcome,
     DurableWriteService,
@@ -62,7 +63,7 @@ def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
     }
     assert _ALLOWED_MODELS["acct.payment.register.v1"] == {
         "account.payment", "account.move", "account.move.line",
-        "account.partial.reconcile",
+        "account.partial.reconcile", "account.full.reconcile",
     }
     assert _ALLOWED_MODELS["acct.bank.statement_import.v1"] == {
         "account.bank.statement", "account.bank.statement.line",
@@ -81,6 +82,80 @@ def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
         assert {"account.move", "account.move.line"} <= _ALLOWED_MODELS[
             capability_id
         ]
+
+
+def test_companyless_full_reconcile_is_bound_through_every_fresh_journal_item():
+    line_snapshots = [
+        create_record_snapshot(
+            model="account.move.line",
+            record_id=line_id,
+            exists=True,
+            record_state="reconciled",
+            values={"company_id": 7, "reconciled": True},
+        )
+        for line_id in (101, 102)
+    ]
+    full_snapshot = create_record_snapshot(
+        model="account.full.reconcile",
+        record_id=201,
+        exists=True,
+        record_state="full",
+        values={
+            "partial_reconcile_ids": [301],
+            "reconciled_line_ids": [101, 102],
+        },
+    )
+    partial_snapshot = create_record_snapshot(
+        model="account.partial.reconcile",
+        record_id=301,
+        exists=True,
+        record_state="linked",
+        values={"company_id": 7},
+    )
+
+    indexed = _index_company_bound_fresh_snapshots(
+        [*line_snapshots, partial_snapshot, full_snapshot], 7
+    )
+
+    assert set(indexed) == {
+        ("account.move.line", 101),
+        ("account.move.line", 102),
+        ("account.partial.reconcile", 301),
+        ("account.full.reconcile", 201),
+    }
+
+
+def test_companyless_full_reconcile_rejects_missing_or_unbound_journal_items():
+    full_snapshot = create_record_snapshot(
+        model="account.full.reconcile",
+        record_id=201,
+        exists=True,
+        record_state="full",
+        values={
+            "partial_reconcile_ids": [301],
+            "reconciled_line_ids": [101],
+        },
+    )
+    with pytest.raises(
+        WriteServiceError,
+        match="full reconcile snapshot is not bound to company graph",
+    ):
+        _index_company_bound_fresh_snapshots([full_snapshot], 7)
+
+    ordinary_without_company = create_record_snapshot(
+        model="account.move.line",
+        record_id=101,
+        exists=True,
+        record_state="reconciled",
+        values={"reconciled": True},
+    )
+    with pytest.raises(
+        WriteServiceError,
+        match="snapshot identity or company is invalid",
+    ):
+        _index_company_bound_fresh_snapshots(
+            [ordinary_without_company, full_snapshot], 7
+        )
 
 
 def _capabilities():
