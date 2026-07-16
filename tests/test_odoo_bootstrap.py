@@ -399,12 +399,13 @@ class OdooBootstrapTest(unittest.TestCase):
                 "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
                 "acct.gl.trial_balance.v1",
+                "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 4, "total_count": 4})
+        self.assertEqual(result["page"], {"count": 5, "total_count": 5})
         self.assertEqual(result["receipt"]["capability_id"], "acct.registry.list.v1")
-        self.assertEqual(result["receipt"]["record_count"], 4)
+        self.assertEqual(result["receipt"]["record_count"], 5)
 
     def test_ar_open_items_request_keeps_all_filters_and_returns_bound_receipt(self):
         requested = {

@@ -123,6 +123,67 @@ These findings make V2 useful as a regression fixture, not as the V3 AP oracle.
 The real fixture currently lacks open supplier refunds, foreign-currency AP,
 and partial-payment examples; those remain explicit sandbox evidence gaps.
 
+## V2 reuse record: multicurrency balances
+
+The Pi Bridge V2 files were inspected read-only on the target before the V3
+slice was implemented. The reviewed SHA-256 values were:
+
+- `commands/gl.py`: `8b3cc5f70636b1ed144d7bf24b778156726ae527a2db0f11103dd058c0789997`
+- `commands/report.py`: `50d37ce81e5497b6d22c65cc6c1d70e3f8b21bf550724523c2200c3d790210a6`
+- `commands/backend.py`: `b9a6405040f25b518eda82ce5caf3348cac73d4453509939c3a354652813cb78`
+- `tests/unit/test_phase8_gl_account_movement.py`:
+  `a73cb113bbf3be670b45eb4b30cb5d938595b75d063ab81eb8d929dcc08561db`
+
+V3 retains the useful V2 field distinction between `account.move.line.balance`
+and `amount_currency`, explicit company/date filters, posted-only GL selection,
+read-only execution, and deterministic pagination tests. It does not import or
+execute V2 code. The V2 account-movement implementation was rejected as the
+multicurrency algorithm because it returns individual floats, labels a mixed
+page with the first row's currency, summarizes only the page, is hard-bound to
+one test company/database, and has no account-plus-currency aggregation,
+complete requested-currency summaries, ACL-bound non-superuser environment, or
+cutoff-rate provenance. V2 `report.py` and `backend.py` provide no equivalent
+multicurrency balance handler.
+
+The deployed Odoo 19 sources were also inspected read-only. Core
+`res_currency.py` SHA-256
+`09af473416f6efa9df216d0c931551621f0f8f995a0a4852e6c216307e762a59`
+selects rates with `name <= date`, company root/global scope, company-specific
+precedence, and then falls back to the earliest rate (which may be in the
+future) and finally `1.0`. Its `_get_rates` resolves both the transaction and
+target currencies, and `_get_conversion_rate` returns target technical rate
+divided by transaction technical rate. V3 therefore requires an actual
+`res.currency.rate` record on or before the cutoff for every requested
+non-company transaction currency and independently resolves the company target
+currency using the same root-specific/global precedence. A company currency
+with no applicable rate record at any date is disclosed as
+`no_rate_identity` with technical rate `1`; if applicable records exist but all
+are after the cutoff, V3 rejects Odoo's earliest-future fallback. V3 reports
+both technical sources, the conversion direction and formula, and rejects an
+Odoo conversion factor that differs from `company_technical / transaction_technical`
+beyond a relative `1e-12` tolerance. It never uses the cutoff rate to replace
+historically booked `balance` or `amount_currency` totals. Odoo 19's required
+currency and same-currency amount
+constraints were cross-checked in `account_move_line.py` SHA-256
+`2f867883ce6359501915a4d6d6ef9e8c34833d65ad27b68cc1769203505cbcf2`;
+the fixed off-balance exclusion follows `account_account.py` SHA-256
+`89e9ab0e5709ff8df74da2aeb0d5ebc9e54cb2820236c861fe9e4bbbe223cea2`.
+
+A read-only SQL oracle for `odoo_test`, company 9, cutoff `2026-07-13`
+identified company currency CNY (ID 6), no applicable CNY rate record at any
+date (therefore the explicit target `no_rate_identity` case), a company-specific USD rate record
+effective `2025-12-15` with technical rate
+`0.15384615384615385` (USD-to-CNY factor `6.5`), and eight posted,
+non-off-balance USD receivable lines for account 3855/code `112200`. Their
+booked sums are exactly `1950.00 CNY` and `300.00 USD`. This is a financial
+standard answer, not a current-release signed V3 receipt. The capability must
+remain disabled. Contract tests permit the separate `test` staged channel, but
+its registry evidence must not claim live Odoo verification until the exact
+immutable release produces and retains that receipt under the authenticated
+non-superuser path. The known test user is non-superuser and company-bound but
+also has accounting-manager/system groups, so it is not production
+least-privilege evidence.
+
 An independent SQL/ORM oracle for `odoo_test`, company 1, posted entries, and
 the inclusive 2026 calendar-year period found 2,341 move lines across 12 active
 accounts. Full-period debit and credit both equal `136193.63`; the difference is

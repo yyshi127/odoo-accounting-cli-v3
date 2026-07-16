@@ -10,6 +10,13 @@ from odoo_accounting_cli_v3.domain.ar_open_items import (
     OpenItemPartial,
     OpenItemSource,
 )
+from odoo_accounting_cli_v3.domain.multicurrency_balance import (
+    AccountInfo as MulticurrencyAccountInfo,
+    BalanceAggregate,
+    CurrencyInfo as MulticurrencyCurrencyInfo,
+    EffectiveRate,
+    TechnicalRateSource,
+)
 from odoo_accounting_cli_v3.domain.trial_balance import AccountInfo, Aggregate, CurrencyInfo
 from odoo_accounting_cli_v3.gateway import RequestContext
 from odoo_accounting_cli_v3.odoo.executor import OdooExecutionError, OdooReadExecutor
@@ -199,6 +206,63 @@ class ApBackend(ArBackend):
         }
 
 
+class MulticurrencyBackend:
+    company_currency_info = MulticurrencyCurrencyInfo(
+        6, "CNY", "CNY", Decimal("0.01")
+    )
+    usd = MulticurrencyCurrencyInfo(1, "USD", "$", Decimal("0.01"))
+
+    def assert_read_access(self, *, company_id):
+        if company_id != 7:
+            raise AssertionError("unexpected company")
+
+    def company_currency(self, *, company_id):
+        return self.company_currency_info
+
+    def currencies(self, *, company_id, currency_ids):
+        by_id = {6: self.company_currency_info, 1: self.usd}
+        return [by_id[item] for item in currency_ids]
+
+    def accounts(self, *, company_id, account_ids):
+        return [
+            MulticurrencyAccountInfo(
+                401, "112200", "Accounts Receivable", "asset_receivable"
+            )
+        ]
+
+    def balance_aggregates(
+        self, *, company_id, as_of_date, currency_ids, exclude_off_balance
+    ):
+        return [BalanceAggregate(401, 1, Decimal("1950"), Decimal("300"), 8)]
+
+    def effective_rate(
+        self, *, company_id, as_of_date, currency, company_currency
+    ):
+        company_source = TechnicalRateSource.no_rate_identity(
+            currency_id=company_currency.id
+        )
+        if currency.id == company_currency.id:
+            return EffectiveRate(
+                currency_id=currency.id,
+                transaction_technical_source=company_source,
+                company_technical_source=company_source,
+                transaction_to_company_rate=Decimal("1"),
+            )
+        return EffectiveRate(
+            currency_id=currency.id,
+            transaction_technical_source=TechnicalRateSource(
+                currency_id=currency.id,
+                effective_date=as_of_date,
+                source_scope="company_specific",
+                source_company_id=7,
+                source_record_id=91,
+                technical_rate=Decimal("0.15384615384615385"),
+            ),
+            company_technical_source=company_source,
+            transaction_to_company_rate=Decimal("6.5"),
+        )
+
+
 def context(**changes):
     values = {
         "audience": "odoo-accounting-cli-v3",
@@ -268,6 +332,9 @@ class OdooReadExecutorTest(unittest.TestCase):
             trial_balance_backend_factory=lambda _env, _user, _companies: Backend(),
             ar_open_items_backend_factory=lambda _env, _user, _companies: ArBackend(),
             ap_open_items_backend_factory=lambda _env, _user, _companies: ApBackend(),
+            multicurrency_balance_backend_factory=(
+                lambda _env, _user, _companies: MulticurrencyBackend()
+            ),
         )
 
     def test_executes_handler_and_verifies_receipt(self) -> None:
@@ -300,11 +367,12 @@ class OdooReadExecutorTest(unittest.TestCase):
                 "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
                 "acct.gl.trial_balance.v1",
+                "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 4, "total_count": 4})
-        self.assertEqual(result["receipt"]["record_count"], 4)
+        self.assertEqual(result["page"], {"count": 5, "total_count": 5})
+        self.assertEqual(result["receipt"]["record_count"], 5)
         self.assertEqual(env.company.access_checks, [("rights", "read"), ("rule", "read")])
         for descriptor in result["capabilities"]:
             source = capability(descriptor["id"]).data
@@ -403,6 +471,35 @@ class OdooReadExecutorTest(unittest.TestCase):
         self.assertEqual(result["receipt"]["capability_id"], "acct.ap.open_items.v1")
         executor.verify(
             context(), ap_capability, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_multicurrency_executes_booked_balance_handler_and_verifies_receipt(self) -> None:
+        executor = self.executor()
+        requested = {
+            "company_id": 7,
+            "as_of_date": "2026-07-13",
+            "currency_ids": [6, 1],
+            "balance_basis": "posted_ledger_cumulative",
+            "off_balance_policy": "exclude",
+            "limit": 100,
+            "offset": 0,
+        }
+        multicurrency_capability = capability("acct.multicurrency.balance_read.v1")
+
+        result = executor(
+            context(), multicurrency_capability, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertEqual(result["balances"][0]["ledger_company_balance"], "1950.00")
+        self.assertEqual(result["balances"][0]["ledger_transaction_amount"], "300.00")
+        self.assertEqual(result["rates"][1]["transaction_to_company_rate"], "6.5")
+        self.assertEqual(result["receipt"]["record_count"], 1)
+        self.assertEqual(
+            result["receipt"]["capability_id"],
+            "acct.multicurrency.balance_read.v1",
+        )
+        executor.verify(
+            context(), multicurrency_capability, requested, result, "c" * 64, "d" * 64
         )
 
 

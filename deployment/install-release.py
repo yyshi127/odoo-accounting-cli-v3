@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import uuid
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Iterable
@@ -60,6 +61,13 @@ MAX_RELEASE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 10_000
 MAX_RELEASE_TREE_ENTRIES = 20_000
+TAR_BLOCK_BYTES = 512
+MAX_RAW_ARCHIVE_HEADERS = 2 * MAX_ARCHIVE_MEMBERS + 1
+MAX_TAR_EXTENSION_BYTES = 64 * 1024
+MAX_TAR_EXTENSION_TOTAL_BYTES = 16 * 1024 * 1024
+MAX_CONSECUTIVE_TAR_EXTENSIONS = 2
+MAX_TAR_TRAILING_ZERO_BYTES = 1024 * 1024
+PUBLICATION_METADATA_BLOCKS_PER_OBJECT = 4
 MIN_FREE_BYTES_AFTER_INSTALL = 2 * 1024 * 1024 * 1024
 BROKER_HELP_STDOUT = (
     b"usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH\n"
@@ -400,6 +408,33 @@ def _release_allocation_budget(plan: ArchivePlan, target: Path) -> int:
     return file_blocks + directory_blocks + entry_blocks
 
 
+def _require_completed_staging_free_space(
+    publication_objects: tuple[tuple[str, Path], ...],
+) -> None:
+    """Budget pending publication metadata once per actual filesystem."""
+
+    filesystems: dict[int, tuple[list[str], Path, int]] = {}
+    for label, path in publication_objects:
+        device = path.stat().st_dev
+        filesystem = os.statvfs(path)
+        block_size = filesystem.f_frsize or filesystem.f_bsize
+        if block_size <= 0:
+            raise InstallError("publication filesystem reported an invalid block size")
+        object_budget = block_size * PUBLICATION_METADATA_BLOCKS_PER_OBJECT
+        if device in filesystems:
+            labels, representative, budget = filesystems[device]
+            labels.append(label)
+            filesystems[device] = (labels, representative, budget + object_budget)
+        else:
+            filesystems[device] = ([label], path, object_budget)
+    for labels, path, budget in filesystems.values():
+        _require_free_space(
+            path,
+            budget,
+            label=f"completed staging publication ({', '.join(labels)})",
+        )
+
+
 def _open_lock(layout: InstallLayout) -> int:
     flags = (
         os.O_RDWR
@@ -671,7 +706,298 @@ def _validate_manifest(
     return indexed
 
 
+def _read_exact(stream: BinaryIO, size: int, *, label: str) -> bytes:
+    payload = bytearray()
+    while len(payload) < size:
+        chunk = stream.read(size - len(payload))
+        if not chunk:
+            raise InstallError(f"truncated {label}")
+        payload.extend(chunk)
+    return bytes(payload)
+
+
+def _discard_exact(stream: BinaryIO, size: int, *, label: str) -> None:
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(remaining, 64 * 1024))
+        if not chunk:
+            raise InstallError(f"truncated {label}")
+        remaining -= len(chunk)
+
+
+class _SingleGzipReader:
+    """Bound decompression and reject bytes after the first gzip member."""
+
+    def __init__(self, path: Path) -> None:
+        self._raw = path.open("rb")
+        self._decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        self._compressed = b""
+        self._finished = False
+
+    def __enter__(self) -> _SingleGzipReader:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self._raw.close()
+
+    def read(self, size: int) -> bytes:
+        if size < 0:
+            raise InstallError("unbounded gzip reads are forbidden")
+        output = bytearray()
+        while len(output) < size and not self._finished:
+            if self._compressed:
+                compressed = self._compressed
+                self._compressed = b""
+            else:
+                compressed = self._raw.read(64 * 1024)
+                if not compressed:
+                    raise InstallError("truncated gzip member")
+            try:
+                decoded = self._decoder.decompress(
+                    compressed,
+                    size - len(output),
+                )
+            except zlib.error as exc:
+                raise InstallError("archive has an invalid gzip member") from exc
+            self._compressed = self._decoder.unconsumed_tail
+            output.extend(decoded)
+            if self._decoder.eof:
+                if self._decoder.unused_data or self._compressed or self._raw.read(1):
+                    raise InstallError("concatenated or trailing gzip data is forbidden")
+                self._finished = True
+        return bytes(output)
+
+
+def _parse_tar_octal(field: bytes, *, label: str) -> int:
+    if field and field[0] & 0x80:
+        raise InstallError(f"base-256 {label} is forbidden in a release archive")
+    raw = field.rstrip(b"\0 ").lstrip(b" ")
+    if not raw:
+        return 0
+    if any(character < ord("0") or character > ord("7") for character in raw):
+        raise InstallError(f"invalid tar {label}")
+    return int(raw, 8)
+
+
+def _validate_raw_tar_header(header: bytes) -> int:
+    if len(header) != TAR_BLOCK_BYTES:
+        raise InstallError("truncated tar header")
+    expected_checksum = _parse_tar_octal(header[148:156], label="checksum")
+    actual_checksum = sum(header[:148]) + (8 * ord(" ")) + sum(header[156:])
+    if expected_checksum != actual_checksum:
+        raise InstallError("invalid tar header checksum")
+    return _parse_tar_octal(header[124:136], label="size")
+
+
+def _decode_raw_tar_path(header: bytes) -> str:
+    name = header[:100].split(b"\0", 1)[0]
+    prefix = header[345:500].split(b"\0", 1)[0]
+    raw = prefix + (b"/" if prefix and name else b"") + name
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise InstallError("tar header path is not UTF-8") from exc
+
+
+def _parse_pax_payload(payload: bytes) -> dict[str, object]:
+    values: dict[str, object] = {}
+    seen: set[str] = set()
+    offset = 0
+    while offset < len(payload):
+        space = payload.find(b" ", offset)
+        if space < 0:
+            raise InstallError("invalid PAX extension framing")
+        raw_length = payload[offset:space]
+        if not raw_length or len(raw_length) > 20 or any(
+            character < ord("0") or character > ord("9")
+            for character in raw_length
+        ):
+            raise InstallError("invalid PAX extension length")
+        record_length = int(raw_length, 10)
+        end = offset + record_length
+        if record_length < 5 or end > len(payload) or payload[end - 1] != 0x0A:
+            raise InstallError("invalid PAX extension framing")
+        record = payload[space + 1 : end - 1]
+        key, separator, value = record.partition(b"=")
+        if not key or not separator:
+            raise InstallError("invalid PAX extension field")
+        try:
+            decoded_key = key.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise InstallError("PAX extension key is not UTF-8") from exc
+        if decoded_key in seen:
+            raise InstallError("duplicate PAX extension field")
+        seen.add(decoded_key)
+        if decoded_key.startswith("GNU.sparse."):
+            raise InstallError("sparse PAX extensions are forbidden")
+        if decoded_key == "hdrcharset" and value == b"BINARY":
+            raise InstallError("binary PAX path encoding is forbidden")
+        if decoded_key == "size":
+            if (
+                not value
+                or len(value) > len(str(MAX_RELEASE_FILE_BYTES))
+                or any(
+                    character < ord("0") or character > ord("9")
+                    for character in value
+                )
+            ):
+                raise InstallError("invalid PAX size override")
+            parsed_size = int(value, 10)
+            if parsed_size > MAX_RELEASE_FILE_BYTES:
+                raise InstallError("PAX size override exceeds the file limit")
+            values[decoded_key] = parsed_size
+        elif decoded_key == "path":
+            try:
+                values[decoded_key] = value.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise InstallError("PAX path is not UTF-8") from exc
+        offset = end
+    return values
+
+
+def _read_tar_extension(
+    stream: BinaryIO,
+    size: int,
+    *,
+    total_extension_bytes: int,
+) -> tuple[bytes, int]:
+    if size > MAX_TAR_EXTENSION_BYTES:
+        raise InstallError("tar extension payload exceeds the per-header limit")
+    total_extension_bytes += size
+    if total_extension_bytes > MAX_TAR_EXTENSION_TOTAL_BYTES:
+        raise InstallError("tar extension payloads exceed the total limit")
+    payload = _read_exact(stream, size, label="tar extension payload")
+    padding = (-size) % TAR_BLOCK_BYTES
+    padding_payload = _read_exact(stream, padding, label="tar extension padding")
+    if any(padding_payload):
+        raise InstallError("tar extension padding must be zero")
+    return payload, total_extension_bytes
+
+
+def _preflight_archive(path: Path) -> None:
+    """Bound raw gzip/tar structure before tarfile can materialize extensions."""
+
+    raw_headers = 0
+    extension_bytes = 0
+    regular_bytes = 0
+    manifest_bytes = 0
+    pending_path: str | None = None
+    pending_size: int | None = None
+    consecutive_extensions = 0
+    try:
+        with _SingleGzipReader(path) as stream:
+            while True:
+                header = _read_exact(stream, TAR_BLOCK_BYTES, label="tar header")
+                if header == bytes(TAR_BLOCK_BYTES):
+                    second = _read_exact(
+                        stream,
+                        TAR_BLOCK_BYTES,
+                        label="tar zero terminator",
+                    )
+                    if second != bytes(TAR_BLOCK_BYTES):
+                        raise InstallError("tar archive has a single zero terminator")
+                    if consecutive_extensions:
+                        raise InstallError("tar archive ends with a dangling extension")
+                    trailing = 0
+                    while True:
+                        chunk = stream.read(64 * 1024)
+                        if not chunk:
+                            return
+                        trailing += len(chunk)
+                        if (
+                            trailing > MAX_TAR_TRAILING_ZERO_BYTES
+                            or any(chunk)
+                        ):
+                            raise InstallError("tar archive has unsafe trailing data")
+
+                raw_headers += 1
+                if raw_headers > MAX_RAW_ARCHIVE_HEADERS:
+                    raise InstallError("raw tar header count exceeds the safe limit")
+                raw_size = _validate_raw_tar_header(header)
+                member_type = header[156:157]
+
+                if member_type in {b"x", b"g", b"L", b"K"}:
+                    consecutive_extensions += 1
+                    if consecutive_extensions > MAX_CONSECUTIVE_TAR_EXTENSIONS:
+                        raise InstallError(
+                            "consecutive tar extension chain exceeds the safe limit"
+                        )
+                    payload, extension_bytes = _read_tar_extension(
+                        stream,
+                        raw_size,
+                        total_extension_bytes=extension_bytes,
+                    )
+                    if member_type in {b"x", b"L"} and (
+                        pending_path is not None or pending_size is not None
+                    ):
+                        raise InstallError("stacked local tar extensions are forbidden")
+                    if member_type in {b"x", b"g"}:
+                        pax = _parse_pax_payload(payload)
+                        if member_type == b"g" and (
+                            "path" in pax or "size" in pax
+                        ):
+                            raise InstallError(
+                                "global PAX path and size overrides are forbidden"
+                            )
+                        if member_type == b"x":
+                            path_override = pax.get("path")
+                            size_override = pax.get("size")
+                            pending_path = (
+                                path_override
+                                if isinstance(path_override, str)
+                                else None
+                            )
+                            pending_size = (
+                                size_override
+                                if isinstance(size_override, int)
+                                else None
+                            )
+                    elif member_type == b"L":
+                        raw_path, separator, remainder = payload.partition(b"\0")
+                        if separator and any(remainder):
+                            raise InstallError("GNU longname has non-zero trailing data")
+                        try:
+                            pending_path = raw_path.decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise InstallError("GNU longname is not UTF-8") from exc
+                    continue
+
+                if member_type not in {b"\0", b"0", b"5"}:
+                    raise InstallError("unsafe raw archive member type")
+                path_name = pending_path or _decode_raw_tar_path(header)
+                effective_size = pending_size if pending_size is not None else raw_size
+                if raw_size > MAX_RELEASE_FILE_BYTES:
+                    raise InstallError("raw archive file size exceeds the file limit")
+                if member_type == b"5":
+                    if effective_size != 0:
+                        raise InstallError("raw archive directory has data")
+                elif path_name == "RELEASE-MANIFEST.json":
+                    manifest_bytes += effective_size
+                    if manifest_bytes > MAX_MANIFEST_BYTES:
+                        raise InstallError("raw release manifest exceeds the size limit")
+                else:
+                    regular_bytes += effective_size
+                    if regular_bytes > MAX_RELEASE_BYTES:
+                        raise InstallError("raw regular content exceeds the total limit")
+                if regular_bytes + manifest_bytes > MAX_RELEASE_BYTES + MAX_MANIFEST_BYTES:
+                    raise InstallError("raw archive content exceeds the total limit")
+                pending_path = None
+                pending_size = None
+                consecutive_extensions = 0
+                _discard_exact(stream, effective_size, label="tar member payload")
+                _discard_exact(
+                    stream,
+                    (-effective_size) % TAR_BLOCK_BYTES,
+                    label="tar member padding",
+                )
+    except InstallError:
+        raise
+    except (OSError, EOFError) as exc:
+        raise InstallError("archive is not a valid gzip tar package") from exc
+
+
 def inspect_archive(path: Path, expected: ExpectedIdentity) -> ArchivePlan:
+    _preflight_archive(path)
     try:
         with tarfile.open(path, mode="r:gz") as archive:
             members: list[tarfile.TarInfo] = []
@@ -688,6 +1014,8 @@ def inspect_archive(path: Path, expected: ExpectedIdentity) -> ArchivePlan:
                 name = _portable_member_name(member)
                 if name in names:
                     raise InstallError(f"duplicate archive member: {name}")
+                if member.sparse is not None:
+                    raise InstallError(f"sparse archive member is forbidden: {name}")
                 if (
                     member.uid != 0
                     or member.gid != 0
@@ -752,7 +1080,14 @@ def inspect_archive(path: Path, expected: ExpectedIdentity) -> ArchivePlan:
                     if files[name].size != item["size"]:
                         raise InstallError(f"archive/manifest size mismatch: {name}")
             return ArchivePlan(manifest=manifest, members=tuple(members))
-    except (tarfile.TarError, OSError, EOFError) as exc:
+    except (
+        tarfile.TarError,
+        OSError,
+        EOFError,
+        RecursionError,
+        MemoryError,
+        OverflowError,
+    ) as exc:
         raise InstallError("archive is not a valid gzip tar package") from exc
 
 
@@ -885,7 +1220,14 @@ def _extract_archive(
                     expected_item = indexed[name]
                     if size != expected_item["size"] or digest.hexdigest() != expected_item["sha256"]:
                         raise InstallError(f"extracted release file mismatch: {name}")
-    except (tarfile.TarError, OSError, EOFError) as exc:
+    except (
+        tarfile.TarError,
+        OSError,
+        EOFError,
+        RecursionError,
+        MemoryError,
+        OverflowError,
+    ) as exc:
         if isinstance(exc, InstallError):
             raise
         raise InstallError("archive extraction failed") from exc
@@ -1334,10 +1676,12 @@ def install(
         if _sha256_path(package_staging) != expected.package_sha256:
             raise InstallError("staged package changed after archive verification")
         _write_anchor_staging(anchor_staging, expected, layout, staging)
-        _require_free_space(
-            layout.root,
-            0,
-            label="completed staging",
+        _require_completed_staging_free_space(
+            (
+                ("package hardlink", package_staging),
+                ("release rename", release_staging),
+                ("anchor hardlink", anchor_staging),
+            )
         )
 
         canonical_package = layout.packages / expected.package_name

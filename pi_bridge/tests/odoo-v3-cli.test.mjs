@@ -682,6 +682,36 @@ test("capability queries and the explicit test broker read retain fixed argv and
 	assert.deepEqual(read.data.result._test_parsed_request, readRequest);
 });
 
+test("multicurrency read retains the complete company, cutoff, currency set, policy, and page", async () => {
+	const runtimeConfigPath = path.join(fixtureDir, "runtime.json");
+	const run = createBoundRunner({
+		cliPath: process.execPath,
+		prefixArgs: [trustedFixture],
+		runtimeConfigPath,
+		timeoutMs: 5000,
+	});
+	const request = {
+		capability_id: "acct.multicurrency.balance_read.v1",
+		parameters: {
+			company_id: 7,
+			as_of_date: "2026-06-30",
+			currency_ids: [6, 1, 2],
+			balance_basis: "posted_ledger_cumulative",
+			off_balance_policy: "exclude",
+			limit: 100,
+			offset: 0,
+		},
+	};
+	const before = structuredClone(request);
+
+	const result = await run("read", request);
+
+	assert.equal(result.ok, true);
+	assert.equal(result.data.result._test_raw_stdin, JSON.stringify(before));
+	assert.deepEqual(result.data.result._test_parsed_request, before);
+	assert.deepEqual(request, before);
+});
+
 test("approve-execute and result reject evidence-free fake CLI success", async () => {
 	const run = createBoundRunner({
 		cliPath: process.execPath,

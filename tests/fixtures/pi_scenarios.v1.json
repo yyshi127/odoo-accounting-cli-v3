@@ -320,7 +320,8 @@
         "clarification": {"outcome": "not_required", "fields": []},
         "material_parameters": {
           "company_id": {"$fixture": "company_primary_id"}, "as_of_date": "2026-06-30",
-          "currency_ids": [{"$fixture": "currency_cny_id"}, {"$fixture": "currency_usd_id"}, {"$fixture": "currency_eur_id"}]
+          "currency_ids": [{"$fixture": "currency_cny_id"}, {"$fixture": "currency_usd_id"}, {"$fixture": "currency_eur_id"}],
+          "balance_basis": "posted_ledger_cumulative", "off_balance_policy": "exclude", "limit": 100, "offset": 0
         }
       }
     },

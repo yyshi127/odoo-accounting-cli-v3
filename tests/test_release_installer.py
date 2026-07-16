@@ -18,6 +18,7 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INSTALLER_PATH = PROJECT_ROOT / "deployment" / "install-release.py"
+CANONICAL_PAX_PATH = "docs/" + ("p" * 110) + ".txt"
 
 
 def _load_installer():
@@ -74,6 +75,7 @@ def _fixture_files(
         ),
         "deployment/install-release.py": INSTALLER_PATH.read_bytes(),
         "deployment/dev9/run-private-mount-gate.sh": b"#!/bin/sh\nexit 70\n",
+        CANONICAL_PAX_PATH: b"canonical PAX path\n",
         "src/odoo_accounting_cli_v3/__init__.py": (
             PROJECT_ROOT / "src/odoo_accounting_cli_v3/__init__.py"
         ).read_bytes(),
@@ -148,6 +150,27 @@ def _linux_non_root() -> bool:
 
 def _linux_root() -> bool:
     return sys.platform == "linux" and os.geteuid() == 0
+
+
+def _pax_record(key: str, value: str) -> bytes:
+    body = f" {key}={value}\n".encode("utf-8")
+    length = len(body) + 1
+    while True:
+        record = str(length).encode("ascii") + body
+        if len(record) == length:
+            return record
+        length = len(record)
+
+
+def _raw_tar_header(name: str, member_type: bytes, size: int) -> bytes:
+    info = tarfile.TarInfo(name)
+    info.type = member_type
+    info.size = size
+    info.mode = 0o644
+    info.uid = info.gid = 0
+    info.uname = info.gname = "root"
+    info.mtime = 0
+    return info.tobuf(format=tarfile.USTAR_FORMAT)
 
 
 def test_expected_release_is_bound_to_version_and_full_commit(installer):
@@ -355,6 +378,7 @@ def test_oversized_member_is_rejected_before_tar_scans_its_payload(
             raise AssertionError("installer scanned beyond an oversized member header")
 
     archive = HeaderOnlyArchive()
+    monkeypatch.setattr(installer, "_preflight_archive", lambda _path: None)
     monkeypatch.setattr(installer.tarfile, "open", lambda *_args, **_kwargs: archive)
     expected = installer.ExpectedIdentity(
         version="1.2.3",
@@ -367,6 +391,327 @@ def test_oversized_member_is_rejected_before_tar_scans_its_payload(
     with pytest.raises(installer.InstallError, match="file size limit exceeded"):
         installer.inspect_archive(Path("unused.tar.gz"), expected)
     assert archive.calls == 1
+
+
+def test_raw_preflight_accepts_the_canonical_pax_release(installer, tmp_path):
+    archive, expected = _build_archive(installer, tmp_path)
+
+    plan = installer.inspect_archive(archive, expected)
+
+    assert CANONICAL_PAX_PATH in {
+        installer._portable_member_name(member) for member in plan.members
+    }
+
+
+@pytest.mark.parametrize("extension_type", (tarfile.XHDTYPE, tarfile.GNUTYPE_LONGNAME))
+def test_raw_preflight_rejects_real_gzip_extension_bomb_before_tarfile(
+    installer, monkeypatch, tmp_path, extension_type
+):
+    info = tarfile.TarInfo("././@PaxHeader")
+    info.type = extension_type
+    info.size = installer.MAX_TAR_EXTENSION_BYTES + 1
+    info.mode = 0o644
+    info.uid = info.gid = 0
+    info.uname = info.gname = "root"
+    info.mtime = 0
+    header = info.tobuf(format=tarfile.USTAR_FORMAT)
+    padding = (-info.size) % installer.TAR_BLOCK_BYTES
+    raw_tar = (
+        header
+        + (b"A" * info.size)
+        + (b"\0" * padding)
+        + (b"\0" * installer.TAR_BLOCK_BYTES * 2)
+    )
+    archive = tmp_path / "pax-bomb.tar.gz"
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as stream:
+            stream.write(raw_tar)
+    expected = installer.ExpectedIdentity(
+        version="1.2.3",
+        commit="a" * 40,
+        release="1.2.3-" + "a" * 12,
+        package_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+    )
+    monkeypatch.setattr(
+        installer.tarfile,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tarfile must not see an oversized extension payload")
+        ),
+    )
+
+    with pytest.raises(installer.InstallError, match="extension payload exceeds"):
+        installer.inspect_archive(archive, expected)
+
+
+def test_raw_preflight_rejects_pax_records_hidden_in_nonzero_padding(
+    installer, monkeypatch, tmp_path
+):
+    declared = _pax_record("mtime", "0")
+    hidden = _pax_record("size", "1")
+    padding_size = (-len(declared)) % installer.TAR_BLOCK_BYTES
+    assert len(hidden) <= padding_size
+    extension_block = declared + hidden + (b"\0" * (padding_size - len(hidden)))
+    raw_tar = (
+        _raw_tar_header("././@PaxHeader", tarfile.XHDTYPE, len(declared))
+        + extension_block
+        + _raw_tar_header("payload.bin", tarfile.REGTYPE, 1)
+        + b"A"
+        + (b"\0" * (installer.TAR_BLOCK_BYTES - 1))
+        + (b"\0" * installer.TAR_BLOCK_BYTES * 2)
+    )
+    archive = tmp_path / "hidden-padding-record.tar.gz"
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as stream:
+            stream.write(raw_tar)
+    expected = installer.ExpectedIdentity(
+        version="1.2.3",
+        commit="a" * 40,
+        release="1.2.3-" + "a" * 12,
+        package_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+    )
+    monkeypatch.setattr(
+        installer.tarfile,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tarfile must not parse non-zero extension padding")
+        ),
+    )
+
+    with pytest.raises(installer.InstallError, match="padding must be zero"):
+        installer.inspect_archive(archive, expected)
+
+
+def test_raw_preflight_rejects_deep_extension_chain_before_tarfile(
+    installer, monkeypatch, tmp_path
+):
+    raw_tar = (
+        b"".join(
+            _raw_tar_header("././@PaxHeader", tarfile.XGLTYPE, 0)
+            for _ in range(1500)
+        )
+        + _raw_tar_header("payload.bin", tarfile.REGTYPE, 0)
+        + (b"\0" * installer.TAR_BLOCK_BYTES * 2)
+    )
+    archive = tmp_path / "deep-extension-chain.tar.gz"
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as stream:
+            stream.write(raw_tar)
+    expected = installer.ExpectedIdentity(
+        version="1.2.3",
+        commit="a" * 40,
+        release="1.2.3-" + "a" * 12,
+        package_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+    )
+    monkeypatch.setattr(
+        installer.tarfile,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tarfile must not recurse through an extension chain")
+        ),
+    )
+
+    with pytest.raises(installer.InstallError, match="extension chain"):
+        installer.inspect_archive(archive, expected)
+
+
+def test_tarfile_recursion_error_is_normalized_as_install_error(
+    installer, monkeypatch
+):
+    monkeypatch.setattr(installer, "_preflight_archive", lambda _path: None)
+    monkeypatch.setattr(
+        installer.tarfile,
+        "open",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RecursionError("adversarial extension recursion")
+        ),
+    )
+    expected = installer.ExpectedIdentity(
+        version="1.2.3",
+        commit="a" * 40,
+        release="1.2.3-" + "a" * 12,
+        package_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+    )
+
+    with pytest.raises(installer.InstallError, match="valid gzip tar"):
+        installer.inspect_archive(Path("unused.tar.gz"), expected)
+
+
+def test_logical_tarfile_layer_rejects_even_an_empty_sparse_map(
+    installer, monkeypatch, tmp_path
+):
+    pax = _pax_record("GNU.sparse.size", "0")
+    raw_tar = (
+        _raw_tar_header("././@PaxHeader", tarfile.XHDTYPE, len(pax))
+        + pax
+        + (b"\0" * ((-len(pax)) % installer.TAR_BLOCK_BYTES))
+        + _raw_tar_header("sparse.bin", tarfile.REGTYPE, 0)
+        + (b"\0" * installer.TAR_BLOCK_BYTES * 2)
+    )
+    archive = tmp_path / "logical-empty-sparse.tar.gz"
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as stream:
+            stream.write(raw_tar)
+    expected = installer.ExpectedIdentity(
+        version="1.2.3",
+        commit="a" * 40,
+        release="1.2.3-" + "a" * 12,
+        package_sha256="b" * 64,
+        manifest_sha256="c" * 64,
+    )
+    monkeypatch.setattr(installer, "_preflight_archive", lambda _path: None)
+
+    with pytest.raises(installer.InstallError, match="sparse archive member"):
+        installer.inspect_archive(archive, expected)
+
+
+def test_raw_preflight_uses_effective_pax_size_for_physical_payload(
+    installer, tmp_path
+):
+    effective_size = 1024
+    pax = _pax_record("size", str(effective_size))
+    raw_tar = (
+        _raw_tar_header("././@PaxHeader", tarfile.XHDTYPE, len(pax))
+        + pax
+        + (b"\0" * ((-len(pax)) % installer.TAR_BLOCK_BYTES))
+        + _raw_tar_header("payload.bin", tarfile.REGTYPE, 1)
+        + (b"A" * effective_size)
+        + (b"\0" * installer.TAR_BLOCK_BYTES * 2)
+    )
+    archive = tmp_path / "pax-effective-size.tar.gz"
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as stream:
+            stream.write(raw_tar)
+
+    installer._preflight_archive(archive)
+
+
+def test_metadata_only_local_pax_cannot_bypass_raw_size_limit(installer, tmp_path):
+    pax = _pax_record("mtime", "0")
+    raw_tar = (
+        _raw_tar_header("././@PaxHeader", tarfile.XHDTYPE, len(pax))
+        + pax
+        + (b"\0" * ((-len(pax)) % installer.TAR_BLOCK_BYTES))
+        + _raw_tar_header(
+            "payload.bin",
+            tarfile.REGTYPE,
+            installer.MAX_RELEASE_FILE_BYTES + 1,
+        )
+    )
+    archive = tmp_path / "metadata-only-pax.tar.gz"
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as stream:
+            stream.write(raw_tar)
+
+    with pytest.raises(installer.InstallError, match="raw archive file size"):
+        installer._preflight_archive(archive)
+
+
+def test_raw_preflight_rejects_concatenated_gzip_even_when_second_member_is_empty(
+    installer, tmp_path
+):
+    archive = tmp_path / "concatenated.tar.gz"
+    with archive.open("wb") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0) as stream:
+            stream.write(b"\0" * installer.TAR_BLOCK_BYTES * 2)
+    with archive.open("ab") as output:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=output, mtime=0):
+            pass
+
+    with pytest.raises(installer.InstallError, match="concatenated"):
+        installer._preflight_archive(archive)
+
+
+@pytest.mark.parametrize(
+    ("devices", "block_sizes", "expected_calls"),
+    (
+        (
+            (11, 11, 11),
+            (4096, 4096, 4096),
+            (
+                (
+                    "package",
+                    3 * 4 * 4096,
+                    "completed staging publication (package hardlink, "
+                    "release rename, anchor hardlink)",
+                ),
+            ),
+        ),
+        (
+            (11, 22, 11),
+            (4096, 8192, 4096),
+            (
+                (
+                    "package",
+                    2 * 4 * 4096,
+                    "completed staging publication (package hardlink, "
+                    "anchor hardlink)",
+                ),
+                (
+                    "release",
+                    4 * 8192,
+                    "completed staging publication (release rename)",
+                ),
+            ),
+        ),
+    ),
+)
+def test_completed_staging_floor_budgets_same_and_cross_filesystems(
+    installer, monkeypatch, devices, block_sizes, expected_calls
+):
+    class DevicePath:
+        def __init__(self, name: str, device: int) -> None:
+            self.name = name
+            self.device = device
+
+        def stat(self):
+            return SimpleNamespace(st_dev=self.device)
+
+    paths = tuple(
+        DevicePath(name, device)
+        for name, device in zip(
+            ("package", "release", "anchor"),
+            devices,
+            strict=True,
+        )
+    )
+    calls = []
+    by_name = {
+        path.name: block_size
+        for path, block_size in zip(paths, block_sizes, strict=True)
+    }
+    monkeypatch.setattr(
+        installer.os,
+        "statvfs",
+        lambda path: SimpleNamespace(
+            f_frsize=by_name[path.name],
+            f_bsize=by_name[path.name],
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        installer,
+        "_require_free_space",
+        lambda path, additional_bytes, *, label: calls.append(
+            (path.name, additional_bytes, label)
+        ),
+    )
+
+    installer._require_completed_staging_free_space(
+        tuple(
+            zip(
+                ("package hardlink", "release rename", "anchor hardlink"),
+                paths,
+                strict=True,
+            )
+        )
+    )
+
+    assert calls == list(expected_calls)
 
 
 def test_archive_expansion_and_filesystem_allocation_are_bounded(

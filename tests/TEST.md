@@ -144,6 +144,33 @@ transaction-currency amounts must remain separate, and absent real fixtures for
 partial reconciliation, unmatched payments, or foreign currency must be
 recorded as evidence gaps rather than inferred as passing.
 
+For the multicurrency balance slice, the oracle groups every posted
+`account.move.line` on or before the inclusive cutoff by account and transaction
+currency, under one explicit company, with `off_balance` accounts excluded.
+It independently sums booked `balance` in company currency and booked
+`amount_currency` in transaction currency; neither value may be reconstructed
+from the cutoff rate. A separate changed-rate fixture must prove that a newer
+cutoff rate does not revalue historical ledger amounts. Every requested unique
+currency ID must appear exactly once in both `currency_summaries` and `rates`,
+including zero-activity currencies, and the request order must be retained.
+Rates must disclose transaction-to-company direction, inverse direction, the
+formula `company_technical / transaction_technical`, and separate transaction
+and company technical sources with effective date, scope/company/record, and
+technical rate. A non-company transaction currency without an actual rate
+record dated no later than the cutoff fails closed. The company target uses its
+actual cutoff record when present; it may use disclosed `no_rate_identity=1`
+only when no applicable root/global record exists at any date. Applicable
+company-currency records that are all in the future fail closed. The Odoo
+conversion factor must match the two disclosed technical sources within a
+relative `1e-12` tolerance, including for extremely small rates. Balance rows are deterministically
+ordered by account code/ID and requested currency order, full summaries remain
+invariant under pagination, the request is bounded to 50 currencies, output to
+25,000 aggregate groups and 500 rows per page, and all monetary totals use the
+applicable Odoo currency rounding. Target acceptance additionally requires the
+company-9 USD golden (`1950.00 CNY`, `300.00 USD`, factor `6.5`) through the
+exact immutable release's signed non-superuser receipt; the read-only SQL
+answer alone is not release verification.
+
 ## Gate E — sandbox write lifecycle
 
 Before running this gate, the operator must record the designated sandbox

@@ -172,6 +172,117 @@ def ap_result_body() -> dict:
     return body
 
 
+def multicurrency_request_document() -> dict:
+    request = request_document()
+    capability_id = "acct.multicurrency.balance_read.v1"
+    parameters = {
+        "company_id": 7,
+        "as_of_date": "2026-06-30",
+        "currency_ids": [6, 1, 2],
+        "balance_basis": "posted_ledger_cumulative",
+        "off_balance_policy": "exclude",
+        "limit": 100,
+        "offset": 0,
+    }
+    request["capability_id"] = capability_id
+    request["parameters"] = parameters
+    request["context"]["auth_token_id"] = "token-cli-multicurrency-read-1"
+    request["context"]["auth_request_digest"] = authentication_request_digest(
+        capability_id, parameters
+    )
+    return request
+
+
+def multicurrency_result_body() -> dict:
+    currencies = [(6, "CNY", "CNY"), (1, "USD", "$"), (2, "EUR", "EUR")]
+    body = {
+        "basis": "odoo_posted_aml_booked_amounts_no_cutoff_revaluation",
+        "filters": {
+            "company_id": 7,
+            "as_of_date": "2026-06-30",
+            "currency_ids": [6, 1, 2],
+            "balance_basis": "posted_ledger_cumulative",
+            "off_balance_policy": "exclude",
+        },
+        "balances": [],
+        "page": {"limit": 100, "offset": 0, "count": 0, "total_count": 0},
+        "page_summary": {
+            "balance_group_count": 0,
+            "account_count": 0,
+            "move_line_count": 0,
+            "ledger_company_balance": "0.00",
+        },
+        "ledger_summary": {
+            "balance_group_count": 0,
+            "account_count": 0,
+            "move_line_count": 0,
+            "ledger_company_balance": "0.00",
+        },
+        "currency_summaries": [
+            {
+                "currency_id": currency_id,
+                "currency_name": name,
+                "currency_symbol": symbol,
+                "currency_rounding": "0.01",
+                "ledger_company_balance": "0.00",
+                "ledger_transaction_amount": "0.00",
+                "account_count": 0,
+                "move_line_count": 0,
+            }
+            for currency_id, name, symbol in currencies
+        ],
+        "rates": [
+            {
+                "currency_id": currency_id,
+                "currency_name": name,
+                "company_currency_id": 6,
+                "company_currency_name": "CNY",
+                "as_of_date": "2026-06-30",
+                "direction": "transaction_currency_to_company_currency",
+                "formula": "company_technical_rate / transaction_technical_rate",
+                "transaction_technical_source": {
+                    "currency_id": currency_id,
+                    "currency_name": name,
+                    "effective_date": None if currency_id == 6 else "2026-06-01",
+                    "source_model": (
+                        "no_rate_identity"
+                        if currency_id == 6
+                        else "res.currency.rate"
+                    ),
+                    "source_scope": (
+                        "no_rate_identity" if currency_id == 6 else "global"
+                    ),
+                    "source_company_id": None,
+                    "source_record_id": None if currency_id == 6 else 100 + currency_id,
+                    "odoo_technical_rate": (
+                        "1" if currency_id == 6 else "0.15384615384615385"
+                    ),
+                },
+                "company_technical_source": {
+                    "currency_id": 6,
+                    "currency_name": "CNY",
+                    "effective_date": None,
+                    "source_model": "no_rate_identity",
+                    "source_scope": "no_rate_identity",
+                    "source_company_id": None,
+                    "source_record_id": None,
+                    "odoo_technical_rate": "1",
+                },
+                "transaction_to_company_rate": "1" if currency_id == 6 else "6.5",
+                "company_to_transaction_rate": "1" if currency_id == 6 else "0.1538461538461538461538461538",
+            }
+            for currency_id, name, _symbol in currencies
+        ],
+        "company_currency": {
+            "id": 6,
+            "name": "CNY",
+            "symbol": "CNY",
+            "rounding": "0.01",
+        },
+    }
+    return body
+
+
 def identity() -> dict:
     return {
         "commit": "a" * 40,
@@ -357,6 +468,45 @@ class CliReadTest(unittest.TestCase):
         transmitted = run_shell.call_args.args[1]
         self.assertEqual(transmitted["parameters"], request["parameters"])
         self.assertEqual(transmitted["capability_id"], "acct.ap.open_items.v1")
+
+    @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
+    @patch("odoo_accounting_cli_v3.cli._load_release_identity")
+    @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    @patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_secrets",
+        return_value=(AUTH_SECRET, RECEIPT_SECRET),
+    )
+    def test_multicurrency_read_transmits_company_date_all_currencies_and_page_unchanged(
+        self, _load_secrets, load_config, load_identity, run_shell
+    ) -> None:
+        load_config.return_value = self.config
+        load_identity.return_value = identity()
+        request = multicurrency_request_document()
+        verified = self.verified_result(request, multicurrency_result_body())
+        run_shell.return_value = verified
+
+        result = CliRunner().invoke(
+            main,
+            [
+                "read",
+                "--runtime-config",
+                str(self.runtime_path),
+                "--request-json",
+                json.dumps(request),
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.stdout)["data"]["result"], verified)
+        transmitted = run_shell.call_args.args[1]
+        self.assertEqual(transmitted["parameters"], request["parameters"])
+        self.assertEqual(
+            transmitted["parameters"]["currency_ids"],
+            [6, 1, 2],
+        )
+        self.assertEqual(
+            transmitted["capability_id"], "acct.multicurrency.balance_read.v1"
+        )
 
     @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
     @patch("odoo_accounting_cli_v3.cli._load_release_identity", return_value=identity())

@@ -140,11 +140,24 @@ repair. On failure the installer removes only staging paths bearing its own
 random transaction identity and inode. It never removes an existing or already
 published object.
 
-The archive is capped at 10,000 members, 512 MiB compressed and 512 MiB total
-declared extracted content, with a 64 MiB per-file ceiling. Before package copy
-and again before extraction, the installer requires the target filesystem to
-retain at least 2 GiB free after the next allocation. These are refusal limits,
-not sizing recommendations.
+Before Python's tar reader is entered, a constant-memory raw gzip/tar preflight
+bounds raw header count, regular and manifest declarations, and PAX/GNU
+extension data. It accepts exactly one gzip member and a standard two-block tar
+terminator. Extension padding must be zero and a consecutive extension chain
+is limited to two headers, preventing hidden PAX fields and recursive parser
+exhaustion. One extension is capped at 64 KiB and all extensions at 16 MiB;
+oversized extension payloads are rejected from their header without being
+materialized. Sparse metadata is rejected again after logical tar parsing. The
+archive is capped at 10,000 logical members and 512 MiB compressed. Its
+manifest-listed regular content is capped at 512 MiB, with a 64 MiB per-file
+ceiling; `RELEASE-MANIFEST.json` has a separate 16 MiB ceiling. Before package
+copy and again before extraction, the installer requires the relevant target
+filesystem to retain at least 2 GiB free after the next allocation. After all
+three staging objects are complete, it rechecks that floor once on every
+distinct filesystem actually backing the package hardlink, release rename,
+and anchor hardlink. This final check reserves four filesystem blocks per
+pending publication object. These are refusal limits, not sizing
+recommendations.
 
 `--test-mode --root-prefix ABSOLUTE_PRIVATE_DIRECTORY` exists only for the
 non-root automated installer tests. Both flags are required together, root

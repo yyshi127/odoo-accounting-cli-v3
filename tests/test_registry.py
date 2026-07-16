@@ -35,7 +35,7 @@ class RegistryTest(unittest.TestCase):
                 self.assertIs(item["approval"]["required"], True)
                 self.assertIs(item["idempotency"]["required"], True)
 
-    def test_only_four_verified_read_contracts_are_staged_in_test(self) -> None:
+    def test_only_five_contract_tested_reads_are_staged_in_test(self) -> None:
         staged = [
             item
             for item in self.document["capabilities"]
@@ -48,6 +48,7 @@ class RegistryTest(unittest.TestCase):
                 "acct.gl.trial_balance.v1",
                 "acct.ar.open_items.v1",
                 "acct.ap.open_items.v1",
+                "acct.multicurrency.balance_read.v1",
             ],
         )
         for item in staged:
@@ -150,6 +151,53 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(item["output_schema"], ar_item["output_schema"])
         self.assertIn("payable", item["business_description"])
         self.assertEqual(item["evidence"]["level"], "contract_tested")
+        self.assertEqual(item["staged_environments"], ["test"])
+        self.assertEqual(item["enabled_environments"], [])
+
+    def test_multicurrency_contract_is_strict_but_not_claimed_as_verified(self) -> None:
+        item = next(
+            item
+            for item in self.document["capabilities"]
+            if item["id"] == "acct.multicurrency.balance_read.v1"
+        )
+        self.assertEqual(
+            item["input_schema"]["required"],
+            [
+                "company_id",
+                "as_of_date",
+                "currency_ids",
+                "balance_basis",
+                "off_balance_policy",
+                "limit",
+                "offset",
+            ],
+        )
+        currency_ids = item["input_schema"]["properties"]["currency_ids"]
+        self.assertIs(currency_ids["uniqueItems"], True)
+        self.assertEqual(currency_ids["maxItems"], 50)
+        output = item["output_schema"]["properties"]
+        self.assertTrue(output["balances"]["items"]["properties"])
+        rate_properties = output["rates"]["items"]["properties"]
+        self.assertEqual(
+            rate_properties["formula"]["enum"],
+            ["company_technical_rate / transaction_technical_rate"],
+        )
+        for source_name in (
+            "transaction_technical_source",
+            "company_technical_source",
+        ):
+            source = rate_properties[source_name]
+            self.assertIs(source["additionalProperties"], False)
+            self.assertEqual(
+                source["properties"]["source_scope"]["enum"],
+                ["no_rate_identity", "company_specific", "global"],
+            )
+            self.assertIn("odoo_technical_rate", source["required"])
+        self.assertTrue(output["receipt"]["properties"])
+        self.assertEqual(output["page"]["properties"]["total_count"]["maximum"], 25000)
+        self.assertEqual(
+            item["evidence"], {"level": "contract_tested", "receipts": []}
+        )
         self.assertEqual(item["staged_environments"], ["test"])
         self.assertEqual(item["enabled_environments"], [])
 
