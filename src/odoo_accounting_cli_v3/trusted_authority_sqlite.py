@@ -32,13 +32,21 @@ from .operations import (
     Operation,
     canonical_json,
 )
+from .sqlite_process_lifecycle import (
+    SQLiteProcessLifecycleError,
+    SQLiteProcessLifecycleLease,
+    process_sqlite_lifecycle,
+)
 from .trusted_authority import (
     ApprovalChallenge,
     ApprovalChallengeState,
     AuthorityAuditDraft,
     AuthorityAuditEvent,
+    AuthorityCommitOutcomeUnknownError,
     AuthorityConcurrentUpdate,
     AuthorityError,
+    AuthorityKnownCommittedError,
+    AuthorityReconciliationRequiredError,
     _audit_hash,
     _operation_binding_digest,
 )
@@ -383,7 +391,39 @@ class SQLiteApprovalChallengeStore:
         self.busy_timeout_ms = busy_timeout_ms
         self._initialize()
 
-    def _secure_database_file(self) -> tuple[int, int]:
+    @contextmanager
+    def _database_lifecycle(self) -> Iterator[SQLiteProcessLifecycleLease]:
+        try:
+            with process_sqlite_lifecycle(
+                bounded_sqlite_connect_timeout_seconds(self.busy_timeout_ms)
+            ) as lease:
+                yield lease
+        except SQLiteProcessLifecycleError as exc:
+            raise AuthorityError(
+                "authority store SQLite process lifecycle is unsafe"
+            ) from exc
+
+    @staticmethod
+    def _close_descriptor(
+        descriptor: int,
+        lease: SQLiteProcessLifecycleLease,
+        *,
+        label: str,
+    ) -> None:
+        try:
+            os.close(descriptor)
+        except OSError:
+            lease.poison(f"{label} descriptor close was not confirmed")
+            raise
+
+    def _secure_database_file(
+        self, lease: SQLiteProcessLifecycleLease | None = None
+    ) -> tuple[int, int]:
+        if lease is None:
+            with self._database_lifecycle() as acquired:
+                return self._secure_database_file(acquired)
+        lease.require_file_phase()
+        descriptor: int | None = None
         try:
             parent = self.path.parent
             parent_metadata = parent.lstat()
@@ -394,32 +434,86 @@ class SQLiteApprovalChallengeStore:
                 or parent_metadata.st_mode & 0o022
             ):
                 raise AuthorityError("authority store parent directory is not private")
+            if os.name == "posix" and not hasattr(os, "O_NOFOLLOW"):
+                raise AuthorityError(
+                    "authority store database requires O_NOFOLLOW support"
+                )
             if not os.path.lexists(self.path):
                 flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
                 flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
                 try:
                     descriptor = os.open(self.path, flags, 0o600)
                 except FileExistsError:
-                    pass
+                    descriptor = None
                 else:
-                    os.close(descriptor)
-            metadata = self.path.lstat()
-            if not stat.S_ISREG(metadata.st_mode) or self.path.is_symlink():
+                    try:
+                        if os.name == "posix":
+                            os.fchmod(descriptor, 0o600)
+                    finally:
+                        closing = descriptor
+                        descriptor = None
+                        self._close_descriptor(
+                            closing,
+                            lease,
+                            label="authority store database creation",
+                        )
+            initial = self.path.lstat()
+            if not stat.S_ISREG(initial.st_mode) or self.path.is_symlink():
                 raise AuthorityError(
                     "authority store database must be a regular non-symlink file"
                 )
+            if initial.st_nlink != 1:
+                raise AuthorityError(
+                    "authority store database must have exactly one hard link"
+                )
             if os.name == "posix" and (
-                metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077
+                initial.st_uid != os.geteuid()
+                or stat.S_IMODE(initial.st_mode) != 0o600
             ):
                 raise AuthorityError("authority store database file is not private")
-            self._verify_sidecars()
-            return metadata.st_dev, metadata.st_ino
+            flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, flags)
+            opened = os.fstat(descriptor)
+            metadata = self.path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or self.path.is_symlink()
+                or (opened.st_dev, opened.st_ino)
+                != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise AuthorityError(
+                    "authority store database must be a regular non-symlink file"
+                )
+            if opened.st_nlink != 1 or metadata.st_nlink != 1:
+                raise AuthorityError(
+                    "authority store database must have exactly one hard link"
+                )
+            if os.name == "posix" and (
+                opened.st_uid != os.geteuid()
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise AuthorityError("authority store database file is not private")
+            self._verify_sidecars(lease)
+            return opened.st_dev, opened.st_ino
         except AuthorityError:
             raise
         except OSError as exc:
             raise AuthorityError("authority store database path cannot be secured") from exc
+        finally:
+            if descriptor is not None:
+                closing = descriptor
+                descriptor = None
+                self._close_descriptor(
+                    closing,
+                    lease,
+                    label="authority store database",
+                )
 
-    def _verify_database_file(self, expected: tuple[int, int]) -> None:
+    def _verify_database_path(self, expected: tuple[int, int]) -> None:
         try:
             metadata = self.path.lstat()
             if (
@@ -428,27 +522,104 @@ class SQLiteApprovalChallengeStore:
                 or (metadata.st_dev, metadata.st_ino) != expected
             ):
                 raise AuthorityError("authority store database path changed while open")
-            self._verify_sidecars()
+            if metadata.st_nlink != 1:
+                raise AuthorityError(
+                    "authority store database must have exactly one hard link"
+                )
+            if os.name == "posix" and (
+                metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+            ):
+                raise AuthorityError("authority store database file is not private")
         except AuthorityError:
             raise
         except OSError as exc:
             raise AuthorityError("authority store database path cannot be verified") from exc
 
-    def _verify_sidecars(self) -> None:
+    def _verify_database_file(
+        self,
+        expected: tuple[int, int],
+        lease: SQLiteProcessLifecycleLease | None = None,
+    ) -> None:
+        if lease is None:
+            with self._database_lifecycle() as acquired:
+                self._verify_database_file(expected, acquired)
+                return
+        lease.require_file_phase()
+        self._verify_database_path(expected)
+        self._verify_sidecars(lease)
+
+    def _verify_sidecars(
+        self, lease: SQLiteProcessLifecycleLease | None = None
+    ) -> None:
+        if lease is None:
+            with self._database_lifecycle() as acquired:
+                self._verify_sidecars(acquired)
+                return
+        lease.require_file_phase()
         if os.name != "posix":
             return
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise AuthorityError("authority store sidecars require O_NOFOLLOW support")
         for suffix in ("-wal", "-shm"):
             sidecar = Path(f"{self.path}{suffix}")
-            if not os.path.lexists(sidecar):
-                continue
-            sidecar_metadata = sidecar.lstat()
-            if (
-                not stat.S_ISREG(sidecar_metadata.st_mode)
-                or sidecar.is_symlink()
-                or sidecar_metadata.st_uid != os.geteuid()
-                or sidecar_metadata.st_mode & 0o077
-            ):
-                raise AuthorityError("authority store SQLite sidecar is not private")
+            for _attempt in range(3):
+                if not os.path.lexists(sidecar):
+                    break
+                descriptor: int | None = None
+                try:
+                    flags = (
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | os.O_NOFOLLOW
+                    )
+                    descriptor = os.open(sidecar, flags)
+                    opened = os.fstat(descriptor)
+                    metadata = sidecar.lstat()
+                    if (
+                        not stat.S_ISREG(opened.st_mode)
+                        or not stat.S_ISREG(metadata.st_mode)
+                        or metadata.st_nlink != 1
+                        or opened.st_uid != os.geteuid()
+                        or metadata.st_uid != os.geteuid()
+                        or stat.S_IMODE(opened.st_mode) != 0o600
+                        or stat.S_IMODE(metadata.st_mode) != 0o600
+                    ):
+                        raise AuthorityError(
+                            "authority store SQLite sidecar is not private"
+                        )
+                    if (opened.st_dev, opened.st_ino) != (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ):
+                        continue
+                    if opened.st_nlink != 1:
+                        raise AuthorityError(
+                            "authority store SQLite sidecar is not private"
+                        )
+                    break
+                except FileNotFoundError:
+                    if not os.path.lexists(sidecar):
+                        break
+                except AuthorityError:
+                    raise
+                except OSError as exc:
+                    raise AuthorityError(
+                        "authority store SQLite sidecar cannot be secured"
+                    ) from exc
+                finally:
+                    if descriptor is not None:
+                        closing = descriptor
+                        descriptor = None
+                        self._close_descriptor(
+                            closing,
+                            lease,
+                            label="authority store SQLite sidecar",
+                        )
+            else:
+                raise AuthorityError(
+                    "authority store SQLite sidecar changed while checked"
+                )
 
     def _configure(self, connection: sqlite3.Connection, *, write: bool) -> None:
         busy_timeout_ms = bounded_sqlite_busy_timeout_ms(self.busy_timeout_ms)
@@ -465,57 +636,209 @@ class SQLiteApprovalChallengeStore:
             raise AuthorityError("authority store requires SQLite foreign keys")
 
     @contextmanager
-    def _transaction(self) -> Iterator[sqlite3.Connection]:
-        expected = self._secure_database_file()
-        connection = sqlite3.connect(
-            self.path,
-            timeout=bounded_sqlite_connect_timeout_seconds(self.busy_timeout_ms),
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
+    def _postclose_database_verification(
+        self,
+        expected: tuple[int, int],
+        lease: SQLiteProcessLifecycleLease,
+    ) -> Iterator[None]:
         try:
-            self._configure(connection, write=True)
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
-            connection.commit()
-        except sqlite3.Error as exc:
-            if connection.in_transaction:
-                connection.rollback()
-            raise AuthorityError("authority store SQLite transaction failed") from exc
-        except BaseException:
-            if connection.in_transaction:
-                connection.rollback()
+            yield
+        except BaseException as exc:
+            try:
+                self._verify_database_file(expected, lease)
+            except BaseException as verification_error:
+                exc.add_note(
+                    "authority store post-close verification also failed: "
+                    f"{verification_error}"
+                )
             raise
-        finally:
-            connection.close()
-            self._verify_database_file(expected)
+        else:
+            self._verify_database_file(expected, lease)
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Connection]:
+        committed = False
+        try:
+            with self._database_lifecycle() as lease:
+                expected = self._secure_database_file(lease)
+                with (
+                    self._postclose_database_verification(expected, lease),
+                    lease.connection_phase() as connection_phase,
+                ):
+                    connection_phase.connecting()
+                    try:
+                        connection = sqlite3.connect(
+                            self.path,
+                            timeout=bounded_sqlite_connect_timeout_seconds(
+                                self.busy_timeout_ms
+                            ),
+                            isolation_level=None,
+                        )
+                    except BaseException:
+                        connection_phase.connect_failed()
+                        raise
+                    connection_phase.opened()
+                    connection.row_factory = sqlite3.Row
+                    transaction_error: BaseException | None = None
+                    commit_started = False
+                    try:
+                        self._configure(connection, write=True)
+                        self._verify_database_path(expected)
+                        connection.execute("BEGIN IMMEDIATE")
+                        yield connection
+                        connection_phase.require_active()
+                        self._verify_database_path(expected)
+                        connection_phase.require_active()
+                        commit_started = True
+                        connection.commit()
+                        committed = True
+                    except BaseException as exc:
+                        rollback_confirmed = False
+                        state_check_failed = False
+                        try:
+                            in_transaction = connection.in_transaction
+                        except BaseException as state_error:
+                            state_check_failed = True
+                            exc.add_note(
+                                "authority store SQLite transaction state check "
+                                f"also failed: {state_error}"
+                            )
+                            in_transaction = False
+                        if in_transaction:
+                            try:
+                                connection.rollback()
+                            except BaseException as rollback_error:
+                                exc.add_note(
+                                    "authority store SQLite rollback also failed: "
+                                    f"{rollback_error}"
+                                )
+                            else:
+                                try:
+                                    rollback_confirmed = not connection.in_transaction
+                                except BaseException as state_error:
+                                    state_check_failed = True
+                                    exc.add_note(
+                                        "authority store SQLite rollback state check "
+                                        f"also failed: {state_error}"
+                                    )
+                        if commit_started and (
+                            state_check_failed or not rollback_confirmed
+                        ):
+                            error = AuthorityCommitOutcomeUnknownError(
+                                "authority store SQLite commit outcome is unknown; "
+                                "reconcile durable state and do not replay the request"
+                            )
+                            transaction_error = error
+                            raise error from exc
+                        if isinstance(exc, sqlite3.Error):
+                            error = AuthorityError(
+                                "authority store SQLite transaction failed"
+                            )
+                            transaction_error = error
+                            raise error from exc
+                        transaction_error = exc
+                        raise
+                    finally:
+                        try:
+                            connection.close()
+                        except BaseException as close_error:
+                            if transaction_error is None:
+                                raise
+                            transaction_error.add_note(
+                                "authority store SQLite connection close also failed: "
+                                f"{close_error}"
+                            )
+                        else:
+                            try:
+                                connection_phase.closed()
+                            except BaseException as lifecycle_error:
+                                if transaction_error is None:
+                                    raise
+                                transaction_error.add_note(
+                                    "authority store SQLite connection lifecycle "
+                                    f"cleanup also failed: {lifecycle_error}"
+                                )
+        except AuthorityReconciliationRequiredError:
+            raise
+        except BaseException as exc:
+            if committed:
+                raise AuthorityKnownCommittedError(
+                    "authority store SQLite commit completed but cleanup failed; "
+                    "reconcile durable state and do not replay the request"
+                ) from exc
+            if isinstance(exc, sqlite3.Error):
+                raise AuthorityError(
+                    "authority store SQLite transaction failed"
+                ) from exc
+            raise
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
-        expected = self._secure_database_file()
-        connection = sqlite3.connect(
-            self.path,
-            timeout=bounded_sqlite_connect_timeout_seconds(self.busy_timeout_ms),
-            isolation_level=None,
-        )
-        connection.row_factory = sqlite3.Row
         try:
-            self._configure(connection, write=False)
-            connection.execute("PRAGMA query_only = ON")
-            connection.execute("BEGIN")
-            yield connection
-            connection.commit()
+            with self._database_lifecycle() as lease:
+                expected = self._secure_database_file(lease)
+                with (
+                    self._postclose_database_verification(expected, lease),
+                    lease.connection_phase() as connection_phase,
+                ):
+                    connection_phase.connecting()
+                    try:
+                        connection = sqlite3.connect(
+                            self.path,
+                            timeout=bounded_sqlite_connect_timeout_seconds(
+                                self.busy_timeout_ms
+                            ),
+                            isolation_level=None,
+                        )
+                    except BaseException:
+                        connection_phase.connect_failed()
+                        raise
+                    connection_phase.opened()
+                    connection.row_factory = sqlite3.Row
+                    read_error: BaseException | None = None
+                    try:
+                        self._configure(connection, write=False)
+                        connection.execute("PRAGMA query_only = ON")
+                        connection.execute("BEGIN")
+                        self._verify_database_path(expected)
+                        yield connection
+                        connection_phase.require_active()
+                        self._verify_database_path(expected)
+                        connection_phase.require_active()
+                        connection.commit()
+                    except sqlite3.Error as exc:
+                        if connection.in_transaction:
+                            connection.rollback()
+                        error = AuthorityError("authority store SQLite read failed")
+                        read_error = error
+                        raise error from exc
+                    except BaseException as exc:
+                        if connection.in_transaction:
+                            connection.rollback()
+                        read_error = exc
+                        raise
+                    finally:
+                        try:
+                            connection.close()
+                        except BaseException as close_error:
+                            if read_error is None:
+                                raise
+                            read_error.add_note(
+                                "authority store SQLite read close also failed: "
+                                f"{close_error}"
+                            )
+                        else:
+                            try:
+                                connection_phase.closed()
+                            except BaseException as lifecycle_error:
+                                if read_error is None:
+                                    raise
+                                read_error.add_note(
+                                    "authority store SQLite read lifecycle cleanup "
+                                    f"also failed: {lifecycle_error}"
+                                )
         except sqlite3.Error as exc:
-            if connection.in_transaction:
-                connection.rollback()
             raise AuthorityError("authority store SQLite read failed") from exc
-        except BaseException:
-            if connection.in_transaction:
-                connection.rollback()
-            raise
-        finally:
-            connection.close()
-            self._verify_database_file(expected)
 
     def _initialize(self) -> None:
         with self._transaction() as connection:

@@ -240,6 +240,22 @@ not protection against arbitrary code running as the state-file owner.
 Production promotion still requires the separate service-identity and external
 audit-anchor gates.
 
+All trusted authority and session SQLite stores in one service process share a
+single lifecycle gate. Do not fork after a trusted connection has opened, and
+do not run a pre-fork worker that lets children inherit those connections or
+writer-lock descriptors. A Python-managed `os.fork` child created during an
+active or poisoned lifecycle is terminated by the V3 at-fork hook with exit
+status `70`, before it returns to the fork caller or runs normal Python
+cleanup, close/rollback SQLite, writer-lock release, or exec. Prohibit native
+fork paths that bypass `os.register_at_fork`; any third-party child hook that
+runs earlier must not touch trusted-store connections or descriptors. If logs
+report exit `70` or a poisoned SQLite lifecycle,
+unconfirmed connection close, known-committed cleanup failure, or unknown
+commit outcome, stop new approval/write traffic, preserve the database and
+sidecars, reconcile the request/audit/record identity, and restart with a fresh
+process. Never replay the request merely to test whether the first commit
+landed, and never clear the condition by deleting a database or lock file.
+
 ## Test-only candidate verification
 
 Run all checks as the non-root Odoo service user with bytecode and pytest cache

@@ -36,6 +36,27 @@ class AuthorityError(ValueError):
     """A trusted-authority request was rejected without issuing authority."""
 
 
+class AuthorityReconciliationRequiredError(AuthorityError):
+    """An authority mutation cannot be replayed before durable reconciliation."""
+
+    retryable = False
+    reconciliation_required = True
+
+
+class AuthorityKnownCommittedError(AuthorityReconciliationRequiredError):
+    """The authority mutation committed but cleanup was not fully verified."""
+
+    committed = True
+    commit_outcome = "committed"
+
+
+class AuthorityCommitOutcomeUnknownError(AuthorityReconciliationRequiredError):
+    """Commit began and rollback could not be positively confirmed."""
+
+    committed = None
+    commit_outcome = "unknown"
+
+
 class ChallengeExpired(AuthorityError):
     pass
 
@@ -1429,9 +1450,12 @@ __all__ = [
     "ApprovalChallengeStore",
     "ApprovalDecision",
     "AuthorityAuditEvent",
+    "AuthorityCommitOutcomeUnknownError",
     "AuthorityConcurrentUpdate",
     "AuthorityError",
+    "AuthorityKnownCommittedError",
     "AuthorityKeys",
+    "AuthorityReconciliationRequiredError",
     "AuthorizedWriteAction",
     "ChallengeExpired",
     "ChallengeTerminal",

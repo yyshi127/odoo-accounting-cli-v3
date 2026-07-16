@@ -388,13 +388,20 @@ function requestedOperationId(action, request) {
 	return typeof request?.[field] === "string" ? request[field] : undefined;
 }
 
-function bridgeFailure(action, request, { code, message, odooEffect, retryable }) {
+function bridgeFailure(
+	action,
+	request,
+	{ code, message, odooEffect, reconciliationRequired = false, retryable },
+) {
 	const error = {
 		code,
 		message,
 		odoo_effect: odooEffect,
 		retryable,
 	};
+	if (reconciliationRequired) {
+		error.reconciliation_required = true;
+	}
 	const operationId = requestedOperationId(action, request);
 	if (operationId) {
 		error.operation_id = operationId;
@@ -776,6 +783,13 @@ export function createV3CliRunner(options = {}) {
 let inheritedSessionRead = false;
 let inheritedSessionHandle = "";
 
+class BrokerTransportError extends Error {
+	constructor({ notDelivered }) {
+		super("trusted broker transport failed");
+		this.notDelivered = notDelivered === true;
+	}
+}
+
 function inheritedBrokerSessionHandle() {
 	if (!inheritedSessionRead) {
 		inheritedSessionRead = true;
@@ -800,6 +814,10 @@ function defaultBrokerTransport({
 	timeoutMs,
 }) {
 	return new Promise((resolve, reject) => {
+		let connected = false;
+		let deadline;
+		let request;
+		let response;
 		let settled = false;
 		let responseBody = "";
 		const finish = (callback, value) => {
@@ -807,9 +825,22 @@ function defaultBrokerTransport({
 				return;
 			}
 			settled = true;
+			clearTimeout(deadline);
 			callback(value);
 		};
-		const request = http.request({
+		const fail = () => finish(
+			reject,
+			new BrokerTransportError({ notDelivered: !connected }),
+		);
+		const terminate = () => {
+			if (settled) {
+				return;
+			}
+			fail();
+			response?.destroy();
+			request?.destroy();
+		};
+		request = http.request({
 			headers: {
 				"Content-Length": Buffer.byteLength(body),
 				"Content-Type": "application/json; charset=utf-8",
@@ -823,13 +854,19 @@ function defaultBrokerTransport({
 			path: requestPath,
 			socketPath,
 			timeout: timeoutMs,
-		}, (response) => {
+		}, (incomingResponse) => {
+			connected = true;
+			response = incomingResponse;
 			response.setEncoding("utf8");
 			response.on("data", (chunk) => {
-				responseBody += chunk;
-				if (Buffer.byteLength(responseBody) > maxOutputBytes) {
-					request.destroy(new Error("broker response exceeded limit"));
+				if (
+					Buffer.byteLength(responseBody)
+					+ Buffer.byteLength(chunk) > maxOutputBytes
+				) {
+					terminate();
+					return;
 				}
+				responseBody += chunk;
 			});
 			response.on("end", () => finish(resolve, {
 				authorityVerified:
@@ -841,10 +878,25 @@ function defaultBrokerTransport({
 					response.headers["x-odoo-v3-executed-release-digest"],
 				statusCode: response.statusCode ?? 0,
 			}));
+			response.on("aborted", terminate);
+			response.on("error", terminate);
+			response.on("close", terminate);
 		});
-		request.on("timeout", () => request.destroy(new Error("broker timeout")));
-		request.on("error", (error) => finish(reject, error));
-		request.end(body, "utf8");
+		request.on("socket", (socket) => {
+			if (socket.connecting) {
+				socket.once("connect", () => { connected = true; });
+			} else {
+				connected = true;
+			}
+		});
+		request.on("timeout", terminate);
+		request.on("error", terminate);
+		deadline = setTimeout(terminate, timeoutMs);
+		try {
+			request.end(body, "utf8");
+		} catch {
+			terminate();
+		}
 	});
 }
 
@@ -957,12 +1009,32 @@ export function createV3BrokerClient(options = {}) {
 				socketPath: brokerSocketPath,
 				timeoutMs,
 			});
-		} catch {
+		} catch (error) {
+			if (
+				action === "read"
+				|| (error instanceof BrokerTransportError && error.notDelivered)
+			) {
+				return bridgeFailure(action, request, {
+					code: "bridge_v3_broker_unavailable",
+					message: "The fixed local V3 trusted broker is unavailable.",
+					odooEffect: "none",
+					retryable: true,
+				});
+			}
+			if (action !== "operation.approve_execute") {
+				return bridgeFailure(action, request, {
+					code: "bridge_v3_broker_reconciliation_required",
+					message: "The trusted V3 broker request may have been accepted; reconcile it before retrying.",
+					odooEffect: "none",
+					reconciliationRequired: true,
+					retryable: false,
+				});
+			}
 			return bridgeFailure(action, request, {
-				code: "bridge_v3_broker_unavailable",
-				message: "The fixed local V3 trusted broker is unavailable.",
-				odooEffect: action === "operation.approve_execute" ? "unknown" : "none",
-				retryable: true,
+				code: "bridge_v3_broker_outcome_unknown",
+				message: "The trusted V3 broker request may have been accepted; reconcile it before retrying.",
+				odooEffect: "unknown",
+				retryable: false,
 			});
 		}
 		const responseBodyIsSafeToInspect =

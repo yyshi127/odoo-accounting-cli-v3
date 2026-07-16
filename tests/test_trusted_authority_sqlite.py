@@ -11,10 +11,11 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event, Lock, Thread
 
 import pytest
 
+from odoo_accounting_cli_v3 import sqlite_process_lifecycle, trusted_authority_sqlite
 from odoo_accounting_cli_v3.operations import (
     Operation,
     State,
@@ -27,9 +28,12 @@ from odoo_accounting_cli_v3.trusted_authority import (
     ApprovalChallengeState,
     ApprovalDecision,
     AuthorityAuditDraft,
+    AuthorityCommitOutcomeUnknownError,
     AuthorityConcurrentUpdate,
     AuthorityError,
+    AuthorityKnownCommittedError,
     AuthorityKeys,
+    AuthorityReconciliationRequiredError,
     TrustedAuthority,
     TrustedSession,
     _operation_binding_digest,
@@ -45,6 +49,32 @@ DATABASE_UUID = "b4ac5547-f101-49ca-b9a7-e9793394a237"
 APPROVAL_SECRET = b"a" * 32
 CONTEXT_SECRET_SENTINEL = b"context-secret-must-never-enter-sqlite-1"
 APPROVAL_SECRET_SENTINEL = b"approval-secret-must-never-enter-sqlite"
+
+
+class _ObservableMutex:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self.blocked = Event()
+
+    def acquire(self, *, timeout: float = -1) -> bool:
+        if self._lock.acquire(blocking=False):
+            return True
+        self.blocked.set()
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_sqlite_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> sqlite_process_lifecycle._ProcessSQLiteLifecycle:
+    gate = sqlite_process_lifecycle._ProcessSQLiteLifecycle()
+    monkeypatch.setattr(
+        sqlite_process_lifecycle, "_PROCESS_SQLITE_LIFECYCLE", gate
+    )
+    return gate
 
 
 def awaiting_operation(operation_id: str = "op-1") -> Operation:
@@ -248,6 +278,71 @@ def test_requires_absolute_regular_non_symlink_private_database_path(
         pytest.skip("symlinks are unavailable on this platform")
     with pytest.raises(AuthorityError, match="non-symlink"):
         SQLiteApprovalChallengeStore(link)
+
+
+def test_database_hardlink_is_rejected(tmp_path: Path) -> None:
+    database = (tmp_path / "hardlinked.sqlite3").absolute()
+    database.touch(mode=0o600)
+    database.chmod(0o600)
+    alias = (tmp_path / "database-alias.sqlite3").absolute()
+    try:
+        os.link(database, alias)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    with pytest.raises(AuthorityError, match="exactly one hard link"):
+        SQLiteApprovalChallengeStore(database)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX database race contract")
+def test_database_path_replacement_after_open_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = (tmp_path / "replace.sqlite3").absolute()
+    database.touch(mode=0o600)
+    database.chmod(0o600)
+    real_open = os.open
+
+    def replace_after_open(
+        candidate: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        descriptor = real_open(candidate, flags, *args)
+        if Path(candidate) == database:
+            database.unlink()
+            database.write_bytes(b"replacement authority database")
+            database.chmod(0o600)
+        return descriptor
+
+    monkeypatch.setattr(trusted_authority_sqlite.os, "open", replace_after_open)
+
+    with pytest.raises(AuthorityError, match="regular non-symlink"):
+        SQLiteApprovalChallengeStore(database)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX database permission contract")
+def test_database_permission_change_between_fstat_and_lstat_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = (tmp_path / "permission-race.sqlite3").absolute()
+    database.touch(mode=0o600)
+    database.chmod(0o600)
+    real_lstat = Path.lstat
+    database_lstats = 0
+
+    def make_public_on_second_lstat(candidate: Path):
+        nonlocal database_lstats
+        if candidate == database:
+            database_lstats += 1
+            if database_lstats == 2:
+                candidate.chmod(0o644)
+        return real_lstat(candidate)
+
+    monkeypatch.setattr(
+        trusted_authority_sqlite.Path, "lstat", make_public_on_second_lstat
+    )
+
+    with pytest.raises(AuthorityError, match="database file is not private"):
+        SQLiteApprovalChallengeStore(database)
 
 
 def test_initializes_versioned_private_wal_database(database_path: Path) -> None:
@@ -639,6 +734,472 @@ def test_wal_sidecars_are_private_and_insecure_sidecar_fails_before_append(
             sidecars[0].chmod(0o600)
 
     assert [event.event_id for event in store.audit_events()] == ["event-1"]
+
+
+def test_precommit_identity_failure_rolls_back_without_durable_event(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    verify = store._verify_database_path
+    calls = 0
+
+    def fail_second(expected: tuple[int, int]) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise AuthorityError("forced precommit identity failure")
+        verify(expected)
+
+    monkeypatch.setattr(store, "_verify_database_path", fail_second)
+
+    with pytest.raises(AuthorityError, match="forced precommit identity failure"):
+        store.append_audit_event(draft(None, "must-not-commit"))
+
+    monkeypatch.setattr(store, "_verify_database_path", verify)
+    assert store.audit_events() == ()
+
+
+@pytest.mark.parametrize("cleanup_phase", ("database_verification", "close"))
+def test_post_commit_cleanup_failure_requires_authority_reconciliation(
+    database_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_phase: str,
+) -> None:
+    gate = sqlite_process_lifecycle._ProcessSQLiteLifecycle()
+    monkeypatch.setattr(
+        sqlite_process_lifecycle, "_PROCESS_SQLITE_LIFECYCLE", gate
+    )
+    store = SQLiteApprovalChallengeStore(database_path)
+    real_connect = sqlite3.connect
+    real_verify = store._verify_database_file
+
+    if cleanup_phase == "database_verification":
+        verification_calls = 0
+
+        def fail_post_commit_verification(
+            expected: tuple[int, int],
+            lease: sqlite_process_lifecycle.SQLiteProcessLifecycleLease | None = None,
+        ) -> None:
+            nonlocal verification_calls
+            verification_calls += 1
+            real_verify(expected, lease)
+            if verification_calls == 1:
+                raise AuthorityError("simulated post-commit verification failure")
+
+        monkeypatch.setattr(
+            store, "_verify_database_file", fail_post_commit_verification
+        )
+    else:
+
+        class CloseFailureConnection(sqlite3.Connection):
+            def close(self) -> None:
+                super().close()
+                raise sqlite3.OperationalError("simulated post-commit close failure")
+
+        def failing_close_connect(
+            *args: object, **kwargs: object
+        ) -> sqlite3.Connection:
+            kwargs["factory"] = CloseFailureConnection
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(
+            trusted_authority_sqlite.sqlite3,
+            "connect",
+            failing_close_connect,
+        )
+
+    with pytest.raises(AuthorityKnownCommittedError) as caught:
+        store.append_audit_event(draft(None, f"event-{cleanup_phase}"))
+
+    assert caught.value.committed is True
+    assert caught.value.retryable is False
+    assert caught.value.reconciliation_required is True
+    assert "do not replay" in str(caught.value)
+    assert gate.poisoned is (cleanup_phase == "close")
+
+    monkeypatch.setattr(trusted_authority_sqlite.sqlite3, "connect", real_connect)
+    with real_connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM authority_audit_events"
+        ).fetchone()[0] == 1
+
+    if cleanup_phase == "close":
+        with pytest.raises(AuthorityError, match="process lifecycle is unsafe"):
+            store.audit_events()
+        monkeypatch.setattr(
+            sqlite_process_lifecycle,
+            "_PROCESS_SQLITE_LIFECYCLE",
+            sqlite_process_lifecycle._ProcessSQLiteLifecycle(),
+        )
+    monkeypatch.setattr(store, "_verify_database_file", real_verify)
+    assert SQLiteApprovalChallengeStore(database_path).verify_audit_chain() is True
+
+
+def test_commit_that_may_have_completed_requires_authority_reconciliation(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    real_connect = sqlite3.connect
+
+    class CommitThenRaiseConnection(sqlite3.Connection):
+        def commit(self) -> None:
+            super().commit()
+            raise sqlite3.OperationalError("simulated post-commit exception")
+
+    def uncertain_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        kwargs["factory"] = CommitThenRaiseConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        trusted_authority_sqlite.sqlite3, "connect", uncertain_connect
+    )
+    with pytest.raises(AuthorityCommitOutcomeUnknownError) as caught:
+        store.append_audit_event(draft(None, "commit-outcome-unknown"))
+
+    assert isinstance(caught.value, AuthorityReconciliationRequiredError)
+    assert caught.value.committed is None
+    assert caught.value.commit_outcome == "unknown"
+    assert caught.value.retryable is False
+    assert caught.value.reconciliation_required is True
+    assert "do not replay" in str(caught.value)
+
+    monkeypatch.setattr(trusted_authority_sqlite.sqlite3, "connect", real_connect)
+    with real_connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM authority_audit_events"
+        ).fetchone()[0] == 1
+    assert SQLiteApprovalChallengeStore(database_path).verify_audit_chain() is True
+
+
+def test_commit_failure_with_confirmed_rollback_is_retry_safe(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    real_connect = sqlite3.connect
+
+    class CommitBeforeDurableFailureConnection(sqlite3.Connection):
+        def commit(self) -> None:
+            raise sqlite3.OperationalError("simulated pre-commit failure")
+
+    def failed_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        kwargs["factory"] = CommitBeforeDurableFailureConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(trusted_authority_sqlite.sqlite3, "connect", failed_connect)
+    with pytest.raises(AuthorityError, match="transaction failed") as caught:
+        store.append_audit_event(draft(None, "must-roll-back"))
+    assert not isinstance(caught.value, AuthorityReconciliationRequiredError)
+
+    monkeypatch.setattr(trusted_authority_sqlite.sqlite3, "connect", real_connect)
+    with real_connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT count(*) FROM authority_audit_events"
+        ).fetchone()[0] == 0
+    store.append_audit_event(draft(None, "safe-retry"))
+    assert [event.event_id for event in store.audit_events()] == ["safe-retry"]
+
+
+@pytest.mark.parametrize("state_failure", ("after_commit", "after_rollback"))
+def test_unverifiable_transaction_state_requires_authority_reconciliation(
+    database_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_failure: str,
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    real_connect = sqlite3.connect
+
+    class UnverifiableStateConnection(sqlite3.Connection):
+        fail_state_inspection = False
+
+        @property
+        def in_transaction(self) -> bool:
+            if self.fail_state_inspection:
+                raise sqlite3.OperationalError(
+                    "simulated transaction state inspection failure"
+                )
+            return super().in_transaction
+
+        def commit(self) -> None:
+            if state_failure == "after_commit":
+                super().commit()
+                self.fail_state_inspection = True
+                raise sqlite3.OperationalError("simulated post-commit exception")
+            raise sqlite3.OperationalError("simulated pre-commit failure")
+
+        def rollback(self) -> None:
+            super().rollback()
+            if state_failure == "after_rollback":
+                self.fail_state_inspection = True
+
+    def unverifiable_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        kwargs["factory"] = UnverifiableStateConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        trusted_authority_sqlite.sqlite3,
+        "connect",
+        unverifiable_connect,
+    )
+    with pytest.raises(AuthorityCommitOutcomeUnknownError) as caught:
+        store.append_audit_event(draft(None, f"state-{state_failure}"))
+
+    assert caught.value.committed is None
+    assert caught.value.retryable is False
+    assert caught.value.reconciliation_required is True
+
+    monkeypatch.setattr(trusted_authority_sqlite.sqlite3, "connect", real_connect)
+    connection = real_connect(database_path)
+    try:
+        count = connection.execute(
+            "SELECT count(*) FROM authority_audit_events"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == (1 if state_failure == "after_commit" else 0)
+
+
+def test_process_coordination_blocks_a_second_store_while_connection_is_live(
+    database_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = SQLiteApprovalChallengeStore(database_path)
+    second = SQLiteApprovalChallengeStore(database_path)
+    connection_live = Event()
+    release_connection = Event()
+    second_started = Event()
+    second_finished = Event()
+    failures: list[BaseException] = []
+    observable = _ObservableMutex()
+    monkeypatch.setattr(
+        sqlite_process_lifecycle._PROCESS_SQLITE_LIFECYCLE,
+        "_mutex",
+        observable,
+    )
+
+    def hold_connection() -> None:
+        try:
+            with first._read_connection():
+                connection_live.set()
+                if not release_connection.wait(5):
+                    raise TimeoutError("authority connection release was not signalled")
+        except BaseException as exc:
+            failures.append(exc)
+
+    def open_second_store() -> None:
+        try:
+            if not connection_live.wait(5):
+                raise TimeoutError("authority connection did not become live")
+            second_started.set()
+            second.audit_events()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            second_finished.set()
+
+    holder = Thread(target=hold_connection)
+    contender = Thread(target=open_second_store)
+    holder.start()
+    contender.start()
+    try:
+        assert second_started.wait(5)
+        assert observable.blocked.wait(5)
+        assert not second_finished.is_set()
+    finally:
+        release_connection.set()
+        holder.join(5)
+        contender.join(5)
+
+    assert not holder.is_alive()
+    assert not contender.is_alive()
+    assert failures == []
+    assert second_finished.is_set()
+
+
+def test_same_thread_file_checks_fail_before_open_during_live_connection(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    real_open = os.open
+    nested_attempt = False
+    nested_descriptor_opens = 0
+
+    def observe_open(
+        path: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        nonlocal nested_descriptor_opens
+        if nested_attempt:
+            nested_descriptor_opens += 1
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(trusted_authority_sqlite.os, "open", observe_open)
+    with store._transaction():
+        nested_attempt = True
+        try:
+            with pytest.raises(AuthorityError, match="process lifecycle is unsafe"):
+                store._verify_sidecars()
+            with pytest.raises(AuthorityError, match="process lifecycle is unsafe"):
+                store._secure_database_file()
+        finally:
+            nested_attempt = False
+
+    assert nested_descriptor_opens == 0
+    assert store.audit_events() == ()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar race contract")
+def test_sidecar_disappearance_during_verification_is_safe_sqlite_cleanup(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    sidecar = Path(f"{database_path}-shm")
+    sidecar.write_bytes(b"closing SQLite sidecar")
+    sidecar.chmod(0o600)
+    real_open = os.open
+
+    def disappear(path: str | bytes | os.PathLike[str], flags: int, *args: object) -> int:
+        if Path(path) == sidecar:
+            sidecar.unlink()
+            raise FileNotFoundError(str(sidecar))
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(trusted_authority_sqlite.os, "open", disappear)
+
+    store._verify_sidecars()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar race contract")
+def test_sidecar_reappearance_after_missing_open_is_reverified(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    sidecar = Path(f"{database_path}-shm")
+    sidecar.write_bytes(b"original SQLite sidecar")
+    sidecar.chmod(0o600)
+    real_open = os.open
+    replaced = False
+
+    def replace(path: str | bytes | os.PathLike[str], flags: int, *args: object) -> int:
+        nonlocal replaced
+        if Path(path) == sidecar and not replaced:
+            replaced = True
+            sidecar.unlink()
+            sidecar.write_bytes(b"replacement SQLite sidecar")
+            sidecar.chmod(0o600)
+            raise FileNotFoundError(str(sidecar))
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(trusted_authority_sqlite.os, "open", replace)
+
+    store._verify_sidecars()
+    assert replaced is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar race contract")
+def test_valid_sidecar_path_replacement_after_open_is_reverified(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    sidecar = Path(f"{database_path}-shm")
+    sidecar.write_bytes(b"original SQLite sidecar")
+    sidecar.chmod(0o600)
+    real_open = os.open
+    replaced = False
+
+    def replace_after_open(
+        candidate: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        nonlocal replaced
+        descriptor = real_open(candidate, flags, *args)
+        if Path(candidate) == sidecar and not replaced:
+            replaced = True
+            sidecar.unlink()
+            sidecar.write_bytes(b"replacement SQLite sidecar")
+            sidecar.chmod(0o600)
+        return descriptor
+
+    monkeypatch.setattr(trusted_authority_sqlite.os, "open", replace_after_open)
+
+    store._verify_sidecars()
+    assert replaced is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar race contract")
+def test_continuously_replaced_sidecar_fails_closed(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    sidecar = Path(f"{database_path}-shm")
+    sidecar.write_bytes(b"unstable SQLite sidecar")
+    sidecar.chmod(0o600)
+    real_open = os.open
+
+    def keep_replacing(
+        candidate: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        descriptor = real_open(candidate, flags, *args)
+        if Path(candidate) == sidecar:
+            sidecar.unlink()
+            sidecar.write_bytes(b"another unstable SQLite sidecar")
+            sidecar.chmod(0o600)
+        return descriptor
+
+    monkeypatch.setattr(trusted_authority_sqlite.os, "open", keep_replacing)
+
+    with pytest.raises(AuthorityError, match="changed while checked"):
+        store._verify_sidecars()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar hard-link contract")
+def test_sidecar_hardlink_is_rejected(
+    database_path: Path, tmp_path: Path
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    sidecar = Path(f"{database_path}-shm")
+    sidecar.write_bytes(b"hardlinked SQLite sidecar")
+    sidecar.chmod(0o600)
+    alias = tmp_path / "sidecar-alias"
+    try:
+        os.link(sidecar, alias)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable: {exc}")
+
+    with pytest.raises(AuthorityError, match="sidecar is not private"):
+        store._verify_sidecars()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar permission contract")
+def test_sidecar_permission_change_between_fstat_and_lstat_fails_closed(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    sidecar = Path(f"{database_path}-shm")
+    sidecar.write_bytes(b"permission-raced SQLite sidecar")
+    sidecar.chmod(0o600)
+    real_lstat = Path.lstat
+    changed = False
+
+    def make_public(candidate: Path):
+        nonlocal changed
+        if candidate == sidecar and not changed:
+            candidate.chmod(0o644)
+            changed = True
+        return real_lstat(candidate)
+
+    monkeypatch.setattr(trusted_authority_sqlite.Path, "lstat", make_public)
+
+    with pytest.raises(AuthorityError, match="sidecar is not private"):
+        store._verify_sidecars()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX O_NOFOLLOW contract")
+def test_sidecar_verification_requires_o_nofollow(
+    database_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteApprovalChallengeStore(database_path)
+    monkeypatch.delattr(trusted_authority_sqlite.os, "O_NOFOLLOW")
+
+    with pytest.raises(AuthorityError, match="O_NOFOLLOW"):
+        store._verify_sidecars()
 
 
 def test_audit_is_canonical_monotonic_append_only_and_hash_verified(

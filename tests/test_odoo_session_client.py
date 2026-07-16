@@ -123,7 +123,7 @@ def root_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 def test_manifest_init_and_acl_keep_client_internal() -> None:
     manifest = ast.literal_eval((ADDON / "__manifest__.py").read_text(encoding="utf-8"))
-    assert manifest["version"] == "19.0.0.5.0"
+    assert manifest["version"] == "19.0.0.6.0"
     assert "server-side" in manifest["summary"].lower()
     assert "from . import session_client" in (
         ADDON / "models" / "__init__.py"

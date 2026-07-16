@@ -413,7 +413,7 @@ def test_root_owned_release_verifies_in_real_linux_process() -> None:
         pytest.fail("the release-binding integration gate requires Linux root")
 
     fixture_root = Path(
-        tempfile.mkdtemp(prefix="odoo-v3-addon-binding-", dir="/opt")
+        tempfile.mkdtemp(prefix="odoo-v3-addon-binding-", dir="/var/lib")
     )
     try:
         fixture_root.chmod(0o755)

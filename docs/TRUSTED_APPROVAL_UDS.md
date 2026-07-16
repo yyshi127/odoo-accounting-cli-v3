@@ -60,9 +60,25 @@ group. No approval path uses `sudo` or caller-provided context authority.
 
 Every call revokes its minted handle in a `finally` path. A malformed mint
 response that contains a syntactically valid candidate handle is also revoked,
-even when its HTTP status is wrong. A revoke failure, response mismatch,
-timeout, broker error, or audit failure is reported only as a fixed safe Odoo
-error. It never returns or logs the handle or a backend exception.
+even when its HTTP status is wrong. Errors are fixed and sanitized, but their
+replay semantics are not collapsed. A request cancelled before broker dispatch
+returns a retryable timeout. Once dispatch starts, a lost deadline, malformed
+post-effect response, unexpected backend failure, or audit failure returns
+`approval_broker_outcome_unknown` and is non-replayable. Durable store outcomes
+retain their recovery target as `approval_session_reconciliation_required` or
+`approval_authority_reconciliation_required`. All three reconciliation
+responses are HTTP 503 with `retryable=false` and
+`reconciliation_required=true`; they never claim an Odoo accounting effect.
+
+The Odoo client accepts those responses only with the exact status, fields,
+fixed message, and boolean values. It then tells the user not to repeat the
+action and names the session store, authority store, or broker state that must
+be reconciled against the audit trail. If session-handle revocation also fails,
+the message includes the session store as a second recovery target. Unknown,
+extended, or contradictory envelopes received after an approval attempt fall
+back to generic broker-state reconciliation; they cannot inject a named store
+target or private operator guidance. Failures before the approval attempt
+remain generic. No path returns or logs the handle or a backend exception.
 
 The durable broker audit records the authenticated Odoo session identity,
 company, operation/challenge route, outcome, and the observed Unix UID/GID/PID.

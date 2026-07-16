@@ -30,7 +30,11 @@ from odoo_accounting_cli_v3.operations import (
 )
 from odoo_accounting_cli_v3.trusted_authority import (
     ApprovalDecision,
+    AuthorityCommitOutcomeUnknownError,
+    AuthorityError,
+    AuthorityKnownCommittedError,
     AuthorityKeys,
+    AuthorityReconciliationRequiredError,
     InMemoryApprovalChallengeStore,
     TrustedAuthority,
     TrustedSession,
@@ -1025,6 +1029,129 @@ def test_independent_approval_reconciliation_has_one_safe_non_retryable_mapping(
     event = harness.audit.events()[-1]
     assert event.action == f"approval.{approval_action}"
     assert event.outcome_code == "broker_session_reconciliation_required"
+
+
+@pytest.mark.parametrize(
+    "reconciliation_error",
+    [AuthorityKnownCommittedError, AuthorityCommitOutcomeUnknownError],
+)
+@pytest.mark.parametrize(
+    ("approval_action", "authority_method"),
+    [
+        ("request", "request_approval"),
+        ("inspect", "inspect_approval"),
+        ("decide", "decide_approval"),
+    ],
+)
+def test_authority_reconciliation_is_non_retryable_and_stops_before_executor(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    reconciliation_error: type[AuthorityReconciliationRequiredError],
+    approval_action: str,
+    authority_method: str,
+) -> None:
+    operation_id = harness.prepare()
+    challenge = harness.preview(operation_id)
+    executor_calls = len(harness.executor.calls)
+    backend_secret = f"private-{approval_action}-authority-store-state"
+
+    def fail_authority(*_args, **_kwargs):
+        try:
+            raise reconciliation_error(backend_secret)
+        except AuthorityReconciliationRequiredError as exc:
+            raise AuthorityError("private-authority-wrapper") from exc
+
+    monkeypatch.setattr(TrustedAuthority, authority_method, fail_authority)
+    with pytest.raises(TrustedBrokerError) as rejected:
+        if approval_action == "request":
+            harness.broker.request_approval(
+                session_handle="requester-session-0123456789abcdef",
+                operation_id=operation_id,
+            )
+        elif approval_action == "inspect":
+            harness.broker.inspect_approval(
+                session_handle="approver-session-0123456789abcdef",
+                challenge_id=challenge["challenge_id"],
+            )
+        else:
+            harness.broker.decide_approval(
+                session_handle="approver-session-0123456789abcdef",
+                challenge_id=challenge["challenge_id"],
+                decision=ApprovalDecision.APPROVE,
+            )
+
+    error = rejected.value
+    assert error.code == "broker_authority_reconciliation_required"
+    assert error.status_code == 503
+    assert error.odoo_effect == "none"
+    assert error.retryable is False
+    assert error.reconciliation_required is True
+    assert backend_secret not in str(error)
+    assert "private-authority-wrapper" not in str(error)
+    assert len(harness.executor.calls) == executor_calls
+    event = harness.audit.events()[-1]
+    assert event.action == f"approval.{approval_action}"
+    assert event.outcome_code == "broker_authority_reconciliation_required"
+
+
+def test_authority_reconciliation_dominates_secondary_approval_audit_failure(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = harness.prepare()
+    challenge = harness.preview(operation_id)
+
+    def fail_decision(*_args, **_kwargs):
+        raise AuthorityKnownCommittedError("private committed decision")
+
+    monkeypatch.setattr(TrustedAuthority, "decide_approval", fail_decision)
+    harness.set_audit_failure(True)
+    with pytest.raises(TrustedBrokerError) as rejected:
+        harness.broker.decide_approval(
+            session_handle="approver-session-0123456789abcdef",
+            challenge_id=challenge["challenge_id"],
+            decision=ApprovalDecision.APPROVE,
+        )
+
+    assert rejected.value.code == "broker_authority_reconciliation_required"
+    assert rejected.value.retryable is False
+    assert rejected.value.reconciliation_required is True
+
+
+def test_write_authority_reconciliation_dominates_broker_audit_failure(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = harness.prepare()
+    challenge = harness.preview(operation_id)
+    harness.broker.decide_approval(
+        session_handle="approver-session-0123456789abcdef",
+        challenge_id=challenge["challenge_id"],
+        decision=ApprovalDecision.APPROVE,
+    )
+    executor_calls = len(harness.executor.calls)
+
+    def fail_issue(*_args, **_kwargs):
+        raise AuthorityCommitOutcomeUnknownError("private commit state")
+
+    monkeypatch.setattr(
+        TrustedAuthority,
+        "issue_approved_execute_for_operation",
+        fail_issue,
+    )
+    harness.set_audit_failure(True)
+    result = harness.dispatch(
+        "operation.approve_execute", {"operation_id": operation_id}
+    )
+
+    assert result.status_code == 200
+    assert result.authority_verified is True
+    assert result.body["error"] == {
+        "code": "broker_authority_reconciliation_required",
+        "message": "The trusted V3 broker rejected the request.",
+        "odoo_effect": "none",
+        "reconciliation_required": True,
+        "retryable": False,
+    }
+    assert len(harness.executor.calls) == executor_calls
 
 
 @pytest.mark.parametrize(
@@ -2794,6 +2921,47 @@ def test_recovery_refresh_rejects_wrong_resolver_content(
     assert event.request_id == "request-1"
     assert event.operation_id != wrong.operation_id
     assert event.selected_release_digest == OLD_RELEASE
+
+
+def test_preview_challenge_wrapped_authority_reconciliation_is_non_replayable(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    operation_id = harness.prepare()
+    executor_calls = len(harness.executor.calls)
+    execution_effects = harness.executor.execution_effects
+    backend_secret = "private-preview-authority-commit-state"
+
+    def fail_approval_request(*_args, **_kwargs):
+        try:
+            raise AuthorityCommitOutcomeUnknownError(backend_secret)
+        except AuthorityReconciliationRequiredError as exc:
+            raise RuntimeError("private-preview-authority-wrapper") from exc
+
+    monkeypatch.setattr(harness.broker, "_request_approval", fail_approval_request)
+    result = harness.dispatch("operation.preview", {"operation_id": operation_id})
+
+    assert result.status_code == 200
+    assert result.authority_verified is True
+    assert result.body["error"] == {
+        "code": "broker_authority_reconciliation_required",
+        "message": "The trusted V3 broker rejected the request.",
+        "odoo_effect": "none",
+        "reconciliation_required": True,
+        "retryable": False,
+    }
+    serialized = json.dumps(result.body, sort_keys=True)
+    assert backend_secret not in serialized
+    assert "private-preview-authority-wrapper" not in serialized
+    assert len(harness.executor.calls) == executor_calls + 1
+    assert harness.executor.calls[-1][0] == "operation.preview"
+    assert harness.executor.execution_effects == execution_effects
+    assert all(
+        action != "operation.approve_execute" for action, _ in harness.executor.calls
+    )
+    event = harness.audit.events()[-1]
+    assert event.action == "operation.preview"
+    assert event.operation_id == operation_id
+    assert event.outcome_code == "broker_authority_reconciliation_required"
 
 
 def test_unexpected_preview_exception_is_safe_and_audited(

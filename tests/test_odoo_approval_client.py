@@ -194,7 +194,7 @@ def test_addon_registers_private_approval_client_without_acl_or_controller() -> 
     init = (ADDON / "models" / "__init__.py").read_text("utf-8")
     acl = (ADDON / "security" / "ir.model.access.csv").read_text("utf-8")
 
-    assert manifest["version"] == "19.0.0.5.0"
+    assert manifest["version"] == "19.0.0.6.0"
     assert "from . import approval_client" in init
     assert "models.AbstractModel" in source
     assert "def _odoo_v3_request_approval(" in source
@@ -528,6 +528,235 @@ def test_every_ambiguous_failure_is_safe_and_revokes_when_possible(
     assert routes == [session._MINT_PATH, session._REVOKE_PATH]
     assert HANDLE not in str(raised.value)
     assert "backend secret" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("code", "recovery_target"),
+    [
+        ("approval_session_reconciliation_required", "session store"),
+        ("approval_authority_reconciliation_required", "authority store"),
+        ("approval_broker_outcome_unknown", "broker state"),
+    ],
+)
+def test_reconciliation_response_gives_explicit_do_not_replay_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+    code: str,
+    recovery_target: str,
+) -> None:
+    session, approval = _load_modules(monkeypatch)
+    value = _client(session, approval)
+    routes: list[str] = []
+
+    def session_call(
+        _settings: Any, route: str, _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        routes.append(route)
+        return (
+            (201, _mint())
+            if route == session._MINT_PATH
+            else (200, {"ok": True, "revoked": True})
+        )
+
+    monkeypatch.setattr(session, "_post_uds_json", session_call)
+    monkeypatch.setattr(
+        approval,
+        "_post_approval",
+        lambda *_args, **_kwargs: (
+            503,
+            {
+                "ok": False,
+                "error": {
+                    "code": code,
+                    "message": (
+                        "The trusted approval service rejected the local request."
+                    ),
+                    "reconciliation_required": True,
+                    "retryable": False,
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(FakeUserError, match="Do not repeat") as raised:
+        value._odoo_v3_request_approval({"operation_id": "operation-1"})
+
+    assert recovery_target in str(raised.value)
+    assert code not in str(raised.value)
+    assert routes == [session._MINT_PATH, session._REVOKE_PATH]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong_status",
+        "unknown_code",
+        "private_message",
+        "retryable",
+        "not_reconciliation",
+        "extra_field",
+    ],
+)
+def test_spoofed_reconciliation_response_uses_only_generic_broker_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+    mutation: str,
+) -> None:
+    session, approval = _load_modules(monkeypatch)
+    value = _client(session, approval)
+
+    def session_call(
+        _settings: Any, route: str, _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        return (
+            (201, _mint())
+            if route == session._MINT_PATH
+            else (200, {"ok": True, "revoked": True})
+        )
+
+    error: dict[str, Any] = {
+        "code": "approval_authority_reconciliation_required",
+        "message": "The trusted approval service rejected the local request.",
+        "reconciliation_required": True,
+        "retryable": False,
+    }
+    status = 503
+    if mutation == "wrong_status":
+        status = 200
+    elif mutation == "unknown_code":
+        error["code"] = "private-authority-state"
+    elif mutation == "private_message":
+        error["message"] = "private backend path"
+    elif mutation == "retryable":
+        error["retryable"] = True
+    elif mutation == "not_reconciliation":
+        error["reconciliation_required"] = False
+    else:
+        error["private"] = "backend path"
+
+    monkeypatch.setattr(session, "_post_uds_json", session_call)
+    monkeypatch.setattr(
+        approval,
+        "_post_approval",
+        lambda *_args, **_kwargs: (
+            status,
+            {"ok": False, "error": error},
+        ),
+    )
+
+    with pytest.raises(FakeUserError, match="Do not repeat") as raised:
+        value._odoo_v3_request_approval({"operation_id": "operation-1"})
+
+    rendered = str(raised.value)
+    assert "broker state" in rendered
+    assert "authority store" not in rendered
+    assert "session store" not in rendered
+    assert "private" not in rendered
+    assert "backend" not in rendered
+
+
+def test_authority_reconciliation_plus_revoke_failure_names_both_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+) -> None:
+    session, approval = _load_modules(monkeypatch)
+    value = _client(session, approval)
+
+    def session_call(
+        _settings: Any, route: str, _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        if route == session._MINT_PATH:
+            return 201, _mint()
+        return 503, {"ok": False}
+
+    monkeypatch.setattr(session, "_post_uds_json", session_call)
+    monkeypatch.setattr(
+        approval,
+        "_post_approval",
+        lambda *_args, **_kwargs: (
+            503,
+            {
+                "ok": False,
+                "error": {
+                    "code": "approval_authority_reconciliation_required",
+                    "message": (
+                        "The trusted approval service rejected the local request."
+                    ),
+                    "reconciliation_required": True,
+                    "retryable": False,
+                },
+            },
+        ),
+    )
+
+    with pytest.raises(FakeUserError, match="Do not repeat") as raised:
+        value._odoo_v3_request_approval({"operation_id": "operation-1"})
+
+    rendered = str(raised.value)
+    assert "authority store" in rendered
+    assert "session store" in rendered
+
+
+def test_response_loss_after_approval_attempt_requires_broker_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+) -> None:
+    session, approval = _load_modules(monkeypatch)
+    value = _client(session, approval)
+    routes: list[str] = []
+    durable_state: list[str] = []
+    transport: list[str] = []
+
+    def session_call(
+        _settings: Any, route: str, _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        routes.append(route)
+        return (
+            (201, _mint())
+            if route == session._MINT_PATH
+            else (200, {"ok": True, "revoked": True})
+        )
+
+    class Connection:
+        def __init__(
+            self,
+            _path: str,
+            _peer_uid: int,
+            *,
+            timeout_seconds: float,
+        ) -> None:
+            assert timeout_seconds == 35.0
+
+        def close(self) -> None:
+            transport.append("closed")
+
+    def send(
+        _connection: Any,
+        route: str,
+        body: bytes,
+        _headers: tuple[tuple[str, str], ...],
+    ) -> Any:
+        assert route == "/v1/approval/request"
+        parsed = json.loads(body)
+        assert parsed["operation_id"] == "operation-1"
+        assert parsed["session_handle"] == HANDLE
+        durable_state.append("challenge-created")
+        raise TimeoutError("private response path was truncated")
+
+    monkeypatch.setattr(session, "_post_uds_json", session_call)
+    monkeypatch.setattr(session, "_UnixHTTPConnection", Connection)
+    monkeypatch.setattr(session, "_send_fixed_post", send)
+
+    with pytest.raises(FakeUserError, match="Do not repeat") as raised:
+        value._odoo_v3_request_approval({"operation_id": "operation-1"})
+
+    rendered = str(raised.value)
+    assert "broker state" in rendered
+    assert "private" not in rendered
+    assert "truncated" not in rendered
+    assert durable_state == ["challenge-created"]
+    assert transport == ["closed"]
+    assert routes == [session._MINT_PATH, session._REVOKE_PATH]
 
 
 @pytest.mark.parametrize(

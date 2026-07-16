@@ -270,7 +270,7 @@ print(json.dumps({
 	await makeDirectoriesTraversable(staging);
 
 	const productionRoot = path.join(
-		"/opt",
+		"/var/lib",
 		`odoo-v3-pi-bootstrap-test-${process.pid}-${randomBytes(6).toString("hex")}`,
 	);
 	const moved = spawnSync("sudo", ["mv", "--", staging, productionRoot], {

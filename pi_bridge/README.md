@@ -120,6 +120,13 @@ omit the executed identity when execution did not yield a trustworthy route
 response; `odoo_effect: unknown` remains mandatory when dispatch outcome is
 uncertain.
 
+For `operation.approve_execute`, a connected broker response loss is reported
+as `bridge_v3_broker_outcome_unknown`. An ambiguous local-state action is
+reported as `bridge_v3_broker_reconciliation_required`. Both errors set
+`retryable: false`: Pi must not repeat the request or create a replacement
+operation. An operator must first query the operation and reconcile the trusted
+broker/authority state, then follow the returned recovery guidance.
+
 Run the bridge contract tests with:
 
 ```text

@@ -37,10 +37,26 @@ _VIEW_FIELDS = frozenset(
     }
 )
 _VIEW_STATES = frozenset({"pending", "approved", "denied", "expired", "stale"})
+_RECONCILIATION_TARGETS = {
+    "approval_session_reconciliation_required": "session store",
+    "approval_authority_reconciliation_required": "authority store",
+    "approval_broker_outcome_unknown": "broker state",
+}
+_SAFE_REJECTION_MESSAGE = (
+    "The trusted approval service rejected the local request."
+)
 
 
 class ApprovalClientError(RuntimeError):
     """The local approval exchange failed without exposing credentials."""
+
+
+class _ApprovalReconciliationRequired(ApprovalClientError):
+    """A strict local response requires operator reconciliation, not replay."""
+
+    def __init__(self, target: str) -> None:
+        super().__init__("trusted approval reconciliation is required")
+        self.target = target
 
 
 def _approval_socket_path() -> str:
@@ -261,6 +277,32 @@ def _validated_response(
     return view
 
 
+def _reconciliation_target(status: int, value: object) -> str | None:
+    if (
+        status != 503
+        or type(value) is not dict
+        or set(value) != {"ok", "error"}
+        or value.get("ok") is not False
+    ):
+        return None
+    error = value.get("error")
+    if (
+        type(error) is not dict
+        or set(error)
+        != {
+            "code",
+            "message",
+            "reconciliation_required",
+            "retryable",
+        }
+        or error.get("message") != _SAFE_REJECTION_MESSAGE
+        or error.get("reconciliation_required") is not True
+        or error.get("retryable") is not False
+    ):
+        return None
+    return _RECONCILIATION_TARGETS.get(error.get("code"))
+
+
 def _validated_inspection_response(
     status: int,
     value: object,
@@ -322,6 +364,8 @@ class OdooAccountingCliV3ApprovalClient(models.AbstractModel):
         result: dict[str, Any] | None = None
         failed = False
         revoke_failed = False
+        reconciliation_target: str | None = None
+        approval_attempted = False
         try:
             settings = sessions._root_settings()
             socket_path = _approval_socket_path()
@@ -331,6 +375,7 @@ class OdooAccountingCliV3ApprovalClient(models.AbstractModel):
             )
             handle = sessions._candidate_handle(mint_status, mint_value)
             handle = sessions._validated_mint_handle(mint_status, mint_value)
+            approval_attempted = True
             status, value = _post_approval(
                 settings,
                 socket_path=socket_path,
@@ -338,6 +383,9 @@ class OdooAccountingCliV3ApprovalClient(models.AbstractModel):
                 handle=handle,
                 payload=payload,
             )
+            reconciliation_target = _reconciliation_target(status, value)
+            if reconciliation_target is not None:
+                raise _ApprovalReconciliationRequired(reconciliation_target)
             if inspection_response:
                 if expected_challenge_id is None or not forbid_requester_identity:
                     raise ApprovalClientError(
@@ -366,8 +414,13 @@ class OdooAccountingCliV3ApprovalClient(models.AbstractModel):
                         identity["user_id"] if forbid_requester_identity else None
                     ),
                 )
+        except _ApprovalReconciliationRequired as exc:
+            reconciliation_target = exc.target
         except Exception:
-            failed = True
+            if approval_attempted:
+                reconciliation_target = "broker state"
+            else:
+                failed = True
         finally:
             if handle is not None and settings is not None:
                 try:
@@ -379,6 +432,19 @@ class OdooAccountingCliV3ApprovalClient(models.AbstractModel):
                     sessions._validate_revoke_response(revoke_status, revoke_value)
                 except Exception:
                     revoke_failed = True
+        if revoke_failed:
+            if reconciliation_target is None:
+                reconciliation_target = "session store"
+            elif reconciliation_target != "session store":
+                reconciliation_target = (
+                    f"{reconciliation_target} and session store"
+                )
+        if reconciliation_target is not None:
+            raise UserError(
+                "The V3 approval outcome is uncertain. Do not repeat this "
+                f"action. Reconcile the trusted {reconciliation_target} "
+                "against the audit trail before continuing."
+            ) from None
         if failed or revoke_failed or result is None:
             raise UserError(
                 "The V3 approval request could not be completed safely."

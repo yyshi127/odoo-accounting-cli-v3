@@ -13,7 +13,9 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator
 
 import pytest
@@ -945,10 +947,10 @@ def test_broker_session_reconciliation_outcome_is_not_collapsed_to_rejection(
         broker,
         error_attribute,
         TrustedBrokerError(
-            f"private-{SESSION_HANDLE}-backend-state",
-            status_code=403,
-            odoo_effect="unknown",
-            retryable=True,
+            "broker_session_reconciliation_required",
+            status_code=503,
+            odoo_effect="none",
+            retryable=False,
             reconciliation_required=True,
         ),
     )
@@ -960,6 +962,9 @@ def test_broker_session_reconciliation_outcome_is_not_collapsed_to_rejection(
     )
 
     assert result.status == "reconciliation_required"
+    assert result.reconciliation_code == (
+        "approval_session_reconciliation_required"
+    )
     assert result.view is None
     safe = approval_uds._safe_error(
         "approval_session_reconciliation_required",
@@ -970,6 +975,160 @@ def test_broker_session_reconciliation_outcome_is_not_collapsed_to_rejection(
     serialized = json.dumps(safe)
     assert SESSION_HANDLE not in serialized
     assert "backend-state" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("path", "payload", "error_attribute"),
+    [
+        (
+            approval_uds.APPROVAL_REQUEST_PATH,
+            _request_payload(),
+            "request_error",
+        ),
+        (
+            approval_uds.APPROVAL_INSPECT_PATH,
+            _inspect_payload(),
+            "inspect_error",
+        ),
+        (
+            approval_uds.APPROVAL_DECIDE_PATH,
+            _decide_payload(),
+            "decide_error",
+        ),
+    ],
+)
+def test_broker_authority_reconciliation_keeps_its_recovery_target(
+    path: str, payload: dict[str, Any], error_attribute: str
+) -> None:
+    broker = StubBroker()
+    setattr(
+        broker,
+        error_attribute,
+        TrustedBrokerError(
+            "broker_authority_reconciliation_required",
+            status_code=503,
+            odoo_effect="none",
+            retryable=False,
+            reconciliation_required=True,
+        ),
+    )
+    invoker = approval_uds._BoundedBrokerInvoker(broker, max_inflight=1)
+    call = approval_uds._decode_call(path, _json_bytes(payload))
+
+    result = invoker.invoke(
+        call, deadline_monotonic=time.monotonic() + 1
+    )
+
+    assert result.status == "reconciliation_required"
+    assert result.reconciliation_code == (
+        "approval_authority_reconciliation_required"
+    )
+    assert result.view is None
+
+
+def test_broker_call_that_times_out_after_dispatch_is_not_reported_replayable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = {"now": 100.0}
+    entered = threading.Event()
+    release = threading.Event()
+
+    class LateAuthorityBroker(StubBroker):
+        def request_approval(self, **kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            entered.set()
+            clock["now"] = 102.0
+            release.wait()
+            raise TrustedBrokerError(
+                "broker_authority_reconciliation_required",
+                status_code=503,
+                odoo_effect="none",
+                retryable=False,
+                reconciliation_required=True,
+            )
+
+    invoker = approval_uds._BoundedBrokerInvoker(
+        LateAuthorityBroker(), max_inflight=1
+    )
+    monkeypatch.setattr(approval_uds, "monotonic", lambda: clock["now"])
+    call = approval_uds._decode_call(
+        approval_uds.APPROVAL_REQUEST_PATH, _json_bytes(_request_payload())
+    )
+    try:
+        result = invoker.invoke(call, deadline_monotonic=101.0)
+        assert entered.is_set()
+        assert result.status == "reconciliation_required"
+        assert result.reconciliation_code == "approval_broker_outcome_unknown"
+        assert result.view is None
+    finally:
+        release.set()
+        invoker.wait_for_drain()
+
+
+def test_unexpected_failure_after_broker_dispatch_requires_reconciliation(
+) -> None:
+    mutated = []
+
+    class CrashingBroker(StubBroker):
+        def request_approval(self, **kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            mutated.append("challenge-may-have-been-created")
+            raise RuntimeError(f"private-{SESSION_HANDLE}-backend-crash")
+
+    invoker = approval_uds._BoundedBrokerInvoker(
+        CrashingBroker(), max_inflight=1
+    )
+    call = approval_uds._decode_call(
+        approval_uds.APPROVAL_REQUEST_PATH, _json_bytes(_request_payload())
+    )
+
+    result = invoker.invoke(
+        call, deadline_monotonic=time.monotonic() + 1
+    )
+
+    assert mutated == ["challenge-may-have-been-created"]
+    assert result.status == "reconciliation_required"
+    assert result.reconciliation_code == "approval_broker_outcome_unknown"
+    assert SESSION_HANDLE not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("error_code", "retryable"),
+    [
+        ("broker_audit_failed", True),
+        ("broker_approval_route_rejected", False),
+    ],
+)
+def test_post_effect_broker_errors_are_not_downgraded_to_known_rejection(
+    error_code: str, retryable: bool
+) -> None:
+    durable_state = []
+
+    class PostEffectBroker(StubBroker):
+        def decide_approval(self, **kwargs: Any) -> dict[str, Any]:
+            del kwargs
+            durable_state.append("approved")
+            raise TrustedBrokerError(
+                error_code,
+                status_code=503,
+                odoo_effect="none",
+                retryable=retryable,
+            )
+
+    invoker = approval_uds._BoundedBrokerInvoker(
+        PostEffectBroker(), max_inflight=1
+    )
+    call = approval_uds._decode_call(
+        approval_uds.APPROVAL_DECIDE_PATH, _json_bytes(_decide_payload())
+    )
+
+    result = invoker.invoke(
+        call, deadline_monotonic=time.monotonic() + 1
+    )
+
+    assert durable_state == ["approved"]
+    assert result.status == "reconciliation_required"
+    assert result.reconciliation_code == "approval_broker_outcome_unknown"
 
 
 def test_hung_broker_is_time_bounded_and_consumes_only_one_bounded_slot() -> None:
@@ -1007,7 +1166,8 @@ def test_hung_broker_is_time_bounded_and_consumes_only_one_bounded_slot() -> Non
     release.set()
     invoker.wait_for_drain()
 
-    assert first.status == "timeout"
+    assert first.status == "reconciliation_required"
+    assert first.reconciliation_code == "approval_broker_outcome_unknown"
     assert first.view is None
     assert elapsed < 0.5
     assert second.status == "unavailable"
@@ -1054,7 +1214,8 @@ def test_timed_out_broker_worker_is_non_daemon_and_drainable() -> None:
     )
     drain_thread.start()
     try:
-        assert result.status == "timeout"
+        assert result.status == "reconciliation_required"
+        assert result.reconciliation_code == "approval_broker_outcome_unknown"
         assert len(workers) == 1
         assert workers[0].daemon is False
         assert not drained.wait(0.05)
@@ -1092,6 +1253,73 @@ def test_broker_call_does_not_start_if_deadline_expires_during_thread_start(
     assert result.status == "timeout"
     assert result.view is None
     assert broker.calls == []
+
+
+def _handler_response_for_invocation(
+    invocation: approval_uds._BrokerInvocation,
+    *,
+    expire_after_invoke: bool = False,
+) -> tuple[int, dict[str, Any]]:
+    body = _json_bytes(_request_payload())
+    headers = Message()
+    headers.add_header("Host", "odoo-approval-client")
+    headers.add_header("Content-Type", "application/json")
+    headers.add_header("Content-Length", str(len(body)))
+    headers.add_header("Connection", "close")
+    captured: list[tuple[int, dict[str, Any]]] = []
+
+    class Invoker:
+        def invoke(self, *_args: Any, **_kwargs: Any) -> Any:
+            if expire_after_invoke:
+                handler._io_expired = True
+            return invocation
+
+    handler = SimpleNamespace(
+        path=approval_uds.APPROVAL_REQUEST_PATH,
+        request_version="HTTP/1.1",
+        headers=headers,
+        rfile=io.BytesIO(body),
+        server=SimpleNamespace(
+            config=_config(),
+            broker_invoker=Invoker(),
+        ),
+        _accepted_at=time.monotonic(),
+        _io_expired=False,
+        _peer=None,
+    )
+    handler._send_json = lambda status, value: captured.append((status, value))
+    handler._reject = lambda status, code, **kwargs: handler._send_json(
+        status, approval_uds._safe_error(code, **kwargs)
+    )
+
+    approval_uds._ApprovalRequestHandler.do_POST(handler)
+
+    assert len(captured) == 1
+    return captured[0]
+
+
+def test_pre_dispatch_timeout_is_explicitly_safe_to_retry() -> None:
+    status, body = _handler_response_for_invocation(
+        approval_uds._BrokerInvocation(status="timeout", view=None)
+    )
+
+    assert status == 504
+    assert body == approval_uds._safe_error(
+        "approval_request_timeout", retryable=True
+    )
+
+
+def test_response_deadline_after_success_requires_reconciliation() -> None:
+    status, body = _handler_response_for_invocation(
+        approval_uds._BrokerInvocation(status="ok", view=_view()),
+        expire_after_invoke=True,
+    )
+
+    assert status == 503
+    assert body == approval_uds._safe_error(
+        "approval_broker_outcome_unknown",
+        reconciliation_required=True,
+    )
 
 
 def test_request_line_reader_bounds_preparse_resource_use() -> None:
@@ -1389,7 +1617,10 @@ def test_real_linux_rejects_noncanonical_or_authority_bearing_requests(
 def test_real_linux_broker_failures_are_closed_and_sanitized(failure: str) -> None:
     broker = StubBroker()
     broker.request_error = TrustedBrokerError(
-        f"{failure}-{SESSION_HANDLE}-backend-secret", status_code=403
+        "broker_approval_rejected", status_code=403
+    )
+    broker.request_error.__cause__ = RuntimeError(
+        f"{failure}-{SESSION_HANDLE}-backend-secret"
     )
     with _linux_server(broker) as config:
         response = _exchange(config.socket_path, _raw_request())
@@ -1401,10 +1632,25 @@ def test_real_linux_broker_failures_are_closed_and_sanitized(failure: str) -> No
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real Linux approval UDS")
-def test_real_linux_session_reconciliation_outcome_is_safe_http_503() -> None:
+@pytest.mark.parametrize(
+    ("broker_code", "approval_code"),
+    [
+        (
+            "broker_session_reconciliation_required",
+            "approval_session_reconciliation_required",
+        ),
+        (
+            "broker_authority_reconciliation_required",
+            "approval_authority_reconciliation_required",
+        ),
+    ],
+)
+def test_real_linux_reconciliation_keeps_safe_recovery_target(
+    broker_code: str, approval_code: str
+) -> None:
     broker = StubBroker()
     broker.request_error = TrustedBrokerError(
-        f"private-{SESSION_HANDLE}-backend-secret",
+        broker_code,
         status_code=503,
         odoo_effect="none",
         retryable=False,
@@ -1417,13 +1663,12 @@ def test_real_linux_session_reconciliation_outcome_is_safe_http_503() -> None:
     assert status == 503
     assert headers["cache-control"] == "no-store"
     assert body == approval_uds._safe_error(
-        "approval_session_reconciliation_required",
+        approval_code,
         reconciliation_required=True,
     )
     assert body["error"]["retryable"] is False
     assert body["error"]["reconciliation_required"] is True
     assert SESSION_HANDLE.encode() not in response
-    assert b"backend-secret" not in response
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real Linux approval UDS")
@@ -1564,14 +1809,17 @@ def test_real_linux_hung_broker_is_bounded() -> None:
             response = _exchange(config.socket_path, _raw_request())
             elapsed = time.monotonic() - started
             unavailable = _exchange(config.socket_path, _raw_request())
-            # A timed-out broker call remains bounded but is now deliberately
+            # A dispatched call with a lost deadline remains bounded and is
             # drained by server_close instead of being abandoned as a daemon.
             release.set()
     finally:
         release.set()
     status, _, body = _response(response)
-    assert status == 504
-    assert body == approval_uds._safe_error("approval_request_timeout")
+    assert status == 503
+    assert body == approval_uds._safe_error(
+        "approval_broker_outcome_unknown",
+        reconciliation_required=True,
+    )
     assert elapsed < 1
     unavailable_status, _, unavailable_body = _response(unavailable)
     assert unavailable_status == 503

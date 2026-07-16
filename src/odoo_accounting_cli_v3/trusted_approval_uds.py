@@ -205,8 +205,64 @@ class TrustedApprovalUdsError(RuntimeError):
     """The approval UDS boundary rejected configuration or request state."""
 
 
-class _TrustedApprovalSessionReconciliationRequired(TrustedApprovalUdsError):
-    """The broker consumed session state with a non-replayable outcome."""
+_BROKER_RECONCILIATION_CODES: Final = {
+    "broker_session_reconciliation_required": (
+        "approval_session_reconciliation_required"
+    ),
+    "broker_authority_reconciliation_required": (
+        "approval_authority_reconciliation_required"
+    ),
+}
+_APPROVAL_RECONCILIATION_CODES: Final = frozenset(
+    {
+        *_BROKER_RECONCILIATION_CODES.values(),
+        "approval_broker_outcome_unknown",
+    }
+)
+_SAFE_BROKER_REJECTIONS_BY_ACTION: Final = {
+    "approval.request": frozenset(
+        {
+            "broker_approval_peer_rejected",
+            "broker_approval_rejected",
+            "broker_session_rejected",
+        }
+    ),
+    "approval.inspect": frozenset(
+        {
+            "broker_approval_challenge_rejected",
+            "broker_approval_peer_rejected",
+            "broker_approval_precheck_rejected",
+            "broker_approval_preview_rejected",
+            "broker_approval_rejected",
+            "broker_session_rejected",
+        }
+    ),
+    "approval.decide": frozenset(
+        {
+            "broker_approval_challenge_rejected",
+            "broker_approval_peer_rejected",
+            "broker_approval_rejected",
+            "broker_session_rejected",
+        }
+    ),
+}
+
+
+class _TrustedApprovalReconciliationRequired(TrustedApprovalUdsError):
+    """The broker consumed trusted state with a non-replayable outcome."""
+
+    def __init__(self, code: str) -> None:
+        if code not in _APPROVAL_RECONCILIATION_CODES:
+            code = "approval_broker_outcome_unknown"
+        super().__init__("trusted approval broker rejected request")
+        self.code = code
+
+
+class _TrustedApprovalBrokerRejected(TrustedApprovalUdsError):
+    """The broker authoritatively rejected a request without a durable effect."""
+
+    def __init__(self) -> None:
+        super().__init__("trusted approval broker rejected request")
 
 
 class TrustedApprovalBroker(Protocol):
@@ -982,8 +1038,9 @@ def _invoke_broker(
 ) -> dict[str, Any]:
     """Invoke only the fixed broker methods and erase every backend failure."""
 
-    failed = False
     view: dict[str, Any] | None = None
+    known_rejection = False
+    reconciliation_code: str | None = None
     try:
         if not _broker_contract_is_valid(broker):
             raise TypeError("invalid trusted approval broker")
@@ -1049,13 +1106,28 @@ def _invoke_broker(
             and exc.retryable is False
             and exc.odoo_effect == "none"
         ):
-            raise _TrustedApprovalSessionReconciliationRequired from None
-        failed = True
+            reconciliation_code = _BROKER_RECONCILIATION_CODES.get(
+                exc.code, "approval_broker_outcome_unknown"
+            )
+        elif (
+            exc.odoo_effect == "none"
+            and exc.retryable is False
+            and exc.code in _SAFE_BROKER_REJECTIONS_BY_ACTION[call.action]
+        ):
+            known_rejection = True
+        else:
+            reconciliation_code = "approval_broker_outcome_unknown"
     except Exception:
-        failed = True
-    if failed or view is None:
-        raise TrustedApprovalUdsError(
-            "trusted approval broker rejected request"
+        reconciliation_code = "approval_broker_outcome_unknown"
+    if reconciliation_code is not None:
+        raise _TrustedApprovalReconciliationRequired(
+            reconciliation_code
+        ) from None
+    if known_rejection:
+        raise _TrustedApprovalBrokerRejected from None
+    if view is None:
+        raise _TrustedApprovalReconciliationRequired(
+            "approval_broker_outcome_unknown"
         ) from None
     return view
 
@@ -1064,6 +1136,7 @@ def _invoke_broker(
 class _BrokerInvocation:
     status: str
     view: dict[str, Any] | None
+    reconciliation_code: str | None = None
 
 
 class _BoundedBrokerInvoker:
@@ -1127,25 +1200,40 @@ class _BoundedBrokerInvoker:
             return _BrokerInvocation(status="unavailable", view=None)
 
         done = threading.Event()
+        dispatch_lock = threading.Lock()
+        dispatch_state = {"phase": "queued"}
         result: dict[str, Any] = {"status": "rejected", "view": None}
 
         def worker() -> None:
             try:
-                if monotonic() >= effective_deadline:
-                    result["status"] = "timeout"
-                    return
+                with dispatch_lock:
+                    if dispatch_state["phase"] == "cancelled":
+                        result["status"] = "timeout"
+                        return
+                    if monotonic() >= effective_deadline:
+                        result["status"] = "timeout"
+                        return
+                    dispatch_state["phase"] = "started"
                 result["view"] = _invoke_broker(
                     self._broker,
                     call,
                     peer=peer,
                 )
                 result["status"] = "ok"
-            except _TrustedApprovalSessionReconciliationRequired:
+            except _TrustedApprovalReconciliationRequired as exc:
                 result["status"] = "reconciliation_required"
+                result["reconciliation_code"] = exc.code
+            except _TrustedApprovalBrokerRejected:
+                result["status"] = "rejected"
             except BaseException:
                 # Never let threading.excepthook print a handle/backend traceback.
-                pass
+                result["status"] = "reconciliation_required"
+                result["reconciliation_code"] = (
+                    "approval_broker_outcome_unknown"
+                )
             finally:
+                with dispatch_lock:
+                    dispatch_state["phase"] = "finished"
                 self._slots.release()
                 with self._worker_condition:
                     self._workers.discard(thread)
@@ -1172,15 +1260,49 @@ class _BoundedBrokerInvoker:
             return _BrokerInvocation(status="unavailable", view=None)
 
         remaining = max(0.0, effective_deadline - monotonic())
-        if not done.wait(remaining) or monotonic() >= effective_deadline:
-            return _BrokerInvocation(status="timeout", view=None)
+        completed = done.wait(remaining)
+        expired = monotonic() >= effective_deadline
+        if not completed or expired:
+            with dispatch_lock:
+                phase = dispatch_state["phase"]
+                if phase == "queued":
+                    dispatch_state["phase"] = "cancelled"
+                    return _BrokerInvocation(status="timeout", view=None)
+            if (
+                phase == "finished"
+                and result["status"] == "reconciliation_required"
+            ):
+                code = result.get("reconciliation_code")
+                return _BrokerInvocation(
+                    status="reconciliation_required",
+                    view=None,
+                    reconciliation_code=(
+                        code
+                        if code in _APPROVAL_RECONCILIATION_CODES
+                        else "approval_broker_outcome_unknown"
+                    ),
+                )
+            if phase == "finished" and result["status"] == "timeout":
+                return _BrokerInvocation(status="timeout", view=None)
+            return _BrokerInvocation(
+                status="reconciliation_required",
+                view=None,
+                reconciliation_code="approval_broker_outcome_unknown",
+            )
         status = result["status"]
         view = result["view"]
         if status == "timeout":
             return _BrokerInvocation(status="timeout", view=None)
         if status == "reconciliation_required":
+            code = result.get("reconciliation_code")
             return _BrokerInvocation(
-                status="reconciliation_required", view=None
+                status="reconciliation_required",
+                view=None,
+                reconciliation_code=(
+                    code
+                    if code in _APPROVAL_RECONCILIATION_CODES
+                    else "approval_broker_outcome_unknown"
+                ),
             )
         if status != "ok" or type(view) is not dict:
             return _BrokerInvocation(status="rejected", view=None)
@@ -1435,8 +1557,10 @@ class _ApprovalRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionError, OSError):
             pass
 
-    def _reject(self, status_code: int, code: str) -> None:
-        self._send_json(status_code, _safe_error(code))
+    def _reject(
+        self, status_code: int, code: str, *, retryable: bool = False
+    ) -> None:
+        self._send_json(status_code, _safe_error(code, retryable=retryable))
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
         if self.path not in _ACTION_BY_PATH:
@@ -1481,10 +1605,10 @@ class _ApprovalRequestHandler(BaseHTTPRequestHandler):
         try:
             body = self.rfile.read(content_length)
         except (TimeoutError, socket.timeout, OSError):
-            self._reject(408, "approval_request_timeout")
+            self._reject(408, "approval_request_timeout", retryable=True)
             return
         if self._io_expired:
-            self._reject(408, "approval_request_timeout")
+            self._reject(408, "approval_request_timeout", retryable=True)
             return
         if len(body) != content_length:
             self._reject(400, "approval_request_body_incomplete")
@@ -1496,7 +1620,7 @@ class _ApprovalRequestHandler(BaseHTTPRequestHandler):
             return
         deadline = self._accepted_at + self.server.config.request_timeout_seconds
         if monotonic() >= deadline:
-            self._reject(408, "approval_request_timeout")
+            self._reject(408, "approval_request_timeout", retryable=True)
             return
         invocation = self.server.broker_invoker.invoke(
             call,
@@ -1504,7 +1628,7 @@ class _ApprovalRequestHandler(BaseHTTPRequestHandler):
             deadline_monotonic=deadline,
         )
         if invocation.status == "timeout":
-            self._reject(504, "approval_request_timeout")
+            self._reject(504, "approval_request_timeout", retryable=True)
             return
         if invocation.status == "unavailable":
             self._send_json(
@@ -1516,7 +1640,12 @@ class _ApprovalRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 503,
                 _safe_error(
-                    "approval_session_reconciliation_required",
+                    (
+                        invocation.reconciliation_code
+                        if invocation.reconciliation_code
+                        in _APPROVAL_RECONCILIATION_CODES
+                        else "approval_broker_outcome_unknown"
+                    ),
                     reconciliation_required=True,
                 ),
             )
@@ -1525,7 +1654,13 @@ class _ApprovalRequestHandler(BaseHTTPRequestHandler):
             self._reject(403, "approval_broker_rejected")
             return
         if self._io_expired or monotonic() >= deadline:
-            self._reject(504, "approval_request_timeout")
+            self._send_json(
+                503,
+                _safe_error(
+                    "approval_broker_outcome_unknown",
+                    reconciliation_required=True,
+                ),
+            )
             return
         response_field = {
             "approval.request": "challenge",

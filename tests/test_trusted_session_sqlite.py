@@ -10,9 +10,11 @@ import stat
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Lock, Thread
 
 import pytest
 
+from odoo_accounting_cli_v3 import sqlite_process_lifecycle
 import odoo_accounting_cli_v3.trusted_session_sqlite as trusted_session_sqlite
 from odoo_accounting_cli_v3.trusted_session_sqlite import (
     SQLiteTrustedSessionStore,
@@ -32,6 +34,32 @@ else:  # pragma: no cover - POSIX-only lock tests are skipped on Windows
 DATABASE_UUID = "f1d2d2f9-8d43-4b2f-a36c-64c76df38f81"
 RELEASE_DIGEST = "a" * 64
 REGISTRY_DIGEST = "b" * 64
+
+
+class _ObservableMutex:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self.blocked = Event()
+
+    def acquire(self, *, timeout: float = -1) -> bool:
+        if self._lock.acquire(blocking=False):
+            return True
+        self.blocked.set()
+        return self._lock.acquire(timeout=timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_process_sqlite_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> sqlite_process_lifecycle._ProcessSQLiteLifecycle:
+    gate = sqlite_process_lifecycle._ProcessSQLiteLifecycle()
+    monkeypatch.setattr(
+        sqlite_process_lifecycle, "_PROCESS_SQLITE_LIFECYCLE", gate
+    )
+    return gate
 
 
 class MutableClock:
@@ -231,16 +259,23 @@ def test_v1_store_is_rejected_without_in_place_mutation(tmp_path: Path) -> None:
         "          OR NEW.registry_digest IS NOT OLD.registry_digest\n",
         "",
     )
-    with sqlite3.connect(path) as connection:
-        assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
-        for statement in old_tables.values():
-            connection.execute(statement)
-        connection.execute(
-            "INSERT INTO trusted_session_schema_meta(key, value) VALUES(?, ?)",
-            ("schema_version", "1"),
-        )
-        for statement in old_triggers.values():
-            connection.execute(statement)
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            assert connection.execute("PRAGMA journal_mode = WAL").fetchone()[0] == "wal"
+            for statement in old_tables.values():
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO trusted_session_schema_meta(key, value) VALUES(?, ?)",
+                ("schema_version", "1"),
+            )
+            for statement in old_triggers.values():
+                connection.execute(statement)
+    finally:
+        connection.close()
+    assert all(
+        not os.path.lexists(Path(f"{path}{suffix}")) for suffix in ("-wal", "-shm")
+    )
     path.chmod(0o600)
     before = path.read_bytes()
     before_stat = path.stat()
@@ -481,9 +516,19 @@ def test_setup_cleanup_failure_rejects_retry_before_yield(
     with pytest.raises(TrustedSessionStoreError, match="cleanup failed"):
         store.resolve(issued.handle)
     assert configure_calls == 1
+    assert sqlite_process_lifecycle._PROCESS_SQLITE_LIFECYCLE.poisoned is True
 
     monkeypatch.setattr(trusted_session_sqlite.sqlite3, "connect", real_connect)
     monkeypatch.setattr(store, "_configure", real_configure)
+    with pytest.raises(
+        TrustedSessionStoreError, match="process lifecycle is unsafe"
+    ):
+        store.resolve(issued.handle)
+    monkeypatch.setattr(
+        sqlite_process_lifecycle,
+        "_PROCESS_SQLITE_LIFECYCLE",
+        sqlite_process_lifecycle._ProcessSQLiteLifecycle(),
+    )
     assert store.resolve(issued.handle) == issued.session
 
 
@@ -507,14 +552,21 @@ def test_setup_retry_uses_one_bounded_monotonic_budget(
 
     def consume_writer_lock_budget(
         retry_deadline: float,
-    ) -> tuple[int, tuple[int, int]] | None:
+        *,
+        owner_process_id: int,
+    ) -> tuple[int, tuple[int, int], int] | None:
+        assert owner_process_id == os.getpid()
         assert retry_deadline == pytest.approx(100.25)
         now["value"] += 0.1
         return None
 
     def fail_attempt(
-        *, retry_deadline: float
+        *,
+        retry_deadline: float,
+        expected: tuple[int, int],
+        connection_phase: sqlite_process_lifecycle.SQLiteProcessConnectionPhase,
     ) -> tuple[sqlite3.Connection, tuple[int, int]]:
+        del expected, connection_phase
         attempt_starts.append(now["value"])
         attempt_budgets.append(
             store._remaining_transaction_busy_timeout_ms(
@@ -557,14 +609,20 @@ def test_expired_budget_after_writer_lock_never_starts_sqlite_setup(
 
     def consume_entire_budget(
         retry_deadline: float,
-    ) -> tuple[int, tuple[int, int]] | None:
+        *,
+        owner_process_id: int,
+    ) -> tuple[int, tuple[int, int], int] | None:
+        assert owner_process_id == os.getpid()
         now["value"] = retry_deadline
         return None
 
     def forbidden_attempt(
-        *, retry_deadline: float
+        *,
+        retry_deadline: float,
+        expected: tuple[int, int],
+        connection_phase: sqlite_process_lifecycle.SQLiteProcessConnectionPhase,
     ) -> tuple[sqlite3.Connection, tuple[int, int]]:
-        del retry_deadline
+        del retry_deadline, expected, connection_phase
         nonlocal setup_calls
         setup_calls += 1
         raise AssertionError("expired budget started SQLite setup")
@@ -618,11 +676,18 @@ def test_retryable_error_after_yield_never_replays_caller_work(
     caller_runs = 0
 
     def recording_open(
-        *, retry_deadline: float
+        *,
+        retry_deadline: float,
+        expected: tuple[int, int],
+        connection_phase: sqlite_process_lifecycle.SQLiteProcessConnectionPhase,
     ) -> tuple[sqlite3.Connection, tuple[int, int]]:
         nonlocal open_calls
         open_calls += 1
-        return real_open(retry_deadline=retry_deadline)
+        return real_open(
+            retry_deadline=retry_deadline,
+            expected=expected,
+            connection_phase=connection_phase,
+        )
 
     monkeypatch.setattr(store, "_open_write_transaction", recording_open)
     with pytest.raises(TrustedSessionStoreError, match="transaction failed") as caught:
@@ -634,6 +699,102 @@ def test_retryable_error_after_yield_never_replays_caller_work(
     assert caught.value.__cause__.sqlite_errorcode == sqlite3.SQLITE_PROTOCOL
     assert open_calls == 1
     assert caller_runs == 1
+    assert store.verify_integrity() is True
+
+
+def test_process_coordination_blocks_a_second_store_while_connection_is_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    first = SQLiteTrustedSessionStore(path)
+    second = SQLiteTrustedSessionStore(path)
+    connection_live = Event()
+    release_connection = Event()
+    second_started = Event()
+    second_finished = Event()
+    failures: list[BaseException] = []
+    observable = _ObservableMutex()
+    monkeypatch.setattr(
+        sqlite_process_lifecycle._PROCESS_SQLITE_LIFECYCLE,
+        "_mutex",
+        observable,
+    )
+
+    def hold_connection() -> None:
+        try:
+            with first._read_connection():
+                connection_live.set()
+                if not release_connection.wait(5):
+                    raise TimeoutError(
+                        "trusted-session connection release was not signalled"
+                    )
+        except BaseException as exc:
+            failures.append(exc)
+
+    def open_second_store() -> None:
+        try:
+            if not connection_live.wait(5):
+                raise TimeoutError("trusted-session connection did not become live")
+            second_started.set()
+            second.verify_integrity()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            second_finished.set()
+
+    holder = Thread(target=hold_connection)
+    contender = Thread(target=open_second_store)
+    holder.start()
+    contender.start()
+    try:
+        assert second_started.wait(5)
+        assert observable.blocked.wait(5)
+        assert not second_finished.is_set()
+    finally:
+        release_connection.set()
+        holder.join(5)
+        contender.join(5)
+
+    assert not holder.is_alive()
+    assert not contender.is_alive()
+    assert failures == []
+    assert second_finished.is_set()
+
+
+def test_same_thread_file_checks_fail_before_open_during_live_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    real_open = os.open
+    nested_attempt = False
+    nested_descriptor_opens = 0
+
+    def observe_open(
+        candidate: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        nonlocal nested_descriptor_opens
+        if nested_attempt:
+            nested_descriptor_opens += 1
+        return real_open(candidate, flags, *args)
+
+    monkeypatch.setattr(trusted_session_sqlite.os, "open", observe_open)
+    with store._transaction():
+        nested_attempt = True
+        try:
+            with pytest.raises(
+                TrustedSessionStoreError, match="process lifecycle is unsafe"
+            ):
+                store._verify_sidecars()
+            with pytest.raises(
+                TrustedSessionStoreError, match="process lifecycle is unsafe"
+            ):
+                store._secure_database_file()
+        finally:
+            nested_attempt = False
+
+    assert nested_descriptor_opens == 0
     assert store.verify_integrity() is True
 
 
@@ -657,11 +818,12 @@ def test_post_commit_cleanup_failure_explicitly_requires_reconciliation(
 
         def fail_post_commit_database_verification(
             expected: tuple[int, int],
+            lease: sqlite_process_lifecycle.SQLiteProcessLifecycleLease | None = None,
         ) -> None:
             nonlocal verification_calls
             verification_calls += 1
-            real_verify_database(expected)
-            if verification_calls == 2:
+            real_verify_database(expected, lease)
+            if verification_calls == 1:
                 raise TrustedSessionStoreError(
                     "simulated post-commit database verification failure"
                 )
@@ -708,10 +870,23 @@ def test_post_commit_cleanup_failure_explicitly_requires_reconciliation(
     assert caught.value.retryable is False
     assert caught.value.reconciliation_required is True
     assert "do not replay" in str(caught.value)
+    assert sqlite_process_lifecycle._PROCESS_SQLITE_LIFECYCLE.poisoned is (
+        cleanup_phase == "close"
+    )
 
     monkeypatch.setattr(trusted_session_sqlite.sqlite3, "connect", real_connect)
     monkeypatch.setattr(store, "_release_writer_lock", real_release)
     monkeypatch.setattr(store, "_verify_database_file", real_verify_database)
+    if cleanup_phase == "close":
+        with pytest.raises(
+            TrustedSessionStoreError, match="process lifecycle is unsafe"
+        ):
+            store.verify_integrity()
+        monkeypatch.setattr(
+            sqlite_process_lifecycle,
+            "_PROCESS_SQLITE_LIFECYCLE",
+            sqlite_process_lifecycle._ProcessSQLiteLifecycle(),
+        )
     with real_connect(path) as connection:
         assert connection.execute("SELECT count(*) FROM trusted_sessions").fetchone()[0] == 1
         assert connection.execute(
@@ -783,6 +958,66 @@ def test_commit_failure_with_confirmed_rollback_is_safe_to_retry(
         assert connection.execute("SELECT count(*) FROM trusted_sessions").fetchone()[0] == 0
     issued = store.issue(_identity(), ttl_seconds=120, max_uses=1)
     assert store.resolve(issued.handle) == issued.session
+
+
+@pytest.mark.parametrize("state_failure", ("after_commit", "after_rollback"))
+def test_unverifiable_transaction_state_requires_session_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state_failure: str,
+) -> None:
+    path = (tmp_path / f"sessions-{state_failure}.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    real_connect = sqlite3.connect
+
+    class UnverifiableStateConnection(sqlite3.Connection):
+        fail_state_inspection = False
+
+        @property
+        def in_transaction(self) -> bool:
+            if self.fail_state_inspection:
+                raise sqlite3.OperationalError(
+                    "simulated transaction state inspection failure"
+                )
+            return super().in_transaction
+
+        def commit(self) -> None:
+            if state_failure == "after_commit":
+                super().commit()
+                self.fail_state_inspection = True
+                raise sqlite3.OperationalError("simulated post-commit exception")
+            raise sqlite3.OperationalError("simulated pre-commit failure")
+
+        def rollback(self) -> None:
+            super().rollback()
+            if state_failure == "after_rollback":
+                self.fail_state_inspection = True
+
+    def unverifiable_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        kwargs["factory"] = UnverifiableStateConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(
+        trusted_session_sqlite.sqlite3,
+        "connect",
+        unverifiable_connect,
+    )
+    with pytest.raises(TrustedSessionCommitOutcomeUnknownError) as caught:
+        store.issue(_identity(), ttl_seconds=120, max_uses=1)
+
+    assert caught.value.committed is None
+    assert caught.value.retryable is False
+    assert caught.value.reconciliation_required is True
+
+    monkeypatch.setattr(trusted_session_sqlite.sqlite3, "connect", real_connect)
+    connection = real_connect(path)
+    try:
+        count = connection.execute(
+            "SELECT count(*) FROM trusted_sessions"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert count == (1 if state_failure == "after_commit" else 0)
 
 
 def test_expired_and_revoked_handles_fail_closed_with_security_events(
@@ -1046,6 +1281,54 @@ def test_database_hardlink_alias_is_rejected_before_lock_derivation(
     assert store.verify_integrity() is True
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX database race contract")
+def test_database_path_replacement_after_open_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "replace-sessions.sqlite3").resolve()
+    path.touch(mode=0o600)
+    path.chmod(0o600)
+    real_open = os.open
+
+    def replace_after_open(
+        candidate: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        descriptor = real_open(candidate, flags, *args)
+        if Path(candidate) == path:
+            path.unlink()
+            path.write_bytes(b"replacement trusted-session database")
+            path.chmod(0o600)
+        return descriptor
+
+    monkeypatch.setattr(trusted_session_sqlite.os, "open", replace_after_open)
+
+    with pytest.raises(TrustedSessionStoreError, match="regular non-symlink"):
+        SQLiteTrustedSessionStore(path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX database permission contract")
+def test_database_permission_change_between_stats_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "permission-sessions.sqlite3").resolve()
+    path.touch(mode=0o600)
+    path.chmod(0o600)
+    real_lstat = Path.lstat
+    changed = False
+
+    def make_public(candidate: Path):
+        nonlocal changed
+        if candidate == path and not changed:
+            candidate.chmod(0o644)
+            changed = True
+        return real_lstat(candidate)
+
+    monkeypatch.setattr(trusted_session_sqlite.Path, "lstat", make_public)
+
+    with pytest.raises(TrustedSessionStoreError, match="database file is not private"):
+        SQLiteTrustedSessionStore(path)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file mode contract")
 def test_database_requires_private_parent_and_mode(tmp_path: Path) -> None:
     private = tmp_path / "private"
@@ -1057,3 +1340,99 @@ def test_database_requires_private_parent_and_mode(tmp_path: Path) -> None:
     os.chmod(private, 0o755)
     with pytest.raises(TrustedSessionStoreError, match="parent directory is not private"):
         SQLiteTrustedSessionStore(path)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar hard-link contract")
+def test_sqlite_sidecar_hardlink_is_rejected(tmp_path: Path) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"hardlinked trusted-session sidecar")
+    sidecar.chmod(0o600)
+    alias = tmp_path / "session-sidecar-alias"
+    os.link(sidecar, alias)
+
+    with pytest.raises(TrustedSessionStoreError, match="sidecar is not private"):
+        store._verify_sidecars()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar race contract")
+def test_valid_sqlite_sidecar_replacement_after_open_is_reverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"original trusted-session sidecar")
+    sidecar.chmod(0o600)
+    real_open = os.open
+    replaced = False
+
+    def replace_after_open(
+        candidate: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        nonlocal replaced
+        descriptor = real_open(candidate, flags, *args)
+        if Path(candidate) == sidecar and not replaced:
+            replaced = True
+            sidecar.unlink()
+            sidecar.write_bytes(b"replacement trusted-session sidecar")
+            sidecar.chmod(0o600)
+        return descriptor
+
+    monkeypatch.setattr(trusted_session_sqlite.os, "open", replace_after_open)
+
+    store._verify_sidecars()
+    assert replaced is True
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar race contract")
+def test_continuously_replaced_sqlite_sidecar_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"unstable trusted-session sidecar")
+    sidecar.chmod(0o600)
+    real_open = os.open
+
+    def keep_replacing(
+        candidate: str | bytes | os.PathLike[str], flags: int, *args: object
+    ) -> int:
+        descriptor = real_open(candidate, flags, *args)
+        if Path(candidate) == sidecar:
+            sidecar.unlink()
+            sidecar.write_bytes(b"another unstable trusted-session sidecar")
+            sidecar.chmod(0o600)
+        return descriptor
+
+    monkeypatch.setattr(trusted_session_sqlite.os, "open", keep_replacing)
+
+    with pytest.raises(TrustedSessionStoreError, match="changed while checked"):
+        store._verify_sidecars()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar permission contract")
+def test_sqlite_sidecar_permission_change_between_stats_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"permission-raced trusted-session sidecar")
+    sidecar.chmod(0o600)
+    real_lstat = Path.lstat
+    changed = False
+
+    def make_public(candidate: Path):
+        nonlocal changed
+        if candidate == sidecar and not changed:
+            candidate.chmod(0o644)
+            changed = True
+        return real_lstat(candidate)
+
+    monkeypatch.setattr(trusted_session_sqlite.Path, "lstat", make_public)
+
+    with pytest.raises(TrustedSessionStoreError, match="sidecar is not private"):
+        store._verify_sidecars()

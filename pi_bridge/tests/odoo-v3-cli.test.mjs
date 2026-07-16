@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test, { after, before } from "node:test";
@@ -242,6 +243,12 @@ function createStaticBrokerRunner(response) {
 		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
 		transport: async () => response,
 	});
+}
+
+function localBrokerSocketPath(name) {
+	return process.platform === "win32"
+		? `\\\\.\\pipe\\odoo-v3-${name}-${process.pid}-${Date.now()}`
+		: path.join(fixtureDir, `${name}.sock`);
 }
 
 function writeParameterFixtures() {
@@ -846,6 +853,11 @@ test("authenticated broker reconciliation errors enforce the optional boolean co
 			...baseError,
 			reconciliation_required: true,
 		}],
+		["true with authority reconciliation", {
+			...baseError,
+			code: "broker_authority_reconciliation_required",
+			reconciliation_required: true,
+		}],
 	]) {
 		await t.test(`accepts ${name}`, async () => {
 			const { envelope, result } = await runError(error);
@@ -910,6 +922,231 @@ test("the exact pre-auth broker reconciliation denial is returned unchanged", as
 	assert.equal(Object.hasOwn(result, "data"), false);
 	assert.equal(Object.hasOwn(result, "executedReleaseDigest"), false);
 	assert.equal(Object.hasOwn(result, "executedRegistryDigest"), false);
+});
+
+test("a possibly delivered approve-execute transport failure forbids replay", async () => {
+	const action = "operation.approve_execute";
+	const request = requests()[action];
+	const run = createV3BrokerClient({
+		brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		transport: async () => {
+			throw new Error("private socket acknowledgement loss");
+		},
+	});
+
+	const result = await run(action, request);
+
+	assert.deepEqual(result, {
+		command: action,
+		error: {
+			code: "bridge_v3_broker_outcome_unknown",
+			message: "The trusted V3 broker request may have been accepted; reconcile it before retrying.",
+			odoo_effect: "unknown",
+			operation_id: request.operation_id,
+			retryable: false,
+		},
+		ok: false,
+	});
+	assert.deepEqual(addUnknownEffectGuidance(result).bridge_guidance, {
+		must_not_create_new_operation: true,
+		next_action: "operation.status",
+		operation_id: request.operation_id,
+	});
+	assert.equal(JSON.stringify(result).includes("private socket"), false);
+});
+
+test("a definite pre-connect broker refusal remains safely retryable", async () => {
+	const action = "operation.approve_execute";
+	const request = requests()[action];
+	const missingSocket = path.join(
+		os.tmpdir(),
+		`odoo-v3-missing-${process.pid}-${Date.now()}.sock`,
+	);
+	const run = createV3BrokerClient({
+		brokerSocketPath: missingSocket,
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		timeoutMs: 1000,
+	});
+
+	const result = await run(action, request);
+
+	assert.deepEqual(result, {
+		command: action,
+		error: {
+			code: "bridge_v3_broker_unavailable",
+			message: "The fixed local V3 trusted broker is unavailable.",
+			odoo_effect: "none",
+			operation_id: request.operation_id,
+			retryable: true,
+		},
+		ok: false,
+	});
+});
+
+test("a broker that drops a partial response produces outcome unknown", async () => {
+	const action = "operation.approve_execute";
+	const request = requests()[action];
+	const socketPath = localBrokerSocketPath("partial-response");
+	let receivedBody = "";
+	let markReceived;
+	const received = new Promise((resolve) => { markReceived = resolve; });
+	let markPartialSent;
+	const partialSent = new Promise((resolve) => { markPartialSent = resolve; });
+	const server = http.createServer((incoming, outgoing) => {
+		incoming.setEncoding("utf8");
+		incoming.on("data", (chunk) => { receivedBody += chunk; });
+		incoming.on("end", () => {
+			markReceived();
+			outgoing.writeHead(200, {
+				"Connection": "close",
+				"Content-Length": "1024",
+				"Content-Type": "application/json; charset=utf-8",
+				"X-Odoo-V3-Broker-Authority": "verified-v1",
+			});
+			outgoing.end('{"ok":', "utf8", markPartialSent);
+		});
+	});
+	await new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(socketPath, resolve);
+	});
+	let settleTimer;
+	const run = createV3BrokerClient({
+		brokerSocketPath: socketPath,
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		timeoutMs: 5000,
+	});
+	try {
+		const pendingResult = run(action, request);
+		await received;
+		await partialSent;
+		const didNotSettle = Symbol("did-not-settle");
+		const result = await Promise.race([
+			pendingResult,
+			new Promise((resolve) => {
+				settleTimer = setTimeout(() => resolve(didNotSettle), 1000);
+			}),
+		]);
+		assert.notEqual(result, didNotSettle, "partial broker response did not settle");
+		assert.equal(receivedBody, JSON.stringify(request));
+		assert.equal(result.ok, false);
+		assert.equal(result.error.code, "bridge_v3_broker_outcome_unknown");
+		assert.equal(result.error.odoo_effect, "unknown");
+		assert.equal(result.error.retryable, false);
+		assert.equal(Object.hasOwn(result.error, "reconciliation_required"), false);
+	} finally {
+		clearTimeout(settleTimer);
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+test("a broker response-phase timeout produces outcome unknown", async () => {
+	const action = "operation.approve_execute";
+	const request = requests()[action];
+	const socketPath = localBrokerSocketPath("response-timeout");
+	const server = http.createServer((incoming, outgoing) => {
+		incoming.resume();
+		incoming.on("end", () => {
+			outgoing.writeHead(200, {
+				"Content-Type": "application/json; charset=utf-8",
+				"X-Odoo-V3-Broker-Authority": "verified-v1",
+			});
+			outgoing.write('{"ok":');
+		});
+	});
+	await new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(socketPath, resolve);
+	});
+	const run = createV3BrokerClient({
+		brokerSocketPath: socketPath,
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		timeoutMs: 500,
+	});
+	try {
+		const result = await run(action, request);
+		assert.equal(result.ok, false);
+		assert.equal(result.error.code, "bridge_v3_broker_outcome_unknown");
+		assert.equal(result.error.odoo_effect, "unknown");
+		assert.equal(result.error.retryable, false);
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+test("an oversized broker response produces outcome unknown", async () => {
+	const action = "operation.approve_execute";
+	const request = requests()[action];
+	const socketPath = localBrokerSocketPath("oversized-response");
+	const server = http.createServer((incoming, outgoing) => {
+		incoming.resume();
+		incoming.on("end", () => {
+			outgoing.writeHead(200, {
+				"Content-Type": "application/json; charset=utf-8",
+				"X-Odoo-V3-Broker-Authority": "verified-v1",
+			});
+			outgoing.end("x".repeat(128));
+		});
+	});
+	await new Promise((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(socketPath, resolve);
+	});
+	const run = createV3BrokerClient({
+		brokerSocketPath: socketPath,
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		maxOutputBytes: 16,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		timeoutMs: 5000,
+	});
+	try {
+		const result = await run(action, request);
+		assert.equal(result.ok, false);
+		assert.equal(result.error.code, "bridge_v3_broker_outcome_unknown");
+		assert.equal(result.error.odoo_effect, "unknown");
+		assert.equal(result.error.retryable, false);
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+});
+
+test("a possibly delivered local-state action requires broker reconciliation", async () => {
+	const action = "operation.preview";
+	const request = requests()[action];
+	const run = createV3BrokerClient({
+		brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		transport: async () => {
+			throw new Error("private response loss");
+		},
+	});
+
+	const result = await run(action, request);
+
+	assert.deepEqual(result, {
+		command: action,
+		error: {
+			code: "bridge_v3_broker_reconciliation_required",
+			message: "The trusted V3 broker request may have been accepted; reconcile it before retrying.",
+			odoo_effect: "none",
+			operation_id: request.operation_id,
+			reconciliation_required: true,
+			retryable: false,
+		},
+		ok: false,
+	});
 });
 
 test("all other unauthenticated or non-200 broker responses stay untrusted", async (t) => {

@@ -111,6 +111,30 @@ print, copy into evidence, commit, or pass any secret or complete signed request
 on argv. Pi integrations must send the JSON request over standard input or an
 equivalent sealed local transport.
 
+Within one Python process, every trusted authority/session SQLite connection
+and every direct database/WAL/SHM descriptor check shares one non-reentrant
+process-wide lifecycle gate. This intentionally serializes even different
+trusted-store paths: on POSIX, closing an unrelated descriptor for an aliased
+database can release process-owned record locks. The gate remains held from
+the first file check until the SQLite connection is positively closed and all
+post-close checks finish. A nested same-thread lifecycle fails immediately.
+An unconfirmed close, descriptor-close failure, or ownership/phase mismatch
+poisons the process gate; no further trusted SQLite access is allowed until a
+fresh process starts.
+
+Forking while a lifecycle is active or poisoned is unsupported. For
+Python-managed `os.fork`, the registered V3 child hook fail-stops with
+`_exit(70)` before returning to the fork caller or running its `finally`,
+garbage collection, SQLite close/rollback, or writer-lock cleanup. It therefore
+cannot continue or exec with the inherited connection and cannot unlock the
+parent's writer-lock descriptor. Native/C-level fork paths that bypass
+`os.register_at_fork` are prohibited, and an earlier-registered third-party
+child hook must never touch a trusted-store connection or descriptor before the
+V3 fail-stop hook runs. Services must fork workers before opening a trusted
+store and then exec their runtime, or use a non-forking worker model. A
+reconciliation-required result is never repaired by retrying in the poisoned
+process.
+
 The modes are fail-closed:
 
 - `disabled` rejects prepare, preview, approve-execute, and recover while
