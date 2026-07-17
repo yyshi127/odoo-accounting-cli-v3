@@ -790,14 +790,93 @@ class Dev15ReadEvidenceTest(unittest.TestCase):
     def test_system_snapshot_requires_exact_v2_and_pi_baselines(self) -> None:
         document = system_document(self.plan)
         verifier.verify_system_snapshots(self.plan, document, deepcopy(document))
+        wrong_algorithm = deepcopy(document)
+        wrong_algorithm["pi_bridge_control"]["algorithm"] = "unverified"
+        with self.assertRaisesRegex(ValueError, "five-file"):
+            verifier.verify_system_snapshots(
+                self.plan, wrong_algorithm, deepcopy(wrong_algorithm),
+            )
         changed = deepcopy(document)
         changed["pi_bridge_control"]["entries"][0]["sha256"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "five-file"):
             verifier.verify_system_snapshots(self.plan, changed, deepcopy(changed))
+        inconsistent_plan = deepcopy(self.plan)
+        inconsistent_plan["system_baseline"]["pi_bridge_control_entries"][0][
+            "sha256"
+        ] = "0" * 64
+        inconsistent = system_document(inconsistent_plan)
+        with self.assertRaisesRegex(ValueError, "aggregate digest"):
+            verifier.verify_system_snapshots(
+                inconsistent_plan, inconsistent, deepcopy(inconsistent),
+            )
+        unordered_plan = deepcopy(self.plan)
+        unordered_plan["system_baseline"]["pi_bridge_control_entries"].reverse()
+        unordered_entries = unordered_plan["system_baseline"][
+            "pi_bridge_control_entries"
+        ]
+        unordered_plan["system_baseline"]["pi_bridge_control_digest"] = (
+            hashlib.sha256(verifier.canonical_json(unordered_entries)).hexdigest()
+        )
+        unordered = system_document(unordered_plan)
+        with self.assertRaisesRegex(ValueError, "canonically ordered"):
+            verifier.verify_system_snapshots(
+                unordered_plan, unordered, deepcopy(unordered),
+            )
         loaded = deepcopy(document)
         loaded["v3"]["unit_files"][0]["properties"]["LoadState"] = "loaded"
         with self.assertRaisesRegex(ValueError, "present, loaded, or aliased"):
             verifier.verify_system_snapshots(self.plan, loaded, deepcopy(loaded))
+
+    def test_pi_control_snapshot_matches_frozen_plan_independent_of_order(
+        self,
+    ) -> None:
+        baseline = self.plan["system_baseline"]
+        entries = baseline["pi_bridge_control_entries"]
+        entry_map = {
+            (entry["component"], entry["path"]): entry for entry in entries
+        }
+        self.assertEqual(len(entry_map), len(entries))
+        self.assertEqual(len(entries), len(runner.PI_CONTROL_FILES))
+        self.assertEqual(set(entry_map), set(runner.PI_CONTROL_FILES))
+        self.assertEqual(
+            entries,
+            sorted(entries, key=lambda item: (item["component"], item["path"])),
+        )
+        computed_digest = hashlib.sha256(runner.canonical_json(entries)).hexdigest()
+        self.assertEqual(computed_digest, baseline["pi_bridge_control_digest"])
+        self.assertEqual(computed_digest, runner.EXPECTED_PI_CONTROL_DIGEST)
+
+        empty_v2_digest = hashlib.sha256(runner.canonical_json([])).hexdigest()
+
+        def capture(order):
+            with (
+                mock.patch.object(runner, "V2_ROOTS", ()),
+                mock.patch.object(runner, "EXPECTED_V2_COMBINED_COUNT", 0),
+                mock.patch.object(
+                    runner, "EXPECTED_V2_COMBINED_DIGEST", empty_v2_digest,
+                ),
+                mock.patch.object(runner, "PI_CONTROL_FILES", order),
+                mock.patch.object(runner, "V3_CURRENT", self.root / "absent"),
+                mock.patch.object(runner, "V3_UNIT_FILES", ()),
+                mock.patch.object(runner, "SERVICES", ()),
+                mock.patch.object(
+                    runner,
+                    "fixed_file_snapshot",
+                    side_effect=lambda component, path: deepcopy(
+                        entry_map[(component, path)]
+                    ),
+                ),
+                mock.patch.object(
+                    runner, "systemd_residue_snapshot", return_value={},
+                ),
+            ):
+                return runner.system_snapshot()["pi_bridge_control"]
+
+        declared = capture(runner.PI_CONTROL_FILES)
+        reversed_order = capture(tuple(reversed(runner.PI_CONTROL_FILES)))
+        self.assertEqual(declared, reversed_order)
+        self.assertEqual(declared["entries"], entries)
+        self.assertEqual(declared["digest"], baseline["pi_bridge_control_digest"])
 
     def test_systemd_residue_scanner_rejects_runtime_and_filesystem_residue(self) -> None:
         def fake_runner(*, loaded: bytes = b"", unit_files: bytes = b""):

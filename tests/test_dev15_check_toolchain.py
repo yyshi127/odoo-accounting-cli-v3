@@ -15,7 +15,7 @@ DEV15 = PROJECT_ROOT / "deployment" / "dev15"
 CHECK_TOOL = DEV15 / "check_toolchain.py"
 PLAN_BYTES = (DEV15 / "read_plan.json").read_bytes()
 EXPECTED_TOOLCHAIN_MANIFEST_SHA256 = (
-    "912a85bdc2bd307b2952d8aed1da0734657350afe4d01a86dc3c0d9631c2a4d3"
+    "472b44c1cd030a2be66f964b31d879aacf95b15e52fc6adf143c2584101b3842"
 )
 
 
@@ -110,6 +110,52 @@ def test_plan_rejects_system_baseline_drift_even_if_repinned(
     )
 
     with pytest.raises(RuntimeError, match="system baseline mismatch"):
+        check_tool.check_plan()
+
+
+def test_plan_rejects_noncanonical_pi_entries_even_if_fully_repinned(
+    check_tool, monkeypatch, tmp_path: Path
+) -> None:
+    plan = json.loads(PLAN_BYTES)
+    entries = plan["system_baseline"]["pi_bridge_control_entries"]
+    entries.reverse()
+    plan["system_baseline"]["pi_bridge_control_digest"] = hashlib.sha256(
+        json.dumps(
+            entries,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    payload = _json_bytes(plan)
+    _set_plan(check_tool, monkeypatch, tmp_path, payload)
+    monkeypatch.setattr(
+        check_tool, "READ_PLAN_SHA256", hashlib.sha256(payload).hexdigest()
+    )
+    monkeypatch.setattr(
+        check_tool, "SYSTEM_BASELINE", deepcopy(plan["system_baseline"])
+    )
+
+    with pytest.raises(RuntimeError, match="not canonically ordered"):
+        check_tool.check_plan()
+
+
+def test_plan_rejects_pi_aggregate_digest_even_if_fully_repinned(
+    check_tool, monkeypatch, tmp_path: Path
+) -> None:
+    plan = json.loads(PLAN_BYTES)
+    plan["system_baseline"]["pi_bridge_control_digest"] = "0" * 64
+    payload = _json_bytes(plan)
+    _set_plan(check_tool, monkeypatch, tmp_path, payload)
+    monkeypatch.setattr(
+        check_tool, "READ_PLAN_SHA256", hashlib.sha256(payload).hexdigest()
+    )
+    monkeypatch.setattr(
+        check_tool, "SYSTEM_BASELINE", deepcopy(plan["system_baseline"])
+    )
+
+    with pytest.raises(RuntimeError, match="aggregate digest mismatch"):
         check_tool.check_plan()
 
 

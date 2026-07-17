@@ -146,22 +146,16 @@
     "pi_bridge_control_digest": "52fb10453c439d7f3877d0208f335023bef0952a3911c049ab06e64e09974b62",
     "pi_bridge_control_entries": [
       {
-        "component": "pi_bridge_systemd",
-        "path": "sudo-pi-agent-bridge.service",
-        "sha256": "e67fabc92fb8e8a3bbf50124d2cf194ca38ad516c4d34b85b0ae17eeb6571764",
-        "size": 424
-      },
-      {
-        "component": "pi_bridge_control",
-        "path": "server.mjs",
-        "sha256": "fae40056f346df95e55443a1ca44cfd580577c6a7505b87bb46abf9f1d60df9f",
-        "size": 9160
-      },
-      {
         "component": "pi_bridge_control",
         "path": "extensions/odoo-tools.ts",
         "sha256": "c34484bfb5934513db85a594049a3360b1af62f2496c4c951b4caa000a6e5455",
         "size": 4117
+      },
+      {
+        "component": "pi_bridge_control",
+        "path": "package-lock.json",
+        "sha256": "d61184e2b0270cf151e5ff676f65c8331dd0e6249805037feeb9721d5a4dcf7e",
+        "size": 73928
       },
       {
         "component": "pi_bridge_control",
@@ -171,9 +165,15 @@
       },
       {
         "component": "pi_bridge_control",
-        "path": "package-lock.json",
-        "sha256": "d61184e2b0270cf151e5ff676f65c8331dd0e6249805037feeb9721d5a4dcf7e",
-        "size": 73928
+        "path": "server.mjs",
+        "sha256": "fae40056f346df95e55443a1ca44cfd580577c6a7505b87bb46abf9f1d60df9f",
+        "size": 9160
+      },
+      {
+        "component": "pi_bridge_systemd",
+        "path": "sudo-pi-agent-bridge.service",
+        "sha256": "e67fabc92fb8e8a3bbf50124d2cf194ca38ad516c4d34b85b0ae17eeb6571764",
+        "size": 424
       }
     ],
     "pi_bridge_control_roots": {

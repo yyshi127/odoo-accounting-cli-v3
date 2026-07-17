@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.1"
+TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.2"
 PRODUCTION_ROOT = Path("/opt/odoo-accounting-cli-v3")
 TARGET_RELATIVE = Path("toolchains") / TOOLCHAIN_VERSION
 APPLICATION = {

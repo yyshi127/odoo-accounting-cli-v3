@@ -10,19 +10,19 @@
   "control_files": [
     {
       "name": "README.md",
-      "sha256": "c3b05b336825af38bd60acebf095eb3e8ad6f9d05242678496017cb531f1af88",
-      "size": 8438
+      "sha256": "8c68eebe38933222f8ed271f6bb6a6c52e3dd25085b58027fad6c0a251df5c43",
+      "size": 8800
     },
     {
       "name": "check_toolchain.py",
-      "sha256": "2bc3c8fb6d3eb8c936bf5f31e7615884aadee912e9980eb1b1531c4cd2ec6441",
-      "size": 12425
+      "sha256": "08971cb819aa34ecd9490545dd3ba87d705009143a142891ff0d37199cdb6328",
+      "size": 13088
     }
   ],
   "files": [
     {
       "name": "install_toolchain.py",
-      "sha256": "4eb1f0f9a21c11b6b1687b3fcb8c4446b4a3b9c7851ace82625669f0386a6c97",
+      "sha256": "6aeb6ea9b4bd0815e6cb43351664d529a29b3d5f5c40144b6c893e7c5b16ec5b",
       "size": 25561
     },
     {
@@ -32,30 +32,30 @@
     },
     {
       "name": "sign_read.py",
-      "sha256": "f2ece29620c4b0f515c8f9e5e53751dd07a3ed5636c2cd52b4297ae625a84d41",
+      "sha256": "3dff62895913a961927e1a688bfa33aeba5c46a8ca38ac539bcdc96e33dbc937",
       "size": 16804
     },
     {
       "name": "run_multicurrency_read.py",
-      "sha256": "71a7f9cc6a67d344b713ed022a76e482aff535106884e1759df11bbe9d8d7cf4",
-      "size": 56277
+      "sha256": "d6b82cfc8fa6bb056d90a6fc3296e0d88567016e121e048f660c7dc55e3554b7",
+      "size": 56372
     },
     {
       "name": "multicurrency_sql_oracle.py",
-      "sha256": "0e7fb2556b77e792be89268db2aff92eb054598a1ca9a3a4475da183a0de98ba",
+      "sha256": "c31580aa130318df27233426df40bfd0cbdc726913ba53679a08c1d859cb9147",
       "size": 25269
     },
     {
       "name": "verify_evidence.py",
-      "sha256": "7a4cb9c432d852f45b4bf086ac3f6d7e255206f3394815fea90b45f4e794e168",
-      "size": 83065
+      "sha256": "d1917c2a61ee1405c151f949b37a1c32c0163e2b3ccda947575e546ebace2dab",
+      "size": 83565
     },
     {
       "name": "read_plan.json",
-      "sha256": "860de4fb5b4efe41f760295b0b8eee4ae8b63f15d70e25e418640c8eb5f04c80",
+      "sha256": "f15442df9d707ed77dc9c79ce0aa67fb022b4e5c1c94889ca4ab5ff0d1b2f161",
       "size": 7316
     }
   ],
   "schema_version": 2,
-  "toolchain_version": "0.1.0.dev15-read-toolchain.1"
+  "toolchain_version": "0.1.0.dev15-read-toolchain.2"
 }

@@ -18,7 +18,7 @@ from typing import Any, Callable
 CAPABILITY_ID = "acct.multicurrency.balance_read.v1"
 RELEASE = "0.1.0.dev15-c4616386f921"
 TOOLCHAIN_ROOT = Path(
-    "/opt/odoo-accounting-cli-v3/toolchains/0.1.0.dev15-read-toolchain.1"
+    "/opt/odoo-accounting-cli-v3/toolchains/0.1.0.dev15-read-toolchain.2"
 )
 DATABASE_NAME = "odoo_test"
 DATABASE_UUID = "19b09656-d10f-11f0-9065-00163e54a5ad"

@@ -18,7 +18,7 @@ from typing import Any, Callable, Iterable
 RELEASE = "0.1.0.dev15-c4616386f921"
 RELEASE_ROOT = Path("/opt/odoo-accounting-cli-v3/releases") / RELEASE
 LAUNCHER = RELEASE_ROOT / "bin/odoo-accounting-cli-v3"
-TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.1"
+TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.2"
 TOOLCHAIN_ROOT = Path("/opt/odoo-accounting-cli-v3/toolchains") / TOOLCHAIN_VERSION
 TOOLCHAIN_MANIFEST = TOOLCHAIN_ROOT / "TOOLCHAIN-MANIFEST.json"
 TOOLCHAIN_FILES = (
@@ -36,7 +36,7 @@ SIGNER = TOOLCHAIN_ROOT / "sign_read.py"
 ORACLE = TOOLCHAIN_ROOT / "multicurrency_sql_oracle.py"
 EVIDENCE_PARENT = Path("/var/lib/odoo-accounting-cli-v3/evidence")
 CAPABILITY_ID = "acct.multicurrency.balance_read.v1"
-READ_PLAN_SHA256 = "860de4fb5b4efe41f760295b0b8eee4ae8b63f15d70e25e418640c8eb5f04c80"
+READ_PLAN_SHA256 = "f15442df9d707ed77dc9c79ce0aa67fb022b4e5c1c94889ca4ab5ff0d1b2f161"
 PACKAGE_SHA256 = "71d9bcea9c89b9ab2877406ca28b039791d380d0aeb09c60516a83b031b9c8bf"
 MANIFEST_SHA256 = "f4ea1dbd6e6b57472875d27a64504ffb433812c568bcd7be546d2e5074d24be2"
 REGISTRY_DIGEST = "ae50c3aa8d93472b7d58ca656ea9b2a42e18e5a38a9df0919320737b5632789b"
@@ -862,10 +862,13 @@ def system_snapshot() -> dict[str, Any]:
         or combined_digest != EXPECTED_V2_COMBINED_DIGEST
     ):
         raise ValueError("combined V2 source baseline drift")
-    pi_entries = [
-        fixed_file_snapshot(component, relative)
-        for component, relative in PI_CONTROL_FILES
-    ]
+    pi_entries = sorted(
+        [
+            fixed_file_snapshot(component, relative)
+            for component, relative in PI_CONTROL_FILES
+        ],
+        key=lambda item: (item["component"], item["path"]),
+    )
     pi_digest = hashlib.sha256(canonical_json(pi_entries)).hexdigest()
     if pi_digest != EXPECTED_PI_CONTROL_DIGEST:
         raise ValueError("Pi Bridge control baseline drift")

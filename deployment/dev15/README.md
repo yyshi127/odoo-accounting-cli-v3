@@ -5,10 +5,16 @@ database read of `acct.multicurrency.balance_read.v1`. It installs beside the
 application release. It does not create or change `current`, systemd units,
 Pi Bridge routing, V2 files, or accounting records.
 
+Toolchain `.1` remains immutable and is superseded. Its runner hashed the
+fixed Pi Bridge control entries before canonical ordering, so the real-server
+baseline rejected the otherwise byte-identical five-file snapshot before any
+Odoo execution. Toolchain `.2` canonically orders those entries and verifies
+that the frozen entry list and aggregate digest agree.
+
 ## Fixed contents
 
 The installed directory is exactly
-`/opt/odoo-accounting-cli-v3/toolchains/0.1.0.dev15-read-toolchain.1` and
+`/opt/odoo-accounting-cli-v3/toolchains/0.1.0.dev15-read-toolchain.2` and
 contains ten regular, single-link files:
 
 - `TOOLCHAIN-MANIFEST.json`
@@ -31,7 +37,7 @@ Manifest schema 2 has two ordered lists. `files` is exactly
 
 The manifest cannot authenticate itself. Deployment must obtain its expected
 raw SHA-256 from the reviewed, signed annotation of tag
-`toolchain/0.1.0.dev15-read-toolchain.1`, never from the upload directory or
+`toolchain/0.1.0.dev15-read-toolchain.2`, never from the upload directory or
 from a value stored inside the manifest. The installer requires that external
 digest and rejects any byte, file-set, order, identity, ownership, mode,
 symlink, or hard-link mismatch. Do not move or reissue this tag.
@@ -45,7 +51,7 @@ independently provisioned public key, not a key taken from the tag or upload:
 
 ```sh
 set -eu
-TAG=toolchain/0.1.0.dev15-read-toolchain.1
+TAG=toolchain/0.1.0.dev15-read-toolchain.2
 SIGNING_PRINCIPAL=yyshi127@users.noreply.github.com
 SIGNING_FINGERPRINT=SHA256:GFGfgQoBqTNZZ47Ts+lDRURoCwpmSv9/o24gzkFQjXs
 RELEASE_PUBLIC_KEY=/root/odoo-accounting-cli-v3-release.pub
@@ -90,7 +96,7 @@ package SHA-256
 and registry digest
 `ae50c3aa8d93472b7d58ca656ea9b2a42e18e5a38a9df0919320737b5632789b`.
 The raw SHA-256 of `read_plan.json` is
-`860de4fb5b4efe41f760295b0b8eee4ae8b63f15d70e25e418640c8eb5f04c80`.
+`f15442df9d707ed77dc9c79ce0aa67fb022b4e5c1c94889ca4ab5ff0d1b2f161`.
 
 ## Deployment and execution
 
@@ -101,8 +107,8 @@ the independently verified digest from the preceding authorization step:
 
 ```sh
 set -eu
-UPLOAD=/root/odoo-accounting-cli-v3-dev15-read-toolchain.1-upload
-TOOLCHAIN=/opt/odoo-accounting-cli-v3/toolchains/0.1.0.dev15-read-toolchain.1
+UPLOAD=/root/odoo-accounting-cli-v3-dev15-read-toolchain.2-upload
+TOOLCHAIN=/opt/odoo-accounting-cli-v3/toolchains/0.1.0.dev15-read-toolchain.2
 export EXPECTED_MANIFEST_SHA256 UPLOAD TOOLCHAIN
 install -d -o root -g root -m 0700 "$UPLOAD"
 # Copy exactly the ten fixed files into $UPLOAD before sealing them.

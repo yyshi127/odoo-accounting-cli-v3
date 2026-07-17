@@ -28,7 +28,7 @@ PACKAGE_PATH = (
 RELEASE_ANCHOR = (
     Path("/opt/odoo-accounting-cli-v3/trusted-artifacts") / f"{RELEASE}.json"
 )
-TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.1"
+TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.2"
 TOOLCHAIN_ROOT = Path("/opt/odoo-accounting-cli-v3/toolchains") / TOOLCHAIN_VERSION
 TOOLCHAIN_MANIFEST = TOOLCHAIN_ROOT / "TOOLCHAIN-MANIFEST.json"
 TOOLCHAIN_FILES = (
@@ -44,7 +44,7 @@ RUNTIME_CONFIG = (
 )
 ANCHOR_PARENT = Path("/var/lib/odoo-accounting-cli-v3/evidence-anchors")
 EVIDENCE_PARENT = Path("/var/lib/odoo-accounting-cli-v3/evidence")
-READ_PLAN_SHA256 = "860de4fb5b4efe41f760295b0b8eee4ae8b63f15d70e25e418640c8eb5f04c80"
+READ_PLAN_SHA256 = "f15442df9d707ed77dc9c79ce0aa67fb022b4e5c1c94889ca4ab5ff0d1b2f161"
 MANIFEST_SHA256 = "f4ea1dbd6e6b57472875d27a64504ffb433812c568bcd7be546d2e5074d24be2"
 PACKAGE_SHA256 = "71d9bcea9c89b9ab2877406ca28b039791d380d0aeb09c60516a83b031b9c8bf"
 REGISTRY_DIGEST = "ae50c3aa8d93472b7d58ca656ea9b2a42e18e5a38a9df0919320737b5632789b"
@@ -1156,10 +1156,25 @@ def verify_system_snapshots(plan: dict[str, Any], before: dict[str, Any], after:
     require(
         isinstance(pi, dict)
         and set(pi) == {"algorithm", "count", "digest", "entries", "roots"}
+        and pi["algorithm"]
+        == "canonical-json(component,path,sha256,size)-sha256-v1"
         and pi["count"] == 5
         and pi["digest"] == baseline["pi_bridge_control_digest"]
         and pi["entries"] == baseline["pi_bridge_control_entries"],
         "Pi Bridge exact five-file control baseline mismatch",
+    )
+    pi_entries = pi["entries"]
+    require(
+        pi_entries
+        == sorted(
+            pi_entries,
+            key=lambda item: (item["component"], item["path"]),
+        ),
+        "Pi Bridge control entries are not canonically ordered",
+    )
+    require(
+        hashlib.sha256(canonical_json(pi_entries)).hexdigest() == pi["digest"],
+        "Pi Bridge control aggregate digest mismatch",
     )
     require(pi["roots"] == baseline["pi_bridge_control_roots"], "Pi Bridge control roots mismatch")
     services = before["services"]

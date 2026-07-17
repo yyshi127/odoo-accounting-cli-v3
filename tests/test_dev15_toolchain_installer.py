@@ -127,6 +127,36 @@ def test_installs_exact_immutable_tree_and_is_idempotent(installer, tmp_path: Pa
     assert _stages(installer, install_root) == []
 
 
+def test_installing_point_two_preserves_immutable_point_one(
+    installer, tmp_path: Path
+):
+    assert installer.TOOLCHAIN_VERSION == "0.1.0.dev15-read-toolchain.2"
+    source = _source_fixture(installer, tmp_path / "source")
+    install_root = tmp_path / "installed"
+    toolchains = install_root / "toolchains"
+    legacy = toolchains / "0.1.0.dev15-read-toolchain.1"
+    legacy.mkdir(parents=True, mode=0o755)
+    sentinel = legacy / "immutable-sentinel"
+    sentinel.write_bytes(b"point-one-remains-unchanged\n")
+    sentinel.chmod(0o444)
+    legacy.chmod(0o555)
+    legacy_identity = (legacy.stat().st_ino, sentinel.stat().st_ino)
+
+    manifest_sha256 = _manifest_sha256(installer, source)
+    first = installer._install_for_test(source, install_root, manifest_sha256)
+    second = installer._install_for_test(source, install_root, manifest_sha256)
+
+    assert first["already_installed"] is False
+    assert second["already_installed"] is True
+    assert _target(installer, install_root).is_dir()
+    assert legacy.is_dir()
+    assert sentinel.read_bytes() == b"point-one-remains-unchanged\n"
+    assert (legacy.stat().st_ino, sentinel.stat().st_ino) == legacy_identity
+    if os.name == "posix":
+        assert stat.S_IMODE(legacy.stat().st_mode) == 0o555
+        assert stat.S_IMODE(sentinel.stat().st_mode) == 0o444
+
+
 def test_rejects_payload_tampering(installer, tmp_path: Path):
     source = _source_fixture(installer, tmp_path)
     manifest_sha256 = _manifest_sha256(installer, source)

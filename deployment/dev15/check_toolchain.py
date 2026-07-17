@@ -13,9 +13,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = ROOT / "TOOLCHAIN-MANIFEST.json"
-TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.1"
+TOOLCHAIN_VERSION = "0.1.0.dev15-read-toolchain.2"
 READ_PLAN_SHA256 = (
-    "860de4fb5b4efe41f760295b0b8eee4ae8b63f15d70e25e418640c8eb5f04c80"
+    "f15442df9d707ed77dc9c79ce0aa67fb022b4e5c1c94889ca4ab5ff0d1b2f161"
 )
 APPLICATION = {
     "commit": "c4616386f921946cf43cde2de449d2938a837422",
@@ -68,28 +68,20 @@ SYSTEM_BASELINE = {
     ),
     "pi_bridge_control_entries": [
         {
-            "component": "pi_bridge_systemd",
-            "path": "sudo-pi-agent-bridge.service",
-            "sha256": (
-                "e67fabc92fb8e8a3bbf50124d2cf194ca38ad516c4d34b85b0ae17eeb6571764"
-            ),
-            "size": 424,
-        },
-        {
-            "component": "pi_bridge_control",
-            "path": "server.mjs",
-            "sha256": (
-                "fae40056f346df95e55443a1ca44cfd580577c6a7505b87bb46abf9f1d60df9f"
-            ),
-            "size": 9160,
-        },
-        {
             "component": "pi_bridge_control",
             "path": "extensions/odoo-tools.ts",
             "sha256": (
                 "c34484bfb5934513db85a594049a3360b1af62f2496c4c951b4caa000a6e5455"
             ),
             "size": 4117,
+        },
+        {
+            "component": "pi_bridge_control",
+            "path": "package-lock.json",
+            "sha256": (
+                "d61184e2b0270cf151e5ff676f65c8331dd0e6249805037feeb9721d5a4dcf7e"
+            ),
+            "size": 73928,
         },
         {
             "component": "pi_bridge_control",
@@ -101,11 +93,19 @@ SYSTEM_BASELINE = {
         },
         {
             "component": "pi_bridge_control",
-            "path": "package-lock.json",
+            "path": "server.mjs",
             "sha256": (
-                "d61184e2b0270cf151e5ff676f65c8331dd0e6249805037feeb9721d5a4dcf7e"
+                "fae40056f346df95e55443a1ca44cfd580577c6a7505b87bb46abf9f1d60df9f"
             ),
-            "size": 73928,
+            "size": 9160,
+        },
+        {
+            "component": "pi_bridge_systemd",
+            "path": "sudo-pi-agent-bridge.service",
+            "sha256": (
+                "e67fabc92fb8e8a3bbf50124d2cf194ca38ad516c4d34b85b0ae17eeb6571764"
+            ),
+            "size": 424,
         },
     ],
     "pi_bridge_control_roots": {
@@ -315,6 +315,28 @@ def check_plan() -> None:
     require(
         plan.get("system_baseline") == SYSTEM_BASELINE,
         "read plan system baseline mismatch",
+    )
+    pi_entries = plan["system_baseline"]["pi_bridge_control_entries"]
+    require(
+        pi_entries
+        == sorted(
+            pi_entries,
+            key=lambda item: (item["component"], item["path"]),
+        ),
+        "Pi Bridge control entries are not canonically ordered",
+    )
+    pi_digest = sha256(
+        json.dumps(
+            pi_entries,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    require(
+        pi_digest == plan["system_baseline"]["pi_bridge_control_digest"],
+        "Pi Bridge control aggregate digest mismatch",
     )
     require(
         plan.get("capability_id") == "acct.multicurrency.balance_read.v1"
