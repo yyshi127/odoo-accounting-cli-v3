@@ -13,9 +13,17 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from ..draft_invoice_recovery import (
+    DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+    DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+    classic_read_many2one_id,
+    customer_invoice_business_binding,
+    customer_invoice_document_binding,
+)
 from ..domain.write_semantics import WriteSemanticError, validate_write_semantics
 from ..write_receipts import (
     WriteReceiptError,
+    create_record_snapshot,
     validate_executable_recovery_plan,
     validate_record_snapshot,
 )
@@ -31,6 +39,7 @@ class OdooWriteContext:
     user_id: int
     allowed_company_ids: frozenset[int]
     today: date
+    environment: str
     trusted_recovery_plan: Mapping[str, Any] | None = None
 
 
@@ -52,9 +61,10 @@ _CAPABILITIES = frozenset(
     }
 )
 
-# Automatic recovery stays closed until each active Odoo module override and
-# its complete side-effect graph have passed a real sandbox oracle.
-_RECOVERY_ACTIONS = frozenset()
+# This dormant implementation is reachable only through a receipt-derived V2
+# plan in a registry-staged sandbox.  Production remains fail-closed even if a
+# plan is replayed there; promotion still requires the real module-graph oracle.
+_RECOVERY_ACTIONS = frozenset({DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD})
 
 _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "account.move": (
@@ -63,9 +73,16 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
         "invoice_payment_term_id",
         "amount_untaxed", "amount_tax", "amount_total", "amount_residual", "payment_state",
         "line_ids", "invoice_line_ids", "reversed_entry_id", "reversal_move_ids",
-        "payment_id", "statement_line_id", "statement_id",
+        "adjusting_entry_origin_move_ids", "adjusting_entries_move_ids",
+        "exchange_diff_partial_ids",
+        "origin_payment_id", "payment_id", "payment_ids", "matched_payment_ids",
+        "reconciled_payment_ids", "statement_line_id", "statement_id",
         "tax_cash_basis_rec_id", "tax_cash_basis_origin_move_id",
-        "auto_post", "asset_id", "asset_move_type", "asset_number_days",
+        "tax_cash_basis_created_move_ids",
+        "posted_before", "secure_sequence_number", "inalterable_hash",
+        "is_manually_modified", "need_cancel_request", "edi_document_ids",
+        "expense_ids", "pos_order_ids",
+        "auto_post", "auto_post_origin_id", "asset_id", "asset_move_type", "asset_number_days",
         "asset_depreciation_beginning_date", "depreciation_value",
         "deferred_move_ids", "deferred_original_move_ids",
         "odoo_cli_v3_reason", "odoo_cli_v3_period_end_date",
@@ -81,6 +98,7 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
         "matching_number", "tax_ids", "tax_line_id", "display_type",
         "tax_repartition_line_id",
         "deferred_start_date", "deferred_end_date", "asset_ids",
+        "statement_line_id", "sale_line_ids", "purchase_line_id", "expense_id",
         "odoo_cli_v3_line_reference",
     ),
     "account.payment": (
@@ -1472,14 +1490,40 @@ class OdooWriteHandlers:
         self.require_created(move, "account.move", company)
         if p["posting_mode"] == "post":
             move.action_post()
-        recovery = _recovery(
-            "manual_escalation",
-            "manual_review_vendor_bill_recovery"
-            if vendor
-            else "manual_review_customer_invoice_recovery",
-            [{"model": "account.move", "record_id": move.id}],
-        )
-        return self.move_records(move, company), recovery
+        records = self.move_records(move, company)
+        if (
+            not vendor
+            and p["posting_mode"] == "draft"
+            and self.context.environment == "sandbox"
+        ):
+            lines = [
+                record
+                for model_name, record in records
+                if model_name == "account.move.line"
+            ]
+            self._assert_pristine_customer_invoice(
+                move, lines, company, expected_state="draft"
+            )
+            recovery = _recovery(
+                "available",
+                DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+                [{"model": "account.move", "record_id": move.id}],
+                guards=[
+                    {"model": model_name, "record_id": record.id}
+                    for model_name, record in records
+                    if model_name == "account.move.line"
+                ],
+                oracle_id=DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+            )
+        else:
+            recovery = _recovery(
+                "manual_escalation",
+                "manual_review_vendor_bill_recovery"
+                if vendor
+                else "manual_review_customer_invoice_recovery",
+                [{"model": "account.move", "record_id": move.id}],
+            )
+        return records, recovery
 
     def execute_customer_invoice(self, p: dict[str, Any], company: Any, checked: dict[str, Any]):
         return self.execute_document(p, company, vendor=False)
@@ -4801,6 +4845,8 @@ class OdooWriteHandlers:
 
     @staticmethod
     def document_binding(kind: str, parameters: Mapping[str, Any]) -> str:
+        if kind == "customer_invoice":
+            return customer_invoice_document_binding(parameters)
         return _digest(
             {
                 "capability_kind": kind,
@@ -4815,7 +4861,7 @@ class OdooWriteHandlers:
     @staticmethod
     def business_binding(kind: str, parameters: Mapping[str, Any]) -> str:
         if kind == "customer_invoice":
-            identity = {"reference": parameters["reference"]}
+            return customer_invoice_business_binding(parameters)
         elif kind == "vendor_bill":
             identity = {
                 "partner_id": parameters["partner_id"],
@@ -5626,6 +5672,235 @@ class OdooWriteHandlers:
             "move_balanced", "record_graph_exact",
         ]
 
+    def recovery_reference(
+        self,
+        model_name: str,
+        record: Any,
+        company: Any,
+        *,
+        required_fields: frozenset[str],
+    ) -> dict[str, Any]:
+        raw = self.snapshot(
+            model_name,
+            record,
+            company,
+            required_fields=required_fields,
+        )
+        snapshot = create_record_snapshot(
+            model=model_name,
+            record_id=raw["record_id"],
+            exists=True,
+            record_state=raw["state"],
+            values=raw["values"],
+        )
+        return {
+            "model": model_name,
+            "record_id": raw["record_id"],
+            "company_id": company.id,
+            "record_state": raw["state"],
+            "record_fingerprint": _digest(snapshot),
+        }
+
+    @staticmethod
+    def _valid_sha_binding(value: Any) -> bool:
+        return (
+            isinstance(value, str)
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    def _assert_pristine_customer_invoice(
+        self,
+        move: Any,
+        lines: list[Any],
+        company: Any,
+        *,
+        expected_state: str,
+    ) -> None:
+        if (
+            str(getattr(move, "state", "")) != expected_state
+            or str(getattr(move, "move_type", "")) != "out_invoice"
+            or getattr(move, "posted_before", None) is not False
+            or str(getattr(move, "auto_post", "")) != "no"
+            or _record_id(getattr(move, "company_id", None)) != company.id
+        ):
+            raise OdooWriteHandlerError(
+                "recovery target is not a pristine V3 draft customer invoice"
+            )
+        journal = getattr(move, "journal_id", None)
+        if (
+            _record_id(journal) is None
+            or str(getattr(journal, "type", "")) != "sale"
+            or getattr(journal, "active", True) is False
+        ):
+            raise OdooWriteHandlerError(
+                "recovery target journal is not an active sales journal"
+            )
+        if not self._valid_sha_binding(
+            getattr(move, "odoo_cli_v3_document_binding", None)
+        ) or not self._valid_sha_binding(
+            getattr(move, "odoo_cli_v3_business_binding", None)
+        ):
+            raise OdooWriteHandlerError(
+                "recovery target lacks immutable V3 document bindings"
+            )
+        if (
+            getattr(move, "secure_sequence_number", 0) not in {False, 0}
+            or bool(getattr(move, "inalterable_hash", False))
+            or bool(getattr(move, "need_cancel_request", False))
+            or bool(getattr(move, "is_manually_modified", False))
+        ):
+            raise OdooWriteHandlerError(
+                "recovery target has prior posting, EDI, or manual mutation evidence"
+            )
+        singular_links = (
+            "auto_post_origin_id",
+            "origin_payment_id",
+            "payment_id",
+            "statement_line_id",
+            "statement_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "reversed_entry_id",
+            "asset_id",
+        )
+        plural_links = (
+            "payment_ids",
+            "matched_payment_ids",
+            "reconciled_payment_ids",
+            "tax_cash_basis_created_move_ids",
+            "reversal_move_ids",
+            "adjusting_entry_origin_move_ids",
+            "adjusting_entries_move_ids",
+            "exchange_diff_partial_ids",
+            "deferred_move_ids",
+            "deferred_original_move_ids",
+            "edi_document_ids",
+            "expense_ids",
+            "pos_order_ids",
+        )
+        if any(_record_id(getattr(move, field, None)) is not None for field in singular_links):
+            raise OdooWriteHandlerError(
+                "recovery target has a payment, statement, tax, reversal, or asset link"
+            )
+        if any(_ids(getattr(move, field, [])) for field in plural_links):
+            raise OdooWriteHandlerError(
+                "recovery target has linked payment, tax, EDI, asset, expense, or sale effects"
+            )
+        if set(_ids(getattr(move, "line_ids", []))) != {line.id for line in lines}:
+            raise OdooWriteHandlerError(
+                "recovery guard records do not cover the complete line graph"
+            )
+        for line in lines:
+            if (
+                _record_id(getattr(line, "move_id", None)) != move.id
+                or _record_id(getattr(line, "company_id", None)) != company.id
+                or bool(getattr(line, "reconciled", False))
+                or _record_id(getattr(line, "full_reconcile_id", None)) is not None
+                or _ids(getattr(line, "matched_debit_ids", []))
+                or _ids(getattr(line, "matched_credit_ids", []))
+                or _record_id(getattr(line, "statement_line_id", None)) is not None
+                or _ids(getattr(line, "asset_ids", []))
+                or _ids(getattr(line, "sale_line_ids", []))
+                or _record_id(getattr(line, "purchase_line_id", None)) is not None
+                or _record_id(getattr(line, "expense_id", None)) is not None
+                or getattr(line, "deferred_start_date", None) not in {None, False}
+                or getattr(line, "deferred_end_date", None) not in {None, False}
+                or str(getattr(line, "display_type", "")) == "cogs"
+            ):
+                raise OdooWriteHandlerError(
+                    "recovery line graph has reconciliation or external business effects"
+                )
+
+    def _draft_customer_invoice_recovery_graph(
+        self,
+        plan: Mapping[str, Any],
+        company: Any,
+    ) -> tuple[Any, list[Any], list[tuple[str, Any]]]:
+        if (
+            self.context.environment != "sandbox"
+            or plan["method"] != DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
+            or plan["oracle_id"] != DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
+        ):
+            raise OdooWriteHandlerError(
+                "recovery method is not allowlisted for this environment"
+            )
+        actions = plan["action_targets"]
+        guards = plan["guard_records"]
+        if (
+            len(actions) != 1
+            or actions[0]["model"] != "account.move"
+            or not guards
+            or any(
+                guard["model"] != "account.move.line"
+                or guard["expected_outcome"] != "survive_exact"
+                for guard in guards
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "recovery plan does not contain the exact invoice action/guard graph"
+            )
+        move = self.record(
+            "account.move", actions[0]["record_id"], company, write=True
+        )
+        lines = [
+            self.record("account.move.line", guard["record_id"], company)
+            for guard in guards
+        ]
+        self._assert_pristine_customer_invoice(
+            move, lines, company, expected_state="draft"
+        )
+        action_reference = self.recovery_reference(
+            "account.move",
+            move,
+            company,
+            required_fields=frozenset(
+                {
+                    "state", "move_type", "company_id", "journal_id",
+                    "currency_id", "partner_id", "date", "line_ids",
+                    "auto_post", "posted_before", "secure_sequence_number",
+                    "inalterable_hash", "origin_payment_id", "payment_ids",
+                    "matched_payment_ids", "reconciled_payment_ids",
+                    "statement_line_id", "statement_id",
+                    "tax_cash_basis_rec_id", "tax_cash_basis_origin_move_id",
+                    "tax_cash_basis_created_move_ids", "reversed_entry_id",
+                    "reversal_move_ids", "is_manually_modified",
+                    "adjusting_entry_origin_move_ids",
+                    "adjusting_entries_move_ids", "exchange_diff_partial_ids",
+                    "odoo_cli_v3_document_binding",
+                    "odoo_cli_v3_business_binding",
+                }
+            ),
+        )
+        if action_reference != actions[0]:
+            raise OdooWriteHandlerError(
+                "recovery action target fingerprint changed after approval"
+            )
+        line_required = frozenset(
+            {
+                "move_id", "company_id", "account_id", "currency_id",
+                "debit", "credit", "balance", "amount_currency",
+                "reconciled", "full_reconcile_id", "matched_debit_ids",
+                "matched_credit_ids", "tax_ids", "tax_line_id",
+                "display_type", "odoo_cli_v3_line_reference",
+            }
+        )
+        for line, guard in zip(lines, guards):
+            reference = self.recovery_reference(
+                "account.move.line",
+                line,
+                company,
+                required_fields=line_required,
+            )
+            if {**reference, "expected_outcome": "survive_exact"} != guard:
+                raise OdooWriteHandlerError(
+                    "recovery guard fingerprint changed after approval"
+                )
+        records = [("account.move", move), *(
+            ("account.move.line", line) for line in lines
+        )]
+        return move, lines, records
+
     def precheck_recovery(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
         plan = self.context.trusted_recovery_plan
         if not isinstance(plan, Mapping):
@@ -5640,22 +5915,151 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError("recovery plan origin differs")
         if plan["plan_digest"] != p["expected_recovery_plan_digest"]:
             raise OdooWriteHandlerError("recovery plan digest differs")
-        raise OdooWriteHandlerError(
-            "automatic recovery is disabled until the active Odoo module "
-            "side-effect graph passes a real sandbox oracle"
+        move, _lines, records = self._draft_customer_invoice_recovery_graph(
+            plan, company
         )
+        return {
+            "checks": [
+                "receipt_derived_available_v2_plan",
+                "sandbox_only_recovery",
+                "single_v3_draft_customer_invoice",
+                "never_posted_or_hashed",
+                "no_payment_reconciliation_or_external_effects",
+                "complete_line_guard_graph",
+                "action_and_guard_fingerprints_match",
+                "write_acl",
+            ],
+            "before": self.snapshots(records, company),
+            "dependencies": self.snapshots(
+                [("account.journal", move.journal_id)], company
+            ),
+        }
 
     def execute_recovery(self, p, company, checked):
-        raise OdooWriteHandlerError(
-            "automatic recovery is disabled until the active Odoo module "
-            "side-effect graph passes a real sandbox oracle"
+        plan = self.context.trusted_recovery_plan
+        if not isinstance(plan, Mapping):
+            raise OdooWriteHandlerError("trusted recovery plan is unavailable")
+        move, _lines, records = self._draft_customer_invoice_recovery_graph(
+            plan, company
+        )
+        # Active button_cancel overrides can trigger EDI cron work, unlink
+        # COGS, or mutate sale/asset/expense records.  The precheck proves
+        # those graphs absent, then this non-sudo primitive changes only state.
+        result = move.with_context(
+            tracking_disable=True,
+            skip_account_move_synchronization=True,
+            skip_invoice_sync=True,
+            skip_is_manually_modified=True,
+        ).write({"state": "cancel"})
+        if result is not True or str(getattr(move, "state", "")) != "cancel":
+            raise OdooWriteHandlerError(
+                "draft customer invoice cancellation returned no exact result"
+            )
+        self._assert_recovery_exact_delta(
+            move,
+            _lines,
+            company,
+            self.trusted_before_values(
+                {"before": checked.get("before")}, company
+            ),
+        )
+        return records, _recovery(
+            "not_applicable", "recovery_completed", []
         )
 
-    def verify_recovery(self, p, company, records, before):
-        raise OdooWriteHandlerError(
-            "automatic recovery is disabled until the active Odoo module "
-            "side-effect graph passes a real sandbox oracle"
+    def _assert_recovery_exact_delta(
+        self,
+        move: Any,
+        lines: list[Any],
+        company: Any,
+        before: Mapping[tuple[str, int], dict[str, Any]],
+    ) -> None:
+        self._assert_pristine_customer_invoice(
+            move, lines, company, expected_state="cancel"
         )
+        move_before = before.get(("account.move", move.id))
+        if (
+            not isinstance(move_before, Mapping)
+            or move_before.get("state") != "draft"
+            or move_before.get("posted_before") is not False
+        ):
+            raise OdooWriteHandlerError(
+                "recovery before evidence was not an unposted draft"
+            )
+        self.assert_approved_record_delta(
+            "account.move",
+            move,
+            company,
+            move_before,
+            allowed_changed_fields=frozenset({"state"}),
+            label="recovered customer invoice",
+        )
+        for line in lines:
+            line_before = before.get(("account.move.line", line.id))
+            self._assert_recovery_line_exact_delta(
+                line,
+                company,
+                line_before,
+                move_id=move.id,
+            )
+
+    def _assert_recovery_line_exact_delta(
+        self,
+        line: Any,
+        company: Any,
+        approved: Mapping[str, Any] | None,
+        *,
+        move_id: int,
+    ) -> None:
+        if not isinstance(approved, Mapping):
+            raise OdooWriteHandlerError(
+                "recovery guard line approval snapshot is missing"
+            )
+        current = self.snapshot("account.move.line", line, company)["values"]
+        # move_id's display label is derived from the parent state in Odoo.
+        # Only that label may drift; the strict relation ID must stay exact.
+        if (
+            set(current) != set(approved)
+            or classic_read_many2one_id(approved.get("move_id")) != move_id
+            or classic_read_many2one_id(current.get("move_id")) != move_id
+            or any(
+                current[field] != approved[field]
+                for field in set(current) - {"move_id"}
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "recovery guard line graph changed outside the approved allowlist"
+            )
+
+    def verify_recovery(self, p, company, records, before):
+        plan = self.context.trusted_recovery_plan
+        if not isinstance(plan, Mapping):
+            raise OdooWriteHandlerError("trusted recovery plan is unavailable")
+        actions = plan["action_targets"]
+        guards = plan["guard_records"]
+        keyed = {(model_name, record.id): record for model_name, record in records}
+        expected_keys = {
+            (actions[0]["model"], actions[0]["record_id"]),
+            *((guard["model"], guard["record_id"]) for guard in guards),
+        }
+        if set(keyed) != expected_keys or set(before) != expected_keys:
+            raise OdooWriteHandlerError(
+                "recovery read-back graph differs from the approved guard graph"
+            )
+        move = keyed[("account.move", actions[0]["record_id"])]
+        lines = [
+            keyed[("account.move.line", guard["record_id"])]
+            for guard in guards
+        ]
+        self._assert_recovery_exact_delta(move, lines, company, before)
+        return [
+            "draft_customer_invoice_cancelled_exactly",
+            "never_posted_evidence_preserved",
+            "document_and_business_bindings_preserved",
+            "payment_reconciliation_and_external_links_absent",
+            "line_guard_graph_survived_exactly",
+            "no_delete_or_button_cancel_path_used",
+        ]
 
     def require_created(self, record: Any, model_name: str, company: Any) -> None:
         identifier = _record_id(record)

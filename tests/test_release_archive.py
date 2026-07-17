@@ -156,6 +156,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/auth.py",
         "src/odoo_accounting_cli_v3/cli.py",
         "src/odoo_accounting_cli_v3/contracts.py",
+        "src/odoo_accounting_cli_v3/draft_invoice_recovery.py",
         "src/odoo_accounting_cli_v3/domain/__init__.py",
         "src/odoo_accounting_cli_v3/domain/ap_open_items.py",
         "src/odoo_accounting_cli_v3/domain/ar_open_items.py",

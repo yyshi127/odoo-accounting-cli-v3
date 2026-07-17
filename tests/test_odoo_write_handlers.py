@@ -14,10 +14,12 @@ from odoo_accounting_cli_v3.odoo.write_handlers import (
     OdooWriteHandlerError,
     OdooWriteHandlers,
 )
+from odoo_accounting_cli_v3.odoo.write_bootstrap import _execution_evidence
 from odoo_accounting_cli_v3.operations import canonical_json
 from odoo_accounting_cli_v3.write_receipts import (
     create_record_snapshot,
     create_recovery_plan_v2,
+    validate_executable_recovery_plan,
 )
 
 
@@ -31,6 +33,7 @@ class Record:
         self.ids = [identifier]
         self.access = []
         self.writes = []
+        self.contexts = []
         self.action_post_calls = 0
         for key, value in values.items():
             setattr(self, key, value)
@@ -58,6 +61,10 @@ class Record:
         for key, value in values.items():
             setattr(self, key, value)
         return True
+
+    def with_context(self, **values):
+        self.contexts.append(values)
+        return self
 
     def action_post(self):
         self.action_post_calls += 1
@@ -118,12 +125,13 @@ class Env:
         return self.models[model]
 
 
-def context(env=None, *, recovery_plan=None):
+def context(env=None, *, recovery_plan=None, environment="sandbox"):
     return OdooWriteContext(
         env=env or Env({}),
         user_id=42,
         allowed_company_ids=frozenset({7}),
         today=date(2026, 7, 15),
+        environment=environment,
         trusted_recovery_plan=recovery_plan,
     )
 
@@ -142,8 +150,17 @@ def company(**values):
 
 
 class Harness(OdooWriteHandlers):
-    def __init__(self, *, models=None, records=None, recovery_plan=None):
-        self.context = context(recovery_plan=recovery_plan)
+    def __init__(
+        self,
+        *,
+        models=None,
+        records=None,
+        recovery_plan=None,
+        environment="sandbox",
+    ):
+        self.context = context(
+            recovery_plan=recovery_plan, environment=environment
+        )
         self.models = models or {}
         self.records = records or {}
         self.test_company = company()
@@ -216,8 +233,8 @@ def executable_recovery_plan(
     origin_operation_id="op-1",
     action_targets,
     guard_records,
-    method="cancel_draft_move",
-    oracle_id="cancel_draft_move_exact_v1",
+    method="cancel_pristine_v3_draft_customer_invoice_v1",
+    oracle_id="cancel_pristine_v3_draft_customer_invoice_exact_v1",
 ):
     return create_recovery_plan_v2(
         origin_operation_id=origin_operation_id,
@@ -660,6 +677,281 @@ def test_customer_invoice_uses_account_move_create_and_public_action_post():
         "method": "manual_review_customer_invoice_recovery",
         "targets": [{"model": "account.move", "record_id": 100}],
     }
+
+
+def draft_invoice_creation_graph(
+    *,
+    payment_ids=None,
+    reconciled=False,
+    adjusting_entry_origin_move_ids=None,
+):
+    journal = Record(2, type="sale", active=True)
+    move = Record(
+        101,
+        state="draft",
+        move_type="out_invoice",
+        company_id=Record(7),
+        journal_id=journal,
+        line_ids=[],
+        auto_post="no",
+        posted_before=False,
+        odoo_cli_v3_document_binding="a" * 64,
+        odoo_cli_v3_business_binding="b" * 64,
+        payment_ids=list(payment_ids or []),
+        adjusting_entry_origin_move_ids=list(
+            adjusting_entry_origin_move_ids or []
+        ),
+    )
+    line1 = Record(
+        102,
+        company_id=Record(7),
+        move_id=move,
+        reconciled=reconciled,
+    )
+    line2 = Record(
+        103,
+        company_id=Record(7),
+        move_id=move,
+        reconciled=False,
+    )
+    move.line_ids = [line1, line2]
+    return move, line1, line2
+
+
+def test_sandbox_draft_customer_invoice_emits_only_the_exact_line_guard_descriptor():
+    move, line1, line2 = draft_invoice_creation_graph()
+    model = Model(factory=lambda values: move)
+    handler = Harness(
+        models={"account.move": model},
+        records={
+            ("account.move.line", 102): line1,
+            ("account.move.line", 103): line2,
+        },
+    )
+    parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        "reference": "INV-DRAFT-RECOVERY-1",
+        "lines": [{
+            "line_reference": "invoice-line-1",
+            "name": "service",
+            "product_id": None,
+            "account_id": 3,
+            "quantity": "1",
+            "price_unit": "50.00",
+            "tax_ids": [],
+        }],
+    }
+
+    records, recovery = handler.execute_customer_invoice(
+        parameters, handler.test_company, {}
+    )
+
+    assert {(model_name, record.id) for model_name, record in records} == {
+        ("account.move", 101),
+        ("account.move.line", 102),
+        ("account.move.line", 103),
+    }
+    assert recovery == {
+        "status": "available",
+        "method": "cancel_pristine_v3_draft_customer_invoice_v1",
+        "targets": [{"model": "account.move", "record_id": 101}],
+        "guards": [
+            {"model": "account.move.line", "record_id": 102},
+            {"model": "account.move.line", "record_id": 103},
+        ],
+        "oracle_id": "cancel_pristine_v3_draft_customer_invoice_exact_v1",
+    }
+
+
+def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan():
+    move, line1, line2 = draft_invoice_creation_graph()
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        records={
+            ("account.move.line", line1.id): line1,
+            ("account.move.line", line2.id): line2,
+        },
+    )
+    parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        "reference": "INV-DRAFT-INTEGRATION-1",
+        "lines": [{
+            "line_reference": "invoice-line-1",
+            "name": "service",
+            "product_id": None,
+            "account_id": 3,
+            "quantity": "1",
+            "price_unit": "50.00",
+            "tax_ids": [],
+        }],
+        "idempotency_key": "invoice-draft-integration-1",
+    }
+    document_binding = handler.document_binding("customer_invoice", parameters)
+    business_binding = handler.business_binding("customer_invoice", parameters)
+    move.odoo_cli_v3_document_binding = document_binding
+    move.odoo_cli_v3_business_binding = business_binding
+    move.snapshot_values = {
+        "state": "draft",
+        "move_type": "out_invoice",
+        "company_id": [7, "Sandbox Company"],
+        "journal_id": [2, "Sales"],
+        "currency_id": [1, "USD"],
+        "partner_id": [10, "Customer"],
+        "line_ids": [line1.id, line2.id],
+        "auto_post": "no",
+        "posted_before": False,
+        "secure_sequence_number": 0,
+        "inalterable_hash": False,
+        "is_manually_modified": False,
+        "payment_ids": [],
+        "matched_payment_ids": [],
+        "reconciled_payment_ids": [],
+        "tax_cash_basis_created_move_ids": [],
+        "reversal_move_ids": [],
+        "adjusting_entry_origin_move_ids": [],
+        "adjusting_entries_move_ids": [],
+        "exchange_diff_partial_ids": [],
+        "odoo_cli_v3_document_binding": document_binding,
+        "odoo_cli_v3_business_binding": business_binding,
+    }
+    for line in (line1, line2):
+        line.snapshot_values = {
+            "move_id": [move.id, "/"],
+            "company_id": [7, "Sandbox Company"],
+            "reconciled": False,
+            "full_reconcile_id": False,
+            "matched_debit_ids": [],
+            "matched_credit_ids": [],
+            "asset_ids": [],
+            "sale_line_ids": [],
+            "display_type": "product",
+        }
+    checked = {
+        "capability_id": "acct.invoice.customer_create.v1",
+        "company_id": 7,
+        "parameters_digest": hashlib.sha256(canonical_json(parameters)).hexdigest(),
+        "checks": ["approved_live_precheck"],
+        "before": [],
+    }
+
+    raw = handler.execute_prechecked(
+        "acct.invoice.customer_create.v1", parameters, checked
+    )
+    operation = SimpleNamespace(
+        operation_id="op-draft-integration-1",
+        capability_id="acct.invoice.customer_create.v1",
+        company_id=7,
+        environment="sandbox",
+        parameters=parameters,
+    )
+    evidence = _execution_evidence(operation, raw)
+
+    validate_executable_recovery_plan(evidence["recovery_plan"])
+    assert evidence["recovery_plan"]["status"] == "available"
+    assert {
+        (item["model"], item["record_id"])
+        for item in evidence["recovery_plan"]["guard_records"]
+    } == {
+        ("account.move.line", line1.id),
+        ("account.move.line", line2.id),
+    }
+
+
+@pytest.mark.parametrize(
+    ("payment_ids", "reconciled", "adjusting_origins", "match"),
+    [
+        ([Record(991)], False, [], "linked payment"),
+        ([], True, [], "external business effects"),
+        ([], False, [Record(992)], "linked payment"),
+    ],
+)
+def test_sandbox_draft_invoice_never_advertises_recovery_for_an_unsafe_graph(
+    payment_ids, reconciled, adjusting_origins, match
+):
+    move, line1, line2 = draft_invoice_creation_graph(
+        payment_ids=payment_ids,
+        reconciled=reconciled,
+        adjusting_entry_origin_move_ids=adjusting_origins,
+    )
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        records={
+            ("account.move.line", line1.id): line1,
+            ("account.move.line", line2.id): line2,
+        },
+    )
+    parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        "reference": "INV-DRAFT-UNSAFE-1",
+        "lines": [{
+            "line_reference": "invoice-line-1",
+            "name": "service",
+            "product_id": None,
+            "account_id": 3,
+            "quantity": "1",
+            "price_unit": "50.00",
+            "tax_ids": [],
+        }],
+    }
+
+    with pytest.raises(OdooWriteHandlerError, match=match):
+        handler.execute_customer_invoice(parameters, handler.test_company, {})
+
+
+def test_production_draft_invoice_never_advertises_unverified_automatic_recovery():
+    move = Record(104, state="draft", company_id=Record(7), line_ids=[])
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        environment="production",
+    )
+    parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        "reference": "INV-PRODUCTION-CLOSED-1",
+        "lines": [{
+            "line_reference": "invoice-line-1",
+            "name": "service",
+            "product_id": None,
+            "account_id": 3,
+            "quantity": "1",
+            "price_unit": "50.00",
+            "tax_ids": [],
+        }],
+    }
+
+    _records, recovery = handler.execute_customer_invoice(
+        parameters, handler.test_company, {}
+    )
+
+    assert recovery["status"] == "manual_escalation"
+    assert recovery["method"] == "manual_review_customer_invoice_recovery"
 
 
 def test_vendor_bill_uses_vendor_reference_and_purchase_move_type():
@@ -4045,15 +4337,43 @@ def test_reversal_verification_requires_exact_linewise_graph_and_approved_origin
 
 
 def draft_move_recovery_fixture():
-    journal = Record(2, type="general")
+    journal = Record(2, type="sale", active=True)
     move = Record(
         1101,
         state="draft",
-        move_type="entry",
+        move_type="out_invoice",
         company_id=Record(7),
         journal_id=journal,
         line_ids=[],
         auto_post="no",
+        posted_before=False,
+        secure_sequence_number=0,
+        inalterable_hash=False,
+        origin_payment_id=None,
+        payment_id=None,
+        payment_ids=[],
+        matched_payment_ids=[],
+        reconciled_payment_ids=[],
+        statement_line_id=None,
+        statement_id=None,
+        tax_cash_basis_rec_id=None,
+        tax_cash_basis_origin_move_id=None,
+        tax_cash_basis_created_move_ids=[],
+        reversed_entry_id=None,
+        reversal_move_ids=[],
+        adjusting_entry_origin_move_ids=[],
+        adjusting_entries_move_ids=[],
+        exchange_diff_partial_ids=[],
+        asset_id=None,
+        deferred_move_ids=[],
+        deferred_original_move_ids=[],
+        edi_document_ids=[],
+        expense_ids=[],
+        pos_order_ids=[],
+        need_cancel_request=False,
+        is_manually_modified=False,
+        odoo_cli_v3_document_binding="a" * 64,
+        odoo_cli_v3_business_binding="b" * 64,
     )
     line1 = Record(
         1102,
@@ -4070,6 +4390,11 @@ def draft_move_recovery_fixture():
         deferred_start_date=None,
         deferred_end_date=None,
         statement_line_id=None,
+        sale_line_ids=[],
+        purchase_line_id=None,
+        expense_id=None,
+        display_type="product",
+        reconciled=False,
     )
     line2 = Record(
         1103,
@@ -4086,33 +4411,77 @@ def draft_move_recovery_fixture():
         deferred_start_date=None,
         deferred_end_date=None,
         statement_line_id=None,
+        sale_line_ids=[],
+        purchase_line_id=None,
+        expense_id=None,
+        display_type="payment_term",
+        reconciled=False,
     )
     move.line_ids = [line1, line2]
     move.snapshot_values = {
         "state": "draft",
-        "move_type": "entry",
+        "move_type": "out_invoice",
         "journal_id": 2,
         "line_ids": [1102, 1103],
         "ref": "DRAFT-RECOVERY-1",
+        "auto_post": "no",
+        "posted_before": False,
+        "secure_sequence_number": 0,
+        "inalterable_hash": False,
+        "origin_payment_id": False,
+        "payment_ids": [],
+        "matched_payment_ids": [],
+        "reconciled_payment_ids": [],
+        "statement_line_id": False,
+        "statement_id": False,
+        "tax_cash_basis_rec_id": False,
+        "tax_cash_basis_origin_move_id": False,
+        "tax_cash_basis_created_move_ids": [],
+        "reversed_entry_id": False,
+        "reversal_move_ids": [],
+        "adjusting_entry_origin_move_ids": [],
+        "adjusting_entries_move_ids": [],
+        "exchange_diff_partial_ids": [],
+        "asset_id": False,
+        "deferred_move_ids": [],
+        "deferred_original_move_ids": [],
+        "edi_document_ids": [],
+        "expense_ids": [],
+        "pos_order_ids": [],
+        "need_cancel_request": False,
+        "is_manually_modified": False,
+        "odoo_cli_v3_document_binding": "a" * 64,
+        "odoo_cli_v3_business_binding": "b" * 64,
     }
     line1.snapshot_values = {
-        "move_id": 1101,
+        "move_id": [1101, "Draft Invoice DRAFT-RECOVERY-1"],
         "account_id": 10,
         "debit": "100",
         "credit": "0",
     }
     line2.snapshot_values = {
-        "move_id": 1101,
+        "move_id": [1101, "Draft Invoice DRAFT-RECOVERY-1"],
         "account_id": 20,
         "debit": "0",
         "credit": "100",
     }
 
-    def button_cancel():
-        move.state = "cancel"
-        move.snapshot_values["state"] = "cancel"
+    def exact_write(values):
+        move.writes.append(values)
+        for key, value in values.items():
+            setattr(move, key, value)
+            move.snapshot_values[key] = value
+        if values.get("state") == "cancel":
+            for line in (line1, line2):
+                line.snapshot_values["move_id"] = [
+                    move.id,
+                    "Cancelled Invoice DRAFT-RECOVERY-1",
+                ]
+        return True
 
-    move.button_cancel = button_cancel
+    move.write = exact_write
+    move.button_cancel = lambda: pytest.fail("button_cancel must not be called")
+    move.unlink = lambda: pytest.fail("unlink must not be called")
     records = {
         ("account.move", move.id): move,
         ("account.move.line", line1.id): line1,
@@ -4128,7 +4497,7 @@ def draft_move_recovery_fixture():
     return move, line1, line2, records, plan
 
 
-def test_cancel_draft_recovery_stays_closed_until_active_module_graph_is_proven():
+def test_cancel_pristine_v3_draft_customer_invoice_is_exact_and_auditable():
     move, line1, line2, records_by_key, plan = draft_move_recovery_fixture()
     write_checks = []
 
@@ -4147,13 +4516,97 @@ def test_cancel_draft_recovery_stays_closed_until_active_module_graph_is_proven(
         "recovery_date": "2026-07-10",
         "reason": "undo duplicate draft",
     }
-    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
-        handler.precheck_recovery(parameters, handler.test_company)
-    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
-        handler.execute_recovery(parameters, handler.test_company, {})
+    checked = handler.precheck_recovery(parameters, handler.test_company)
+    assert set((item["model"], item["record_id"]) for item in checked["before"]) == {
+        ("account.move", 1101),
+        ("account.move.line", 1102),
+        ("account.move.line", 1103),
+    }
+    assert [
+        (item["model"], item["record_id"])
+        for item in checked["dependencies"]
+    ] == [("account.journal", 2)]
+    records, recovery = handler.execute_recovery(
+        parameters, handler.test_company, checked
+    )
+    assert move.state == "cancel"
+    assert move.writes == [{"state": "cancel"}]
+    assert move.contexts == [{
+        "tracking_disable": True,
+        "skip_account_move_synchronization": True,
+        "skip_invoice_sync": True,
+        "skip_is_manually_modified": True,
+    }]
+    assert line1.snapshot_values["move_id"] == [
+        1101,
+        "Cancelled Invoice DRAFT-RECOVERY-1",
+    ]
+    assert {(model_name, record.id) for model_name, record in records} == {
+        ("account.move", 1101),
+        ("account.move.line", 1102),
+        ("account.move.line", 1103),
+    }
+    assert recovery == {
+        "status": "not_applicable",
+        "method": "recovery_completed",
+        "targets": [],
+    }
+    before = {
+        (item["model"], item["record_id"]): item["values"]
+        for item in checked["before"]
+    }
+    assert "draft_customer_invoice_cancelled_exactly" in handler.verify_recovery(
+        parameters, handler.test_company, records, before
+    )
+    assert ("account.move", 1101, True) in write_checks
 
-    assert move.state == "draft"
-    assert write_checks == []
+
+def test_recovery_rejects_write_override_side_effects_before_business_commit():
+    move, line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    exact_write = move.write
+
+    def write_with_side_effect(values):
+        result = exact_write(values)
+        line1.reconciled = True
+        return result
+
+    move.write = write_with_side_effect
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+    parameters = {
+        "origin_operation_id": "op-1",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "company_id": 7,
+        "recovery_date": "2026-07-10",
+        "reason": "undo duplicate draft",
+    }
+    checked = handler.precheck_recovery(parameters, handler.test_company)
+
+    with pytest.raises(OdooWriteHandlerError, match="external business effects"):
+        handler.execute_recovery(parameters, handler.test_company, checked)
+
+
+def test_recovery_rejects_a_line_reparent_hidden_in_the_post_write_snapshot():
+    move, line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    exact_write = move.write
+
+    def write_with_reparented_snapshot(values):
+        result = exact_write(values)
+        line1.snapshot_values["move_id"] = [9999, "Other Move"]
+        return result
+
+    move.write = write_with_reparented_snapshot
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+    parameters = {
+        "origin_operation_id": "op-1",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "company_id": 7,
+        "recovery_date": "2026-07-10",
+        "reason": "undo duplicate draft",
+    }
+    checked = handler.precheck_recovery(parameters, handler.test_company)
+
+    with pytest.raises(OdooWriteHandlerError, match="guard line graph changed"):
+        handler.execute_recovery(parameters, handler.test_company, checked)
 
 
 def test_cancel_draft_recovery_rejects_incomplete_line_guard_closure():
@@ -4163,7 +4616,88 @@ def test_cancel_draft_recovery_rejects_incomplete_line_guard_closure():
         guard_records=[recovery_target("account.move.line", line1)],
     )
     handler = Harness(recovery_plan=plan, records=records_by_key)
-    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+    with pytest.raises(OdooWriteHandlerError, match="guard.*complete line graph"):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    [
+        ("posted_before", True, "pristine"),
+        ("move_type", "in_invoice", "pristine"),
+        ("odoo_cli_v3_document_binding", "", "immutable V3"),
+        ("payment_ids", [Record(991)], "linked payment"),
+        ("adjusting_entry_origin_move_ids", [Record(992)], "linked payment"),
+        ("adjusting_entries_move_ids", [Record(993)], "linked payment"),
+        ("exchange_diff_partial_ids", [Record(994)], "linked payment"),
+    ],
+)
+def test_draft_customer_invoice_recovery_rejects_prior_or_external_effects(
+    field, value, match
+):
+    move, _line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    setattr(move, field, value)
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+
+    with pytest.raises(OdooWriteHandlerError, match=match):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
+
+
+def test_draft_customer_invoice_recovery_rejects_live_line_fingerprint_drift():
+    _move, line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    line1.snapshot_values["debit"] = "99"
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+
+    with pytest.raises(OdooWriteHandlerError, match="guard fingerprint changed"):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
+
+
+def test_draft_customer_invoice_recovery_rejects_live_action_fingerprint_drift():
+    move, _line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    move.snapshot_values["ref"] = "CHANGED-AFTER-APPROVAL"
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+
+    with pytest.raises(OdooWriteHandlerError, match="action target fingerprint changed"):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
+
+
+def test_draft_customer_invoice_recovery_is_never_executable_in_production():
+    _move, _line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    handler = Harness(
+        recovery_plan=plan,
+        records=records_by_key,
+        environment="production",
+    )
+
+    with pytest.raises(OdooWriteHandlerError, match="not allowlisted"):
         handler.precheck_recovery(
             {
                 "origin_operation_id": "op-1",
@@ -4175,7 +4709,9 @@ def test_cancel_draft_recovery_rejects_incomplete_line_guard_closure():
 
 
 def test_every_advertised_available_recovery_method_has_an_execute_allowlist_branch():
-    assert _RECOVERY_ACTIONS == set()
+    assert _RECOVERY_ACTIONS == {
+        "cancel_pristine_v3_draft_customer_invoice_v1"
+    }
 
 
 def test_payment_and_posted_reversal_recovery_remain_fail_closed():
@@ -4194,7 +4730,7 @@ def test_payment_and_posted_reversal_recovery_remain_fail_closed():
             ("account.move", guard.id): guard,
         },
     )
-    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+    with pytest.raises(OdooWriteHandlerError, match="not allowlisted"):
         handler.precheck_recovery(
             {
                 "origin_operation_id": "op-1",
@@ -4224,7 +4760,7 @@ def test_bank_recovery_is_not_executable_until_precise_compensation_exists():
         },
     )
 
-    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+    with pytest.raises(OdooWriteHandlerError, match="not allowlisted"):
         handler.precheck_recovery(
             {
                 "origin_operation_id": "op-bank",
@@ -4252,7 +4788,7 @@ def test_asset_recovery_is_closed_until_full_schedule_compensation_is_verified()
             ("account.move", 1303): guard,
         },
     )
-    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+    with pytest.raises(OdooWriteHandlerError, match="not allowlisted"):
         handler.precheck_recovery(
             {
                 "origin_operation_id": "op-asset",
@@ -4285,7 +4821,7 @@ def test_recovery_precheck_rejects_user_when_trusted_plan_is_missing_or_action_n
             ("account.move.line", 2): guard,
         },
     )
-    with pytest.raises(OdooWriteHandlerError, match="automatic recovery is disabled"):
+    with pytest.raises(OdooWriteHandlerError, match="not allowlisted"):
         handler.precheck_recovery(
             {"origin_operation_id": "op-1", "expected_recovery_plan_digest": plan["plan_digest"], "company_id": 7},
             handler.test_company,

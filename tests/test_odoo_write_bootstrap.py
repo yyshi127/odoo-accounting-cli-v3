@@ -14,10 +14,16 @@ import pytest
 import odoo_accounting_cli_v3.odoo.write_bootstrap as write_bootstrap
 from odoo_accounting_cli_v3.auth import sign_request_context
 from odoo_accounting_cli_v3.gateway import RequestContext
+from odoo_accounting_cli_v3.draft_invoice_recovery import (
+    customer_invoice_business_binding,
+    customer_invoice_document_binding,
+)
 from odoo_accounting_cli_v3.odoo.write_bootstrap import (
     OdooWriteBootstrapError,
     _default_handler_factory,
     _difference,
+    _execution_evidence,
+    _lock_live_precheck_records,
     _resource_lock_digests,
     execute_write_from_odoo_shell,
 )
@@ -143,6 +149,258 @@ def test_execution_difference_rejects_a_graph_too_large_for_the_receipt_contract
         _difference([], after, 7)
 
 
+def test_difference_ignores_only_the_display_label_of_the_same_line_move_relation():
+    def line_snapshot(move_id, display_name):
+        values = {
+            "move_id": [move_id, display_name],
+            "company_id": [7, "Sandbox Company"],
+        }
+        return {
+            "model": "account.move.line",
+            "record_id": 502,
+            "company_id": 7,
+            "state": "unknown",
+            "values": values,
+            "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+        }
+
+    difference, _records = _difference(
+        [line_snapshot(501, "Draft Invoice INV/1")],
+        [line_snapshot(501, "Cancelled Invoice INV/1")],
+        7,
+    )
+    assert difference["changed_fields"] == []
+
+    reparented, _records = _difference(
+        [line_snapshot(501, "Draft Invoice INV/1")],
+        [line_snapshot(999, "Other Move")],
+        7,
+    )
+    assert reparented["changed_fields"] == ["move_id"]
+
+
+def _draft_invoice_available_raw(
+    operation,
+    *,
+    guard_record_ids=(502,),
+    action_overrides=None,
+    line_overrides=None,
+):
+    def raw_snapshot(model, record_id, state, values):
+        return {
+            "model": model,
+            "record_id": record_id,
+            "company_id": operation.company_id,
+            "state": state,
+            "values": values,
+            "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+        }
+
+    line_ids = [502, 503]
+    after = [
+        raw_snapshot(
+            "account.move",
+            501,
+            "draft",
+            {
+                "state": "draft",
+                "move_type": "out_invoice",
+                "company_id": [7, "Sandbox Company"],
+                "journal_id": [operation.parameters["journal_id"], "Sales"],
+                "currency_id": [operation.parameters["currency_id"], "USD"],
+                "partner_id": [operation.parameters["partner_id"], "Customer"],
+                "line_ids": line_ids,
+                "posted_before": False,
+                "auto_post": "no",
+                "secure_sequence_number": 0,
+                "inalterable_hash": False,
+                "is_manually_modified": False,
+                "payment_ids": [],
+                "matched_payment_ids": [],
+                "reconciled_payment_ids": [],
+                "tax_cash_basis_created_move_ids": [],
+                "reversal_move_ids": [],
+                "adjusting_entry_origin_move_ids": [],
+                "adjusting_entries_move_ids": [],
+                "exchange_diff_partial_ids": [],
+                "odoo_cli_v3_document_binding": (
+                    customer_invoice_document_binding(operation.parameters)
+                ),
+                "odoo_cli_v3_business_binding": (
+                    customer_invoice_business_binding(operation.parameters)
+                ),
+                **(action_overrides or {}),
+            },
+        ),
+        raw_snapshot(
+            "account.move.line",
+            502,
+            "unknown",
+            {
+                "company_id": [7, "Sandbox Company"],
+                "move_id": [501, "/"],
+                "reconciled": False,
+                "full_reconcile_id": False,
+                "matched_debit_ids": [],
+                "matched_credit_ids": [],
+                "asset_ids": [],
+                "sale_line_ids": [],
+                "display_type": "product",
+                "debit": "100",
+                "credit": "0",
+                **(line_overrides or {}),
+            },
+        ),
+        raw_snapshot(
+            "account.move.line",
+            503,
+            "unknown",
+            {
+                "company_id": [7, "Sandbox Company"],
+                "move_id": [501, "/"],
+                "reconciled": False,
+                "full_reconcile_id": False,
+                "matched_debit_ids": [],
+                "matched_credit_ids": [],
+                "asset_ids": [],
+                "sale_line_ids": [],
+                "display_type": "payment_term",
+                "debit": "0",
+                "credit": "100",
+                **(line_overrides or {}),
+            },
+        ),
+    ]
+    return {
+        "capability_id": operation.capability_id,
+        "company_id": operation.company_id,
+        "parameters_digest": hashlib.sha256(
+            canonical_json(operation.parameters)
+        ).hexdigest(),
+        "before": [],
+        "after": after,
+        "records": [
+            {"model": item["model"], "record_id": item["record_id"]}
+            for item in after
+        ],
+        "recovery": {
+            "status": "available",
+            "method": "cancel_pristine_v3_draft_customer_invoice_v1",
+            "targets": [{"model": "account.move", "record_id": 501}],
+            "guards": [
+                {"model": "account.move.line", "record_id": record_id}
+                for record_id in guard_record_ids
+            ],
+            "oracle_id": "cancel_pristine_v3_draft_customer_invoice_exact_v1",
+        },
+    }
+
+
+def test_draft_customer_invoice_descriptor_becomes_receipt_derived_available_v2_plan():
+    parameters = {**_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(parameters)
+
+    evidence = _execution_evidence(
+        operation, _draft_invoice_available_raw(operation, guard_record_ids=(503, 502))
+    )
+
+    plan = evidence["recovery_plan"]
+    assert plan["plan_version"] == 2
+    assert plan["status"] == "available"
+    assert plan["method"] == "cancel_pristine_v3_draft_customer_invoice_v1"
+    assert plan["oracle_id"] == (
+        "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+    )
+    assert [(item["model"], item["record_id"]) for item in plan["action_targets"]] == [
+        ("account.move", 501)
+    ]
+    assert {
+        (item["model"], item["record_id"])
+        for item in plan["guard_records"]
+    } == {
+        ("account.move.line", 502),
+        ("account.move.line", 503),
+    }
+    assert plan["guard_records"] == sorted(
+        plan["guard_records"], key=canonical_json
+    )
+    assert all(
+        item["expected_outcome"] == "survive_exact"
+        for item in plan["guard_records"]
+    )
+    assert evidence["recovery_parameters"] == {
+        "company_id": 7,
+        "origin_operation_id": operation.operation_id,
+        "method": "cancel_pristine_v3_draft_customer_invoice_v1",
+        "action_targets": [{"model": "account.move", "record_id": 501}],
+        "guard_records": [
+            {"model": "account.move.line", "record_id": 502},
+            {"model": "account.move.line", "record_id": 503},
+        ],
+        "oracle_id": "cancel_pristine_v3_draft_customer_invoice_exact_v1",
+    }
+
+
+@pytest.mark.parametrize(
+    ("parameters_override", "guard_record_ids", "match"),
+    [
+        ({"posting_mode": "post"}, (502, 503), "sandbox draft customer invoice"),
+        ({"posting_mode": "draft"}, (502,), "complete line graph"),
+    ],
+)
+def test_available_recovery_descriptor_rejects_posted_or_incomplete_invoice_graph(
+    parameters_override, guard_record_ids, match
+):
+    parameters = {**_parameters(), **parameters_override}
+    _context_value, operation, _approval = _executing(parameters)
+
+    with pytest.raises(OdooWriteBootstrapError, match=match):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation, guard_record_ids=guard_record_ids
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("action_overrides", "line_overrides", "match"),
+    [
+        ({"company_id": 7}, {}, "pristine V3 draft"),
+        ({"company_id": [True, "x"]}, {}, "pristine V3 draft"),
+        ({"company_id": [7]}, {}, "pristine V3 draft"),
+        ({"company_id": [7, "x", "extra"]}, {}, "pristine V3 draft"),
+        ({"company_id": ["7", "x"]}, {}, "pristine V3 draft"),
+        ({"line_ids": [502, True]}, {}, "complete line graph"),
+        ({"line_ids": [502, 502, 503]}, {}, "complete line graph"),
+        ({"odoo_cli_v3_document_binding": "0" * 64}, {}, "pristine V3 draft"),
+        ({"odoo_cli_v3_business_binding": "0" * 64}, {}, "pristine V3 draft"),
+        ({"payment_ids": [991]}, {}, "external effects"),
+        ({"adjusting_entry_origin_move_ids": [991]}, {}, "external effects"),
+        ({"adjusting_entries_move_ids": [991]}, {}, "external effects"),
+        ({"exchange_diff_partial_ids": [991]}, {}, "external effects"),
+        ({}, {"move_id": 501}, "outside the invoice line graph"),
+        ({}, {"reconciled": True}, "external effects"),
+    ],
+)
+def test_available_recovery_descriptor_rejects_ambiguous_relations_or_external_effects(
+    action_overrides, line_overrides, match
+):
+    parameters = {**_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(parameters)
+
+    with pytest.raises(OdooWriteBootstrapError, match=match):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation,
+                guard_record_ids=(502, 503),
+                action_overrides=action_overrides,
+                line_overrides=line_overrides,
+            ),
+        )
+
+
 def _capabilities():
     document = json.loads(
         (Path(__file__).resolve().parents[1] / "registry" / "capabilities.json").read_text(
@@ -210,7 +468,7 @@ def _recovery_case(
         "model": "account.move",
         "record_id": target_record_id,
         "company_id": target_company_id,
-        "record_state": "posted",
+        "record_state": "draft",
         "record_fingerprint": hashlib.sha256(
             f"account.move:{target_record_id}:{target_company_id}".encode()
         ).hexdigest(),
@@ -229,15 +487,15 @@ def _recovery_case(
         origin_operation_id=origin_operation_id,
         recovery_capability_id="acct.recovery.execute.v1",
         status="available",
-        method="cancel_draft_move",
+        method="cancel_pristine_v3_draft_customer_invoice_v1",
         requires_approval=True,
         action_targets=[target],
         guard_records=[guard],
-        oracle_id="cancel_draft_move_exact_v1",
+        oracle_id="cancel_pristine_v3_draft_customer_invoice_exact_v1",
         parameters={
             "company_id": company_id,
             "origin_operation_id": origin_operation_id,
-            "method": "cancel_draft_move",
+            "method": "cancel_pristine_v3_draft_customer_invoice_v1",
             "action_targets": [
                 {"model": "account.move", "record_id": target_record_id}
             ],
@@ -247,6 +505,7 @@ def _recovery_case(
                     "record_id": target_record_id + 1,
                 }
             ],
+            "oracle_id": "cancel_pristine_v3_draft_customer_invoice_exact_v1",
         },
     )
     parameters = {
@@ -1113,6 +1372,231 @@ def test_response_loss_after_business_commit_retries_from_committed_anchor_only(
     assert anchor.state == "verified"
 
 
+@pytest.mark.parametrize("expired_reconciliation", [False, True])
+def test_draft_invoice_recovery_response_loss_never_repeats_the_cancel_write(
+    expired_reconciliation,
+):
+    def snapshot(model, record_id, state, values):
+        return {
+            "model": model,
+            "record_id": record_id,
+            "company_id": 7,
+            "state": state,
+            "values": values,
+            "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+        }
+
+    move_before = snapshot(
+        "account.move",
+        501,
+        "draft",
+        {"state": "draft", "company_id": [7, "Sandbox Company"]},
+    )
+    line_before = snapshot(
+        "account.move.line",
+        502,
+        "unknown",
+        {
+            "move_id": [501, "/"],
+            "company_id": [7, "Sandbox Company"],
+        },
+    )
+
+    def cancelled_line_snapshot():
+        item = copy.deepcopy(line_before)
+        item["values"]["move_id"] = [501, "Cancelled Invoice INV/1"]
+        item["values_digest"] = hashlib.sha256(
+            canonical_json(item["values"])
+        ).hexdigest()
+        return item
+
+    journal_dependency = snapshot(
+        "account.journal",
+        5,
+        "stable",
+        {"company_id": [7, "Sandbox Company"], "state": "stable"},
+    )
+    raw_precheck = {
+        "capability_id": "acct.recovery.execute.v1",
+        "company_id": 7,
+        "parameters_digest": "pending",
+        "checks": ["exact_draft_recovery_graph"],
+        "before": [move_before, line_before],
+        "dependencies": [journal_dependency],
+    }
+    parameters, plan = _recovery_case()
+    raw_precheck["parameters_digest"] = hashlib.sha256(
+        canonical_json(parameters)
+    ).hexdigest()
+    shared = SimpleNamespace(
+        state="draft",
+        write_calls=0,
+        disconnect_once=True,
+    )
+
+    class StatefulRecoveryHandler(Handler):
+        def __init__(self, state):
+            super().__init__()
+            self.shared = state
+
+        def precheck(self, capability_id, received_parameters):
+            self.precheck_calls += 1
+            assert self.shared.state == "draft"
+            return copy.deepcopy(raw_precheck)
+
+        def execute_prechecked(self, capability_id, received_parameters, checked):
+            self.prechecked_executions.append(copy.deepcopy(checked))
+            self.calls.append("execute")
+            assert self.shared.state == "draft"
+            self.shared.state = "cancel"
+            self.shared.write_calls += 1
+            move_after = snapshot(
+                "account.move",
+                501,
+                "cancel",
+                {"state": "cancel", "company_id": [7, "Sandbox Company"]},
+            )
+            return {
+                "capability_id": capability_id,
+                "company_id": 7,
+                "parameters_digest": hashlib.sha256(
+                    canonical_json(received_parameters)
+                ).hexdigest(),
+                "before": copy.deepcopy(checked["before"]),
+                "after": [move_after, cancelled_line_snapshot()],
+                "records": [
+                    {"model": "account.move", "record_id": 501},
+                    {"model": "account.move.line", "record_id": 502},
+                ],
+                "recovery": {
+                    "status": "not_applicable",
+                    "method": "recovery_completed",
+                    "targets": [],
+                },
+            }
+
+        def verify(self, capability_id, received_parameters, execution):
+            self.calls.append("verify")
+            assert self.shared.state == "cancel"
+            if self.shared.disconnect_once:
+                self.shared.disconnect_once = False
+                raise SystemExit("recovery readback channel lost")
+            after = [
+                snapshot(
+                    "account.move",
+                    501,
+                    "cancel",
+                    {"state": "cancel", "company_id": [7, "Sandbox Company"]},
+                ),
+                cancelled_line_snapshot(),
+            ]
+            return {
+                "passed": True,
+                "method": "odoo_public_orm_readback_v1",
+                "checks": ["cancel_state_matches", "line_guard_survived"],
+                "after": after,
+                "evidence_digest": hashlib.sha256(
+                    canonical_json(after)
+                ).hexdigest(),
+            }
+
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id=(
+            "recovery-op-response-loss-expired"
+            if expired_reconciliation
+            else "recovery-op-response-loss"
+        ),
+        raw_precheck=raw_precheck,
+    )
+    root, cr, anchors, _handler, kwargs = _harness()
+    handlers = []
+    factory_plans = []
+
+    def handler_factory(_env, _context_value, _now, trusted_plan=None):
+        handler = StatefulRecoveryHandler(shared)
+        handlers.append(handler)
+        factory_plans.append(copy.deepcopy(trusted_plan))
+        return handler
+
+    kwargs["handler_factory"] = handler_factory
+    move_lock = LockableRecordset(501)
+    line_lock = LockableRecordset(502)
+    journal_lock = LockableRecordset(5)
+    anchors.bound_env._models.update({
+        "account.move": LockableModel(move_lock),
+        "account.move.line": LockableModel(line_lock),
+        "account.journal": LockableModel(journal_lock),
+    })
+    request = _request(
+        context,
+        operation,
+        approval,
+        trusted_recovery_plan=plan,
+    )
+
+    with pytest.raises(SystemExit, match="recovery readback channel lost"):
+        execute_write_from_odoo_shell(root, request, **kwargs)
+
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.state == "committed"
+    assert shared.state == "cancel"
+    assert shared.write_calls == 1
+    assert len(handlers) == 2
+    assert handlers[0].precheck_calls == 2
+    assert handlers[0].calls == ["execute"]
+    assert handlers[1].precheck_calls == 0
+    assert handlers[1].calls == ["verify"]
+    assert move_lock.lock_calls == [False]
+    assert line_lock.lock_calls == [False]
+    assert journal_lock.lock_calls == [True]
+    anchored_execution = (
+        anchor.execution_evidence_json,
+        anchor.execution_evidence_digest,
+        anchor.execution_result_json,
+        anchor.execution_result_digest,
+    )
+    assert json.loads(anchor.execution_evidence_json)["difference"][
+        "changed_fields"
+    ] == ["record_state", "state"]
+
+    if expired_reconciliation:
+        kwargs["now"] = approval.expires_at + timedelta(seconds=1)
+        retry_context = _reconciliation_context(operation)
+        retry_request = _request(
+            retry_context,
+            operation,
+            approval,
+            trusted_recovery_plan=plan,
+            reconciliation_only=True,
+        )
+    else:
+        retry_request = request
+    result = execute_write_from_odoo_shell(root, retry_request, **kwargs)
+
+    assert trusted_result_from_mapping(
+        result["verification"]["result"]
+    ).succeeded is True
+    assert anchor.state == "verified"
+    assert shared.state == "cancel"
+    assert shared.write_calls == 1
+    assert len(handlers) == 3
+    assert handlers[2].precheck_calls == 0
+    assert handlers[2].calls == ["verify"]
+    assert factory_plans == [plan, plan, plan]
+    assert (
+        anchor.execution_evidence_json,
+        anchor.execution_evidence_digest,
+        anchor.execution_result_json,
+        anchor.execution_result_digest,
+    ) == anchored_execution
+    assert result["reconciliation_only"] is expired_reconciliation
+    assert anchor.root_verification_calls == 1
+    assert anchor.bound_verification_calls == 0
+    assert cr.commits == 2
+
+
 def test_unapproved_operation_is_rejected_before_anchor_or_handler():
     context, operation, approval = _executing()
     request = _request(context, operation, approval)
@@ -1551,6 +2035,59 @@ def test_precheck_dependencies_are_row_locked_invalidated_and_rechecked_before_w
     assert cr.commits == 2
 
 
+def test_recovery_precheck_exclusively_locks_action_and_guards_but_not_dependencies():
+    def snapshot(model, record_id):
+        values = {"company_id": 7, "state": "stable"}
+        return {
+            "model": model,
+            "record_id": record_id,
+            "company_id": 7,
+            "state": "stable",
+            "values": values,
+            "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+        }
+
+    move = LockableRecordset(501)
+    line = LockableRecordset(502)
+    journal = LockableRecordset(5)
+    cr = Cursor()
+    anchors = Anchors()
+    env = BoundEnv(
+        cr,
+        {
+            42: User(42, [7], set()),
+        },
+        anchors,
+    )
+    env._models.update({
+        "account.move": LockableModel(move),
+        "account.move.line": LockableModel(line),
+        "account.journal": LockableModel(journal),
+    })
+    evidence = {
+        "handler_details": {
+            "before": [
+                snapshot("account.move", 501),
+                snapshot("account.move.line", 502),
+            ],
+            "dependencies": [snapshot("account.journal", 5)],
+        }
+    }
+
+    count = _lock_live_precheck_records(
+        env,
+        evidence,
+        company_id=7,
+        exclusive_before=True,
+    )
+
+    assert count == 3
+    assert move.lock_calls == [False]
+    assert line.lock_calls == [False]
+    assert journal.lock_calls == [True]
+    assert env.cache_invalidations == 1
+
+
 def test_dependency_drift_after_row_lock_is_anchored_before_any_business_write():
     record = LockableRecordset(
         901,
@@ -1969,6 +2506,51 @@ def test_recovery_idempotency_anchor_rejects_a_different_plan_for_same_origin():
                 operation2,
                 approval2,
                 trusted_recovery_plan=other_plan,
+            ),
+            **kwargs,
+        )
+
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+
+
+def test_recovery_idempotency_anchor_rejects_a_second_operation_for_the_same_plan():
+    parameters, plan = _recovery_case()
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-same-plan-first",
+    )
+    root, cr, _anchors, handler, kwargs = _harness()
+    execute_write_from_odoo_shell(
+        root,
+        _request(
+            context,
+            operation,
+            approval,
+            trusted_recovery_plan=plan,
+        ),
+        **kwargs,
+    )
+
+    other_parameters, same_plan = _recovery_case(
+        idempotency_key="recover-origin-op-1-second-operation"
+    )
+    assert same_plan == plan
+    context2, operation2, approval2 = _executing(
+        other_parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="recovery-op-same-plan-second",
+    )
+
+    with pytest.raises(RuntimeError, match="different immutable content"):
+        execute_write_from_odoo_shell(
+            root,
+            _request(
+                context2,
+                operation2,
+                approval2,
+                trusted_recovery_plan=same_plan,
             ),
             **kwargs,
         )

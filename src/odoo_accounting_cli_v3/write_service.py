@@ -17,6 +17,10 @@ from typing import Any, Callable, Iterable
 
 from .auth import authentication_request_digest
 from .contracts import validate_value
+from .draft_invoice_recovery import (
+    DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+    DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+)
 from .gateway import (
     WRITE_AUTH_SIGNATURE_PURPOSE,
     WRITE_AUTH_SIGNATURE_VERSION,
@@ -1398,6 +1402,40 @@ class DurableWriteService:
         ):
             raise WriteServiceError(
                 "origin recovery plan is unavailable or outside the bound company"
+            )
+        actions = plan["action_targets"]
+        guards = plan["guard_records"]
+        result_records = output.get("odoo_records")
+        if (
+            origin_operation.state != State.COMPLETED
+            or origin_operation.environment != "sandbox"
+            or origin_operation.capability_id
+            != "acct.invoice.customer_create.v1"
+            or origin_operation.parameters.get("posting_mode") != "draft"
+            or plan["method"] != DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
+            or plan["oracle_id"] != DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
+            or len(actions) != 1
+            or actions[0]["model"] != "account.move"
+            or actions[0]["record_state"] != "draft"
+            or not guards
+            or any(
+                guard["model"] != "account.move.line"
+                or guard["expected_outcome"] != "survive_exact"
+                for guard in guards
+            )
+            or not isinstance(result_records, list)
+            or {
+                (record.get("model"), record.get("record_id"))
+                for record in result_records
+                if isinstance(record, dict)
+            }
+            != {
+                (actions[0]["model"], actions[0]["record_id"]),
+                *((guard["model"], guard["record_id"]) for guard in guards),
+            }
+        ):
+            raise WriteServiceError(
+                "origin recovery is restricted to an exact sandbox draft customer invoice receipt"
             )
         return json.loads(canonical_json(plan))
 

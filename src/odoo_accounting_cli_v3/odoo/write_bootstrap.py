@@ -18,6 +18,13 @@ from typing import Any, Callable, ContextManager, Iterable, Mapping, Protocol
 
 from ..auth import authentication_request_digest, verify_request_context
 from ..contracts import validate_value
+from ..draft_invoice_recovery import (
+    DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+    DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+    classic_read_many2one_id,
+    customer_invoice_business_binding,
+    customer_invoice_document_binding,
+)
 from ..domain.write_semantics import validate_write_semantics
 from ..gateway import RequestContext
 from ..operations import (
@@ -254,14 +261,14 @@ def _resource_lock_digests(
 
 
 def _precheck_lock_targets(
-    evidence: Mapping[str, Any], *, company_id: int
-) -> dict[str, list[int]]:
+    evidence: Mapping[str, Any], *, company_id: int, exclusive_before: bool = False
+) -> list[tuple[str, list[int], bool]]:
     """Extract and validate persistent records bound by a live precheck."""
 
     details = evidence.get("handler_details")
     if not isinstance(details, Mapping):
         raise OdooWriteBootstrapError("live precheck handler details are invalid")
-    targets: dict[tuple[str, int], str] = {}
+    targets: dict[tuple[str, int], tuple[str, bool]] = {}
     for field in ("before", "dependencies"):
         snapshots = details.get(field, [])
         if not isinstance(snapshots, list):
@@ -302,28 +309,46 @@ def _precheck_lock_targets(
                     f"live precheck {field} snapshot binding is invalid"
                 )
             key = (model_name, record_id)
-            prior_digest = targets.setdefault(key, values_digest)
-            if not hmac.compare_digest(prior_digest, values_digest):
+            strict_lock = exclusive_before and field == "before"
+            prior = targets.get(key)
+            if prior is None:
+                targets[key] = (values_digest, strict_lock)
+            elif not hmac.compare_digest(prior[0], values_digest):
                 raise OdooWriteBootstrapError(
                     "live precheck duplicates a record with different evidence"
                 )
+            elif strict_lock and not prior[1]:
+                targets[key] = (values_digest, True)
     if len(targets) > MAX_AUDIT_RECORDS:
         raise OdooWriteBootstrapError(
             "live precheck requires too many database row locks"
         )
-    grouped: dict[str, list[int]] = {}
-    for model_name, record_id in sorted(targets):
-        grouped.setdefault(model_name, []).append(record_id)
-    return grouped
+    grouped: dict[tuple[str, bool], list[int]] = {}
+    for (model_name, record_id), (_digest_value, strict_lock) in sorted(
+        targets.items()
+    ):
+        grouped.setdefault((model_name, not strict_lock), []).append(record_id)
+    return [
+        (model_name, record_ids, allow_referencing)
+        for (model_name, allow_referencing), record_ids in sorted(grouped.items())
+    ]
 
 
 def _lock_live_precheck_records(
-    bound_env: Any, evidence: Mapping[str, Any], *, company_id: int
+    bound_env: Any,
+    evidence: Mapping[str, Any],
+    *,
+    company_id: int,
+    exclusive_before: bool = False,
 ) -> int:
     """Lock approved precheck records and clear every cached dependency value."""
 
-    grouped = _precheck_lock_targets(evidence, company_id=company_id)
-    for model_name, record_ids in grouped.items():
+    grouped = _precheck_lock_targets(
+        evidence,
+        company_id=company_id,
+        exclusive_before=exclusive_before,
+    )
+    for model_name, record_ids, allow_referencing in grouped:
         model = bound_env[model_name]
         check_access_rights = getattr(model, "check_access_rights", None)
         if not callable(check_access_rights):
@@ -347,7 +372,7 @@ def _lock_live_precheck_records(
                 f"{model_name} cannot enforce an auditable row lock"
             )
         check_access_rule("read")
-        lock_for_update(allow_referencing=True)
+        lock_for_update(allow_referencing=allow_referencing)
         invalidate_recordset()
     if grouped:
         invalidate_all = getattr(bound_env, "invalidate_all", None)
@@ -356,7 +381,7 @@ def _lock_live_precheck_records(
                 "bound Odoo environment cannot invalidate dependency caches"
             )
         invalidate_all()
-    return sum(len(record_ids) for record_ids in grouped.values())
+    return sum(len(record_ids) for _model, record_ids, _allow in grouped)
 
 
 def _utc(value: datetime) -> str:
@@ -728,7 +753,9 @@ def _difference(
         changed.update(
             field
             for field in set(previous_values) | set(current_values)
-            if previous_values.get(field) != current_values.get(field)
+            if _snapshot_field_changed(
+                item["model"], field, previous_values, current_values
+            )
         )
         if previous is None or previous.get("state") != item.get("state"):
             changed.add("record_state")
@@ -736,6 +763,191 @@ def _difference(
         create_difference(before=before, after=after, changed_fields=sorted(changed)),
         references,
     )
+
+
+def _snapshot_field_changed(
+    model_name: str,
+    field: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+) -> bool:
+    if field not in before or field not in after:
+        return True
+    if before[field] == after[field]:
+        return False
+    if model_name == "account.move.line" and field == "move_id":
+        # Odoo includes the parent move's derived display_name in Many2one
+        # reads; changing draft -> cancel changes that label, not the relation.
+        before_id = classic_read_many2one_id(before[field])
+        after_id = classic_read_many2one_id(after[field])
+        return before_id is None or before_id != after_id
+    return True
+
+
+def _empty_many2one(values: Mapping[str, Any], field: str) -> bool:
+    return field not in values or values[field] is False
+
+
+def _empty_x2many(values: Mapping[str, Any], field: str) -> bool:
+    return field not in values or values[field] == []
+
+
+def _assert_available_draft_customer_invoice_snapshot(
+    operation: Operation,
+    *,
+    raw_action: Mapping[str, Any] | None,
+    raw_by_key: Mapping[tuple[str, int], Mapping[str, Any]],
+    action_identity: tuple[str, int],
+    guard_identities: list[tuple[str, int]],
+) -> None:
+    action_values = raw_action.get("values") if raw_action else None
+    required_action_fields = {
+        "state",
+        "move_type",
+        "company_id",
+        "journal_id",
+        "currency_id",
+        "partner_id",
+        "line_ids",
+        "auto_post",
+        "posted_before",
+        "secure_sequence_number",
+        "inalterable_hash",
+        "is_manually_modified",
+        "payment_ids",
+        "matched_payment_ids",
+        "reconciled_payment_ids",
+        "tax_cash_basis_created_move_ids",
+        "reversal_move_ids",
+        "adjusting_entry_origin_move_ids",
+        "adjusting_entries_move_ids",
+        "exchange_diff_partial_ids",
+        "odoo_cli_v3_document_binding",
+        "odoo_cli_v3_business_binding",
+    }
+    if (
+        not isinstance(action_values, Mapping)
+        or not required_action_fields.issubset(action_values)
+        or raw_action.get("state") != "draft"
+        or action_values.get("state") != "draft"
+        or action_values.get("move_type") != "out_invoice"
+        or classic_read_many2one_id(action_values.get("company_id"))
+        != operation.company_id
+        or classic_read_many2one_id(action_values.get("journal_id"))
+        != operation.parameters.get("journal_id")
+        or classic_read_many2one_id(action_values.get("currency_id"))
+        != operation.parameters.get("currency_id")
+        or classic_read_many2one_id(action_values.get("partner_id"))
+        != operation.parameters.get("partner_id")
+        or action_values.get("posted_before") is not False
+        or action_values.get("auto_post") != "no"
+        or action_values.get("secure_sequence_number") not in {False, 0}
+        or action_values.get("inalterable_hash") is not False
+        or action_values.get("is_manually_modified") is not False
+        or action_values.get("odoo_cli_v3_document_binding")
+        != customer_invoice_document_binding(operation.parameters)
+        or action_values.get("odoo_cli_v3_business_binding")
+        != customer_invoice_business_binding(operation.parameters)
+    ):
+        raise OdooWriteBootstrapError(
+            "available recovery action is not a pristine V3 draft customer invoice"
+        )
+    singular_links = (
+        "auto_post_origin_id",
+        "origin_payment_id",
+        "payment_id",
+        "statement_line_id",
+        "statement_id",
+        "tax_cash_basis_rec_id",
+        "tax_cash_basis_origin_move_id",
+        "reversed_entry_id",
+        "asset_id",
+    )
+    plural_links = (
+        "payment_ids",
+        "matched_payment_ids",
+        "reconciled_payment_ids",
+        "tax_cash_basis_created_move_ids",
+        "reversal_move_ids",
+        "adjusting_entry_origin_move_ids",
+        "adjusting_entries_move_ids",
+        "exchange_diff_partial_ids",
+        "deferred_move_ids",
+        "deferred_original_move_ids",
+        "edi_document_ids",
+        "expense_ids",
+        "pos_order_ids",
+    )
+    if (
+        action_values.get("need_cancel_request", False) is not False
+        or any(
+            not _empty_many2one(action_values, field)
+            for field in singular_links
+        )
+        or any(
+            not _empty_x2many(action_values, field)
+            for field in plural_links
+        )
+    ):
+        raise OdooWriteBootstrapError(
+            "available recovery action has payment, posting, or external effects"
+        )
+    expected_line_ids = {identity[1] for identity in guard_identities}
+    raw_line_ids = action_values.get("line_ids")
+    if (
+        not isinstance(raw_line_ids, list)
+        or not raw_line_ids
+        or any(
+            isinstance(record_id, bool)
+            or not isinstance(record_id, int)
+            or record_id <= 0
+            for record_id in raw_line_ids
+        )
+        or len(raw_line_ids) != len(set(raw_line_ids))
+        or set(raw_line_ids) != expected_line_ids
+    ):
+        raise OdooWriteBootstrapError(
+            "available recovery guards do not cover the complete line graph"
+        )
+    required_line_fields = {
+        "move_id",
+        "company_id",
+        "reconciled",
+        "full_reconcile_id",
+        "matched_debit_ids",
+        "matched_credit_ids",
+        "display_type",
+    }
+    for identity in guard_identities:
+        line_values = raw_by_key[identity].get("values")
+        if (
+            not isinstance(line_values, Mapping)
+            or not required_line_fields.issubset(line_values)
+            or classic_read_many2one_id(line_values.get("move_id"))
+            != action_identity[1]
+            or classic_read_many2one_id(line_values.get("company_id"))
+            != operation.company_id
+        ):
+            raise OdooWriteBootstrapError(
+                "available recovery guard is outside the invoice line graph"
+            )
+        if (
+            line_values.get("reconciled") is not False
+            or not _empty_many2one(line_values, "full_reconcile_id")
+            or not _empty_many2one(line_values, "statement_line_id")
+            or not _empty_many2one(line_values, "purchase_line_id")
+            or not _empty_many2one(line_values, "expense_id")
+            or not _empty_x2many(line_values, "matched_debit_ids")
+            or not _empty_x2many(line_values, "matched_credit_ids")
+            or not _empty_x2many(line_values, "asset_ids")
+            or not _empty_x2many(line_values, "sale_line_ids")
+            or line_values.get("deferred_start_date", False) is not False
+            or line_values.get("deferred_end_date", False) is not False
+            or line_values.get("display_type") == "cogs"
+        ):
+            raise OdooWriteBootstrapError(
+                "available recovery guard graph has reconciliation or external effects"
+            )
 
 
 def _execution_evidence(
@@ -749,8 +961,9 @@ def _execution_evidence(
         or raw.get("parameters_digest") != _digest(operation.parameters)
     ):
         raise OdooWriteBootstrapError("write handler execution binding mismatch")
+    raw_after = raw.get("after")
     difference, records = _difference(
-        raw.get("before"), raw.get("after"), operation.company_id
+        raw.get("before"), raw_after, operation.company_id
     )
     raw_records = raw.get("records")
     if not isinstance(raw_records, list) or {
@@ -782,9 +995,114 @@ def _execution_evidence(
             raise OdooWriteBootstrapError("write recovery target was not read back")
         target_records.append(dict(reference))
     if status == "available":
-        raise OdooWriteBootstrapError(
-            "an available recovery requires the explicit V2 action/guard contract"
+        if (
+            set(recovery) != {
+                "status", "method", "targets", "guards", "oracle_id"
+            }
+            or operation.capability_id != "acct.invoice.customer_create.v1"
+            or operation.environment != "sandbox"
+            or operation.parameters.get("posting_mode") != "draft"
+            or method != DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
+            or recovery.get("oracle_id")
+            != DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
+        ):
+            raise OdooWriteBootstrapError(
+                "available recovery is restricted to a sandbox draft customer invoice"
+            )
+        guards = recovery.get("guards")
+        if (
+            len(target_records) != 1
+            or target_records[0]["model"] != "account.move"
+            or len(targets) != 1
+            or not isinstance(targets[0], Mapping)
+            or set(targets[0]) != {"model", "record_id"}
+            or not isinstance(guards, list)
+            or not guards
+        ):
+            raise OdooWriteBootstrapError(
+                "available recovery requires one action and a complete line graph"
+            )
+        guard_records: list[dict[str, Any]] = []
+        guard_identities: list[tuple[str, int]] = []
+        for guard in guards:
+            if (
+                not isinstance(guard, Mapping)
+                or set(guard) != {"model", "record_id"}
+                or guard.get("model") != "account.move.line"
+            ):
+                raise OdooWriteBootstrapError(
+                    "available recovery guard identity is invalid"
+                )
+            identity = (guard["model"], guard.get("record_id"))
+            reference = by_key.get(identity)
+            if reference is None:
+                raise OdooWriteBootstrapError(
+                    "available recovery guard was not read back"
+                )
+            guard_identities.append(identity)
+            guard_records.append(
+                {**reference, "expected_outcome": "survive_exact"}
+            )
+        if len(guard_identities) != len(set(guard_identities)):
+            raise OdooWriteBootstrapError(
+                "available recovery guard graph contains a duplicate"
+            )
+        action_identity = (
+            target_records[0]["model"], target_records[0]["record_id"]
         )
+        expected_graph = {action_identity, *guard_identities}
+        if set(by_key) != expected_graph:
+            raise OdooWriteBootstrapError(
+                "available recovery guards do not cover the complete line graph"
+            )
+        raw_by_key = {
+            (item["model"], item["record_id"]): item
+            for item in raw_after
+            if isinstance(item, Mapping)
+        }
+        raw_action = raw_by_key.get(action_identity)
+        _assert_available_draft_customer_invoice_snapshot(
+            operation,
+            raw_action=raw_action,
+            raw_by_key=raw_by_key,
+            action_identity=action_identity,
+            guard_identities=guard_identities,
+        )
+        ordered_guard_identities = sorted(guard_identities)
+        recovery_parameters = {
+            "company_id": operation.company_id,
+            "origin_operation_id": operation.operation_id,
+            "method": method,
+            "action_targets": [
+                {"model": action_identity[0], "record_id": action_identity[1]}
+            ],
+            "guard_records": [
+                {"model": model_name, "record_id": record_id}
+                for model_name, record_id in ordered_guard_identities
+            ],
+            "oracle_id": DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+        }
+        plan = create_recovery_plan_v2(
+            origin_operation_id=operation.operation_id,
+            recovery_capability_id="acct.recovery.execute.v1",
+            status="available",
+            method=method,
+            requires_approval=True,
+            action_targets=target_records,
+            guard_records=guard_records,
+            oracle_id=DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+            parameters=recovery_parameters,
+        )
+        return {
+            "operation_id": operation.operation_id,
+            "capability_id": operation.capability_id,
+            "succeeded": True,
+            "odoo_records": records,
+            "difference": difference,
+            "recovery_plan": plan,
+            "recovery_parameters": recovery_parameters,
+            "failure_checks": [],
+        }
     guard_records = [
         {**item, "expected_outcome": "manual_review"}
         for item in target_records
@@ -1105,6 +1423,7 @@ def _default_handler_factory(
             user_id=context.user_id,
             allowed_company_ids=context.allowed_company_ids,
             today=observed_at.date(),
+            environment=context.environment,
             trusted_recovery_plan=trusted_recovery_plan,
         )
     )
@@ -1431,6 +1750,9 @@ def execute_write_from_odoo_shell(
                 bound_env,
                 live_precheck,
                 company_id=operation.company_id,
+                exclusive_before=(
+                    operation.capability_id == "acct.recovery.execute.v1"
+                ),
             )
         except Exception as exc:
             return approved_response(_record_no_effect_failure(

@@ -49,6 +49,7 @@ RECOVERY_SECRET = b"write-app-recovery-secret-material-001"
 RECEIPT_SECRET = b"write-app-receipt-secret-material-0001"
 SECOND_RECEIPT_SECRET = b"write-app-second-receipt-secret-material"
 CAPABILITY_ID = "acct.bill.vendor_create.v1"
+CUSTOMER_INVOICE_CAPABILITY_ID = "acct.invoice.customer_create.v1"
 
 
 def _capabilities():
@@ -93,6 +94,32 @@ def _parameters(idempotency_key: str = "vendor-bill-full-parameters-1") -> dict[
                 "tax_ids": [],
             },
         ],
+        "idempotency_key": idempotency_key,
+    }
+
+
+def _draft_customer_invoice_parameters(
+    idempotency_key: str = "customer-invoice-draft-1",
+) -> dict[str, Any]:
+    return {
+        "company_id": 7,
+        "partner_id": 902,
+        "invoice_date": "2026-07-15",
+        "accounting_date": "2026-07-15",
+        "due_date": "2026-08-15",
+        "currency_id": 12,
+        "journal_id": 6,
+        "posting_mode": "draft",
+        "reference": "CUSTOMER-DRAFT-2026-0715",
+        "lines": [{
+            "line_reference": "customer-line-1",
+            "name": "Draft consulting invoice",
+            "product_id": None,
+            "account_id": 410,
+            "quantity": "1",
+            "price_unit": "100.00",
+            "tax_ids": [],
+        }],
         "idempotency_key": idempotency_key,
     }
 
@@ -203,58 +230,89 @@ class FakeOdoo:
     @staticmethod
     def _execution_evidence(operation) -> dict[str, Any]:
         is_recovery = operation.capability_id == "acct.recovery.execute.v1"
-        record_id = 601 if is_recovery else 501
-        before = create_record_snapshot(
-            model="account.move",
-            record_id=record_id,
-            exists=False,
-            record_state="absent",
-            values={},
+        is_draft_customer = (
+            operation.capability_id == CUSTOMER_INVOICE_CAPABILITY_ID
+            and operation.parameters.get("posting_mode") == "draft"
         )
-        values = (
-            {
-                "company_id": operation.company_id,
-                "origin_operation_id": operation.parameters["origin_operation_id"],
-                "state": "posted",
-            }
-            if is_recovery
-            else {
+        record_id = 501
+        origin_values = {
+            "company_id": operation.company_id,
+            "partner_id": 902,
+            "currency_id": 12,
+            "invoice_date": "2026-07-15",
+            "state": "draft",
+            "move_type": "out_invoice",
+            "line_ids": [502],
+            "posted_before": False,
+            "odoo_cli_v3_document_binding": "a" * 64,
+            "odoo_cli_v3_business_binding": "b" * 64,
+        }
+        if is_recovery:
+            before = create_record_snapshot(
+                model="account.move",
+                record_id=record_id,
+                exists=True,
+                record_state="draft",
+                values=origin_values,
+            )
+            values = {**origin_values, "state": "cancel"}
+            state = "cancel"
+        elif is_draft_customer:
+            before = create_record_snapshot(
+                model="account.move",
+                record_id=record_id,
+                exists=False,
+                record_state="absent",
+                values={},
+            )
+            values = origin_values
+            state = "draft"
+        else:
+            before = create_record_snapshot(
+                model="account.move",
+                record_id=record_id,
+                exists=False,
+                record_state="absent",
+                values={},
+            )
+            values = {
                 "company_id": operation.company_id,
                 "partner_id": operation.parameters["partner_id"],
                 "currency_id": operation.parameters["currency_id"],
                 "invoice_date": operation.parameters["invoice_date"],
                 "state": "posted",
             }
-        )
+            state = "posted"
         after = create_record_snapshot(
             model="account.move",
             record_id=record_id,
             exists=True,
-            record_state="posted",
+            record_state=state,
             values=values,
         )
         target = {
             "model": "account.move",
             "record_id": record_id,
             "company_id": operation.company_id,
-            "record_state": "posted",
+            "record_state": state,
             "record_fingerprint": hashlib.sha256(
                 canonical_json(after)
             ).hexdigest(),
         }
+        guard_values = {"company_id": operation.company_id, "move_id": record_id}
         guard_before = create_record_snapshot(
             model="account.move.line",
             record_id=record_id + 1,
-            exists=False,
-            record_state="absent",
-            values={},
+            exists=is_recovery,
+            record_state="unknown" if is_recovery else "absent",
+            values=guard_values if is_recovery else {},
         )
         guard_after = create_record_snapshot(
             model="account.move.line",
             record_id=record_id + 1,
             exists=True,
             record_state="unknown",
-            values={"company_id": operation.company_id, "move_id": record_id},
+            values=guard_values,
         )
         guard_reference = {
             "model": "account.move.line",
@@ -265,18 +323,36 @@ class FakeOdoo:
                 canonical_json(guard_after)
             ).hexdigest(),
         }
-        recovery_parameters = (
-            {"origin_operation_id": operation.parameters["origin_operation_id"]}
-            if is_recovery
-            else {
-                "move_id": 501,
-                "action_targets": [{"model": "account.move", "record_id": 501}],
+        if is_recovery:
+            recovery_parameters = {
+                "origin_operation_id": operation.parameters["origin_operation_id"]
+            }
+        elif is_draft_customer:
+            recovery_parameters = {
+                "company_id": operation.company_id,
+                "origin_operation_id": operation.operation_id,
+                "method": "cancel_pristine_v3_draft_customer_invoice_v1",
+                "action_targets": [
+                    {"model": "account.move", "record_id": 501}
+                ],
                 "guard_records": [
                     {"model": "account.move.line", "record_id": 502}
                 ],
-                "oracle_id": "cancel_draft_move_exact_v1",
+                "oracle_id": (
+                    "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+                ),
             }
-        )
+        else:
+            recovery_parameters = {
+                "company_id": operation.company_id,
+                "origin_operation_id": operation.operation_id,
+                "method": "manual_review_vendor_bill_recovery",
+                "action_targets": [],
+                "guard_records": [
+                    {"model": "account.move", "record_id": 501}
+                ],
+                "oracle_id": "manual_escalation",
+            }
         return {
             "operation_id": operation.operation_id,
             "capability_id": operation.capability_id,
@@ -287,8 +363,16 @@ class FakeOdoo:
                 after=[after, guard_after],
                 changed_fields=[
                     *(
-                        ["company_id", "origin_operation_id", "state"]
+                        ["state"]
                         if is_recovery
+                        else [
+                            "company_id", "currency_id", "invoice_date",
+                            "line_ids", "move_id", "move_type",
+                            "odoo_cli_v3_business_binding",
+                            "odoo_cli_v3_document_binding", "partner_id",
+                            "posted_before", "state",
+                        ]
+                        if is_draft_customer
                         else [
                             "company_id",
                             "currency_id",
@@ -302,15 +386,34 @@ class FakeOdoo:
             "recovery_plan": create_recovery_plan_v2(
                 origin_operation_id=operation.operation_id,
                 recovery_capability_id="acct.recovery.execute.v1",
-                status="not_applicable" if is_recovery else "available",
-                method="recovery_completed" if is_recovery else "cancel_draft_move",
+                status=(
+                    "not_applicable"
+                    if is_recovery
+                    else "available"
+                    if is_draft_customer
+                    else "manual_escalation"
+                ),
+                method=(
+                    "recovery_completed"
+                    if is_recovery
+                    else "cancel_pristine_v3_draft_customer_invoice_v1"
+                    if is_draft_customer
+                    else "manual_review_vendor_bill_recovery"
+                ),
                 requires_approval=not is_recovery,
-                action_targets=[] if is_recovery else [target],
+                action_targets=[target] if is_draft_customer else [],
                 guard_records=(
                     [
                         {
                             **guard_reference,
                             "expected_outcome": "survive_exact",
+                        }
+                    ]
+                    if is_draft_customer
+                    else [
+                        {
+                            **target,
+                            "expected_outcome": "manual_review",
                         }
                     ]
                     if not is_recovery
@@ -319,7 +422,9 @@ class FakeOdoo:
                 oracle_id=(
                     "not_applicable"
                     if is_recovery
-                    else "cancel_draft_move_exact_v1"
+                    else "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+                    if is_draft_customer
+                    else "manual_escalation"
                 ),
                 parameters=recovery_parameters,
             ),
@@ -537,14 +642,28 @@ class Harness:
     def store(self) -> SQLitePersistence:
         return SQLitePersistence(self.config.write_state_path)
 
-    def prepare_preview(self, suffix: str = "main"):
-        parameters = _parameters(f"vendor-bill-{suffix}")
+    def prepare_preview(
+        self,
+        suffix: str = "main",
+        *,
+        capability_id: str = CAPABILITY_ID,
+        parameters: dict[str, Any] | None = None,
+    ):
+        parameters = (
+            _parameters(f"vendor-bill-{suffix}")
+            if parameters is None
+            else parameters
+        )
+        operation_kind = (
+            "customer" if capability_id == CUSTOMER_INVOICE_CAPABILITY_ID
+            else "vendor"
+        )
         prepared = self.call(
             "operation.prepare",
             {
-                "operation_id": f"op-vendor-{suffix}",
-                "request_id": f"req-vendor-{suffix}",
-                "capability_id": CAPABILITY_ID,
+                "operation_id": f"op-{operation_kind}-{suffix}",
+                "request_id": f"req-{operation_kind}-{suffix}",
+                "capability_id": capability_id,
                 "parameters": parameters,
             },
         )
@@ -567,8 +686,18 @@ class Harness:
             secret=APPROVAL_SECRET,
         )
 
-    def complete(self, suffix: str = "main"):
-        parameters, prepared, preview = self.prepare_preview(suffix)
+    def complete(
+        self,
+        suffix: str = "main",
+        *,
+        capability_id: str = CAPABILITY_ID,
+        parameters: dict[str, Any] | None = None,
+    ):
+        parameters, prepared, preview = self.prepare_preview(
+            suffix,
+            capability_id=capability_id,
+            parameters=parameters,
+        )
         approval = self.approval(prepared["operation_id"], f"approval-{suffix}")
         approval_payload = {
             "operation_id": prepared["operation_id"],
@@ -850,7 +979,7 @@ def test_full_lifecycle_preserves_parameters_and_returns_signed_evidence(harness
     assert status_before["operation_state"] == "completed"
     assert result["operation_state"] == "completed"
     assert result["verification"]["passed"] is True
-    assert result["recovery_plan"]["status"] == "available"
+    assert result["recovery_plan"]["status"] == "manual_escalation"
     assert result["audit_receipt"]["signature_purpose"] == "write_audit_receipt_v1"
     assert result["audit_receipt"]["signing_key_id"] == "write-receipt-v1"
     assert len(result["audit_receipt"]["signature"]) == 64
@@ -926,8 +1055,15 @@ def test_retained_releases_share_write_state_with_distinct_receipt_keys(
 
 
 def test_recover_creates_durable_binding_then_previews_receipt_plan(harness: Harness):
+    draft_parameters = _draft_customer_invoice_parameters(
+        "customer-draft-recover-origin"
+    )
     _parameters_value, prepared, _preview, _approval, _payload, _executed, result = (
-        harness.complete("recover-origin")
+        harness.complete(
+            "recover-origin",
+            capability_id=CUSTOMER_INVOICE_CAPABILITY_ID,
+            parameters=draft_parameters,
+        )
     )
     origin_status = harness.call(
         "operation.status", {"operation_id": prepared["operation_id"]}
@@ -935,11 +1071,11 @@ def test_recover_creates_durable_binding_then_previews_receipt_plan(harness: Har
     recovery_payload = {
         "origin_operation_id": prepared["operation_id"],
         "expected_origin_revision": origin_status["operation_revision"],
-        "recovery_operation_id": "op-vendor-recovery",
-        "request_id": "req-vendor-recovery",
+        "recovery_operation_id": "op-customer-recovery",
+        "request_id": "req-customer-recovery",
         "recovery_date": "2026-07-16",
-        "reason": "Reverse the approved duplicate supplier bill",
-        "idempotency_key": "recover-vendor-bill-origin",
+        "reason": "Cancel the approved duplicate draft customer invoice",
+        "idempotency_key": "recover-customer-invoice-origin",
     }
 
     recovered = harness.call("operation.recover", recovery_payload)
@@ -962,8 +1098,8 @@ def test_recover_creates_durable_binding_then_previews_receipt_plan(harness: Har
         "origin_operation_id": prepared["operation_id"],
         "expected_recovery_plan_digest": result["recovery_plan"]["plan_digest"],
         "recovery_date": "2026-07-16",
-        "reason": "Reverse the approved duplicate supplier bill",
-        "idempotency_key": "recover-vendor-bill-origin",
+        "reason": "Cancel the approved duplicate draft customer invoice",
+        "idempotency_key": "recover-customer-invoice-origin",
     }
     recovery_request = harness.odoo.precheck_requests[-1]
     assert recovery_request["trusted_recovery_plan"] == result["recovery_plan"]
@@ -972,8 +1108,15 @@ def test_recover_creates_durable_binding_then_previews_receipt_plan(harness: Har
 def test_recovery_operation_executes_with_trusted_plan_and_returns_verified_receipt(
     harness: Harness,
 ):
+    draft_parameters = _draft_customer_invoice_parameters(
+        "customer-draft-recover-execute-origin"
+    )
     _parameters_value, prepared, _preview, _approval, _payload, _executed, result = (
-        harness.complete("recover-execute-origin")
+        harness.complete(
+            "recover-execute-origin",
+            capability_id=CUSTOMER_INVOICE_CAPABILITY_ID,
+            parameters=draft_parameters,
+        )
     )
     origin_status = harness.call(
         "operation.status", {"operation_id": prepared["operation_id"]}
@@ -983,11 +1126,11 @@ def test_recovery_operation_executes_with_trusted_plan_and_returns_verified_rece
         {
             "origin_operation_id": prepared["operation_id"],
             "expected_origin_revision": origin_status["operation_revision"],
-            "recovery_operation_id": "op-vendor-recovery-execute",
-            "request_id": "req-vendor-recovery-execute",
+            "recovery_operation_id": "op-customer-recovery-execute",
+            "request_id": "req-customer-recovery-execute",
             "recovery_date": "2026-07-16",
             "reason": "Approved compensating reversal",
-            "idempotency_key": "recover-vendor-bill-execute",
+            "idempotency_key": "recover-customer-invoice-execute",
         },
     )
     harness.call("operation.preview", {"operation_id": recovery["operation_id"]})
@@ -1169,7 +1312,7 @@ def test_approved_runner_exception_is_unknown_and_same_approval_can_resume(harne
     )
     assert resumed == result
     assert result["operation_state"] == "completed"
-    assert result["recovery_plan"]["status"] == "available"
+    assert result["recovery_plan"]["status"] == "manual_escalation"
     assert len(harness.odoo.approved_requests) == 2
 
 

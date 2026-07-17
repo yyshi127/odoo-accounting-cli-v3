@@ -225,7 +225,12 @@ def _invoice_parameters(idempotency_key: str = "invoice-1") -> dict[str, object]
     }
 
 
-def _execution_evidence(operation_id: str, *, succeeded: bool = True) -> dict[str, object]:
+def _execution_evidence(
+    operation_id: str,
+    *,
+    succeeded: bool = True,
+    draft_customer_invoice: bool = False,
+) -> dict[str, object]:
     before = create_record_snapshot(
         model="account.move",
         record_id=501,
@@ -237,14 +242,18 @@ def _execution_evidence(operation_id: str, *, succeeded: bool = True) -> dict[st
         model="account.move",
         record_id=501,
         exists=True,
-        record_state="posted",
-        values={"amount_total": "100.00", "company_id": 7, "state": "posted"},
+        record_state="draft" if draft_customer_invoice else "posted",
+        values={
+            "amount_total": "100.00",
+            "company_id": 7,
+            "state": "draft" if draft_customer_invoice else "posted",
+        },
     )
     target = {
         "model": "account.move",
         "record_id": 501,
         "company_id": 7,
-        "record_state": "posted",
+        "record_state": "draft" if draft_customer_invoice else "posted",
         "record_fingerprint": hashlib.sha256(canonical_json(after)).hexdigest(),
     }
     guard_before = create_record_snapshot(
@@ -278,7 +287,11 @@ def _execution_evidence(operation_id: str, *, succeeded: bool = True) -> dict[st
             "guard_records": [
                 {"model": "account.move.line", "record_id": 502}
             ],
-            "oracle_id": "cancel_draft_move_exact_v1",
+            "oracle_id": (
+                "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+                if draft_customer_invoice
+                else "cancel_draft_move_exact_v1"
+            ),
         }
         if succeeded
         else {"operation_id": operation_id}
@@ -287,12 +300,22 @@ def _execution_evidence(operation_id: str, *, succeeded: bool = True) -> dict[st
         origin_operation_id=operation_id,
         recovery_capability_id="acct.recovery.execute.v1",
         status="available" if succeeded else "manual_escalation",
-        method="cancel_draft_move" if succeeded else "inspect_ambiguous_execution",
+        method=(
+            "cancel_pristine_v3_draft_customer_invoice_v1"
+            if succeeded and draft_customer_invoice
+            else "cancel_draft_move"
+            if succeeded
+            else "inspect_ambiguous_execution"
+        ),
         requires_approval=True,
         action_targets=[target] if succeeded else [],
         guard_records=[guard] if succeeded else [],
         oracle_id=(
-            "cancel_draft_move_exact_v1" if succeeded else "manual_escalation"
+            "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+            if succeeded and draft_customer_invoice
+            else "cancel_draft_move_exact_v1"
+            if succeeded
+            else "manual_escalation"
         ),
         parameters=recovery_parameters,
     )
@@ -388,7 +411,12 @@ class Backend:
     def execute(self, _context, capability, operation, _approval, _registry_digest, _release_digest):
         self.calls.append("execute")
         evidence = _execution_evidence(
-            operation.operation_id, succeeded=self.execution_succeeds
+            operation.operation_id,
+            succeeded=self.execution_succeeds,
+            draft_customer_invoice=(
+                operation.capability_id == "acct.invoice.customer_create.v1"
+                and operation.parameters.get("posting_mode") == "draft"
+            ),
         )
         digest = hashlib.sha256(canonical_json(evidence)).hexdigest()
         result = sign_execution_result(
@@ -501,8 +529,12 @@ def service(tmp_path: Path):
     return value, backend, store
 
 
-def _prepare_and_preview(service: DurableWriteService):
-    parameters = _invoice_parameters()
+def _prepare_and_preview(
+    service: DurableWriteService,
+    *,
+    parameters: dict[str, object] | None = None,
+):
+    parameters = _invoice_parameters() if parameters is None else parameters
     operation = service.prepare(
         _context(parameters=parameters, token_id="token-prepare-invoice-1"),
         operation_id="op-invoice-1",
@@ -516,7 +548,9 @@ def _prepare_and_preview(service: DurableWriteService):
         operation.operation_id,
     )
     assert preview["operation_state"] == State.AWAITING_APPROVAL
-    return service.status(_context(), operation.operation_id)
+    return service.status(
+        _context(parameters=parameters), operation.operation_id
+    )
 
 
 def _approval(awaiting, nonce: str):
@@ -1072,10 +1106,17 @@ def test_combined_odoo_invocation_replays_anchor_after_execution_persistence(ser
 
 def test_recovery_is_a_new_operation_derived_from_the_verified_origin_receipt(service):
     gateway, _backend, store = service
-    awaiting = _prepare_and_preview(gateway)
+    draft_parameters = {**_invoice_parameters(), "posting_mode": "draft"}
+    awaiting = _prepare_and_preview(gateway, parameters=draft_parameters)
     approval = _approval(awaiting, "approval-origin-for-recovery")
-    gateway.approve_execute(_context(), approval, reconciliation_only=False)
-    origin = gateway.status(_context(), awaiting.operation_id)
+    gateway.approve_execute(
+        _context(parameters=draft_parameters),
+        approval,
+        reconciliation_only=False,
+    )
+    origin = gateway.status(
+        _context(parameters=draft_parameters), awaiting.operation_id
+    )
     recovery_request = {
         "origin_operation_id": origin.operation_id,
         "expected_origin_revision": origin.revision,
@@ -1181,6 +1222,47 @@ def test_recovery_is_a_new_operation_derived_from_the_verified_origin_receipt(se
     gateway._policy._authenticate_context = gateway._authenticate_context
     with pytest.raises(WriteServiceError, match="revision changed"):
         gateway.prepare_recovery(changed_context, **changed_revision)
+
+
+def test_posted_customer_invoice_receipt_cannot_be_reinterpreted_as_draft_cancel(service):
+    gateway, _backend, _store = service
+    awaiting = _prepare_and_preview(gateway)
+    approval = _approval(awaiting, "approval-posted-origin-recovery-rejected")
+    gateway.approve_execute(_context(), approval, reconciliation_only=False)
+    origin = gateway.status(_context(), awaiting.operation_id)
+
+    with pytest.raises(WriteServiceError, match="draft customer invoice"):
+        gateway.prepare_recovery(
+            _context(token_id="token-posted-origin-recovery-rejected"),
+            origin_operation_id=origin.operation_id,
+            expected_origin_revision=origin.revision,
+            recovery_operation_id="op-posted-origin-recovery-rejected",
+            request_id="req-posted-origin-recovery-rejected",
+            recovery_date="2026-07-16",
+            reason="must not reinterpret a posted invoice",
+            idempotency_key="recover-posted-origin-rejected",
+        )
+
+
+def test_production_origin_can_never_reuse_the_sandbox_draft_recovery_contract(service):
+    gateway, _backend, _store = service
+    draft_parameters = {**_invoice_parameters(), "posting_mode": "draft"}
+    awaiting = _prepare_and_preview(gateway, parameters=draft_parameters)
+    approval = _approval(awaiting, "approval-production-origin-rejected")
+    gateway.approve_execute(
+        _context(parameters=draft_parameters),
+        approval,
+        reconciliation_only=False,
+    )
+    origin = gateway.status(
+        _context(parameters=draft_parameters), awaiting.operation_id
+    )
+
+    with pytest.raises(WriteServiceError, match="sandbox draft customer invoice"):
+        gateway._validated_origin_recovery_plan(
+            _context(parameters=draft_parameters),
+            replace(origin, environment="production"),
+        )
 
 
 def test_expired_or_self_approval_never_calls_business_executor(service):

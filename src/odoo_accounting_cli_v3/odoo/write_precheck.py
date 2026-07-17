@@ -251,6 +251,7 @@ def _default_handler_factory(
             user_id=context.user_id,
             allowed_company_ids=context.allowed_company_ids,
             today=observed_at.date(),
+            environment=context.environment,
             trusted_recovery_plan=trusted_recovery_plan,
         )
     )
