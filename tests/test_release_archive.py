@@ -128,6 +128,20 @@ DEV9_SECURITY_RELEASE_MEMBERS = frozenset(
         "tests/test_verified_release.py",
     }
 )
+DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS = frozenset(
+    {
+        "deployment/dev15/README.md",
+        "deployment/dev15/TOOLCHAIN-MANIFEST.json",
+        "deployment/dev15/check_toolchain.py",
+        "deployment/dev15/install_toolchain.py",
+        "deployment/dev15/runtime_setup.py",
+        "deployment/dev15/sign_read.py",
+        "deployment/dev15/run_multicurrency_read.py",
+        "deployment/dev15/multicurrency_sql_oracle.py",
+        "deployment/dev15/verify_evidence.py",
+        "deployment/dev15/read_plan.json",
+    }
+)
 WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
     {
         "VERSION",
@@ -230,7 +244,8 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
     }
 )
 REQUIRED_WRITE_RELEASE_MEMBERS = (
-    DEV9_SECURITY_RELEASE_MEMBERS
+    DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS
+    | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
     | WRITE_RUNTIME_RELEASE_MEMBERS
 )
@@ -252,6 +267,7 @@ class ReleaseArchiveTest(unittest.TestCase):
         )
 
         production_trees = (
+            "deployment/dev15",
             "deployment/dev9",
             "odoo_addons/odoo_accounting_cli_v3_control",
             "pi_bridge",
@@ -295,8 +311,22 @@ class ReleaseArchiveTest(unittest.TestCase):
         undeclared = discovered - REQUIRED_WRITE_RELEASE_MEMBERS
         self.assertFalse(
             undeclared,
-            "Dev9 production asset is not an explicit canonical release member: "
+            "production asset is not an explicit canonical release member: "
             f"{sorted(undeclared)}",
+        )
+
+    def test_dev15_read_toolchain_is_an_exact_release_member_set(self) -> None:
+        directory = PROJECT_ROOT / "deployment" / "dev15"
+        discovered = {
+            path.relative_to(PROJECT_ROOT).as_posix()
+            for path in directory.iterdir()
+            if path.is_file() and not path.name.endswith((".pyc", ".pyo"))
+        }
+        self.assertEqual(discovered, DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS)
+        self.assertTrue(
+            DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS.issubset(
+                REQUIRED_WRITE_RELEASE_MEMBERS
+            )
         )
 
     def test_deployment_document_references_only_declared_release_dependencies(
@@ -459,7 +489,7 @@ class ReleaseArchiveTest(unittest.TestCase):
                 missing_write_members = REQUIRED_WRITE_RELEASE_MEMBERS - member_names
                 self.assertFalse(
                     missing_write_members,
-                    "canonical release is missing required Dev9 write runtime members: "
+                    "canonical release is missing required production members: "
                     f"{sorted(missing_write_members)}",
                 )
                 for member in members:

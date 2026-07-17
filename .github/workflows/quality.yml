@@ -270,11 +270,11 @@ jobs:
             tests/test_odoo_write_bootstrap.py::test_committed_reconciliation_rolls_back_verify_side_effect_before_control_commit \
             tests/test_odoo_write_bootstrap.py::test_expired_reconciliation_rejects_claimed_anchor_without_side_effect \
             tests/test_odoo_write_bootstrap.py::test_expired_reconciliation_replays_failed_anchor_without_handler_or_commit
-          REPORT="$report" python - <<'PY'
-          import os
+          sudo "$(command -v python)" - "$report" <<'PY'
+          import sys
           import xml.etree.ElementTree as ET
 
-          root = ET.parse(os.environ["REPORT"]).getroot()
+          root = ET.parse(sys.argv[1]).getroot()
           tests = root.findall(".//testcase")
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
@@ -461,7 +461,7 @@ jobs:
           JS
 
   deployment-toolchain:
-    name: dev8 deployment toolchain
+    name: dev8 + dev15 deployment toolchains
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -469,8 +469,42 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Verify tracked tool manifest and embedded Python
+      - run: python -m pip install -e ".[test]"
+      - name: Verify the tracked dev8 tool manifest and embedded Python
         run: python deployment/dev8/check_toolchain.py
+      - name: Verify the exact dev15 toolchain manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest=deployment/dev15/TOOLCHAIN-MANIFEST.json
+          manifest_sha256="$(sha256sum "$manifest" | cut -d ' ' -f 1)"
+          test "${#manifest_sha256}" -eq 64
+          python deployment/dev15/check_toolchain.py "$manifest_sha256"
+      - name: Exercise the dev15 immutable installer as Linux root
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev15-root-installer.xml"
+          sudo "$(command -v python)" -m pytest -q \
+            --junitxml="$report" \
+            "tests/test_dev15_toolchain_installer.py::test_full_production_install_is_immutable_and_idempotent"
+          sudo "$(command -v python)" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          skipped = root.findall(".//skipped")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          if len(tests) != 1 or skipped or failures or errors:
+              raise SystemExit(
+                  "dev15 root installer gate did not execute exactly once: "
+                  f"tests={len(tests)}, skipped={len(skipped)}, "
+                  f"failures={len(failures)}, errors={len(errors)}"
+              )
+          print("dev15_root_installer_tests=1")
+          PY
       - name: Verify shell syntax
         shell: bash
         run: |

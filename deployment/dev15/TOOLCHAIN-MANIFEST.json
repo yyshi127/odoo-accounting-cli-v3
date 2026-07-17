@@ -1,0 +1,61 @@
+{
+  "application": {
+    "commit": "c4616386f921946cf43cde2de449d2938a837422",
+    "manifest_sha256": "f4ea1dbd6e6b57472875d27a64504ffb433812c568bcd7be546d2e5074d24be2",
+    "package_sha256": "71d9bcea9c89b9ab2877406ca28b039791d380d0aeb09c60516a83b031b9c8bf",
+    "registry_digest": "ae50c3aa8d93472b7d58ca656ea9b2a42e18e5a38a9df0919320737b5632789b",
+    "release": "0.1.0.dev15-c4616386f921",
+    "version": "0.1.0.dev15"
+  },
+  "control_files": [
+    {
+      "name": "README.md",
+      "sha256": "c3b05b336825af38bd60acebf095eb3e8ad6f9d05242678496017cb531f1af88",
+      "size": 8438
+    },
+    {
+      "name": "check_toolchain.py",
+      "sha256": "2bc3c8fb6d3eb8c936bf5f31e7615884aadee912e9980eb1b1531c4cd2ec6441",
+      "size": 12425
+    }
+  ],
+  "files": [
+    {
+      "name": "install_toolchain.py",
+      "sha256": "4eb1f0f9a21c11b6b1687b3fcb8c4446b4a3b9c7851ace82625669f0386a6c97",
+      "size": 25561
+    },
+    {
+      "name": "runtime_setup.py",
+      "sha256": "2ec650de9f115f7331743460987d20ba02e5fad6b9817ffc223e8dce65878c50",
+      "size": 47809
+    },
+    {
+      "name": "sign_read.py",
+      "sha256": "f2ece29620c4b0f515c8f9e5e53751dd07a3ed5636c2cd52b4297ae625a84d41",
+      "size": 16804
+    },
+    {
+      "name": "run_multicurrency_read.py",
+      "sha256": "71a7f9cc6a67d344b713ed022a76e482aff535106884e1759df11bbe9d8d7cf4",
+      "size": 56277
+    },
+    {
+      "name": "multicurrency_sql_oracle.py",
+      "sha256": "0e7fb2556b77e792be89268db2aff92eb054598a1ca9a3a4475da183a0de98ba",
+      "size": 25269
+    },
+    {
+      "name": "verify_evidence.py",
+      "sha256": "7a4cb9c432d852f45b4bf086ac3f6d7e255206f3394815fea90b45f4e794e168",
+      "size": 83065
+    },
+    {
+      "name": "read_plan.json",
+      "sha256": "860de4fb5b4efe41f760295b0b8eee4ae8b63f15d70e25e418640c8eb5f04c80",
+      "size": 7316
+    }
+  ],
+  "schema_version": 2,
+  "toolchain_version": "0.1.0.dev15-read-toolchain.1"
+}
