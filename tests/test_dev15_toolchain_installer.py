@@ -299,7 +299,7 @@ def test_rejects_partial_existing_target_without_overwrite(installer, tmp_path: 
     toolchains = install_root / "toolchains"
     toolchains.mkdir(parents=True, mode=0o700)
     target = _target(installer, install_root)
-    target.mkdir(mode=0o555)
+    target.mkdir(mode=0o700)
     sentinel = target / "do-not-delete"
     sentinel.write_bytes(b"existing\n")
     sentinel.chmod(0o444)

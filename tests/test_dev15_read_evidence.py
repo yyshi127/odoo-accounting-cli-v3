@@ -531,9 +531,11 @@ class Dev15ReadEvidenceTest(unittest.TestCase):
 
     def test_bundle_manifest_rejects_tamper_and_extra_file(self) -> None:
         evidence = self.build_fixture()
-        os.chmod(evidence / "response.json", 0o600)
-        with (evidence / "response.json").open("ab") as stream:
+        response = evidence / "response.json"
+        os.chmod(response, 0o600)
+        with response.open("ab") as stream:
             stream.write(b" ")
+        os.chmod(response, 0o400)
         with self.assertRaisesRegex(ValueError, "hash/size"):
             self.verify(evidence)
         evidence = self.build_fixture("evidence-extra")

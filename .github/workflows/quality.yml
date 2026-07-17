@@ -109,20 +109,42 @@ jobs:
           test "$(id -u)" -ne 0
           command -v systemd-run
           systemd_state=
-          for _attempt in $(seq 1 30); do
+          systemd_previous=
+          systemd_attempts=0
+          systemd_started=$SECONDS
+          for _attempt in $(seq 1 90); do
+            systemd_attempts=$_attempt
             systemd_state="$(
               sudo systemctl is-system-running 2>&1 || true
             )"
+            if [[ "$systemd_state" != "$systemd_previous" ]]; then
+              printf 'systemd readiness state=%q attempt=%s elapsed_seconds=%s\n' \
+                "$systemd_state" "$systemd_attempts" \
+                "$((SECONDS - systemd_started))"
+              systemd_previous=$systemd_state
+            fi
             case "$systemd_state" in
               running|degraded) break ;;
-              initializing|starting) sleep 1 ;;
+              initializing|starting)
+                if (( _attempt < 90 )); then
+                  sleep 1
+                fi
+                ;;
               *) break ;;
             esac
           done
           case "$systemd_state" in
             running|degraded) ;;
             *)
-              echo "systemd manager is unavailable: $systemd_state" >&2
+              annotation_state=$systemd_state
+              case "$annotation_state" in
+                ""|*[!A-Za-z0-9_.-]*) annotation_state=unexpected-output ;;
+              esac
+              printf 'systemd readiness failed: final_state=%q attempts=%s elapsed_seconds=%s\n' \
+                "$systemd_state" "$systemd_attempts" \
+                "$((SECONDS - systemd_started))" >&2
+              printf '%s\n' \
+                "::error file=.github/workflows/quality.yml,title=Dev9 systemd readiness::systemd did not reach running/degraded; final_state=$annotation_state attempts=$systemd_attempts elapsed_seconds=$((SECONDS - systemd_started))"
               sudo systemctl list-jobs --no-pager || true
               sudo systemctl --failed --no-pager || true
               sudo journalctl -b --no-pager -n 100 || true
