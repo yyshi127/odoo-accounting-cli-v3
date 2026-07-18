@@ -13,10 +13,11 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-Four reads are staged execution candidates for the dedicated test environment:
-the ACL-filtered capability registry, trial balance, and historical AR and AP
-open items. Staging is separate from enablement: no capability is yet marked
-enabled or routed through Pi. No write capability is staged or enabled;
+Five reads are staged execution candidates for the dedicated test environment:
+the ACL-filtered capability registry, trial balance, historical AR and AP open
+items, and multicurrency balance. Staging is separate from enablement: no
+capability is yet marked enabled or routed through Pi. No write capability is
+staged or enabled;
 sandbox and production remain closed until their approval, idempotency,
 verification, recovery, and evidence gates pass.
 
@@ -40,6 +41,14 @@ fail closed. They never return a simulated Odoo success.
 
 The bare wheel command is limited to development smoke such as `--version` and
 registry-contract inspection; it is not a production accounting entry point.
+
+The Dev19 E00b sandbox-isolation gate is also deliberately non-authorizing.
+It pins the installed release, E00a and recovery evidence, host identity,
+independently installed approval roots, live UTC/monotonic policy window, and
+an isolated namespace-probe contract, but still returns
+`live_collector_unavailable`. It cannot issue an E00b receipt or enable a
+sandbox write until the trusted live collector, nonce ledger, signed report,
+and real sandbox evidence exist. See `deployment/dev19/README.md`.
 
 All machine-facing output is JSON. Real accounting success additionally
 requires an Odoo-bound signed receipt. CLI-Anything v0.4.0 supplies the CLI and

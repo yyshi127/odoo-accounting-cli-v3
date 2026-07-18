@@ -483,7 +483,7 @@ jobs:
           JS
 
   deployment-toolchain:
-    name: dev8 + dev15 + dev18 deployment toolchains
+    name: dev8 + dev15 + dev18 + dev19 deployment toolchains
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -528,6 +528,61 @@ jobs:
                   f"failures={len(failures)} errors={len(errors)}"
               )
           print("dev18_capacity_gate_tests=167")
+          PY
+      - name: Verify the Dev19 fail-closed isolation contracts on Linux
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev19-isolation-contracts.xml"
+          python -m pytest -q --junitxml="$report" \
+            tests/test_dev19_sandbox_isolation_gate.py \
+            tests/test_dev19_sandbox_namespace_probe.py \
+            -k 'not real_linux_root_captures_the_full_initial_host_context'
+          python - "$report" 296 <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          expected = int(sys.argv[2])
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != expected or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev19 Linux contract gate failed: "
+                  f"tests={len(tests)} expected={expected} "
+                  f"failures={len(failures)} errors={len(errors)} "
+                  f"skipped={len(skipped)}"
+              )
+          print(f"dev19_linux_contract_tests={len(tests)}")
+          PY
+      - name: Exercise the Dev19 initial-host context as Linux root
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev19-root-host-context.xml"
+          sudo env \
+            DEV19_ROOT_HOST_CONTEXT_INTEGRATION=1 \
+            "$(command -v python)" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_dev19_sandbox_isolation_gate.py::test_real_linux_root_captures_the_full_initial_host_context
+          sudo "$(command -v python)" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 1 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev19 root host-context gate failed: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev19_root_host_context_tests=1")
           PY
       - name: Exercise the dev15 immutable installer as Linux root
         shell: bash

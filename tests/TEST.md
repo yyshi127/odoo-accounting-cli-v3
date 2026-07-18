@@ -18,9 +18,9 @@ where practical, then record actual execution evidence separately.
 - The observed database named `codex_sgf_test_20260713_01` is not a write sandbox
   until its purpose, owner, reset method, and allowed companies are confirmed.
 - `acct.registry.list.v1`, `acct.gl.trial_balance.v1`,
-  `acct.ar.open_items.v1`, and `acct.ap.open_items.v1` are staged for the
-  isolated `test` environment; no capability is enabled and no write
-  capability is staged.
+  `acct.ar.open_items.v1`, `acct.ap.open_items.v1`, and
+  `acct.multicurrency.balance_read.v1` are staged for the isolated `test`
+  environment; no capability is enabled and no write capability is staged.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -404,17 +404,46 @@ At the current local development checkpoint:
   target gate must additionally inventory the external system Python and Click
   bytes; they are not yet release-scoped, so this slice alone is not a
   production promotion;
-- the in-progress dev9 sidecar adds the business-only Pi-to-UDS broker, durable
+- dev9 committed the business-only Pi-to-UDS broker, durable
   session/company authority, independent approval, shared-store cross-release
   prepare idempotency, retained release/key routing, real per-release read/write
   HMAC response verification, and a separate append-only Broker attempt audit.
-  It also contains strict precheck/handler/verification/recovery implementations
+  It contains strict precheck/handler/verification/recovery implementations
   for the 13 registered write capabilities. Local loss-response, replay,
   cross-company, tamper, audit-failure, wrong-key, and historical-route tests are
-  development evidence only until the exact release is frozen and repeated on
-  target Linux with a dedicated sandbox and real Odoo receipts;
-- no sandbox write lifecycle has been authorized or recorded; and
-- no production write is authorized.
+  historical development evidence, not current-HEAD Odoo receipts or promotion
+  evidence;
+- dev10-dev14 committed control-plane hardening for session concurrency and
+  recovery, canonical Odoo/Pi release binding, approval/SQLite reconciliation,
+  Pi evidence and target safety, recovery v2, fail-closed namespace probes, and
+  immutable release installation. These controls are not real Odoo write
+  evidence;
+- dev15-dev17 added the staged multicurrency balance read. Its fixed Dev15
+  release produced real-Odoo signed read/oracle receipts, after which the
+  signed-tag-bound immutable read-evidence toolchain was added and its Pi
+  control digest corrected. Those receipts bind that historical release, not
+  current HEAD. The implemented automatic Odoo recovery closure is limited to
+  an exact sandbox draft customer invoice and has no real-write receipt;
+- dev18 adds the fail-closed E00a read-only capacity gate. Its Ubuntu CI contract
+  requires exactly 167 Linux gate tests with zero skips, failures, or errors,
+  plus 13 real PostgreSQL 16 integration cases. GitHub `quality #40` passed that
+  complete workflow for commit `c03dbb7`; this is Linux/CI evidence, not a
+  target-host E00a receipt. The target remains blocked by a
+  `22,241,341,440`-byte capacity shortfall and `/run/postgresql` mode `2775`, so
+  no target E00a pass receipt exists;
+- dev19 adds a strictly non-authorizing E00b isolation contract, exact
+  release/E00a/recovery/host approval bindings, live UTC plus monotonic policy
+  checks, fixed-root digest rechecks, full current/for-children namespace
+  identity, and descriptor-pinned Linux file reads/hashes. Its Ubuntu workflow
+  requires exactly 296 combined gate/probe cases with zero skips, failures, or
+  errors plus one root host-context integration case. The operational CLI still
+  returns `live_collector_unavailable`; it has no nonce-consumption ledger,
+  signed report, trusted live Odoo/systemd collector, target-host E00b receipt,
+  or write authorization; and
+- every current registry `evidence.receipts` array is empty: zero capabilities
+  are enabled and zero write capabilities are staged. E00b, a real sandbox
+  Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox
+  or production write is authorized.
 
 The normal local unit command is:
 
