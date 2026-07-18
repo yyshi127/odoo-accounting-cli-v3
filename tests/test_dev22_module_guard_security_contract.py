@@ -60,6 +60,15 @@ def test_bootstrap_refuses_catalog_adoption_before_any_privileged_mutation():
         assert poison_surface in sql[preflight : sql.index("ALTER DATABASE")]
 
 
+def test_missing_bootstrap_role_variables_exit_nonzero_on_postgresql_16():
+    preamble = _sql().split("BEGIN;", 1)[0]
+
+    assert "\\quit 3" not in preamble
+    assert preamble.count("SELECT 1 / 0;") == 3
+    for role in ("runtime_role", "maintenance_role", "finalizer_role"):
+        assert f"requires -v {role}=..." in preamble
+
+
 def test_maintenance_loader_has_no_persistent_login_or_runtime_membership():
     sql = _sql()
 

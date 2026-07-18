@@ -17,17 +17,17 @@
 \if :{?runtime_role}
 \else
 \echo 'module_guard_v1.sql requires -v runtime_role=...'
-\quit 3
+SELECT 1 / 0;
 \endif
 \if :{?maintenance_role}
 \else
 \echo 'module_guard_v1.sql requires -v maintenance_role=...'
-\quit 3
+SELECT 1 / 0;
 \endif
 \if :{?finalizer_role}
 \else
 \echo 'module_guard_v1.sql requires -v finalizer_role=...'
-\quit 3
+SELECT 1 / 0;
 \endif
 
 SELECT set_config('odoo_accounting_cli_v3.runtime_role', :'runtime_role', false);
