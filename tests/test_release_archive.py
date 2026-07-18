@@ -34,6 +34,10 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
         "deployment/dev9/render-systemd-service.py",
         "deployment/dev9/run-private-mount-gate.sh",
         "deployment/dev11/README.md",
+        "deployment/dev18/README.md",
+        "deployment/dev18/sandbox_capacity_gate.py",
+        "docs/TARGET_HOST_CAPACITY_AUDIT_2026-07-17.md",
+        "docs/TARGET_HOST_DEV18_SQL_PROBE_2026-07-17.md",
         "tools/build_release.py",
         "tools/check_source_boundary.py",
         "tools/verify_release.py",
@@ -142,6 +146,19 @@ DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS = frozenset(
         "deployment/dev15/read_plan.json",
     }
 )
+DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS = frozenset(
+    {
+        "deployment/dev18/README.md",
+        "deployment/dev18/sandbox_capacity_gate.py",
+        "docs/TARGET_HOST_CAPACITY_AUDIT_2026-07-17.md",
+        "docs/TARGET_HOST_DEV18_SQL_PROBE_2026-07-17.md",
+        "tests/test_dev18_attested_psql_runner.py",
+        "tests/test_dev18_pg_config_socket_closure.py",
+        "tests/test_dev18_postgres_integration.py",
+        "tests/test_dev18_protected_resource_closure.py",
+        "tests/test_dev18_sandbox_capacity_gate.py",
+    }
+)
 WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
     {
         "VERSION",
@@ -246,6 +263,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
 )
 REQUIRED_WRITE_RELEASE_MEMBERS = (
     DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS
+    | DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
     | WRITE_RUNTIME_RELEASE_MEMBERS
@@ -269,6 +287,7 @@ class ReleaseArchiveTest(unittest.TestCase):
 
         production_trees = (
             "deployment/dev15",
+            "deployment/dev18",
             "deployment/dev9",
             "odoo_addons/odoo_accounting_cli_v3_control",
             "pi_bridge",
@@ -326,6 +345,25 @@ class ReleaseArchiveTest(unittest.TestCase):
         self.assertEqual(discovered, DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS)
         self.assertTrue(
             DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS.issubset(
+                REQUIRED_WRITE_RELEASE_MEMBERS
+            )
+        )
+
+    def test_dev18_capacity_gate_is_an_exact_release_member_set(self) -> None:
+        directory = PROJECT_ROOT / "deployment" / "dev18"
+        discovered = {
+            path.relative_to(PROJECT_ROOT).as_posix()
+            for path in directory.iterdir()
+            if path.is_file() and not path.name.endswith((".pyc", ".pyo"))
+        }
+        expected = {
+            name
+            for name in DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS
+            if name.startswith("deployment/dev18/")
+        }
+        self.assertEqual(discovered, expected)
+        self.assertTrue(
+            DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS.issubset(
                 REQUIRED_WRITE_RELEASE_MEMBERS
             )
         )

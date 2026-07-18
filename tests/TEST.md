@@ -171,6 +171,75 @@ company-9 USD golden (`1950.00 CNY`, `300.00 USD`, factor `6.5`) through the
 exact immutable release's signed non-superuser receipt; the read-only SQL
 answer alone is not release verification.
 
+## Gate E00 — dedicated sandbox prerequisites
+
+E00a is the read-only capacity gate. Run the exact release member
+`deployment/dev18/sandbox_capacity_gate.py` as root on Linux against an
+externally SHA-256-bound reviewed policy. The policy pins the immutable
+collector, requires a root-owned physical policy path, and pins PostgreSQL executables/systemd
+service/process/data directory/listener/cluster, SQL session/current-user
+authority, live backend-to-postmaster process identity, complete semantic and
+physical PostgreSQL configuration, socket/NSS membership, complete catalog,
+protected Odoo UUID relation identities, host, reviewed mountinfo rows, targets,
+and protected resources. The program requires
+the host PID 1 mount namespace and obtains open-path device IDs, `fstatvfs`,
+catalog/UUID, locked relation metadata, machine/boot identity, bounded
+UTC/monotonic capture window, and
+protected-resource before/after observations live;
+it accepts neither a caller observation nor a clock override. PostgreSQL,
+filestore, runtime/evidence, backup, and reserve allocations are aggregated by
+actual filesystem device for both bytes and inodes. The target database must
+remain absent; host/target bindings, protected database UUIDs and their
+policy-hashed ordinary-table identities, and V2/Pi/current resource identities
+must not drift. V2/Pi directory identities cover every physical ancestor's
+path/inode/device/mode/owner routing identity, every descendant, byte count,
+metadata/content hash, and covering mount. Unrelated sibling entry churn does
+not invalidate a stable ancestor identity; intermediate symlink routing,
+ancestor mode/owner changes, and object-device/mountinfo disagreement are
+rejected. Expected absence binds the existing ancestor chain and mount instead
+of using a null digest. Each UUID read uses one
+live-attested read-only repeatable-read transaction,
+locks `ONLY public.ir_config_parameter`, and requires a `pg_catalog`-only
+structure/digest assertion before the explicitly qualified table query. An
+unlisted or concurrently changed
+database catalog, mount topology drift, private mount namespace, PostgreSQL
+service/process restart, listener substitution, or capture timeout fails closed.
+A configuration pass additionally proves one server-side aggregate role-
+password-vector digest, configuration-load time, effective-to-file setting
+binding, include/TLS/authentication asset identity, empty preload sources, and
+reviewed postmaster arguments/environment. Mixed-case GUC names are compared
+case-insensitively and duplicate aliases fail. Files newer than the last
+configuration load, unsupported external authentication, dynamic-loader
+injection, and a group- or world-writable Unix-socket directory are rejection
+cases; a matching policy hash cannot waive them.
+A valid but insufficient observation exits
+`1`; invalid or digest-mismatched evidence exits `2`. Even exit `0` must report
+all provisioning and accounting-write authorizations as false.
+
+The Ubuntu deployment-toolchain job must execute exactly 167 Dev18 capacity,
+resource, configuration/socket, and attested-runner tests with zero skips,
+failures, or errors. CI additionally executes thirteen PostgreSQL 16 integration
+cases, including direct
+non-superuser sessions. They prove SQL-produced identity digests, hostile
+`search_path` resistance, wrong digest/view/type/owner fail-closed ordering,
+DDL lock behavior, expression/partial-index rejection without invoking the
+owner function, a live backend PID/PPID/executable/cgroup/namespace attestation
+on the same connection, password-vector sensitivity without verifier output,
+stale-HBA rejection/reload acceptance, and physical preload rejection before
+the first SQL probe. It also proves PostgreSQL accepts uppercase long-form GUC
+names while the gate rejects case-variant configuration/preload overrides.
+Skips are forbidden in that Linux job.
+
+E00b is a separate real-host isolation and recovery-readiness gate. It must
+prove a different PostgreSQL cluster/authority and restricted role, exact
+sandbox-only database name/UUID/filter, dedicated Odoo identity/data directory/
+filestore, cron and outbound integrations disabled, non-superuser executor,
+independent approver, isolated state, tested backup/reset, and denial of every
+production database/configuration/filestore/mutable-add-on path. It also proves
+V2, Pi, production Odoo, `current`, and existing unit identities remain
+unchanged. E00a does not satisfy E00b. Until both pass, no write capability may
+be staged and `write_execution_mode` remains `disabled`.
+
 ## Gate E — sandbox write lifecycle
 
 Before running this gate, the operator must record the designated sandbox

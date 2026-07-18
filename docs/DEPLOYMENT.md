@@ -378,6 +378,67 @@ database filter, disabled scheduled jobs, non-superuser executor, separately
 authorized approver, and isolated write state. Do not reuse a production clone
 whose UUID, filestore, cron workers, or live connections are shared.
 
+Before any provisioning action, run the exact immutable release member
+`deployment/dev18/sandbox_capacity_gate.py` as specified in
+`deployment/dev18/README.md`. Its reviewed policy is externally SHA-256-bound,
+is a root-owned immutable-path artifact, pins the collector plus PostgreSQL
+executables, systemd service/process/data directory/listener/cluster, complete
+database catalog, complete PostgreSQL configuration and socket/NSS closure,
+SQL session/current-user authority, live backend-to-postmaster identity, every
+protected Odoo UUID relation identity, and reviewed mountinfo identities.
+The configuration closure binds one server-side aggregate role-password-vector
+digest without returning individual verifiers, `pg_conf_load_time()`, effective
+and file settings, HBA/ident rules, role/database defaults, include roots,
+`postgresql.auto.conf`, and TLS/authentication assets. It rejects stale
+unloaded files, unsupported external authentication, every non-empty preload
+source, ambiguous postmaster arguments, and dynamic-loader environment
+injection before accepting SQL evidence. The reviewed Unix-socket directory
+must be owner-only writable; a policy-bound member hash never authorizes a
+group- or world-writable listener path.
+Protected UUID reads use one live-attested, locked, read-only, repeatable-read
+transaction: a `pg_catalog`-only
+structure and reviewed-digest assertion must pass before the explicitly
+qualified `public.ir_config_parameter` query can execute. The root-only Linux
+program requires the host PID 1 mount namespace and captures fresh device,
+database, host, capture-window, and protected-resource observations itself.
+Protected directory trees have no entry truncation and bind each physical
+ancestor's path/inode/device/mode/owner identity plus all descendant
+content/metadata/counts/mounts. Unrelated sibling entry churn is not an
+ancestor routing change. Intermediate symlink routing is rejected and each
+present object's device must match its selected mountinfo row. Expected absence
+binds its physical ancestor chain and covering mount with a non-null digest.
+Caller-supplied observations and clock overrides are rejected. The gate aggregates PostgreSQL,
+filestore, runtime/evidence, backup, and reserve bytes and inodes by actual
+filesystem device, requires the proposed database to remain absent, and fails
+on protected database name/UUID/relation, V2, Pi, or `current` drift. Exit `0`
+means only that the
+host is eligible for a separate sandbox-provisioning review. The tool always
+reports provisioning, sandbox accounting write, and production accounting
+write authorization as false.
+
+Capacity acceptance is Gate E00a, not sandbox qualification. Gate E00b must
+subsequently prove an independent PostgreSQL cluster and restricted role,
+database UUID, Odoo service/OS user, exact database filter, data directory and
+filestore, disabled cron/mail/external integrations, outbound network denial,
+non-superuser executor, independent approver, isolated V3 state, tested
+backup/reset, and inability to reach any production database/configuration/
+filestore/mutable add-on path. Until E00b has immutable real-host evidence,
+`write_execution_mode` stays `disabled` and no registry write capability is
+staged. Neither capacity gate may create the objects it evaluates.
+
+The initial target-host capacity blocker, database/UUID inventory, and
+unchanged V2/Pi/current evidence are retained in
+`docs/TARGET_HOST_CAPACITY_AUDIT_2026-07-17.md`. It is an independent read-only
+baseline, not a substituted or backdated Dev18 collector receipt.
+The real PostgreSQL 16.14/Odoo 19 syntax and locked-relation development probe
+is separately recorded in
+`docs/TARGET_HOST_DEV18_SQL_PROBE_2026-07-17.md`; it is also not an immutable
+capacity receipt and does not alter the host-capacity blocker.
+That probe also records the target's mode-`2775` `/run/postgresql` socket
+directory. The current Dev18 collector rejects that mode before SQL; a
+persistent owner-only-writable remediation and a fresh immutable-release
+capture require separate review and authorization.
+
 Invoke the six standard actions only through the immutable release launcher:
 prepare, preview, approve-execute, status, result, and recover. Send each signed
 JSON request over standard input. For every staged write capability retain:
