@@ -1284,12 +1284,12 @@ BEGIN
            AND maintenance_id = guard_state.maintenance_id
            AND EXISTS (
                SELECT 1
-               FROM odoo_accounting_cli_v3_guard.module_maintenance_authorization AS authorization
-               WHERE authorization.maintenance_id = guard_state.maintenance_id
-                 AND authorization.consumed_at IS NOT NULL
-                 AND authorization.completed_at IS NULL
-                 AND authorization.recovered_at IS NULL
-                 AND authorization.expires_at = guard_state.maintenance_expires_at
+               FROM odoo_accounting_cli_v3_guard.module_maintenance_authorization AS maintenance_authorization
+               WHERE maintenance_authorization.maintenance_id = guard_state.maintenance_id
+                 AND maintenance_authorization.consumed_at IS NOT NULL
+                 AND maintenance_authorization.completed_at IS NULL
+                 AND maintenance_authorization.recovered_at IS NULL
+                 AND maintenance_authorization.expires_at = guard_state.maintenance_expires_at
            )
            AND maintenance_holder_pid = guard_state.maintenance_holder_pid
            AND maintenance_holder_backend_start = (
@@ -1538,9 +1538,9 @@ BEGIN
         session_user::name
     ) ON CONFLICT (maintenance_id) DO NOTHING;
     GET DIAGNOSTICS inserted = ROW_COUNT;
-    SELECT authorization.* INTO existing
-    FROM odoo_accounting_cli_v3_guard.module_maintenance_authorization AS authorization
-    WHERE authorization.maintenance_id = requested_maintenance_id;
+    SELECT maintenance_authorization.* INTO existing
+    FROM odoo_accounting_cli_v3_guard.module_maintenance_authorization AS maintenance_authorization
+    WHERE maintenance_authorization.maintenance_id = requested_maintenance_id;
     IF NOT FOUND
        OR existing.database_uuid <> expected_database_uuid
        OR existing.guard_installation_id <> expected_guard_installation_id
@@ -2022,7 +2022,7 @@ DECLARE
     opened bigint;
     runtime_name name;
     maintenance_name name;
-    authorization odoo_accounting_cli_v3_guard.module_maintenance_authorization%ROWTYPE;
+    maintenance_authorization_row odoo_accounting_cli_v3_guard.module_maintenance_authorization%ROWTYPE;
     maintenance_session_count bigint;
     maintenance_can_login boolean;
     maintenance_connection_limit integer;
@@ -2091,7 +2091,7 @@ BEGIN
             ERRCODE = '42501',
             MESSAGE = 'module guard maintenance role has concurrent sessions';
     END IF;
-    SELECT candidate.* INTO authorization
+    SELECT candidate.* INTO maintenance_authorization_row
     FROM odoo_accounting_cli_v3_guard.module_maintenance_authorization AS candidate
     WHERE candidate.maintenance_id = requested_maintenance_id
       AND candidate.expires_at > pg_catalog.clock_timestamp()
@@ -2100,7 +2100,7 @@ BEGIN
       AND candidate.recovered_at IS NULL
     FOR UPDATE;
     IF NOT FOUND
-       OR authorization.expires_at > maintenance_valid_until
+       OR maintenance_authorization_row.expires_at > maintenance_valid_until
     THEN
         RAISE EXCEPTION USING
             ERRCODE = '55006',
@@ -2111,7 +2111,7 @@ BEGIN
            epoch = epoch + 1,
            opened_epoch = epoch + 1,
            maintenance_id = requested_maintenance_id,
-           maintenance_expires_at = authorization.expires_at,
+           maintenance_expires_at = maintenance_authorization_row.expires_at,
            maintenance_holder_pid = pg_catalog.pg_backend_pid(),
            maintenance_holder_backend_start = holder_start
      WHERE id = 1
@@ -2119,9 +2119,9 @@ BEGIN
        AND schema_version = 2
        AND NOT module_guard_open
        AND epoch = expected_epoch
-       AND guard_installation_id = authorization.guard_installation_id
-       AND database_oid = authorization.database_oid
-       AND database_uuid = authorization.database_uuid
+       AND guard_installation_id = maintenance_authorization_row.guard_installation_id
+       AND database_oid = maintenance_authorization_row.database_oid
+       AND database_uuid = maintenance_authorization_row.database_uuid
        AND unresolved_effect_count = 0
        AND unresolved_effect_count = (
            SELECT pg_catalog.count(*)
@@ -2172,7 +2172,7 @@ BEGIN
            consumed_at = pg_catalog.transaction_timestamp()
      WHERE maintenance_id = requested_maintenance_id
        AND consumed_at IS NULL
-       AND expires_at = authorization.expires_at;
+       AND expires_at = maintenance_authorization_row.expires_at;
     IF NOT FOUND THEN
         RAISE EXCEPTION USING
             ERRCODE = '55006',

@@ -196,7 +196,8 @@ def test_privileged_bootstrap_is_one_transaction_and_missing_inputs_exit_nonzero
     assert sql.index("BEGIN;") < sql.index("DO $bootstrap_roles$")
     assert sql.index("BEGIN;") < sql.index("ALTER DATABASE")
     assert sql.count("COMMIT;") == 1
-    assert sql.count("\\quit 3") == 3
+    assert sql.count("SELECT 1 / 0;") == 3
+    assert "\\quit 3" not in sql
 
 
 def test_module_dml_trigger_requires_exclusive_protocol_and_advances_epoch_once_per_statement():
