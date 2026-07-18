@@ -21,9 +21,13 @@ from ..contracts import validate_value
 from ..draft_invoice_recovery import (
     DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
     DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+    DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+    DRAFT_VENDOR_BILL_RECOVERY_ORACLE,
     classic_read_many2one_id,
     customer_invoice_business_binding,
     customer_invoice_document_binding,
+    vendor_bill_business_binding,
+    vendor_bill_document_binding,
 )
 from ..domain.write_semantics import validate_write_semantics
 from ..gateway import RequestContext
@@ -792,7 +796,7 @@ def _empty_x2many(values: Mapping[str, Any], field: str) -> bool:
     return field not in values or values[field] == []
 
 
-def _assert_available_draft_customer_invoice_snapshot(
+def _assert_available_draft_document_snapshot(
     operation: Operation,
     *,
     raw_action: Mapping[str, Any] | None,
@@ -800,6 +804,18 @@ def _assert_available_draft_customer_invoice_snapshot(
     action_identity: tuple[str, int],
     guard_identities: list[tuple[str, int]],
 ) -> None:
+    vendor = operation.capability_id == "acct.bill.vendor_create.v1"
+    document_label = "vendor bill" if vendor else "customer invoice"
+    expected_document_binding = (
+        vendor_bill_document_binding(operation.parameters)
+        if vendor
+        else customer_invoice_document_binding(operation.parameters)
+    )
+    expected_business_binding = (
+        vendor_bill_business_binding(operation.parameters)
+        if vendor
+        else customer_invoice_business_binding(operation.parameters)
+    )
     action_values = raw_action.get("values") if raw_action else None
     required_action_fields = {
         "state",
@@ -825,12 +841,15 @@ def _assert_available_draft_customer_invoice_snapshot(
         "odoo_cli_v3_document_binding",
         "odoo_cli_v3_business_binding",
     }
+    if vendor:
+        required_action_fields.update({"stock_move_ids", "landed_costs_ids"})
     if (
         not isinstance(action_values, Mapping)
         or not required_action_fields.issubset(action_values)
         or raw_action.get("state") != "draft"
         or action_values.get("state") != "draft"
-        or action_values.get("move_type") != "out_invoice"
+        or action_values.get("move_type")
+        != ("in_invoice" if vendor else "out_invoice")
         or classic_read_many2one_id(action_values.get("company_id"))
         != operation.company_id
         or classic_read_many2one_id(action_values.get("journal_id"))
@@ -845,12 +864,13 @@ def _assert_available_draft_customer_invoice_snapshot(
         or action_values.get("inalterable_hash") is not False
         or action_values.get("is_manually_modified") is not False
         or action_values.get("odoo_cli_v3_document_binding")
-        != customer_invoice_document_binding(operation.parameters)
+        != expected_document_binding
         or action_values.get("odoo_cli_v3_business_binding")
-        != customer_invoice_business_binding(operation.parameters)
+        != expected_business_binding
     ):
         raise OdooWriteBootstrapError(
-            "available recovery action is not a pristine V3 draft customer invoice"
+            "available recovery action is not a pristine V3 draft "
+            + document_label
         )
     singular_links = (
         "auto_post_origin_id",
@@ -877,6 +897,8 @@ def _assert_available_draft_customer_invoice_snapshot(
         "edi_document_ids",
         "expense_ids",
         "pos_order_ids",
+        "stock_move_ids",
+        "landed_costs_ids",
     )
     if (
         action_values.get("need_cancel_request", False) is not False
@@ -918,6 +940,10 @@ def _assert_available_draft_customer_invoice_snapshot(
         "matched_credit_ids",
         "display_type",
     }
+    if vendor:
+        required_line_fields.update(
+            {"cogs_origin_id", "is_landed_costs_line"}
+        )
     for identity in guard_identities:
         line_values = raw_by_key[identity].get("values")
         if (
@@ -937,12 +963,14 @@ def _assert_available_draft_customer_invoice_snapshot(
             or not _empty_many2one(line_values, "statement_line_id")
             or not _empty_many2one(line_values, "purchase_line_id")
             or not _empty_many2one(line_values, "expense_id")
+            or not _empty_many2one(line_values, "cogs_origin_id")
             or not _empty_x2many(line_values, "matched_debit_ids")
             or not _empty_x2many(line_values, "matched_credit_ids")
             or not _empty_x2many(line_values, "asset_ids")
             or not _empty_x2many(line_values, "sale_line_ids")
             or line_values.get("deferred_start_date", False) is not False
             or line_values.get("deferred_end_date", False) is not False
+            or line_values.get("is_landed_costs_line", False) is not False
             or line_values.get("display_type") == "cogs"
         ):
             raise OdooWriteBootstrapError(
@@ -995,19 +1023,31 @@ def _execution_evidence(
             raise OdooWriteBootstrapError("write recovery target was not read back")
         target_records.append(dict(reference))
     if status == "available":
+        if operation.capability_id == "acct.invoice.customer_create.v1":
+            expected_method = DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
+            expected_oracle = DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
+            document_label = "customer invoice"
+        elif operation.capability_id == "acct.bill.vendor_create.v1":
+            expected_method = DRAFT_VENDOR_BILL_RECOVERY_METHOD
+            expected_oracle = DRAFT_VENDOR_BILL_RECOVERY_ORACLE
+            document_label = "vendor bill"
+        else:
+            expected_method = None
+            expected_oracle = None
+            document_label = "document"
         if (
             set(recovery) != {
                 "status", "method", "targets", "guards", "oracle_id"
             }
-            or operation.capability_id != "acct.invoice.customer_create.v1"
+            or expected_method is None
             or operation.environment != "sandbox"
             or operation.parameters.get("posting_mode") != "draft"
-            or method != DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
-            or recovery.get("oracle_id")
-            != DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
+            or method != expected_method
+            or recovery.get("oracle_id") != expected_oracle
         ):
             raise OdooWriteBootstrapError(
-                "available recovery is restricted to a sandbox draft customer invoice"
+                "available recovery is restricted to a sandbox draft "
+                + document_label
             )
         guards = recovery.get("guards")
         if (
@@ -1061,7 +1101,7 @@ def _execution_evidence(
             if isinstance(item, Mapping)
         }
         raw_action = raw_by_key.get(action_identity)
-        _assert_available_draft_customer_invoice_snapshot(
+        _assert_available_draft_document_snapshot(
             operation,
             raw_action=raw_action,
             raw_by_key=raw_by_key,
@@ -1080,7 +1120,7 @@ def _execution_evidence(
                 {"model": model_name, "record_id": record_id}
                 for model_name, record_id in ordered_guard_identities
             ],
-            "oracle_id": DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+            "oracle_id": expected_oracle,
         }
         plan = create_recovery_plan_v2(
             origin_operation_id=operation.operation_id,
@@ -1090,7 +1130,7 @@ def _execution_evidence(
             requires_approval=True,
             action_targets=target_records,
             guard_records=guard_records,
-            oracle_id=DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+            oracle_id=expected_oracle,
             parameters=recovery_parameters,
         )
         return {

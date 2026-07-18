@@ -1,4 +1,4 @@
-"""Pure protocol bindings for the one allowlisted draft-invoice recovery."""
+"""Pure protocol bindings for allowlisted draft-document recoveries."""
 
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD = (
 )
 DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE = (
     "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+)
+DRAFT_VENDOR_BILL_RECOVERY_METHOD = "cancel_pristine_v3_draft_vendor_bill_v1"
+DRAFT_VENDOR_BILL_RECOVERY_ORACLE = (
+    "cancel_pristine_v3_draft_vendor_bill_exact_v1"
 )
 
 
@@ -47,5 +51,28 @@ def customer_invoice_business_binding(parameters: Mapping[str, Any]) -> str:
     payload = {
         "business_kind": "customer_invoice",
         "identity": {"reference": parameters["reference"]},
+    }
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
+
+
+def vendor_bill_document_binding(parameters: Mapping[str, Any]) -> str:
+    payload = {
+        "capability_kind": "vendor_bill",
+        "parameters": {
+            key: parameters[key]
+            for key in sorted(parameters)
+            if key != "idempotency_key"
+        },
+    }
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
+
+
+def vendor_bill_business_binding(parameters: Mapping[str, Any]) -> str:
+    payload = {
+        "business_kind": "vendor_bill",
+        "identity": {
+            "partner_id": parameters["partner_id"],
+            "vendor_reference": parameters["vendor_reference"],
+        },
     }
     return hashlib.sha256(canonical_json(payload)).hexdigest()

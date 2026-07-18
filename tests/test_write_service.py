@@ -174,6 +174,7 @@ def _context(
     company_id: int = 7,
     parameters: dict[str, object] | None = None,
     token_id: str | None = None,
+    capability_id: str = "acct.invoice.customer_create.v1",
 ) -> RequestContext:
     bound_parameters = _invoice_parameters() if parameters is None else parameters
     return RequestContext(
@@ -185,7 +186,7 @@ def _context(
         auth_signature_purpose="auth_context_v1",
         auth_key_id="auth-v1",
         auth_request_digest=authentication_request_digest(
-            "acct.invoice.customer_create.v1", bound_parameters
+            capability_id, bound_parameters
         ),
         auth_signature="b" * 64,
         principal=f"pi:sandbox-user-{user_id}",
@@ -225,12 +226,38 @@ def _invoice_parameters(idempotency_key: str = "invoice-1") -> dict[str, object]
     }
 
 
+def _vendor_bill_parameters(
+    idempotency_key: str = "vendor-bill-1",
+) -> dict[str, object]:
+    parameters = _invoice_parameters(idempotency_key)
+    parameters.pop("reference")
+    parameters["vendor_reference"] = "BILL-SANDBOX-1"
+    return parameters
+
+
 def _execution_evidence(
     operation_id: str,
     *,
     succeeded: bool = True,
     draft_customer_invoice: bool = False,
+    draft_vendor_bill: bool = False,
 ) -> dict[str, object]:
+    draft_document = draft_customer_invoice or draft_vendor_bill
+    capability_id = (
+        "acct.bill.vendor_create.v1"
+        if draft_vendor_bill
+        else "acct.invoice.customer_create.v1"
+    )
+    recovery_method = (
+        "cancel_pristine_v3_draft_vendor_bill_v1"
+        if draft_vendor_bill
+        else "cancel_pristine_v3_draft_customer_invoice_v1"
+    )
+    recovery_oracle = (
+        "cancel_pristine_v3_draft_vendor_bill_exact_v1"
+        if draft_vendor_bill
+        else "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+    )
     before = create_record_snapshot(
         model="account.move",
         record_id=501,
@@ -242,18 +269,18 @@ def _execution_evidence(
         model="account.move",
         record_id=501,
         exists=True,
-        record_state="draft" if draft_customer_invoice else "posted",
+        record_state="draft" if draft_document else "posted",
         values={
             "amount_total": "100.00",
             "company_id": 7,
-            "state": "draft" if draft_customer_invoice else "posted",
+            "state": "draft" if draft_document else "posted",
         },
     )
     target = {
         "model": "account.move",
         "record_id": 501,
         "company_id": 7,
-        "record_state": "draft" if draft_customer_invoice else "posted",
+        "record_state": "draft" if draft_document else "posted",
         "record_fingerprint": hashlib.sha256(canonical_json(after)).hexdigest(),
     }
     guard_before = create_record_snapshot(
@@ -288,8 +315,8 @@ def _execution_evidence(
                 {"model": "account.move.line", "record_id": 502}
             ],
             "oracle_id": (
-                "cancel_pristine_v3_draft_customer_invoice_exact_v1"
-                if draft_customer_invoice
+                recovery_oracle
+                if draft_document
                 else "cancel_draft_move_exact_v1"
             ),
         }
@@ -301,8 +328,8 @@ def _execution_evidence(
         recovery_capability_id="acct.recovery.execute.v1",
         status="available" if succeeded else "manual_escalation",
         method=(
-            "cancel_pristine_v3_draft_customer_invoice_v1"
-            if succeeded and draft_customer_invoice
+            recovery_method
+            if succeeded and draft_document
             else "cancel_draft_move"
             if succeeded
             else "inspect_ambiguous_execution"
@@ -311,8 +338,8 @@ def _execution_evidence(
         action_targets=[target] if succeeded else [],
         guard_records=[guard] if succeeded else [],
         oracle_id=(
-            "cancel_pristine_v3_draft_customer_invoice_exact_v1"
-            if succeeded and draft_customer_invoice
+            recovery_oracle
+            if succeeded and draft_document
             else "cancel_draft_move_exact_v1"
             if succeeded
             else "manual_escalation"
@@ -321,7 +348,7 @@ def _execution_evidence(
     )
     return {
         "operation_id": operation_id,
-        "capability_id": "acct.invoice.customer_create.v1",
+        "capability_id": capability_id,
         "succeeded": succeeded,
         "odoo_records": [target, {key: guard[key] for key in target}] if succeeded else [],
         "difference": create_difference(
@@ -353,7 +380,7 @@ def _verification_evidence(
     )
     return {
         "operation_id": operation.operation_id,
-        "capability_id": "acct.invoice.customer_create.v1",
+        "capability_id": operation.capability_id,
         "passed": passed,
         "method": "read_back_exact_move_lines_tax_preview_single_due_residual_and_content_business_bindings_v1",
         "checks": ["company_matches", "record_exists", "state_is_posted"],
@@ -415,6 +442,10 @@ class Backend:
             succeeded=self.execution_succeeds,
             draft_customer_invoice=(
                 operation.capability_id == "acct.invoice.customer_create.v1"
+                and operation.parameters.get("posting_mode") == "draft"
+            ),
+            draft_vendor_bill=(
+                operation.capability_id == "acct.bill.vendor_create.v1"
                 and operation.parameters.get("posting_mode") == "draft"
             ),
         )
@@ -1222,6 +1253,148 @@ def test_recovery_is_a_new_operation_derived_from_the_verified_origin_receipt(se
     gateway._policy._authenticate_context = gateway._authenticate_context
     with pytest.raises(WriteServiceError, match="revision changed"):
         gateway.prepare_recovery(changed_context, **changed_revision)
+
+
+def test_vendor_bill_recovery_has_its_own_approval_and_idempotency_operation(
+    service, monkeypatch
+):
+    gateway, _backend, store = service
+    bill_parameters = {
+        **_vendor_bill_parameters(),
+        "posting_mode": "draft",
+    }
+    origin = gateway.prepare(
+        _context(
+            parameters=bill_parameters,
+            token_id="token-prepare-bill",
+            capability_id="acct.bill.vendor_create.v1",
+        ),
+        operation_id="op-vendor-bill-1",
+        request_id="request-vendor-bill-1",
+        capability_id="acct.bill.vendor_create.v1",
+        parameters=bill_parameters,
+    )
+    gateway.preview(
+        _context(
+            parameters=bill_parameters,
+            token_id="token-preview-bill",
+            capability_id="acct.bill.vendor_create.v1",
+        ),
+        origin.operation_id,
+    )
+    awaiting = gateway.status(
+        _context(
+            parameters=bill_parameters,
+            capability_id="acct.bill.vendor_create.v1",
+        ),
+        origin.operation_id,
+    )
+    origin_approval = _approval(awaiting, "approval-origin-vendor-bill")
+    gateway.approve_execute(
+        _context(
+            parameters=bill_parameters,
+            token_id="token-execute-bill",
+            capability_id="acct.bill.vendor_create.v1",
+        ),
+        origin_approval,
+        reconciliation_only=False,
+    )
+    origin = gateway.status(
+        _context(
+            parameters=bill_parameters,
+            capability_id="acct.bill.vendor_create.v1",
+        ),
+        origin.operation_id,
+    )
+    origin_result = gateway.result(
+        _context(
+            parameters=bill_parameters,
+            capability_id="acct.bill.vendor_create.v1",
+        ),
+        origin.operation_id,
+    )
+    assert origin_result["recovery_plan"]["method"] == (
+        "cancel_pristine_v3_draft_vendor_bill_v1"
+    )
+
+    request = {
+        "origin_operation_id": origin.operation_id,
+        "expected_origin_revision": origin.revision,
+        "recovery_operation_id": "op-vendor-bill-1-recovery",
+        "request_id": "request-vendor-bill-1-recovery",
+        "recovery_date": "2026-07-16",
+        "reason": "Cancel the duplicate sandbox vendor bill",
+        "idempotency_key": "recover-op-vendor-bill-1",
+    }
+
+    def recovery_context(token_id):
+        return sign_write_action_context(
+            auth_token_id=token_id,
+            principal=origin.principal,
+            odoo_instance_id=origin.odoo_instance_id,
+            database_name=origin.database_name,
+            database_uuid=origin.database_uuid,
+            user_id=origin.user_id,
+            company_id=origin.company_id,
+            allowed_company_ids=frozenset({origin.company_id}),
+            environment=origin.environment,
+            action="operation.recover",
+            request=request,
+            issued_at=NOW - timedelta(seconds=10),
+            expires_at=NOW + timedelta(minutes=4),
+            key_id="write-auth-v2",
+            secret=APPROVAL_SECRET,
+        )
+
+    prepared = gateway.prepare_recovery(
+        recovery_context("token-prepare-vendor-bill-recovery"), **request
+    )
+    recovery = prepared["operation"]
+    binding = store.get_recovery_operation_binding(recovery.operation_id)
+
+    assert recovery.capability_id == "acct.recovery.execute.v1"
+    assert recovery.operation_id != origin.operation_id
+    assert recovery.idempotency_key == "recover-op-vendor-bill-1"
+    assert binding.origin_operation_id == origin.operation_id
+    assert binding.recovery_operation_digest == recovery.digest
+    assert gateway.prepare_recovery(
+        recovery_context("token-replay-vendor-bill-recovery"), **request
+    )["operation"] == recovery
+
+    gateway.preview(
+        recovery_context("token-preview-vendor-bill-recovery"),
+        recovery.operation_id,
+    )
+    awaiting_recovery = gateway.status(
+        recovery_context("token-status-vendor-bill-recovery"),
+        recovery.operation_id,
+    )
+    recovery_approval = _approval(
+        awaiting_recovery, "approval-independent-vendor-bill-recovery"
+    )
+    assert recovery_approval.operation_id == recovery.operation_id
+    assert recovery_approval.operation_digest == awaiting_recovery.digest
+    assert recovery_approval.signature != origin_approval.signature
+
+    original_plan = origin_result["recovery_plan"]
+    forged_plan = create_recovery_plan_v2(
+        origin_operation_id=origin.operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method="cancel_pristine_v3_draft_customer_invoice_v1",
+        requires_approval=True,
+        action_targets=original_plan["action_targets"],
+        guard_records=original_plan["guard_records"],
+        oracle_id="cancel_pristine_v3_draft_customer_invoice_exact_v1",
+        parameters={"origin_operation_id": origin.operation_id},
+    )
+    forged_output = {**origin_result, "recovery_plan": forged_plan}
+    monkeypatch.setattr(gateway, "result", lambda *_args: forged_output)
+
+    with pytest.raises(WriteServiceError, match="draft vendor bill receipt"):
+        gateway._validated_origin_recovery_plan(
+            recovery_context("token-forged-vendor-method"), origin
+        )
 
 
 def test_posted_customer_invoice_receipt_cannot_be_reinterpreted_as_draft_cancel(service):

@@ -430,6 +430,11 @@ The initial target-host capacity blocker, database/UUID inventory, and
 unchanged V2/Pi/current evidence are retained in
 `docs/TARGET_HOST_CAPACITY_AUDIT_2026-07-17.md`. It is an independent read-only
 baseline, not a substituted or backdated Dev18 collector receipt.
+A lightweight read-only recheck is retained in
+`docs/TARGET_HOST_CAPACITY_RECHECK_2026-07-18.md`. It records increased ordinary
+free space but a remaining `12,913,868,800`-byte shortfall, the unchanged
+mode-`2775` socket blocker, and the continued absence of V3 routing. It is also
+not an E00a receipt or provisioning authorization.
 The real PostgreSQL 16.14/Odoo 19 syntax and locked-relation development probe
 is separately recorded in
 `docs/TARGET_HOST_DEV18_SQL_PROBE_2026-07-17.md`; it is also not an immutable

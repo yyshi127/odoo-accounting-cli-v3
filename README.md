@@ -50,6 +50,15 @@ an isolated namespace-probe contract, but still returns
 sandbox write until the trusted live collector, nonce ledger, signed report,
 and real sandbox evidence exist. See `deployment/dev19/README.md`.
 
+Dev20 adds a second dormant recovery vertical slice for a pristine sandbox
+draft vendor bill. Like the existing draft customer-invoice recovery, it uses
+a separate approved and idempotent recovery operation, binds the complete move
+and line graph, and permits only an exact `draft` to `cancel` state change. It
+requires and fingerprints Odoo 19's standard stock-move, COGS, and landed-cost
+link fields, rejecting any linked effect. It does not stage or enable the
+vendor-bill capability and has no real-Odoo write receipt; production execution
+remains closed. A trusted installed/custom-module graph remains a staging gate.
+
 All machine-facing output is JSON. Real accounting success additionally
 requires an Odoo-bound signed receipt. CLI-Anything v0.4.0 supplies the CLI and
 test-harness conventions only; Odoo 19 remains the backend and accounting

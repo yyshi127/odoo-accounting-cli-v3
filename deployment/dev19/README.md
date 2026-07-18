@@ -124,9 +124,10 @@ or recovery artifact fails closed.
 
 ## External prerequisites
 
-No target E00b run is possible until E00a passes. The latest read-only target
-audit still reports a `22,241,341,440`-byte storage shortfall and an unapproved
-group-writable PostgreSQL socket authority. A dedicated PostgreSQL cluster,
+No target E00b run is possible until E00a passes. A 2026-07-18 lightweight
+read-only recheck reports a `12,913,868,800`-byte storage shortfall and the
+same unapproved group-writable PostgreSQL socket authority; it is not an E00a
+receipt. A dedicated PostgreSQL cluster,
 Odoo service, sandbox database/company, executor, independent approver,
 isolated state/secrets, kernel network policy, and an authorized recovery drill
 also do not yet exist. None of those resources may be created or changed by

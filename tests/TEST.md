@@ -428,9 +428,10 @@ At the current local development checkpoint:
   requires exactly 167 Linux gate tests with zero skips, failures, or errors,
   plus 13 real PostgreSQL 16 integration cases. GitHub `quality #40` passed that
   complete workflow for commit `c03dbb7`; this is Linux/CI evidence, not a
-  target-host E00a receipt. The target remains blocked by a
-  `22,241,341,440`-byte capacity shortfall and `/run/postgresql` mode `2775`, so
-  no target E00a pass receipt exists;
+  target-host E00a receipt. A 2026-07-18 lightweight read-only recheck found
+  that the capacity shortfall had decreased to `12,913,868,800` bytes while
+  `/run/postgresql` remained mode `2775`; it is not an immutable E00a receipt,
+  and no target E00a pass receipt exists;
 - dev19 adds a strictly non-authorizing E00b isolation contract, exact
   release/E00a/recovery/host approval bindings, live UTC plus monotonic policy
   checks, fixed-root digest rechecks, full current/for-children namespace
@@ -439,7 +440,17 @@ At the current local development checkpoint:
   errors plus one root host-context integration case. The operational CLI still
   returns `live_collector_unavailable`; it has no nonce-consumption ledger,
   signed report, trusted live Odoo/systemd collector, target-host E00b receipt,
-  or write authorization; and
+  or write authorization;
+- dev20 adds a dormant sandbox-only recovery contract for a pristine draft
+  vendor bill. It binds `acct.bill.vendor_create.v1`, `in_invoice`, the purchase
+  journal, exact document/business digests, the complete move-line graph, a
+  separate approval and idempotency key, and an exact `draft` to `cancel`
+  transition. Customer/vendor method-oracle crossing, production use, external
+  links, incomplete guards, and post-write drift are rejected. Odoo 19's
+  standard stock-move, COGS-origin, and landed-cost fields must be present,
+  empty, and bound into the approved fingerprints. These are local
+  contract/fake-ORM tests only; no real Odoo bill was created or recovered, and
+  the trusted installed/custom-module graph remains a staging prerequisite; and
 - every current registry `evidence.receipts` array is empty: zero capabilities
   are enabled and zero write capabilities are staged. E00b, a real sandbox
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox

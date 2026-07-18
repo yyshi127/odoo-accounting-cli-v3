@@ -20,6 +20,8 @@ from .contracts import validate_value
 from .draft_invoice_recovery import (
     DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
     DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+    DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+    DRAFT_VENDOR_BILL_RECOVERY_ORACLE,
 )
 from .gateway import (
     WRITE_AUTH_SIGNATURE_PURPOSE,
@@ -1406,14 +1408,25 @@ class DurableWriteService:
         actions = plan["action_targets"]
         guards = plan["guard_records"]
         result_records = output.get("odoo_records")
+        if origin_operation.capability_id == "acct.invoice.customer_create.v1":
+            expected_method = DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
+            expected_oracle = DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
+            document_label = "customer invoice"
+        elif origin_operation.capability_id == "acct.bill.vendor_create.v1":
+            expected_method = DRAFT_VENDOR_BILL_RECOVERY_METHOD
+            expected_oracle = DRAFT_VENDOR_BILL_RECOVERY_ORACLE
+            document_label = "vendor bill"
+        else:
+            expected_method = None
+            expected_oracle = None
+            document_label = "document"
         if (
             origin_operation.state != State.COMPLETED
             or origin_operation.environment != "sandbox"
-            or origin_operation.capability_id
-            != "acct.invoice.customer_create.v1"
+            or expected_method is None
             or origin_operation.parameters.get("posting_mode") != "draft"
-            or plan["method"] != DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
-            or plan["oracle_id"] != DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
+            or plan["method"] != expected_method
+            or plan["oracle_id"] != expected_oracle
             or len(actions) != 1
             or actions[0]["model"] != "account.move"
             or actions[0]["record_state"] != "draft"
@@ -1435,7 +1448,9 @@ class DurableWriteService:
             }
         ):
             raise WriteServiceError(
-                "origin recovery is restricted to an exact sandbox draft customer invoice receipt"
+                "origin recovery is restricted to an exact sandbox draft "
+                + document_label
+                + " receipt"
             )
         return json.loads(canonical_json(plan))
 

@@ -17,6 +17,8 @@ from odoo_accounting_cli_v3.gateway import RequestContext
 from odoo_accounting_cli_v3.draft_invoice_recovery import (
     customer_invoice_business_binding,
     customer_invoice_document_binding,
+    vendor_bill_business_binding,
+    vendor_bill_document_binding,
 )
 from odoo_accounting_cli_v3.odoo.write_bootstrap import (
     OdooWriteBootstrapError,
@@ -186,6 +188,8 @@ def _draft_invoice_available_raw(
     action_overrides=None,
     line_overrides=None,
 ):
+    vendor = operation.capability_id == "acct.bill.vendor_create.v1"
+
     def raw_snapshot(model, record_id, state, values):
         return {
             "model": model,
@@ -204,11 +208,17 @@ def _draft_invoice_available_raw(
             "draft",
             {
                 "state": "draft",
-                "move_type": "out_invoice",
+                "move_type": "in_invoice" if vendor else "out_invoice",
                 "company_id": [7, "Sandbox Company"],
-                "journal_id": [operation.parameters["journal_id"], "Sales"],
+                "journal_id": [
+                    operation.parameters["journal_id"],
+                    "Purchases" if vendor else "Sales",
+                ],
                 "currency_id": [operation.parameters["currency_id"], "USD"],
-                "partner_id": [operation.parameters["partner_id"], "Customer"],
+                "partner_id": [
+                    operation.parameters["partner_id"],
+                    "Vendor" if vendor else "Customer",
+                ],
                 "line_ids": line_ids,
                 "posted_before": False,
                 "auto_post": "no",
@@ -223,11 +233,20 @@ def _draft_invoice_available_raw(
                 "adjusting_entry_origin_move_ids": [],
                 "adjusting_entries_move_ids": [],
                 "exchange_diff_partial_ids": [],
+                **(
+                    {"stock_move_ids": [], "landed_costs_ids": []}
+                    if vendor
+                    else {}
+                ),
                 "odoo_cli_v3_document_binding": (
-                    customer_invoice_document_binding(operation.parameters)
+                    vendor_bill_document_binding(operation.parameters)
+                    if vendor
+                    else customer_invoice_document_binding(operation.parameters)
                 ),
                 "odoo_cli_v3_business_binding": (
-                    customer_invoice_business_binding(operation.parameters)
+                    vendor_bill_business_binding(operation.parameters)
+                    if vendor
+                    else customer_invoice_business_binding(operation.parameters)
                 ),
                 **(action_overrides or {}),
             },
@@ -245,6 +264,14 @@ def _draft_invoice_available_raw(
                 "matched_credit_ids": [],
                 "asset_ids": [],
                 "sale_line_ids": [],
+                **(
+                    {
+                        "cogs_origin_id": False,
+                        "is_landed_costs_line": False,
+                    }
+                    if vendor
+                    else {}
+                ),
                 "display_type": "product",
                 "debit": "100",
                 "credit": "0",
@@ -264,6 +291,14 @@ def _draft_invoice_available_raw(
                 "matched_credit_ids": [],
                 "asset_ids": [],
                 "sale_line_ids": [],
+                **(
+                    {
+                        "cogs_origin_id": False,
+                        "is_landed_costs_line": False,
+                    }
+                    if vendor
+                    else {}
+                ),
                 "display_type": "payment_term",
                 "debit": "0",
                 "credit": "100",
@@ -285,13 +320,21 @@ def _draft_invoice_available_raw(
         ],
         "recovery": {
             "status": "available",
-            "method": "cancel_pristine_v3_draft_customer_invoice_v1",
+            "method": (
+                "cancel_pristine_v3_draft_vendor_bill_v1"
+                if vendor
+                else "cancel_pristine_v3_draft_customer_invoice_v1"
+            ),
             "targets": [{"model": "account.move", "record_id": 501}],
             "guards": [
                 {"model": "account.move.line", "record_id": record_id}
                 for record_id in guard_record_ids
             ],
-            "oracle_id": "cancel_pristine_v3_draft_customer_invoice_exact_v1",
+            "oracle_id": (
+                "cancel_pristine_v3_draft_vendor_bill_exact_v1"
+                if vendor
+                else "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+            ),
         },
     }
 
@@ -339,6 +382,161 @@ def test_draft_customer_invoice_descriptor_becomes_receipt_derived_available_v2_
         ],
         "oracle_id": "cancel_pristine_v3_draft_customer_invoice_exact_v1",
     }
+
+
+def test_draft_vendor_bill_descriptor_becomes_receipt_derived_available_v2_plan():
+    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id="acct.bill.vendor_create.v1"
+    )
+
+    evidence = _execution_evidence(
+        operation,
+        _draft_invoice_available_raw(operation, guard_record_ids=(503, 502)),
+    )
+
+    plan = evidence["recovery_plan"]
+    assert plan["status"] == "available"
+    assert plan["method"] == "cancel_pristine_v3_draft_vendor_bill_v1"
+    assert plan["oracle_id"] == "cancel_pristine_v3_draft_vendor_bill_exact_v1"
+    assert evidence["recovery_parameters"] == {
+        "company_id": 7,
+        "origin_operation_id": operation.operation_id,
+        "method": "cancel_pristine_v3_draft_vendor_bill_v1",
+        "action_targets": [{"model": "account.move", "record_id": 501}],
+        "guard_records": [
+            {"model": "account.move.line", "record_id": 502},
+            {"model": "account.move.line", "record_id": 503},
+        ],
+        "oracle_id": "cancel_pristine_v3_draft_vendor_bill_exact_v1",
+    }
+
+
+@pytest.mark.parametrize("field", ["stock_move_ids", "landed_costs_ids"])
+def test_draft_vendor_bill_descriptor_requires_stock_effect_fields(field):
+    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id="acct.bill.vendor_create.v1"
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    action = raw["after"][0]
+    action["values"].pop(field)
+    action["values_digest"] = hashlib.sha256(
+        canonical_json(action["values"])
+    ).hexdigest()
+
+    with pytest.raises(
+        OdooWriteBootstrapError, match="pristine V3 draft vendor bill"
+    ):
+        _execution_evidence(operation, raw)
+
+
+@pytest.mark.parametrize("field", ["cogs_origin_id", "is_landed_costs_line"])
+def test_draft_vendor_bill_descriptor_requires_stock_effect_line_fields(field):
+    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id="acct.bill.vendor_create.v1"
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    line = raw["after"][1]
+    line["values"].pop(field)
+    line["values_digest"] = hashlib.sha256(
+        canonical_json(line["values"])
+    ).hexdigest()
+
+    with pytest.raises(
+        OdooWriteBootstrapError, match="outside the invoice line graph"
+    ):
+        _execution_evidence(operation, raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("cogs_origin_id", [990, "Stock Move"]),
+        ("is_landed_costs_line", True),
+    ],
+)
+def test_draft_vendor_bill_descriptor_rejects_stock_effect_lines(field, value):
+    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id="acct.bill.vendor_create.v1"
+    )
+
+    with pytest.raises(OdooWriteBootstrapError, match="external effects"):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation,
+                guard_record_ids=(502, 503),
+                line_overrides={field: value},
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "action_overrides",
+    [
+        {"move_type": "out_invoice"},
+        {"odoo_cli_v3_document_binding": "0" * 64},
+        {"odoo_cli_v3_business_binding": "0" * 64},
+    ],
+)
+def test_draft_vendor_bill_descriptor_requires_exact_type_and_business_bindings(
+    action_overrides,
+):
+    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id="acct.bill.vendor_create.v1"
+    )
+
+    with pytest.raises(
+        OdooWriteBootstrapError, match="pristine V3 draft vendor bill"
+    ):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation,
+                guard_record_ids=(502, 503),
+                action_overrides=action_overrides,
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("method", "oracle_id"),
+    [
+        (
+            "cancel_pristine_v3_draft_vendor_bill_v1",
+            "cancel_pristine_v3_draft_customer_invoice_exact_v1",
+        ),
+        (
+            "cancel_pristine_v3_draft_customer_invoice_v1",
+            "cancel_pristine_v3_draft_vendor_bill_exact_v1",
+        ),
+    ],
+)
+def test_bootstrap_rejects_crossed_customer_vendor_recovery_contract(
+    method, oracle_id
+):
+    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id="acct.bill.vendor_create.v1"
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    raw["recovery"]["method"] = method
+    raw["recovery"]["oracle_id"] = oracle_id
+
+    with pytest.raises(
+        OdooWriteBootstrapError, match="sandbox draft vendor bill"
+    ):
+        _execution_evidence(operation, raw)
 
 
 @pytest.mark.parametrize(
@@ -410,6 +608,7 @@ def _capabilities():
     selected = []
     for capability_id in (
         "acct.invoice.customer_create.v1",
+        "acct.bill.vendor_create.v1",
         "acct.recovery.execute.v1",
     ):
         capability = copy.deepcopy(
@@ -453,6 +652,15 @@ def _parameters(*, company_id=7, idempotency_key="invoice-1"):
         ],
         "idempotency_key": idempotency_key,
     }
+
+
+def _vendor_parameters(*, company_id=7, idempotency_key="bill-1"):
+    parameters = _parameters(
+        company_id=company_id, idempotency_key=idempotency_key
+    )
+    parameters.pop("reference")
+    parameters["vendor_reference"] = "BILL-SANDBOX-1"
+    return parameters
 
 
 def _recovery_case(
