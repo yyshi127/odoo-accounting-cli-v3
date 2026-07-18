@@ -138,6 +138,34 @@ def _executor_result() -> dict[str, object]:
     }
 
 
+def _module_guard_evidence(config: WriteRuntimeConfig) -> dict[str, object]:
+    return {
+        "guard_protocol_version": 1,
+        "database_name": config.base_runtime.database_name,
+        "database_uuid": config.base_runtime.database_uuid,
+        "backend_pid": 4101,
+        "backend_start": "2026-07-18T01:02:03.000000Z",
+        "advisory_lock": {
+            "namespace": 1329677142,
+            "key": 1297040433,
+            "mode": "shared",
+        },
+        "table_lock": {
+            "relation": "public.ir_module_module",
+            "mode": "SHARE",
+        },
+        "module_graph": {
+            "schema_version": 1,
+            "modules": [
+                {"name": "account", "latest_version": "19.0.1.0"}
+            ],
+            "digest": (
+                "c329d2eca5c679e3cc3e72e9e9eebebfea8f798c4aa587c0e25fabe13b38988a"
+            ),
+        },
+    }
+
+
 def _mock_parent_boundary(monkeypatch, config, result, captured):
     monkeypatch.setattr(runner, "_validate_canonical_package_binding", Mock())
     monkeypatch.setattr(runner, "_verify_child_release", Mock(return_value=()))
@@ -164,6 +192,34 @@ def _mock_parent_boundary(monkeypatch, config, result, captured):
 
     monkeypatch.setattr(runner, "_private_payload_fd", private_payload)
     monkeypatch.setattr(runner, "_run_child_process", run_child)
+
+    class ParentGuard:
+        evidence = _module_guard_evidence(config)
+
+        def final_probe(self, *, timeout_seconds):
+            captured.setdefault("guard_events", []).append(
+                ("final_probe", timeout_seconds)
+            )
+            return self.evidence
+
+        def release(self, *, timeout_seconds):
+            captured.setdefault("guard_events", []).append(
+                ("release", timeout_seconds)
+            )
+
+        def abort(self):
+            captured.setdefault("guard_events", []).append(("abort", None))
+
+    def acquire_guard(base, *, timeout_seconds, lock_timeout_ms):
+        assert base is config.base_runtime
+        captured.setdefault("guard_events", []).append(
+            ("acquire", timeout_seconds, lock_timeout_ms)
+        )
+        return ParentGuard()
+
+    monkeypatch.setattr(
+        runner, "acquire_module_guard", acquire_guard, raising=False
+    )
 
 
 def test_precheck_preserves_all_parameters_and_only_transports_write_auth(
@@ -226,6 +282,102 @@ def test_approved_write_returns_phases_unchanged_and_excludes_recovery_receipt_k
     assert "recovery" not in serialized
     assert SECRET_VALUES["write_receipt"].decode("ascii") not in serialized
     assert SECRET_VALUES["recovery"].decode("ascii") not in serialized
+
+
+@pytest.mark.parametrize(
+    ("call", "result"),
+    [
+        (runner.run_odoo_write_precheck, _precheck_result()),
+        (runner.run_odoo_approved_write, _approved_result()),
+    ],
+)
+def test_effect_capable_actions_hold_pre_registry_module_guard_until_final_probe(
+    tmp_path: Path, monkeypatch, call, result
+) -> None:
+    config, secrets = _runtime(tmp_path)
+    captured: dict[str, object] = {}
+    _mock_parent_boundary(monkeypatch, config, result, captured)
+    original_run = runner._run_child_process
+
+    def ordered_run(*args, **kwargs):
+        captured.setdefault("guard_events", []).append(("shell", None))
+        return original_run(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "_run_child_process", ordered_run)
+
+    assert call(
+        config,
+        secrets,
+        {},
+        release_digest=RELEASE_DIGEST,
+        timeout_seconds=10,
+    ) == result
+
+    event_names = [event[0] for event in captured["guard_events"]]
+    assert event_names == ["acquire", "shell", "final_probe", "release"]
+    payload = json.loads(captured["payload_bytes"])
+    assert payload["module_guard"]["backend_pid"] == 4101
+    exposed = json.dumps(captured["argv"]) + json.dumps(captured["env"])
+    assert "4101" not in exposed
+
+
+def test_acl_audit_does_not_require_the_effect_guard(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config, secrets = _runtime(tmp_path)
+    captured: dict[str, object] = {}
+    _mock_parent_boundary(monkeypatch, config, _executor_result(), captured)
+
+    def forbidden_guard(*_args, **_kwargs):
+        raise AssertionError("ACL-only audit must remain available without the write guard")
+
+    monkeypatch.setattr(runner, "acquire_module_guard", forbidden_guard)
+
+    assert runner.run_odoo_authorize_executor(
+        config, secrets, {}, release_digest=RELEASE_DIGEST
+    )["authorized"] is True
+    assert captured.get("guard_events") in (None, [])
+
+
+def test_guard_probe_failure_aborts_without_normal_release(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config, secrets = _runtime(tmp_path)
+    captured: dict[str, object] = {}
+    _mock_parent_boundary(monkeypatch, config, _approved_result(), captured)
+
+    class BrokenProbeGuard:
+        evidence = {"schema_version": 1}
+
+        def final_probe(self, *, timeout_seconds):
+            captured.setdefault("guard_events", []).append(
+                ("final_probe", timeout_seconds)
+            )
+            raise OdooRunnerError("module guard final probe failed")
+
+        def release(self, *, timeout_seconds):
+            captured.setdefault("guard_events", []).append(
+                ("release", timeout_seconds)
+            )
+
+        def abort(self):
+            captured.setdefault("guard_events", []).append(("abort", None))
+
+    monkeypatch.setattr(
+        runner,
+        "acquire_module_guard",
+        lambda *_args, **_kwargs: BrokenProbeGuard(),
+    )
+
+    with pytest.raises(OdooRunnerError, match="final probe failed"):
+        runner.run_odoo_approved_write(
+            config, secrets, {}, release_digest=RELEASE_DIGEST
+        )
+
+    assert [event[0] for event in captured["guard_events"]] == [
+        "final_probe",
+        "abort",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -520,7 +672,20 @@ def test_action_confusion_and_extra_credentials_are_rejected_before_dispatch(tmp
         runner._decode_credentials(precheck_payload, runner.ACTION_PRECHECK)
 
 
-def _invoke_child(monkeypatch, capsys, config, secrets, action, request, result):
+_DEFAULT_GUARD = object()
+
+
+def _invoke_child(
+    monkeypatch,
+    capsys,
+    config,
+    secrets,
+    action,
+    request,
+    result,
+    *,
+    module_guard=_DEFAULT_GUARD,
+):
     release_root = Path(runner.__file__).resolve().parents[3]
     payload = runner.canonical_json(
         {
@@ -533,6 +698,14 @@ def _invoke_child(monkeypatch, capsys, config, secrets, action, request, result)
             "canonical_package_path": str(release_root.parent.parent / "packages" / f"odoo-accounting-cli-v3-{release_root.name}.tar.gz"),
             "canonical_package_sha256": "4" * 64,
             "release_root": str(release_root),
+            "module_guard": (
+                _module_guard_evidence(config)
+                if module_guard is _DEFAULT_GUARD
+                and action in runner.MODULE_GUARDED_ACTIONS
+                else (
+                    None if module_guard is _DEFAULT_GUARD else module_guard
+                )
+            ),
         }
     )
     read_fd, write_fd = os.pipe()
@@ -551,6 +724,59 @@ def _invoke_child(monkeypatch, capsys, config, secrets, action, request, result)
     response = json.loads(capsys.readouterr().out.strip()[len(MARKER) :])
     assert response["result"] == result
     return response
+
+
+def test_child_rejects_missing_or_action_confused_module_guard(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    config, secrets = _runtime(tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "execute_write_precheck_from_odoo_shell",
+        Mock(return_value=_precheck_result()),
+    )
+    request = {
+        "context": {"signed": "v1"},
+        "capability_id": "acct.invoice.customer.create.v1",
+        "parameters": {"company_id": 7},
+        "trusted_recovery_plan": None,
+    }
+
+    with pytest.raises(OdooRunnerError, match="module guard binding"):
+        _invoke_child(
+            monkeypatch,
+            capsys,
+            config,
+            secrets,
+            runner.ACTION_PRECHECK,
+            request,
+            _precheck_result(),
+            module_guard=None,
+        )
+
+    with pytest.raises(OdooRunnerError, match="module guard binding"):
+        _invoke_child(
+            monkeypatch,
+            capsys,
+            config,
+            secrets,
+            runner.ACTION_EXECUTOR,
+            request,
+            _executor_result(),
+            module_guard=_module_guard_evidence(config),
+        )
+
+    with pytest.raises(OdooRunnerError, match="module guard evidence"):
+        _invoke_child(
+            monkeypatch,
+            capsys,
+            config,
+            secrets,
+            runner.ACTION_PRECHECK,
+            request,
+            _precheck_result(),
+            module_guard={"guard_protocol_version": 1},
+        )
 
 
 def test_child_dispatches_precheck_with_only_write_auth_and_verified_registry(

@@ -13,6 +13,7 @@ import json
 import math
 import os
 import secrets as secret_tokens
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -86,6 +87,7 @@ PAYLOAD_FIELDS = frozenset(
         "canonical_package_path",
         "canonical_package_sha256",
         "release_root",
+        "module_guard",
     }
 )
 RESPONSE_FIELDS = frozenset({"ok", "action", "runtime", "result"})
@@ -102,6 +104,26 @@ ACTION_CREDENTIAL_ROLES = {
         "verification",
     ),
 }
+
+MODULE_GUARDED_ACTIONS = frozenset({ACTION_PRECHECK, ACTION_APPROVED_WRITE})
+MODULE_GUARD_LOCK_TIMEOUT_MS = 3_000
+
+
+def acquire_module_guard(
+    base_runtime: RuntimeConfig,
+    *,
+    timeout_seconds: float,
+    lock_timeout_ms: int,
+) -> Any:
+    """Late-bind the Linux-only guard so local imports remain side-effect free."""
+
+    from .module_guard import acquire_module_guard as acquire
+
+    return acquire(
+        base_runtime,
+        timeout_seconds=timeout_seconds,
+        lock_timeout_ms=lock_timeout_ms,
+    )
 ISSUER_ROLES = frozenset({"execution", "verification"})
 RUNTIME_ROLE_NAMES = (
     "write_auth",
@@ -366,19 +388,6 @@ def _run_odoo_write_action(
         base.canonical_package_sha256,
     )
     _validate_runtime_paths(base)
-    payload = canonical_json(
-        {
-            "protocol": WRITE_CHILD_PROTOCOL_VERSION,
-            "action": action,
-            "runtime": config.runtime_identity,
-            "request_json": request_json,
-            "credentials": _credentials(config, secrets, action),
-            "release_digest": release_digest,
-            "canonical_package_path": str(base.canonical_package_path),
-            "canonical_package_sha256": base.canonical_package_sha256,
-            "release_root": str(base.release_root),
-        }
-    )
     marker = f"__ODOO_ACCOUNTING_CLI_V3_RESULT_{secret_tokens.token_hex(24)}__:"
     if MARKER.fullmatch(marker) is None:
         raise OdooRunnerError("write result marker generation failed")
@@ -392,20 +401,74 @@ def _run_odoo_write_action(
         base.database_name,
         "--no-http",
     ]
-    with _private_payload_fd(payload) as payload_fd:
-        completed = _run_child_process(
-            argv,
-            source=_write_child_source(base, payload_fd, marker, action),
-            payload_fd=payload_fd,
-            timeout_seconds=float(timeout_seconds),
-            cwd=str(base.release_root),
-            env=_safe_environment(),
+    deadline = time.monotonic() + float(timeout_seconds)
+
+    def remaining() -> float:
+        value = deadline - time.monotonic()
+        if value <= 0:
+            raise OdooRunnerError("Odoo shell write action timed out")
+        return value
+
+    guard = None
+    try:
+        if action in MODULE_GUARDED_ACTIONS:
+            acquisition_timeout = remaining()
+            guard = acquire_module_guard(
+                base,
+                timeout_seconds=acquisition_timeout,
+                lock_timeout_ms=min(
+                    MODULE_GUARD_LOCK_TIMEOUT_MS,
+                    max(1, math.floor(acquisition_timeout * 1_000)),
+                ),
+            )
+        if guard is None:
+            guard_evidence = None
+        else:
+            raw_guard_evidence = guard.evidence
+            if not isinstance(raw_guard_evidence, Mapping):
+                raise OdooRunnerError("module guard evidence is invalid")
+            guard_evidence = json.loads(canonical_json(raw_guard_evidence))
+        payload = canonical_json(
+            {
+                "protocol": WRITE_CHILD_PROTOCOL_VERSION,
+                "action": action,
+                "runtime": config.runtime_identity,
+                "request_json": request_json,
+                "credentials": _credentials(config, secrets, action),
+                "release_digest": release_digest,
+                "canonical_package_path": str(base.canonical_package_path),
+                "canonical_package_sha256": base.canonical_package_sha256,
+                "release_root": str(base.release_root),
+                "module_guard": guard_evidence,
+            }
         )
-    if completed.returncode != 0:
-        raise OdooRunnerError(
-            f"Odoo shell write action exited with status {completed.returncode}"
-        )
-    return _parse_write_response(completed.stdout, marker, config, action)
+        with _private_payload_fd(payload) as payload_fd:
+            completed = _run_child_process(
+                argv,
+                source=_write_child_source(base, payload_fd, marker, action),
+                payload_fd=payload_fd,
+                timeout_seconds=remaining(),
+                cwd=str(base.release_root),
+                env=_safe_environment(),
+            )
+        if completed.returncode != 0:
+            raise OdooRunnerError(
+                f"Odoo shell write action exited with status {completed.returncode}"
+            )
+        result = _parse_write_response(completed.stdout, marker, config, action)
+        if guard is not None:
+            final_evidence = guard.final_probe(timeout_seconds=remaining())
+            if canonical_json(final_evidence) != canonical_json(guard_evidence):
+                raise OdooRunnerError("module guard final evidence changed")
+            guard.release(timeout_seconds=remaining())
+            guard = None
+        return result
+    finally:
+        if guard is not None:
+            try:
+                guard.abort()
+            except BaseException:
+                pass
 
 
 def run_odoo_write_precheck(
@@ -508,6 +571,27 @@ def _read_child_payload(payload_fd: int) -> dict[str, Any]:
         or payload.get("protocol") != WRITE_CHILD_PROTOCOL_VERSION
     ):
         raise OdooRunnerError("write child payload fields are invalid")
+    action = payload.get("action")
+    module_guard = payload.get("module_guard")
+    if (
+        action in MODULE_GUARDED_ACTIONS
+        and not isinstance(module_guard, dict)
+    ) or (
+        action not in MODULE_GUARDED_ACTIONS
+        and module_guard is not None
+    ):
+        raise OdooRunnerError("write child module guard binding is invalid")
+    if action in MODULE_GUARDED_ACTIONS:
+        from .module_guard import ModuleGuardError, ModuleGuardEvidence
+
+        try:
+            payload["module_guard"] = ModuleGuardEvidence.from_mapping(
+                module_guard
+            ).as_dict()
+        except ModuleGuardError as exc:
+            raise OdooRunnerError(
+                "write child module guard evidence is invalid"
+            ) from exc
     return payload
 
 

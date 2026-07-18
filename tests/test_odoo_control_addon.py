@@ -81,6 +81,7 @@ def test_control_addon_is_odoo_19_scoped_and_loadable_as_a_static_package():
         "from . import accounting_metadata",
         "from . import approval_client",
         "from . import approval_wizard",
+        "from . import module_guard",
         "from . import operation",
         "from . import session_client",
     ]

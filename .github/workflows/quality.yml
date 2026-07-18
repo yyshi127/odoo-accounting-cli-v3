@@ -728,6 +728,100 @@ jobs:
           print("dev18_real_postgresql_tests=13")
           PY
 
+  dev22-module-guard-postgresql:
+    name: Dev22 real PostgreSQL module guard gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the test runtime
+        run: python -m pip install -e ".[test]"
+      - name: Start a fresh PostgreSQL 16 authority
+        id: postgres
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes postgresql postgresql-client
+          fi
+          sudo service postgresql start
+          ready=false
+          for _attempt in $(seq 1 30); do
+            if sudo -u postgres psql -X -q -A -t -w \
+              -v ON_ERROR_STOP=1 -d postgres -c 'SELECT 1' \
+              >/dev/null 2>&1; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          server_version_num="$(
+            sudo -u postgres psql -X -q -A -t -w -v ON_ERROR_STOP=1 \
+              -d postgres -c 'SHOW server_version_num'
+          )"
+          test "$server_version_num" -ge 160000
+          test "$server_version_num" -lt 170000
+          psql_path="$(command -v psql)"
+          runuser_path="$(command -v runuser)"
+          stdbuf_path="$(command -v stdbuf)"
+          socket_setting="$(
+            sudo -u postgres psql -X -q -A -t -w -v ON_ERROR_STOP=1 \
+              -d postgres -c 'SHOW unix_socket_directories'
+          )"
+          socket_directory="${socket_setting%%,*}"
+          socket_directory="${socket_directory//[[:space:]]/}"
+          port="$(
+            sudo -u postgres psql -X -q -A -t -w -v ON_ERROR_STOP=1 \
+              -d postgres -c 'SHOW port'
+          )"
+          test -S "$socket_directory/.s.PGSQL.$port"
+          {
+            printf 'psql_path=%s\n' "$psql_path"
+            printf 'runuser_path=%s\n' "$runuser_path"
+            printf 'stdbuf_path=%s\n' "$stdbuf_path"
+            printf 'socket_directory=%s\n' "$socket_directory"
+            printf 'port=%s\n' "$port"
+          } >> "$GITHUB_OUTPUT"
+      - name: Prove bootstrap rollback, ACLs, locks, epoch and crash quarantine
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev22-module-guard-postgresql.xml"
+          sudo env \
+            DEV22_MODULE_GUARD_POSTGRES=1 \
+            DEV22_PG_PSQL='${{ steps.postgres.outputs.psql_path }}' \
+            DEV22_PG_RUNUSER='${{ steps.postgres.outputs.runuser_path }}' \
+            DEV22_PG_STDBUF='${{ steps.postgres.outputs.stdbuf_path }}' \
+            DEV22_PG_SOCKET_DIRECTORY='${{ steps.postgres.outputs.socket_directory }}' \
+            DEV22_PG_PORT='${{ steps.postgres.outputs.port }}' \
+            DEV22_PG_ADMIN_OS_USER=postgres \
+            DEV22_PG_ADMIN_DATABASE_USER=postgres \
+            PYTHONDONTWRITEBYTECODE=1 \
+            "$(command -v python)" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" tests/test_dev22_module_guard_postgres.py
+          sudo "$(command -v python)" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 4 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev22 PostgreSQL gate did not execute exactly four tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev22_real_postgresql_tests=4")
+          PY
+
   wheel-smoke:
     name: wheel -> fresh venv -> outside-source CLI
     runs-on: ubuntu-latest
