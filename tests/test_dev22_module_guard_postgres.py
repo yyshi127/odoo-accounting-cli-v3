@@ -1527,7 +1527,11 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
     finally:
         failing_copy.unlink(missing_ok=True)
     assert injected.returncode != 0
-    assert "division by zero" in injected.stderr.lower()
+    if "division by zero" not in injected.stderr.lower():
+        pytest.fail(
+            "injected bootstrap failed before the rollback sentinel:\n"
+            + injected.stderr
+        )
     assert postgres.scalar(
         "SELECT pg_catalog.count(*)::text FROM pg_catalog.pg_namespace "
         "WHERE nspname='odoo_accounting_cli_v3_guard'",
