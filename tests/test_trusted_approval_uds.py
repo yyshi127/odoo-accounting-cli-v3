@@ -1175,8 +1175,11 @@ def test_hung_broker_is_time_bounded_and_consumes_only_one_bounded_slot() -> Non
     assert len(broker.calls) == 1
 
 
-def test_timed_out_broker_worker_is_non_daemon_and_drainable() -> None:
+def test_timed_out_broker_worker_is_non_daemon_and_drainable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     release = threading.Event()
+    broker_started = threading.Event()
 
     class BlockingBroker(StubBroker):
         def request_approval(
@@ -1189,6 +1192,7 @@ def test_timed_out_broker_worker_is_non_daemon_and_drainable() -> None:
             peer_pid: int | None = None,
         ) -> dict[str, Any]:
             del session_handle, operation_id, peer_uid, peer_gid, peer_pid
+            broker_started.set()
             release.wait()
             return self.request_result
 
@@ -1199,9 +1203,18 @@ def test_timed_out_broker_worker_is_non_daemon_and_drainable() -> None:
         approval_uds.APPROVAL_REQUEST_PATH, _json_bytes(_request_payload())
     )
 
-    result = invoker.invoke(
-        call, deadline_monotonic=time.monotonic() + 0.05
-    )
+    real_thread = threading.Thread
+
+    class StartObservedThread(real_thread):
+        def start(self) -> None:
+            super().start()
+            if self.name == "odoo-v3-approval-broker":
+                assert broker_started.wait(2)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(approval_uds, "monotonic", lambda: 100.0)
+        patch.setattr(approval_uds.threading, "Thread", StartObservedThread)
+        result = invoker.invoke(call, deadline_monotonic=100.05)
     workers = [
         thread
         for thread in threading.enumerate()
