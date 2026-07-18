@@ -10,9 +10,15 @@ import pytest
 
 from odoo_accounting_cli_v3.odoo.write_handlers import (
     _RECOVERY_ACTIONS,
+    _SNAPSHOT_FIELDS,
+    _snapshot_primitive,
     OdooWriteContext,
     OdooWriteHandlerError,
     OdooWriteHandlers,
+)
+from odoo_accounting_cli_v3.odoo.module_graph import (
+    OPTIONAL_FIELD_PROVIDERS,
+    build_trusted_module_graph,
 )
 from odoo_accounting_cli_v3.odoo.write_bootstrap import _execution_evidence
 from odoo_accounting_cli_v3.operations import canonical_json
@@ -25,6 +31,41 @@ from odoo_accounting_cli_v3.write_receipts import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "odoo_accounting_cli_v3" / "odoo" / "write_handlers.py"
+_TEST_MODULE_NAMES = {
+    "account",
+    *(
+        module
+        for fields in OPTIONAL_FIELD_PROVIDERS.values()
+        for providers in fields.values()
+        for module in providers
+    ),
+}
+TEST_MODULE_GRAPH = build_trusted_module_graph(
+    [
+        {"name": name, "latest_version": "19.0.test"}
+        for name in sorted(_TEST_MODULE_NAMES)
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "access_token",
+        "invoice_pdf_report_file",
+        "l10n_es_edi_facturae_xml_file",
+        "signature",
+        "ubl_cii_xml_file",
+    ],
+)
+def test_sensitive_snapshot_fields_never_emit_raw_content(field):
+    raw = "super-secret-pdf-or-token-content"
+
+    assert _snapshot_primitive(field, raw) == {"present": True}
+    assert raw.encode("utf-8") not in canonical_json(
+        _snapshot_primitive(field, raw)
+    )
+    assert _snapshot_primitive(field, False) == {"present": False}
 
 
 class Record:
@@ -125,13 +166,20 @@ class Env:
         return self.models[model]
 
 
-def context(env=None, *, recovery_plan=None, environment="sandbox"):
+def context(
+    env=None,
+    *,
+    recovery_plan=None,
+    environment="sandbox",
+    module_graph=TEST_MODULE_GRAPH,
+):
     return OdooWriteContext(
         env=env or Env({}),
         user_id=42,
         allowed_company_ids=frozenset({7}),
         today=date(2026, 7, 15),
         environment=environment,
+        module_graph=module_graph,
         trusted_recovery_plan=recovery_plan,
     )
 
@@ -157,9 +205,12 @@ class Harness(OdooWriteHandlers):
         records=None,
         recovery_plan=None,
         environment="sandbox",
+        module_graph=TEST_MODULE_GRAPH,
     ):
         self.context = context(
-            recovery_plan=recovery_plan, environment=environment
+            recovery_plan=recovery_plan,
+            environment=environment,
+            module_graph=module_graph,
         )
         self.models = models or {}
         self.records = records or {}
@@ -235,7 +286,22 @@ def executable_recovery_plan(
     guard_records,
     method="cancel_pristine_v3_draft_customer_invoice_v1",
     oracle_id="cancel_pristine_v3_draft_customer_invoice_exact_v1",
+    expected_outcome="survive_allowed_delta",
 ):
+    ordered_action_identities = sorted(
+        (
+            {"model": record["model"], "record_id": record["record_id"]}
+            for record in action_targets
+        ),
+        key=lambda item: (item["model"], item["record_id"]),
+    )
+    ordered_guard_identities = sorted(
+        (
+            {"model": record["model"], "record_id": record["record_id"]}
+            for record in guard_records
+        ),
+        key=lambda item: (item["model"], item["record_id"]),
+    )
     return create_recovery_plan_v2(
         origin_operation_id=origin_operation_id,
         recovery_capability_id="acct.recovery.execute.v1",
@@ -244,11 +310,19 @@ def executable_recovery_plan(
         requires_approval=True,
         action_targets=action_targets,
         guard_records=[
-            {**record, "expected_outcome": "survive_exact"}
+            {**record, "expected_outcome": expected_outcome}
             for record in guard_records
         ],
         oracle_id=oracle_id,
-        parameters={"origin_operation_id": origin_operation_id},
+        parameters={
+            "company_id": 7,
+            "origin_operation_id": origin_operation_id,
+            "module_graph_digest": TEST_MODULE_GRAPH.digest,
+            "method": method,
+            "action_targets": ordered_action_identities,
+            "guard_records": ordered_guard_identities,
+            "oracle_id": oracle_id,
+        },
     )
 
 
@@ -581,6 +655,34 @@ def test_snapshot_fails_closed_when_required_audit_fields_are_unavailable():
         handler.record("account.journal", 8, comp)
 
 
+def test_snapshot_reads_binary_fields_as_sizes_without_materializing_payloads():
+    class Currency(Record):
+        def fields_get(self, fields):
+            return {field: {"type": "char"} for field in fields}
+
+        def read(self, fields):
+            assert self.contexts[-1] == {"bin_size": True}
+            values = {
+                "name": "USD",
+                "symbol": "$",
+                "active": True,
+                "rounding": "0.01",
+                "decimal_places": 2,
+            }
+            return [{"id": self.id, **{field: values[field] for field in fields}}]
+
+    currency = Currency(1)
+    handler = OdooWriteHandlers(
+        context(Env({"res.currency": Model({currency.id: currency})}))
+    )
+
+    snapshot = handler.snapshot(
+        "res.currency", currency, company(currency_id=currency)
+    )
+
+    assert snapshot["values"]["name"] == "USD"
+
+
 def test_asset_and_deferred_snapshot_manifests_fail_closed_when_fields_are_missing():
     comp = company()
 
@@ -629,6 +731,197 @@ def test_asset_and_deferred_snapshot_manifests_fail_closed_when_fields_are_missi
                 "deferred_expense_journal_id",
             },
         )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "parent_state",
+        "analytic_distribution",
+        "analytic_line_ids",
+        "tax_tag_ids",
+    ],
+)
+def test_move_line_snapshot_manifest_requires_financial_reporting_fields(missing):
+    comp = company()
+
+    class PartialMoveLine(Record):
+        def fields_get(self, fields):
+            return {
+                field: {"type": "char"}
+                for field in fields
+                if field != missing
+            }
+
+        def read(self, fields):
+            raise AssertionError("missing required fields must fail before read")
+
+    line = PartialMoveLine(91, company_id=comp)
+    handler = OdooWriteHandlers(
+        context(Env({"account.move.line": Model({91: line})}))
+    )
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match=rf"account\.move\.line.*{missing}",
+    ):
+        handler.snapshot("account.move.line", line, comp)
+
+
+@pytest.mark.parametrize(
+    ("model_name", "required_fields"),
+    [
+        (
+            "account.move",
+            {
+                "auto_post_until",
+                "sequence_prefix",
+                "sequence_number",
+                "made_sequence_gap",
+                "checked",
+                "statement_line_ids",
+                "closing_return_id",
+                "transfer_model_id",
+                "transaction_ids",
+                "authorized_transaction_ids",
+                "purchase_id",
+                "asset_ids",
+                "debit_note_ids",
+                "debit_origin_id",
+                "invoice_pdf_report_id",
+                "invoice_vendor_bill_id",
+                "purchase_vendor_bill_id",
+                "ubl_cii_xml_id",
+                "l10n_es_edi_facturae_xml_id",
+                "signature",
+                "signing_user",
+                "is_move_sent",
+                "sending_data",
+                "is_being_sent",
+                "invoice_source_email",
+                "attachment_ids",
+                "message_main_attachment_id",
+                "audit_trail_message_ids",
+                "fiscal_position_id",
+                "invoice_cash_rounding_id",
+                "invoice_incoterm_id",
+                "incoterm_location",
+                "partner_shipping_id",
+                "partner_bank_id",
+                "preferred_payment_method_line_id",
+                "l10n_latam_document_type_id",
+                "invoice_origin",
+                "narration",
+                "quick_edit_total_amount",
+                "always_tax_exigible",
+                "is_storno",
+                "create_uid",
+                "create_date",
+                "write_uid",
+                "write_date",
+            },
+        ),
+        (
+            "account.move.line",
+            {
+                "payment_id",
+                "statement_id",
+                "purchase_order_id",
+                "group_tax_id",
+                "distribution_analytic_account_ids",
+                "reconcile_model_id",
+                "reconciled_lines_ids",
+                "reconciled_lines_excluding_exchange_diff_ids",
+                "parent_id",
+                "move_attachment_ids",
+                "tax_base_amount",
+                "extra_tax_data",
+                "deductible_amount",
+                "is_imported",
+                "is_downpayment",
+                "is_storno",
+                "sequence",
+                "product_uom_id",
+                "discount",
+                "discount_date",
+                "discount_amount_currency",
+                "discount_balance",
+                "l10n_latam_document_type_id",
+                "create_uid",
+                "create_date",
+                "write_uid",
+                "write_date",
+            },
+        ),
+    ],
+)
+def test_recovery_external_effect_fields_are_in_real_snapshot_manifest(
+    model_name, required_fields
+):
+    comp = company()
+
+    class CompleteRecord(Record):
+        def fields_get(self, fields):
+            return {field: {"type": "char"} for field in fields}
+
+        def read(self, fields):
+            return [{field: False for field in fields}]
+
+    record = CompleteRecord(92, company_id=comp, state="draft")
+    handler = OdooWriteHandlers(
+        context(Env({model_name: Model({92: record})}))
+    )
+
+    snapshot = handler.snapshot(model_name, record, comp)
+
+    assert required_fields <= set(snapshot["values"])
+
+
+def test_recovery_snapshot_accepts_optional_fields_proven_absent_by_module_graph():
+    comp = company()
+    graph = build_trusted_module_graph(
+        [
+            {"name": name, "latest_version": "19.0.test"}
+            for name in sorted(_TEST_MODULE_NAMES - {"point_of_sale"})
+        ]
+    )
+
+    class MoveWithoutPos(Record):
+        def fields_get(self, fields):
+            return {
+                field: {"type": "char"}
+                for field in fields
+                if field != "pos_order_ids"
+            }
+
+        def read(self, fields):
+            return [{field: False for field in fields}]
+
+    move = MoveWithoutPos(93, company_id=comp, state="draft")
+    handler = OdooWriteHandlers(
+        OdooWriteContext(
+            env=Env({"account.move": Model({93: move})}),
+            user_id=42,
+            allowed_company_ids=frozenset({7}),
+            today=date(2026, 7, 15),
+            environment="sandbox",
+            module_graph=graph,
+        )
+    )
+
+    snapshot = handler.snapshot(
+        "account.move",
+        move,
+        comp,
+        required_fields={"state", "pos_order_ids"},
+    )
+
+    assert "pos_order_ids" not in snapshot["values"]
+
+
+def test_odoo19_move_snapshot_drops_stale_move_payment_id_only():
+    assert "payment_id" not in _SNAPSHOT_FIELDS["account.move"]
+    assert "payment_id" in _SNAPSHOT_FIELDS["account.move.line"]
 
 
 def test_open_date_rejects_future_and_locked_periods():
@@ -688,33 +981,138 @@ def draft_invoice_creation_graph(
     journal = Record(2, type="sale", active=True)
     move = Record(
         101,
+        name="/",
         state="draft",
         move_type="out_invoice",
         company_id=Record(7),
         journal_id=journal,
         line_ids=[],
         auto_post="no",
+        auto_post_until=False,
         posted_before=False,
+        sequence_prefix=False,
+        sequence_number=0,
+        made_sequence_gap=False,
+        checked=False,
         odoo_cli_v3_document_binding="a" * 64,
         odoo_cli_v3_business_binding="b" * 64,
         payment_ids=list(payment_ids or []),
         adjusting_entry_origin_move_ids=list(
             adjusting_entry_origin_move_ids or []
         ),
+        debit_note_ids=[],
+        debit_origin_id=None,
+        invoice_pdf_report_id=None,
+        invoice_vendor_bill_id=None,
+        purchase_vendor_bill_id=None,
+        ubl_cii_xml_id=None,
+        l10n_es_edi_facturae_xml_id=None,
+        invoice_pdf_report_file=False,
+        l10n_es_edi_facturae_xml_file=False,
+        ubl_cii_xml_file=False,
+        signature=False,
+        signing_user=None,
+        is_move_sent=False,
+        sending_data=False,
+        is_being_sent=False,
+        invoice_source_email=False,
+        attachment_ids=[],
+        message_main_attachment_id=None,
+        audit_trail_message_ids=[],
+        activity_ids=[],
+        message_follower_ids=[],
+        message_ids=[],
+        rating_ids=[],
+        website_message_ids=[],
+        access_token=False,
+        fiscal_position_id=None,
+        invoice_cash_rounding_id=None,
+        invoice_incoterm_id=None,
+        incoterm_location=False,
+        partner_shipping_id=None,
+        partner_bank_id=None,
+        preferred_payment_method_line_id=None,
+        l10n_latam_document_type_id=None,
+        invoice_origin=False,
+        narration=False,
+        quick_edit_total_amount=0,
+        always_tax_exigible=False,
+        is_storno=False,
+        asset_value_change=False,
+        campaign_id=None,
+        medium_id=None,
+        source_id=None,
+        team_id=None,
+        delivery_date=None,
+        fapiao=False,
+        invoice_currency_rate=1,
+        invoice_user_id=Record(42),
+        l10n_es_edi_facturae_reason_code=False,
+        l10n_es_invoicing_period_start_date=None,
+        l10n_es_invoicing_period_end_date=None,
+        l10n_es_is_simplified=False,
+        l10n_es_payment_means=False,
+        payment_reference=False,
+        payment_state_before_switch=False,
+        qr_code_method=False,
+        taxable_supply_date=None,
     )
     line1 = Record(
         102,
         company_id=Record(7),
         move_id=move,
+        parent_state="draft",
         reconciled=reconciled,
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        tax_tag_ids=[],
+        move_attachment_ids=[],
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=0,
+        is_imported=False,
+        is_downpayment=False,
+        is_storno=False,
+        sequence=10,
+        product_uom_id=None,
+        discount=0,
+        discount_date=None,
+        discount_amount_currency=0,
+        discount_balance=0,
+        l10n_latam_document_type_id=None,
+        no_followup=False,
+        collapse_composition=False,
+        collapse_prices=False,
     )
     line2 = Record(
         103,
         company_id=Record(7),
         move_id=move,
+        parent_state="draft",
         reconciled=False,
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        tax_tag_ids=[],
+        move_attachment_ids=[],
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=0,
+        is_imported=False,
+        is_downpayment=False,
+        is_storno=False,
+        sequence=20,
+        product_uom_id=None,
+        discount=0,
+        discount_date=None,
+        discount_amount_currency=0,
+        discount_balance=0,
+        l10n_latam_document_type_id=None,
+        no_followup=False,
+        collapse_composition=False,
+        collapse_prices=False,
     )
     move.line_ids = [line1, line2]
+    move.journal_line_ids = [line1, line2]
     return move, line1, line2
 
 
@@ -861,26 +1259,125 @@ def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan(
     move.odoo_cli_v3_document_binding = document_binding
     move.odoo_cli_v3_business_binding = business_binding
     move.snapshot_values = {
+        "name": "/",
         "state": "draft",
         "move_type": "out_invoice",
         "company_id": [7, "Sandbox Company"],
         "journal_id": [2, "Sales"],
         "currency_id": [1, "USD"],
         "partner_id": [10, "Customer"],
+        "date": "2026-07-10",
+        "invoice_date": "2026-07-10",
+        "invoice_date_due": "2026-08-10",
+        "invoice_line_ids": [line1.id],
+        "invoice_payment_term_id": False,
+        "ref": "INV-DRAFT-INTEGRATION-1",
         "line_ids": [line1.id, line2.id],
+        "journal_line_ids": [line1.id, line2.id],
         "auto_post": "no",
+        "auto_post_until": False,
         "posted_before": False,
+        "sequence_prefix": False,
+        "sequence_number": 0,
         "secure_sequence_number": 0,
+        "made_sequence_gap": False,
         "inalterable_hash": False,
+        "checked": False,
         "is_manually_modified": False,
+        "need_cancel_request": False,
+        "auto_post_origin_id": False,
+        "origin_payment_id": False,
         "payment_ids": [],
         "matched_payment_ids": [],
         "reconciled_payment_ids": [],
+        "statement_line_id": False,
+        "statement_id": False,
+        "tax_cash_basis_rec_id": False,
+        "tax_cash_basis_origin_move_id": False,
         "tax_cash_basis_created_move_ids": [],
+        "reversed_entry_id": False,
         "reversal_move_ids": [],
         "adjusting_entry_origin_move_ids": [],
         "adjusting_entries_move_ids": [],
         "exchange_diff_partial_ids": [],
+        "statement_line_ids": [],
+        "closing_return_id": False,
+        "transfer_model_id": False,
+        "transaction_ids": [],
+        "authorized_transaction_ids": [],
+        "purchase_id": False,
+        "asset_id": False,
+        "asset_ids": [],
+        "deferred_move_ids": [],
+        "deferred_original_move_ids": [],
+        "edi_document_ids": [],
+        "expense_ids": [],
+        "pos_order_ids": [],
+        "stock_move_ids": [],
+        "landed_costs_ids": [],
+        "debit_note_ids": [],
+        "debit_origin_id": False,
+        "invoice_pdf_report_id": False,
+        "invoice_vendor_bill_id": False,
+        "purchase_vendor_bill_id": False,
+        "ubl_cii_xml_id": False,
+        "l10n_es_edi_facturae_xml_id": False,
+        "invoice_pdf_report_file": {"present": False},
+        "l10n_es_edi_facturae_xml_file": {"present": False},
+        "ubl_cii_xml_file": {"present": False},
+        "signature": {"present": False},
+        "signing_user": False,
+        "is_move_sent": False,
+        "sending_data": False,
+        "is_being_sent": False,
+        "invoice_source_email": False,
+        "attachment_ids": [],
+        "message_main_attachment_id": False,
+        "audit_trail_message_ids": [],
+        "activity_ids": [],
+        "message_follower_ids": [],
+        "message_ids": [],
+        "rating_ids": [],
+        "website_message_ids": [],
+        "access_token": {"present": False},
+        "fiscal_position_id": False,
+        "invoice_cash_rounding_id": False,
+        "invoice_incoterm_id": False,
+        "incoterm_location": False,
+        "partner_shipping_id": False,
+        "partner_bank_id": False,
+        "preferred_payment_method_line_id": False,
+        "l10n_latam_document_type_id": False,
+        "invoice_origin": False,
+        "narration": False,
+        "quick_edit_total_amount": "0",
+        "always_tax_exigible": False,
+        "is_storno": False,
+        "asset_value_change": False,
+        "campaign_id": False,
+        "medium_id": False,
+        "source_id": False,
+        "team_id": False,
+        "delivery_date": False,
+        "fapiao": False,
+        "invoice_currency_rate": "1",
+        "invoice_user_id": [42, "V3 Executor"],
+        "l10n_es_edi_facturae_reason_code": False,
+        "l10n_es_invoicing_period_start_date": False,
+        "l10n_es_invoicing_period_end_date": False,
+        "l10n_es_is_simplified": False,
+        "l10n_es_payment_means": False,
+        "payment_reference": False,
+        "payment_state_before_switch": False,
+        "qr_code_method": False,
+        "taxable_supply_date": False,
+        "asset_depreciation_beginning_date": False,
+        "asset_number_days": 0,
+        "depreciation_value": "0",
+        "create_uid": [42, "V3 Executor"],
+        "create_date": "2026-07-10 09:00:00",
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-10 09:00:00",
         "odoo_cli_v3_document_binding": document_binding,
         "odoo_cli_v3_business_binding": business_binding,
     }
@@ -888,18 +1385,79 @@ def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan(
         line.snapshot_values = {
             "move_id": [move.id, "/"],
             "company_id": [7, "Sandbox Company"],
+            "account_id": [10 if line is line1 else 20, "Account"],
+            "currency_id": [1, "USD"],
+            "parent_state": "draft",
             "reconciled": False,
             "full_reconcile_id": False,
             "matched_debit_ids": [],
             "matched_credit_ids": [],
             "asset_ids": [],
             "sale_line_ids": [],
+            "analytic_distribution": False,
+            "analytic_line_ids": [],
+            "tax_tag_ids": [],
+            "tax_ids": [],
+            "tax_line_id": False,
+            "tax_repartition_line_id": False,
+            "payment_id": False,
+            "statement_line_id": False,
+            "statement_id": False,
+            "purchase_line_id": False,
+            "purchase_order_id": False,
+            "expense_id": False,
+            "group_tax_id": False,
+            "distribution_analytic_account_ids": [],
+            "reconcile_model_id": False,
+            "reconciled_lines_ids": [],
+            "reconciled_lines_excluding_exchange_diff_ids": [],
+            "parent_id": False,
+            "cogs_origin_id": False,
+            "is_landed_costs_line": False,
+            "deferred_start_date": False,
+            "deferred_end_date": False,
+            "move_attachment_ids": [],
+            "tax_base_amount": "0",
+            "extra_tax_data": False,
+            "deductible_amount": "0",
+            "is_imported": False,
+            "is_downpayment": False,
+            "is_storno": False,
+            "sequence": 10,
+            "product_uom_id": False,
+            "discount": "0",
+            "discount_date": False,
+            "discount_amount_currency": "0",
+            "discount_balance": "0",
+            "l10n_latam_document_type_id": False,
+            "no_followup": False,
+            "collapse_composition": False,
+            "collapse_prices": False,
+            "date_maturity": False,
+            "matching_number": False,
+            "name": "Invoice line" if line is line1 else "Payment term",
+            "partner_id": [10, "Customer"],
+            "price_unit": "100" if line is line1 else "0",
+            "product_id": False,
+            "quantity": "1" if line is line1 else "0",
+            "create_uid": [42, "V3 Executor"],
+            "create_date": "2026-07-10 09:00:00",
+            "write_uid": [42, "V3 Executor"],
+            "write_date": "2026-07-10 09:00:00",
             "display_type": "product",
+            "debit": "100" if line is line1 else "0",
+            "credit": "0" if line is line1 else "100",
+            "balance": "100" if line is line1 else "-100",
+            "amount_currency": "100" if line is line1 else "-100",
+            "odoo_cli_v3_line_reference": (
+                "line-1" if line is line1 else "line-2"
+            ),
         }
     checked = {
         "capability_id": "acct.invoice.customer_create.v1",
         "company_id": 7,
         "parameters_digest": hashlib.sha256(canonical_json(parameters)).hexdigest(),
+        "module_graph": handler.context.module_graph.evidence,
         "checks": ["approved_live_precheck"],
         "before": [],
     }
@@ -4146,7 +4704,7 @@ def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_gra
     move = Record(
         1001, company_id=comp, state="posted", move_type="entry",
         journal_id=journal, currency_id=currency, amount_total=100,
-        line_ids=SimpleNamespace(ids=[1003, 1004]), payment_id=None,
+        line_ids=SimpleNamespace(ids=[1003, 1004]),
         statement_line_id=None, statement_id=None, asset_id=None,
         deferred_move_ids=[], deferred_original_move_ids=[],
         tax_cash_basis_rec_id=None, tax_cash_basis_origin_move_id=None,
@@ -4191,7 +4749,6 @@ def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_gra
 @pytest.mark.parametrize(
     ("target", "field", "value"),
     (
-        ("move", "payment_id", Record(90)),
         ("move", "statement_line_id", Record(91)),
         ("move", "statement_id", Record(98)),
         ("move", "asset_id", Record(92)),
@@ -4223,7 +4780,7 @@ def test_reversal_precheck_rejects_existing_accounting_dependencies(
     move = Record(
         1001, company_id=comp, state="posted", move_type="entry",
         journal_id=journal, currency_id=currency, amount_total=100,
-        line_ids=SimpleNamespace(ids=[1003]), payment_id=None,
+        line_ids=SimpleNamespace(ids=[1003]),
         statement_line_id=None, statement_id=None, asset_id=None,
         deferred_move_ids=[], deferred_original_move_ids=[],
         tax_cash_basis_rec_id=None, tax_cash_basis_origin_move_id=None,
@@ -4271,7 +4828,7 @@ def test_reversal_precheck_rejects_exchange_and_caba_reverse_dependencies(
     move = Record(
         1001, company_id=comp, state="posted", move_type="entry",
         journal_id=journal, currency_id=currency, amount_total=100,
-        line_ids=SimpleNamespace(ids=[1003]), payment_id=None,
+        line_ids=SimpleNamespace(ids=[1003]),
         statement_line_id=None, statement_id=None, asset_id=None,
         deferred_move_ids=[], deferred_original_move_ids=[],
         tax_cash_basis_rec_id=None, tax_cash_basis_origin_move_id=None,
@@ -4397,20 +4954,31 @@ def draft_move_recovery_fixture(*, vendor=False):
     move = Record(
         1101,
         state="draft",
+        name="/",
         move_type="in_invoice" if vendor else "out_invoice",
         company_id=Record(7),
         journal_id=journal,
+        invoice_date="2026-07-10",
+        invoice_date_due="2026-08-10",
+        invoice_line_ids=[],
+        invoice_payment_term_id=None,
+        ref=("BILL-DRAFT-RECOVERY-1" if vendor else "DRAFT-RECOVERY-1"),
         line_ids=[],
         auto_post="no",
+        auto_post_until=None,
         posted_before=False,
+        sequence_prefix=None,
+        sequence_number=0,
+        made_sequence_gap=False,
         secure_sequence_number=0,
         inalterable_hash=False,
+        checked=False,
         origin_payment_id=None,
-        payment_id=None,
         payment_ids=[],
         matched_payment_ids=[],
         reconciled_payment_ids=[],
         statement_line_id=None,
+        statement_line_ids=[],
         statement_id=None,
         tax_cash_basis_rec_id=None,
         tax_cash_basis_origin_move_id=None,
@@ -4420,17 +4988,83 @@ def draft_move_recovery_fixture(*, vendor=False):
         adjusting_entry_origin_move_ids=[],
         adjusting_entries_move_ids=[],
         exchange_diff_partial_ids=[],
+        closing_return_id=None,
+        transfer_model_id=None,
+        transaction_ids=[],
+        authorized_transaction_ids=[],
+        purchase_id=None,
         asset_id=None,
+        asset_ids=[],
         deferred_move_ids=[],
         deferred_original_move_ids=[],
         edi_document_ids=[],
         expense_ids=[],
         pos_order_ids=[],
-        **(
-            {"stock_move_ids": [], "landed_costs_ids": []}
-            if vendor
-            else {}
-        ),
+        stock_move_ids=[],
+        landed_costs_ids=[],
+        debit_note_ids=[],
+        debit_origin_id=None,
+        invoice_pdf_report_id=None,
+        invoice_vendor_bill_id=None,
+        purchase_vendor_bill_id=None,
+        ubl_cii_xml_id=None,
+        l10n_es_edi_facturae_xml_id=None,
+        invoice_pdf_report_file=False,
+        l10n_es_edi_facturae_xml_file=False,
+        ubl_cii_xml_file=False,
+        signature=False,
+        signing_user=None,
+        is_move_sent=False,
+        sending_data=False,
+        is_being_sent=False,
+        invoice_source_email=False,
+        attachment_ids=[],
+        message_main_attachment_id=None,
+        audit_trail_message_ids=[],
+        activity_ids=[],
+        message_follower_ids=[],
+        message_ids=[],
+        rating_ids=[],
+        website_message_ids=[],
+        access_token=False,
+        fiscal_position_id=None,
+        invoice_cash_rounding_id=None,
+        invoice_incoterm_id=None,
+        incoterm_location=False,
+        partner_shipping_id=None,
+        partner_bank_id=None,
+        preferred_payment_method_line_id=None,
+        l10n_latam_document_type_id=None,
+        invoice_origin=False,
+        narration=False,
+        quick_edit_total_amount=0,
+        always_tax_exigible=False,
+        is_storno=False,
+        asset_value_change=False,
+        campaign_id=None,
+        medium_id=None,
+        source_id=None,
+        team_id=None,
+        delivery_date=None,
+        fapiao=False,
+        invoice_currency_rate=1,
+        invoice_user_id=Record(42),
+        l10n_es_edi_facturae_reason_code=False,
+        l10n_es_invoicing_period_start_date=None,
+        l10n_es_invoicing_period_end_date=None,
+        l10n_es_is_simplified=False,
+        l10n_es_payment_means=False,
+        payment_reference=False,
+        payment_state_before_switch=False,
+        qr_code_method=False,
+        taxable_supply_date=None,
+        asset_depreciation_beginning_date=None,
+        asset_number_days=0,
+        depreciation_value=0,
+        create_uid=Record(42),
+        create_date="2026-07-10 09:00:00",
+        write_uid=Record(42),
+        write_date="2026-07-10 09:00:00",
         need_cancel_request=False,
         is_manually_modified=False,
         odoo_cli_v3_document_binding="a" * 64,
@@ -4451,16 +5085,54 @@ def draft_move_recovery_fixture(*, vendor=False):
         deferred_start_date=None,
         deferred_end_date=None,
         statement_line_id=None,
+        statement_id=None,
         sale_line_ids=[],
         purchase_line_id=None,
+        purchase_order_id=None,
         expense_id=None,
-        **(
-            {"cogs_origin_id": None, "is_landed_costs_line": False}
-            if vendor
-            else {}
-        ),
+        payment_id=None,
+        group_tax_id=None,
+        distribution_analytic_account_ids=[],
+        reconcile_model_id=None,
+        reconciled_lines_ids=[],
+        reconciled_lines_excluding_exchange_diff_ids=[],
+        parent_id=None,
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        tax_tag_ids=[],
+        cogs_origin_id=None,
+        is_landed_costs_line=False,
+        move_attachment_ids=[],
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=0,
+        is_imported=False,
+        is_storno=False,
+        is_downpayment=False,
+        sequence=10,
+        product_uom_id=None,
+        discount=0,
+        discount_date=None,
+        discount_amount_currency=0,
+        discount_balance=0,
+        l10n_latam_document_type_id=None,
+        no_followup=False,
+        collapse_composition=False,
+        collapse_prices=False,
+        create_uid=Record(42),
+        create_date="2026-07-10 09:00:00",
+        write_uid=Record(42),
+        write_date="2026-07-10 09:00:00",
         display_type="product",
+        date_maturity=None,
+        matching_number=False,
+        name="Invoice line",
+        partner_id=Record(10),
+        price_unit=100,
+        product_id=None,
+        quantity=1,
         reconciled=False,
+        parent_state="draft",
     )
     line2 = Record(
         1103,
@@ -4477,33 +5149,90 @@ def draft_move_recovery_fixture(*, vendor=False):
         deferred_start_date=None,
         deferred_end_date=None,
         statement_line_id=None,
+        statement_id=None,
         sale_line_ids=[],
         purchase_line_id=None,
+        purchase_order_id=None,
         expense_id=None,
-        **(
-            {"cogs_origin_id": None, "is_landed_costs_line": False}
-            if vendor
-            else {}
-        ),
+        payment_id=None,
+        group_tax_id=None,
+        distribution_analytic_account_ids=[],
+        reconcile_model_id=None,
+        reconciled_lines_ids=[],
+        reconciled_lines_excluding_exchange_diff_ids=[],
+        parent_id=None,
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        tax_tag_ids=[],
+        cogs_origin_id=None,
+        is_landed_costs_line=False,
+        move_attachment_ids=[],
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=0,
+        is_imported=False,
+        is_storno=False,
+        is_downpayment=False,
+        sequence=20,
+        product_uom_id=None,
+        discount=0,
+        discount_date=None,
+        discount_amount_currency=0,
+        discount_balance=0,
+        l10n_latam_document_type_id=None,
+        no_followup=False,
+        collapse_composition=False,
+        collapse_prices=False,
+        create_uid=Record(42),
+        create_date="2026-07-10 09:00:00",
+        write_uid=Record(42),
+        write_date="2026-07-10 09:00:00",
         display_type="payment_term",
+        date_maturity="2026-08-10",
+        matching_number=False,
+        name="Payment term",
+        partner_id=Record(10),
+        price_unit=0,
+        product_id=None,
+        quantity=0,
         reconciled=False,
+        parent_state="draft",
     )
     move.line_ids = [line1, line2]
+    move.invoice_line_ids = [line1]
+    move.journal_line_ids = [line1, line2]
     move.snapshot_values = {
         "state": "draft",
+        "name": "/",
         "move_type": "in_invoice" if vendor else "out_invoice",
+        "company_id": 7,
         "journal_id": 2,
+        "currency_id": 1,
+        "partner_id": 10,
+        "date": "2026-07-10",
+        "invoice_date": "2026-07-10",
+        "invoice_date_due": "2026-08-10",
+        "invoice_line_ids": [1102],
+        "invoice_payment_term_id": False,
         "line_ids": [1102, 1103],
+        "journal_line_ids": [1102, 1103],
         "ref": "BILL-DRAFT-RECOVERY-1" if vendor else "DRAFT-RECOVERY-1",
         "auto_post": "no",
+        "auto_post_until": False,
         "posted_before": False,
+        "sequence_prefix": False,
+        "sequence_number": 0,
+        "made_sequence_gap": False,
         "secure_sequence_number": 0,
         "inalterable_hash": False,
+        "checked": False,
+        "auto_post_origin_id": False,
         "origin_payment_id": False,
         "payment_ids": [],
         "matched_payment_ids": [],
         "reconciled_payment_ids": [],
         "statement_line_id": False,
+        "statement_line_ids": [],
         "statement_id": False,
         "tax_cash_basis_rec_id": False,
         "tax_cash_basis_origin_move_id": False,
@@ -4513,17 +5242,86 @@ def draft_move_recovery_fixture(*, vendor=False):
         "adjusting_entry_origin_move_ids": [],
         "adjusting_entries_move_ids": [],
         "exchange_diff_partial_ids": [],
+        "closing_return_id": False,
+        "transfer_model_id": False,
+        "transaction_ids": [],
+        "authorized_transaction_ids": [],
+        "purchase_id": False,
         "asset_id": False,
+        "asset_ids": [],
         "deferred_move_ids": [],
         "deferred_original_move_ids": [],
         "edi_document_ids": [],
         "expense_ids": [],
         "pos_order_ids": [],
-        **(
-            {"stock_move_ids": [], "landed_costs_ids": []}
-            if vendor
-            else {}
-        ),
+        "stock_move_ids": [],
+        "landed_costs_ids": [],
+        "debit_note_ids": [],
+        "debit_origin_id": False,
+        "invoice_pdf_report_id": False,
+        "invoice_vendor_bill_id": False,
+        "purchase_vendor_bill_id": False,
+        "ubl_cii_xml_id": False,
+        "l10n_es_edi_facturae_xml_id": False,
+        "invoice_pdf_report_file": {"present": False},
+        "l10n_es_edi_facturae_xml_file": {"present": False},
+        "ubl_cii_xml_file": {"present": False},
+        "signature": {"present": False},
+        "signing_user": False,
+        "is_move_sent": False,
+        "sending_data": False,
+        "is_being_sent": False,
+        "invoice_source_email": False,
+        "attachment_ids": [],
+        "message_main_attachment_id": False,
+        "audit_trail_message_ids": [],
+        "activity_ids": [],
+        "message_follower_ids": [],
+        "message_ids": [],
+        "rating_ids": [],
+        "website_message_ids": [],
+        "access_token": {"present": False},
+        "fiscal_position_id": False,
+        "invoice_cash_rounding_id": False,
+        "invoice_incoterm_id": False,
+        "incoterm_location": False,
+        "partner_shipping_id": False,
+        "partner_bank_id": False,
+        "preferred_payment_method_line_id": False,
+        "l10n_latam_document_type_id": False,
+        "no_followup": False,
+        "collapse_composition": False,
+        "collapse_prices": False,
+        "invoice_origin": False,
+        "narration": False,
+        "quick_edit_total_amount": "0",
+        "always_tax_exigible": False,
+        "is_storno": False,
+        "asset_value_change": False,
+        "campaign_id": False,
+        "medium_id": False,
+        "source_id": False,
+        "team_id": False,
+        "delivery_date": False,
+        "fapiao": False,
+        "invoice_currency_rate": "1",
+        "invoice_user_id": [42, "V3 Executor"],
+        "l10n_es_edi_facturae_reason_code": False,
+        "l10n_es_invoicing_period_start_date": False,
+        "l10n_es_invoicing_period_end_date": False,
+        "l10n_es_is_simplified": False,
+        "l10n_es_payment_means": False,
+        "payment_reference": False,
+        "payment_state_before_switch": False,
+        "qr_code_method": False,
+        "taxable_supply_date": False,
+        "asset_depreciation_beginning_date": False,
+        "asset_number_days": 0,
+        "depreciation_value": "0",
+        "create_uid": [42, "V3 Executor"],
+        "create_date": "2026-07-10 09:00:00",
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-10 09:00:00",
         "need_cancel_request": False,
         "is_manually_modified": False,
         "odoo_cli_v3_document_binding": "a" * 64,
@@ -4538,17 +5336,72 @@ def draft_move_recovery_fixture(*, vendor=False):
                 else "Draft Invoice DRAFT-RECOVERY-1"
             ),
         ],
+        "parent_state": "draft",
+        "company_id": 7,
         "account_id": 10,
+        "currency_id": 1,
         "debit": "100",
         "credit": "0",
-        **(
-            {
-                "cogs_origin_id": False,
-                "is_landed_costs_line": False,
-            }
-            if vendor
-            else {}
-        ),
+        "balance": "100",
+        "amount_currency": "100",
+        "reconciled": False,
+        "full_reconcile_id": False,
+        "matched_debit_ids": [],
+        "matched_credit_ids": [],
+        "tax_ids": [],
+        "tax_line_id": False,
+        "tax_repartition_line_id": False,
+        "analytic_distribution": False,
+        "analytic_line_ids": [],
+        "tax_tag_ids": [],
+        "payment_id": False,
+        "statement_line_id": False,
+        "statement_id": False,
+        "purchase_line_id": False,
+        "purchase_order_id": False,
+        "sale_line_ids": [],
+        "expense_id": False,
+        "asset_ids": [],
+        "group_tax_id": False,
+        "distribution_analytic_account_ids": [],
+        "reconcile_model_id": False,
+        "reconciled_lines_ids": [],
+        "reconciled_lines_excluding_exchange_diff_ids": [],
+        "parent_id": False,
+        "cogs_origin_id": False,
+        "is_landed_costs_line": False,
+        "deferred_start_date": False,
+        "deferred_end_date": False,
+        "move_attachment_ids": [],
+        "tax_base_amount": "0",
+        "extra_tax_data": False,
+        "deductible_amount": "0",
+        "is_imported": False,
+        "is_storno": False,
+        "is_downpayment": False,
+        "sequence": 10,
+        "product_uom_id": False,
+        "discount": "0",
+        "discount_date": False,
+        "discount_amount_currency": "0",
+        "discount_balance": "0",
+        "l10n_latam_document_type_id": False,
+        "no_followup": False,
+        "collapse_composition": False,
+        "collapse_prices": False,
+        "create_uid": [42, "V3 Executor"],
+        "create_date": "2026-07-10 09:00:00",
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-10 09:00:00",
+        "display_type": "product",
+        "date_maturity": False,
+        "matching_number": False,
+        "name": "Invoice line",
+        "partner_id": 10,
+        "price_unit": "100",
+        "product_id": False,
+        "quantity": "1",
+        "odoo_cli_v3_line_reference": "line-1",
     }
     line2.snapshot_values = {
         "move_id": [
@@ -4559,17 +5412,69 @@ def draft_move_recovery_fixture(*, vendor=False):
                 else "Draft Invoice DRAFT-RECOVERY-1"
             ),
         ],
+        "parent_state": "draft",
+        "company_id": 7,
         "account_id": 20,
+        "currency_id": 1,
         "debit": "0",
         "credit": "100",
-        **(
-            {
-                "cogs_origin_id": False,
-                "is_landed_costs_line": False,
-            }
-            if vendor
-            else {}
-        ),
+        "balance": "-100",
+        "amount_currency": "-100",
+        "reconciled": False,
+        "full_reconcile_id": False,
+        "matched_debit_ids": [],
+        "matched_credit_ids": [],
+        "tax_ids": [],
+        "tax_line_id": False,
+        "tax_repartition_line_id": False,
+        "analytic_distribution": False,
+        "analytic_line_ids": [],
+        "tax_tag_ids": [],
+        "payment_id": False,
+        "statement_line_id": False,
+        "statement_id": False,
+        "purchase_line_id": False,
+        "purchase_order_id": False,
+        "sale_line_ids": [],
+        "expense_id": False,
+        "asset_ids": [],
+        "group_tax_id": False,
+        "distribution_analytic_account_ids": [],
+        "reconcile_model_id": False,
+        "reconciled_lines_ids": [],
+        "reconciled_lines_excluding_exchange_diff_ids": [],
+        "parent_id": False,
+        "cogs_origin_id": False,
+        "is_landed_costs_line": False,
+        "deferred_start_date": False,
+        "deferred_end_date": False,
+        "move_attachment_ids": [],
+        "tax_base_amount": "0",
+        "extra_tax_data": False,
+        "deductible_amount": "0",
+        "is_imported": False,
+        "is_storno": False,
+        "is_downpayment": False,
+        "sequence": 20,
+        "product_uom_id": False,
+        "discount": "0",
+        "discount_date": False,
+        "discount_amount_currency": "0",
+        "discount_balance": "0",
+        "l10n_latam_document_type_id": False,
+        "create_uid": [42, "V3 Executor"],
+        "create_date": "2026-07-10 09:00:00",
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-10 09:00:00",
+        "display_type": "payment_term",
+        "date_maturity": "2026-08-10",
+        "matching_number": False,
+        "name": "Payment term",
+        "partner_id": 10,
+        "price_unit": "0",
+        "product_id": False,
+        "quantity": "0",
+        "odoo_cli_v3_line_reference": "line-2",
     }
 
     def exact_write(values):
@@ -4578,7 +5483,17 @@ def draft_move_recovery_fixture(*, vendor=False):
             setattr(move, key, value)
             move.snapshot_values[key] = value
         if values.get("state") == "cancel":
+            move.write_uid = Record(42)
+            move.write_date = "2026-07-10 09:01:00"
+            move.snapshot_values["write_uid"] = [42, "V3 Executor"]
+            move.snapshot_values["write_date"] = "2026-07-10 09:01:00"
             for line in (line1, line2):
+                line.parent_state = "cancel"
+                line.snapshot_values["parent_state"] = "cancel"
+                line.write_uid = Record(42)
+                line.write_date = "2026-07-10 09:01:00"
+                line.snapshot_values["write_uid"] = [42, "V3 Executor"]
+                line.snapshot_values["write_date"] = "2026-07-10 09:01:00"
                 line.snapshot_values["move_id"] = [
                     move.id,
                     (
@@ -4615,6 +5530,387 @@ def draft_move_recovery_fixture(*, vendor=False):
         ),
     )
     return move, line1, line2, records, plan
+
+
+@pytest.mark.parametrize("phase", ["precheck", "execute", "verify"])
+def test_draft_recovery_rejects_module_graph_changed_since_origin_execution(
+    phase,
+):
+    _move, _line1, _line2, records_by_key, plan = (
+        draft_move_recovery_fixture()
+    )
+    changed_graph = build_trusted_module_graph(
+        [
+            {
+                "name": name,
+                "latest_version": (
+                    "19.0.changed" if name == "account" else version
+                ),
+            }
+            for name, version in TEST_MODULE_GRAPH.modules
+        ]
+    )
+    handler = Harness(
+        recovery_plan=plan,
+        records=records_by_key,
+        module_graph=changed_graph,
+    )
+
+    parameters = {
+        "origin_operation_id": "op-1",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "company_id": 7,
+    }
+    with pytest.raises(OdooWriteHandlerError, match="module graph"):
+        if phase == "precheck":
+            handler.precheck_recovery(parameters, handler.test_company)
+        elif phase == "execute":
+            handler.execute_recovery(parameters, handler.test_company, {})
+        else:
+            handler.verify_recovery(
+                parameters,
+                handler.test_company,
+                list(records_by_key.values()),
+                {},
+            )
+
+
+@pytest.mark.parametrize("vendor", [False, True])
+def test_draft_document_recovery_requires_complete_external_effect_fingerprint(
+    vendor,
+):
+    _move, _line1, _line2, records_by_key, plan = (
+        draft_move_recovery_fixture(vendor=vendor)
+    )
+
+    class CaptureRequiredFieldsHarness(Harness):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.required = {}
+
+        def snapshot(self, model, record, company, *, required_fields=()):
+            self.required.setdefault(model, set()).update(required_fields)
+            return super().snapshot(
+                model,
+                record,
+                company,
+                required_fields=required_fields,
+            )
+
+    handler = CaptureRequiredFieldsHarness(
+        recovery_plan=plan,
+        records=records_by_key,
+    )
+    handler.precheck_recovery(
+        {
+            "origin_operation_id": "op-1",
+            "expected_recovery_plan_digest": plan["plan_digest"],
+            "company_id": 7,
+        },
+        handler.test_company,
+    )
+
+    assert {
+        "name",
+        "invoice_date",
+        "invoice_date_due",
+        "invoice_line_ids",
+        "invoice_payment_term_id",
+        "ref",
+        "auto_post_until",
+        "sequence_prefix",
+        "sequence_number",
+        "made_sequence_gap",
+        "checked",
+        "statement_line_ids",
+        "closing_return_id",
+        "transfer_model_id",
+        "transaction_ids",
+        "authorized_transaction_ids",
+        "purchase_id",
+        "asset_ids",
+        "stock_move_ids",
+        "landed_costs_ids",
+        "debit_note_ids",
+        "debit_origin_id",
+        "invoice_pdf_report_id",
+        "invoice_vendor_bill_id",
+        "purchase_vendor_bill_id",
+        "ubl_cii_xml_id",
+        "l10n_es_edi_facturae_xml_id",
+        "signature",
+        "signing_user",
+        "is_move_sent",
+        "sending_data",
+        "is_being_sent",
+        "invoice_source_email",
+        "attachment_ids",
+        "message_main_attachment_id",
+        "audit_trail_message_ids",
+        "activity_ids",
+        "message_follower_ids",
+        "message_ids",
+        "rating_ids",
+        "website_message_ids",
+        "access_token",
+        "asset_value_change",
+        "campaign_id",
+        "medium_id",
+        "source_id",
+        "team_id",
+        "delivery_date",
+        "fapiao",
+        "invoice_currency_rate",
+        "invoice_user_id",
+        "l10n_es_edi_facturae_reason_code",
+        "l10n_es_invoicing_period_start_date",
+        "l10n_es_invoicing_period_end_date",
+        "l10n_es_is_simplified",
+        "l10n_es_payment_means",
+        "payment_reference",
+        "payment_state_before_switch",
+        "qr_code_method",
+        "taxable_supply_date",
+        "journal_line_ids",
+        "asset_depreciation_beginning_date",
+        "asset_number_days",
+        "depreciation_value",
+        "invoice_pdf_report_file",
+        "l10n_es_edi_facturae_xml_file",
+        "ubl_cii_xml_file",
+        "fiscal_position_id",
+        "invoice_cash_rounding_id",
+        "invoice_incoterm_id",
+        "incoterm_location",
+        "partner_shipping_id",
+        "partner_bank_id",
+        "preferred_payment_method_line_id",
+        "l10n_latam_document_type_id",
+        "invoice_origin",
+        "narration",
+        "quick_edit_total_amount",
+        "always_tax_exigible",
+        "is_storno",
+        "create_uid",
+        "create_date",
+        "write_uid",
+        "write_date",
+    } <= handler.required["account.move"]
+    assert {
+        "payment_id",
+        "date_maturity",
+        "matching_number",
+        "name",
+        "partner_id",
+        "price_unit",
+        "product_id",
+        "quantity",
+        "statement_id",
+        "purchase_order_id",
+        "group_tax_id",
+        "distribution_analytic_account_ids",
+        "reconcile_model_id",
+        "reconciled_lines_ids",
+        "reconciled_lines_excluding_exchange_diff_ids",
+        "parent_id",
+        "cogs_origin_id",
+        "is_landed_costs_line",
+        "move_attachment_ids",
+        "tax_base_amount",
+        "extra_tax_data",
+        "deductible_amount",
+        "is_imported",
+        "is_downpayment",
+        "is_storno",
+        "sequence",
+        "product_uom_id",
+        "discount",
+        "discount_date",
+        "discount_amount_currency",
+        "discount_balance",
+        "l10n_latam_document_type_id",
+        "no_followup",
+        "collapse_composition",
+        "collapse_prices",
+        "create_uid",
+        "create_date",
+        "write_uid",
+        "write_date",
+    } <= handler.required["account.move.line"]
+
+
+@pytest.mark.parametrize("vendor", [False, True])
+@pytest.mark.parametrize(
+    ("target", "field", "value", "match"),
+    [
+        ("move", "name", "INV/2026/0001", "pristine"),
+        ("move", "auto_post_until", "2026-12-31", "pristine"),
+        ("move", "sequence_prefix", "INV/2026/", "pristine"),
+        ("move", "sequence_number", 1, "pristine"),
+        ("move", "made_sequence_gap", True, "pristine"),
+        ("move", "checked", True, "pristine"),
+        ("move", "statement_line_ids", [Record(1201)], "link"),
+        ("move", "closing_return_id", Record(1202), "link"),
+        ("move", "transfer_model_id", Record(1203), "link"),
+        ("move", "transaction_ids", [Record(1204)], "link"),
+        (
+            "move",
+            "authorized_transaction_ids",
+            [Record(1205)],
+            "link",
+        ),
+        ("move", "purchase_id", Record(1206), "link"),
+        ("move", "asset_ids", [Record(1207)], "link"),
+        ("move", "stock_move_ids", [Record(1208)], "link"),
+        ("move", "landed_costs_ids", [Record(1209)], "link"),
+        ("move", "debit_note_ids", [Record(1218)], "link"),
+        ("move", "debit_origin_id", Record(1219), "link"),
+        ("move", "invoice_pdf_report_id", Record(1220), "link"),
+        ("move", "invoice_vendor_bill_id", Record(1221), "link"),
+        ("move", "purchase_vendor_bill_id", Record(1222), "link"),
+        ("move", "ubl_cii_xml_id", Record(1223), "link"),
+        (
+            "move",
+            "l10n_es_edi_facturae_xml_id",
+            Record(1224),
+            "link",
+        ),
+        ("move", "signature", "signed-payload", "link"),
+        ("move", "signing_user", Record(1225), "link"),
+        ("move", "is_move_sent", True, "sending"),
+        ("move", "sending_data", {"mail": "queued"}, "sending"),
+        ("move", "is_being_sent", True, "sending"),
+        (
+            "move",
+            "invoice_source_email",
+            "invoice@example.com",
+            "sending",
+        ),
+        ("move", "attachment_ids", [Record(1227)], "link"),
+        ("move", "message_main_attachment_id", Record(1228), "link"),
+        ("line", "payment_id", Record(1210), "external business effects"),
+        ("line", "statement_id", Record(1211), "external business effects"),
+        (
+            "line",
+            "purchase_order_id",
+            Record(1212),
+            "external business effects",
+        ),
+        (
+            "line",
+            "distribution_analytic_account_ids",
+            [Record(1213)],
+            "external business effects",
+        ),
+        (
+            "line",
+            "reconcile_model_id",
+            Record(1214),
+            "external business effects",
+        ),
+        (
+            "line",
+            "reconciled_lines_ids",
+            [Record(1215)],
+            "external business effects",
+        ),
+        (
+            "line",
+            "reconciled_lines_excluding_exchange_diff_ids",
+            [Record(1216)],
+            "external business effects",
+        ),
+        ("line", "cogs_origin_id", Record(1217), "external business effects"),
+        ("line", "is_landed_costs_line", True, "external business effects"),
+        (
+            "line",
+            "move_attachment_ids",
+            [Record(1226)],
+            "external business effects",
+        ),
+        ("line", "is_imported", True, "external business effects"),
+        ("line", "is_downpayment", True, "external business effects"),
+    ],
+)
+def test_draft_document_recovery_rejects_extended_live_effects(
+    vendor, target, field, value, match
+):
+    move, line1, _line2, records_by_key, plan = (
+        draft_move_recovery_fixture(vendor=vendor)
+    )
+    setattr(move if target == "move" else line1, field, value)
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+
+    with pytest.raises(OdooWriteHandlerError, match=match):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
+
+
+@pytest.mark.parametrize("vendor", [False, True])
+def test_draft_document_recovery_allows_fingerprinted_audit_messages(vendor):
+    move, line1, line2, records_by_key, _plan = draft_move_recovery_fixture(
+        vendor=vendor
+    )
+    move.audit_trail_message_ids = [Record(1229)]
+    move.snapshot_values["audit_trail_message_ids"] = [1229]
+    plan = executable_recovery_plan(
+        action_targets=[recovery_target("account.move", move)],
+        guard_records=[
+            recovery_target("account.move.line", line1),
+            recovery_target("account.move.line", line2),
+        ],
+        method=(
+            "cancel_pristine_v3_draft_vendor_bill_v1"
+            if vendor
+            else "cancel_pristine_v3_draft_customer_invoice_v1"
+        ),
+        oracle_id=(
+            "cancel_pristine_v3_draft_vendor_bill_exact_v1"
+            if vendor
+            else "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+        ),
+    )
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+
+    checked = handler.precheck_recovery(
+        {
+            "origin_operation_id": "op-1",
+            "expected_recovery_plan_digest": plan["plan_digest"],
+            "company_id": 7,
+        },
+        handler.test_company,
+    )
+
+    assert checked["before"]
+
+
+def test_draft_document_recovery_rejects_forged_exact_line_outcome():
+    move, line1, line2, records_by_key, _plan = draft_move_recovery_fixture()
+    plan = executable_recovery_plan(
+        action_targets=[recovery_target("account.move", move)],
+        guard_records=[
+            recovery_target("account.move.line", line1),
+            recovery_target("account.move.line", line2),
+        ],
+        expected_outcome="survive_exact",
+    )
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+
+    with pytest.raises(OdooWriteHandlerError, match="exact invoice action/guard graph"):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
 
 
 def test_cancel_pristine_v3_draft_customer_invoice_is_exact_and_auditable():
@@ -4661,6 +5957,7 @@ def test_cancel_pristine_v3_draft_customer_invoice_is_exact_and_auditable():
         1101,
         "Cancelled Invoice DRAFT-RECOVERY-1",
     ]
+    assert line1.snapshot_values["parent_state"] == "cancel"
     assert {(model_name, record.id) for model_name, record in records} == {
         ("account.move", 1101),
         ("account.move.line", 1102),
@@ -4675,8 +5972,13 @@ def test_cancel_pristine_v3_draft_customer_invoice_is_exact_and_auditable():
         (item["model"], item["record_id"]): item["values"]
         for item in checked["before"]
     }
-    assert "draft_customer_invoice_cancelled_exactly" in handler.verify_recovery(
+    verification_checks = handler.verify_recovery(
         parameters, handler.test_company, records, before
+    )
+    assert "draft_customer_invoice_cancelled_exactly" in verification_checks
+    assert (
+        "line_guard_graph_matched_approved_allowed_delta"
+        in verification_checks
     )
     assert ("account.move", 1101, True) in write_checks
 
@@ -4719,6 +6021,7 @@ def test_cancel_pristine_v3_draft_vendor_bill_is_exact_and_auditable():
         1101,
         "Cancelled Bill BILL-DRAFT-RECOVERY-1",
     ]
+    assert line1.snapshot_values["parent_state"] == "cancel"
     assert {(model_name, record.id) for model_name, record in records} == {
         ("account.move", 1101),
         ("account.move.line", 1102),
@@ -4733,9 +6036,65 @@ def test_cancel_pristine_v3_draft_vendor_bill_is_exact_and_auditable():
         (item["model"], item["record_id"]): item["values"]
         for item in checked["before"]
     }
-    assert "draft_vendor_bill_cancelled_exactly" in handler.verify_recovery(
+    verification_checks = handler.verify_recovery(
         parameters, handler.test_company, records, before
     )
+    assert "draft_vendor_bill_cancelled_exactly" in verification_checks
+    assert (
+        "line_guard_graph_matched_approved_allowed_delta"
+        in verification_checks
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "match"),
+    [
+        ("move", "write_uid", [99, "Other User"], "bound execution user"),
+        ("line", "write_uid", [99, "Other User"], "bound execution user"),
+        (
+            "move",
+            "write_date",
+            "2026-07-10 08:59:59",
+            "monotonic delta",
+        ),
+        ("line", "write_date", "not-a-date", "auditable Odoo datetime"),
+        (
+            "line",
+            "write_date",
+            "2026-07-10 09:02:00",
+            "differ within the transaction",
+        ),
+        (
+            "move",
+            "create_date",
+            "2026-07-10 09:00:01",
+            "changed outside the approved",
+        ),
+    ],
+)
+def test_recovery_rejects_uncontrolled_log_access_delta(
+    target, field, value, match
+):
+    move, line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    exact_write = move.write
+
+    def write_with_log_access_drift(values):
+        result = exact_write(values)
+        record = move if target == "move" else line1
+        record.snapshot_values[field] = value
+        return result
+
+    move.write = write_with_log_access_drift
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+    parameters = {
+        "origin_operation_id": "op-1",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "company_id": 7,
+    }
+    checked = handler.precheck_recovery(parameters, handler.test_company)
+
+    with pytest.raises(OdooWriteHandlerError, match=match):
+        handler.execute_recovery(parameters, handler.test_company, checked)
 
 
 def test_draft_vendor_bill_recovery_requires_purchase_journal_and_bill_type():
@@ -4824,6 +6183,10 @@ def test_draft_vendor_bill_recovery_rejects_stock_and_landed_cost_links(
         ("move", "landed_costs_ids"),
         ("line", "cogs_origin_id"),
         ("line", "is_landed_costs_line"),
+        ("line", "analytic_distribution"),
+        ("line", "analytic_line_ids"),
+        ("line", "tax_tag_ids"),
+        ("line", "parent_state"),
     ],
 )
 def test_draft_vendor_bill_recovery_requires_auditable_stock_effect_fields(
@@ -4882,6 +6245,68 @@ def test_draft_vendor_bill_recovery_requires_auditable_stock_effect_fields(
         ("move", "landed_costs_ids", [991], "action target fingerprint"),
         ("line", "cogs_origin_id", 992, "guard fingerprint"),
         ("line", "is_landed_costs_line", True, "guard fingerprint"),
+        ("line", "analytic_distribution", {"17": 100}, "guard fingerprint"),
+        ("line", "analytic_line_ids", [993], "guard fingerprint"),
+        ("line", "tax_tag_ids", [994], "guard fingerprint"),
+        ("line", "group_tax_id", 995, "guard fingerprint"),
+        ("line", "parent_id", 996, "guard fingerprint"),
+        ("move", "closing_return_id", 997, "action target fingerprint"),
+        ("move", "transaction_ids", [998], "action target fingerprint"),
+        ("move", "audit_trail_message_ids", [999], "action target fingerprint"),
+        ("move", "fiscal_position_id", 1000, "action target fingerprint"),
+        (
+            "move",
+            "invoice_cash_rounding_id",
+            1001,
+            "action target fingerprint",
+        ),
+        ("move", "invoice_incoterm_id", 1002, "action target fingerprint"),
+        ("move", "incoterm_location", "Port", "action target fingerprint"),
+        ("move", "partner_shipping_id", 1003, "action target fingerprint"),
+        ("move", "partner_bank_id", 1004, "action target fingerprint"),
+        (
+            "move",
+            "preferred_payment_method_line_id",
+            1005,
+            "action target fingerprint",
+        ),
+        (
+            "move",
+            "l10n_latam_document_type_id",
+            1006,
+            "action target fingerprint",
+        ),
+        ("move", "invoice_origin", "SO001", "action target fingerprint"),
+        ("move", "narration", "note", "action target fingerprint"),
+        (
+            "move",
+            "quick_edit_total_amount",
+            "1",
+            "action target fingerprint",
+        ),
+        ("move", "always_tax_exigible", True, "action target fingerprint"),
+        ("move", "is_storno", True, "action target fingerprint"),
+        ("line", "sequence", 99, "guard fingerprint"),
+        ("line", "product_uom_id", 1007, "guard fingerprint"),
+        ("line", "discount", "5", "guard fingerprint"),
+        ("line", "discount_date", "2026-07-11", "guard fingerprint"),
+        (
+            "line",
+            "discount_amount_currency",
+            "5",
+            "guard fingerprint",
+        ),
+        ("line", "discount_balance", "5", "guard fingerprint"),
+        ("line", "tax_base_amount", "1", "guard fingerprint"),
+        ("line", "extra_tax_data", {"tax": 1}, "guard fingerprint"),
+        ("line", "deductible_amount", "1", "guard fingerprint"),
+        ("line", "is_storno", True, "guard fingerprint"),
+        (
+            "line",
+            "l10n_latam_document_type_id",
+            1008,
+            "guard fingerprint",
+        ),
     ],
 )
 def test_draft_vendor_bill_recovery_binds_stock_effect_fields_to_approval(
@@ -4895,6 +6320,34 @@ def test_draft_vendor_bill_recovery_binds_stock_effect_fields_to_approval(
     handler = Harness(recovery_plan=plan, records=records_by_key)
 
     with pytest.raises(OdooWriteHandlerError, match=match):
+        handler.precheck_recovery(
+            {
+                "origin_operation_id": "op-1",
+                "expected_recovery_plan_digest": plan["plan_digest"],
+                "company_id": 7,
+            },
+            handler.test_company,
+        )
+
+
+@pytest.mark.parametrize("vendor", [False, True])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("analytic_distribution", {"17": 100}),
+        ("analytic_line_ids", [Record(995)]),
+    ],
+)
+def test_draft_document_recovery_rejects_unapproved_analytic_effects(
+    vendor, field, value
+):
+    _move, line1, _line2, records_by_key, plan = (
+        draft_move_recovery_fixture(vendor=vendor)
+    )
+    setattr(line1, field, value)
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+
+    with pytest.raises(OdooWriteHandlerError, match="external business effects"):
         handler.precheck_recovery(
             {
                 "origin_operation_id": "op-1",
@@ -4926,6 +6379,44 @@ def test_draft_vendor_bill_recovery_rejects_non_state_post_write_drift():
     checked = handler.precheck_recovery(parameters, handler.test_company)
 
     with pytest.raises(OdooWriteHandlerError, match="guard line graph changed"):
+        handler.execute_recovery(parameters, handler.test_company, checked)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "match"),
+    [
+        (
+            "move",
+            "invoice_user_id",
+            [999, "Unauthorized Salesperson"],
+            "graph changed",
+        ),
+        ("move", "message_ids", [999], "graph changed"),
+        ("line", "no_followup", True, "guard line graph changed"),
+    ],
+)
+def test_recovery_rejects_unapproved_material_write_override_drift(
+    target, field, value, match
+):
+    move, line1, _line2, records_by_key, plan = draft_move_recovery_fixture()
+    exact_write = move.write
+
+    def write_with_material_drift(values):
+        result = exact_write(values)
+        record = move if target == "move" else line1
+        record.snapshot_values[field] = value
+        return result
+
+    move.write = write_with_material_drift
+    handler = Harness(recovery_plan=plan, records=records_by_key)
+    parameters = {
+        "origin_operation_id": "op-1",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "company_id": 7,
+    }
+    checked = handler.precheck_recovery(parameters, handler.test_company)
+
+    with pytest.raises(OdooWriteHandlerError, match=match):
         handler.execute_recovery(parameters, handler.test_company, checked)
 
 

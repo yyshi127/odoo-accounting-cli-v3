@@ -450,7 +450,21 @@ At the current local development checkpoint:
   standard stock-move, COGS-origin, and landed-cost fields must be present,
   empty, and bound into the approved fingerprints. These are local
   contract/fake-ORM tests only; no real Odoo bill was created or recovered, and
-  the trusted installed/custom-module graph remains a staging prerequisite; and
+  the trusted installed/custom-module graph remains a staging prerequisite;
+- dev21 derives a canonical installed-module graph from installed module names
+  and `latest_version`, rejects noncanonical schema/order/digest evidence, and
+  binds that graph through precheck, execution, verification, and both draft
+  recovery plans. For the two dormant pristine-draft customer-invoice and
+  vendor-bill recovery slices, it closes the material stored-and-writable
+  `account.move` and `account.move.line` snapshot, guard, and recovery field
+  sets observed on the target, permits absent optional fields only when their
+  trusted provider module is absent, and records tokens, signatures, and
+  PDF/Facturae/UBL binaries as presence-only values read with `bin_size=True`.
+  Execution and verification separately lock the module table, but the
+  commit-to-verification interval is not cross-commit mutual exclusion: drift
+  prevents a false success while an already committed effect may require
+  reconciliation. These remain local contract/fake-ORM tests; no real Odoo
+  write/recovery receipt was produced; and
 - every current registry `evidence.receipts` array is empty: zero capabilities
   are enabled and zero write capabilities are staged. E00b, a real sandbox
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox

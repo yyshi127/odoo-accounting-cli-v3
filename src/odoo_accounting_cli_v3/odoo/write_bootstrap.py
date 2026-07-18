@@ -66,6 +66,12 @@ from .bootstrap import (
     database_uuid,
     request_context_from_mapping,
 )
+from .module_graph import (
+    OdooModuleGraphError,
+    TrustedModuleGraph,
+    conditional_required_fields,
+    validate_module_graph_evidence,
+)
 from .write_precheck import (
     canonical_precheck_evidence,
     run_rollback_only_precheck,
@@ -796,9 +802,14 @@ def _empty_x2many(values: Mapping[str, Any], field: str) -> bool:
     return field not in values or values[field] == []
 
 
+def _empty_presence_only(values: Mapping[str, Any], field: str) -> bool:
+    return field not in values or values[field] == {"present": False}
+
+
 def _assert_available_draft_document_snapshot(
     operation: Operation,
     *,
+    module_graph: TrustedModuleGraph,
     raw_action: Mapping[str, Any] | None,
     raw_by_key: Mapping[tuple[str, int], Mapping[str, Any]],
     action_identity: tuple[str, int],
@@ -818,31 +829,137 @@ def _assert_available_draft_document_snapshot(
     )
     action_values = raw_action.get("values") if raw_action else None
     required_action_fields = {
+        "name",
         "state",
         "move_type",
         "company_id",
         "journal_id",
         "currency_id",
         "partner_id",
+        "date",
+        "invoice_date",
+        "invoice_date_due",
+        "invoice_line_ids",
+        "invoice_payment_term_id",
+        "ref",
         "line_ids",
         "auto_post",
+        "auto_post_until",
         "posted_before",
+        "sequence_prefix",
+        "sequence_number",
         "secure_sequence_number",
+        "made_sequence_gap",
         "inalterable_hash",
+        "checked",
         "is_manually_modified",
+        "need_cancel_request",
+        "auto_post_origin_id",
+        "origin_payment_id",
         "payment_ids",
         "matched_payment_ids",
         "reconciled_payment_ids",
+        "statement_line_id",
+        "statement_id",
+        "tax_cash_basis_rec_id",
+        "tax_cash_basis_origin_move_id",
         "tax_cash_basis_created_move_ids",
+        "reversed_entry_id",
         "reversal_move_ids",
         "adjusting_entry_origin_move_ids",
         "adjusting_entries_move_ids",
         "exchange_diff_partial_ids",
+        "statement_line_ids",
+        "closing_return_id",
+        "transfer_model_id",
+        "transaction_ids",
+        "authorized_transaction_ids",
+        "purchase_id",
+        "asset_id",
+        "asset_ids",
+        "deferred_move_ids",
+        "deferred_original_move_ids",
+        "edi_document_ids",
+        "expense_ids",
+        "pos_order_ids",
+        "stock_move_ids",
+        "landed_costs_ids",
+        "debit_note_ids",
+        "debit_origin_id",
+        "invoice_pdf_report_id",
+        "invoice_vendor_bill_id",
+        "purchase_vendor_bill_id",
+        "ubl_cii_xml_id",
+        "l10n_es_edi_facturae_xml_id",
+        "signature",
+        "signing_user",
+        "invoice_pdf_report_file",
+        "ubl_cii_xml_file",
+        "l10n_es_edi_facturae_xml_file",
+        "is_move_sent",
+        "sending_data",
+        "is_being_sent",
+        "invoice_source_email",
+        "attachment_ids",
+        "message_main_attachment_id",
+        "audit_trail_message_ids",
+        "activity_ids",
+        "message_follower_ids",
+        "message_ids",
+        "rating_ids",
+        "website_message_ids",
+        "access_token",
+        "fiscal_position_id",
+        "invoice_cash_rounding_id",
+        "invoice_incoterm_id",
+        "incoterm_location",
+        "partner_shipping_id",
+        "partner_bank_id",
+        "preferred_payment_method_line_id",
+        "l10n_latam_document_type_id",
+        "invoice_origin",
+        "narration",
+        "quick_edit_total_amount",
+        "always_tax_exigible",
+        "is_storno",
+        "asset_value_change",
+        "campaign_id",
+        "medium_id",
+        "source_id",
+        "team_id",
+        "delivery_date",
+        "fapiao",
+        "invoice_currency_rate",
+        "invoice_user_id",
+        "l10n_es_edi_facturae_reason_code",
+        "l10n_es_invoicing_period_start_date",
+        "l10n_es_invoicing_period_end_date",
+        "l10n_es_is_simplified",
+        "l10n_es_payment_means",
+        "payment_reference",
+        "payment_state_before_switch",
+        "qr_code_method",
+        "taxable_supply_date",
+        "journal_line_ids",
+        "asset_depreciation_beginning_date",
+        "asset_number_days",
+        "depreciation_value",
+        "create_uid",
+        "create_date",
+        "write_uid",
+        "write_date",
         "odoo_cli_v3_document_binding",
         "odoo_cli_v3_business_binding",
     }
-    if vendor:
-        required_action_fields.update({"stock_move_ids", "landed_costs_ids"})
+    try:
+        required_action_fields = conditional_required_fields(
+            "account.move",
+            required_action_fields,
+            action_values if isinstance(action_values, Mapping) else (),
+            module_graph,
+        )
+    except OdooModuleGraphError as exc:
+        raise OdooWriteBootstrapError(str(exc)) from exc
     if (
         not isinstance(action_values, Mapping)
         or not required_action_fields.issubset(action_values)
@@ -858,10 +975,18 @@ def _assert_available_draft_document_snapshot(
         != operation.parameters.get("currency_id")
         or classic_read_many2one_id(action_values.get("partner_id"))
         != operation.parameters.get("partner_id")
+        or action_values.get("date")
+        != operation.parameters.get("accounting_date")
+        or action_values.get("name") not in {False, "/"}
         or action_values.get("posted_before") is not False
         or action_values.get("auto_post") != "no"
+        or action_values.get("auto_post_until") is not False
+        or action_values.get("sequence_prefix") is not False
+        or action_values.get("sequence_number") not in {False, 0}
         or action_values.get("secure_sequence_number") not in {False, 0}
+        or action_values.get("made_sequence_gap") is not False
         or action_values.get("inalterable_hash") is not False
+        or action_values.get("checked") is not False
         or action_values.get("is_manually_modified") is not False
         or action_values.get("odoo_cli_v3_document_binding")
         != expected_document_binding
@@ -875,13 +1000,23 @@ def _assert_available_draft_document_snapshot(
     singular_links = (
         "auto_post_origin_id",
         "origin_payment_id",
-        "payment_id",
         "statement_line_id",
         "statement_id",
         "tax_cash_basis_rec_id",
         "tax_cash_basis_origin_move_id",
         "reversed_entry_id",
         "asset_id",
+        "closing_return_id",
+        "transfer_model_id",
+        "purchase_id",
+        "debit_origin_id",
+        "invoice_pdf_report_id",
+        "invoice_vendor_bill_id",
+        "purchase_vendor_bill_id",
+        "ubl_cii_xml_id",
+        "l10n_es_edi_facturae_xml_id",
+        "signing_user",
+        "message_main_attachment_id",
     )
     plural_links = (
         "payment_ids",
@@ -897,11 +1032,32 @@ def _assert_available_draft_document_snapshot(
         "edi_document_ids",
         "expense_ids",
         "pos_order_ids",
+        "statement_line_ids",
+        "transaction_ids",
+        "authorized_transaction_ids",
+        "asset_ids",
         "stock_move_ids",
         "landed_costs_ids",
+        "debit_note_ids",
+        "attachment_ids",
     )
     if (
         action_values.get("need_cancel_request", False) is not False
+        or any(
+            not _empty_presence_only(action_values, field)
+            for field in (
+                "access_token",
+                "invoice_pdf_report_file",
+                "l10n_es_edi_facturae_xml_file",
+                "signature",
+                "ubl_cii_xml_file",
+            )
+        )
+        or action_values.get("is_move_sent", False) is not False
+        or action_values.get("sending_data", False) not in (False, None, {})
+        or action_values.get("is_being_sent", False) is not False
+        or action_values.get("invoice_source_email", False)
+        not in (False, None, "")
         or any(
             not _empty_many2one(action_values, field)
             for field in singular_links
@@ -934,25 +1090,91 @@ def _assert_available_draft_document_snapshot(
     required_line_fields = {
         "move_id",
         "company_id",
+        "parent_state",
         "reconciled",
         "full_reconcile_id",
         "matched_debit_ids",
         "matched_credit_ids",
+        "tax_tag_ids",
+        "analytic_distribution",
+        "analytic_line_ids",
+        "tax_ids",
+        "tax_line_id",
+        "tax_repartition_line_id",
+        "payment_id",
+        "statement_line_id",
+        "statement_id",
+        "purchase_line_id",
+        "purchase_order_id",
+        "sale_line_ids",
+        "expense_id",
+        "asset_ids",
+        "group_tax_id",
+        "distribution_analytic_account_ids",
+        "reconcile_model_id",
+        "reconciled_lines_ids",
+        "reconciled_lines_excluding_exchange_diff_ids",
+        "parent_id",
+        "cogs_origin_id",
+        "is_landed_costs_line",
+        "deferred_start_date",
+        "deferred_end_date",
         "display_type",
+        "move_attachment_ids",
+        "tax_base_amount",
+        "extra_tax_data",
+        "deductible_amount",
+        "is_imported",
+        "is_downpayment",
+        "is_storno",
+        "sequence",
+        "product_uom_id",
+        "discount",
+        "discount_date",
+        "discount_amount_currency",
+        "discount_balance",
+        "l10n_latam_document_type_id",
+        "no_followup",
+        "collapse_composition",
+        "collapse_prices",
+        "create_uid",
+        "create_date",
+        "write_uid",
+        "write_date",
+        "account_id",
+        "currency_id",
+        "date_maturity",
+        "matching_number",
+        "name",
+        "partner_id",
+        "price_unit",
+        "product_id",
+        "quantity",
+        "debit",
+        "credit",
+        "balance",
+        "amount_currency",
+        "odoo_cli_v3_line_reference",
     }
-    if vendor:
-        required_line_fields.update(
-            {"cogs_origin_id", "is_landed_costs_line"}
-        )
     for identity in guard_identities:
         line_values = raw_by_key[identity].get("values")
+        try:
+            required_for_line = conditional_required_fields(
+                "account.move.line",
+                required_line_fields,
+                line_values if isinstance(line_values, Mapping) else (),
+                module_graph,
+            )
+        except OdooModuleGraphError as exc:
+            raise OdooWriteBootstrapError(str(exc)) from exc
         if (
             not isinstance(line_values, Mapping)
-            or not required_line_fields.issubset(line_values)
+            or not required_for_line.issubset(line_values)
             or classic_read_many2one_id(line_values.get("move_id"))
             != action_identity[1]
             or classic_read_many2one_id(line_values.get("company_id"))
             != operation.company_id
+            or line_values.get("parent_state") != "draft"
         ):
             raise OdooWriteBootstrapError(
                 "available recovery guard is outside the invoice line graph"
@@ -961,16 +1183,34 @@ def _assert_available_draft_document_snapshot(
             line_values.get("reconciled") is not False
             or not _empty_many2one(line_values, "full_reconcile_id")
             or not _empty_many2one(line_values, "statement_line_id")
+            or not _empty_many2one(line_values, "payment_id")
+            or not _empty_many2one(line_values, "statement_id")
             or not _empty_many2one(line_values, "purchase_line_id")
+            or not _empty_many2one(line_values, "purchase_order_id")
             or not _empty_many2one(line_values, "expense_id")
             or not _empty_many2one(line_values, "cogs_origin_id")
+            or not _empty_many2one(line_values, "reconcile_model_id")
             or not _empty_x2many(line_values, "matched_debit_ids")
             or not _empty_x2many(line_values, "matched_credit_ids")
             or not _empty_x2many(line_values, "asset_ids")
             or not _empty_x2many(line_values, "sale_line_ids")
+            or not _empty_x2many(
+                line_values, "distribution_analytic_account_ids"
+            )
+            or not _empty_x2many(line_values, "reconciled_lines_ids")
+            or not _empty_x2many(
+                line_values,
+                "reconciled_lines_excluding_exchange_diff_ids",
+            )
+            or line_values.get("analytic_distribution", False)
+            not in (False, None, {})
+            or not _empty_x2many(line_values, "analytic_line_ids")
             or line_values.get("deferred_start_date", False) is not False
             or line_values.get("deferred_end_date", False) is not False
             or line_values.get("is_landed_costs_line", False) is not False
+            or not _empty_x2many(line_values, "move_attachment_ids")
+            or line_values.get("is_imported", False) is not False
+            or line_values.get("is_downpayment", False) is not False
             or line_values.get("display_type") == "cogs"
         ):
             raise OdooWriteBootstrapError(
@@ -983,6 +1223,15 @@ def _execution_evidence(
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise OdooWriteBootstrapError("write handler returned no execution object")
+    raw_module_graph = raw.get("module_graph")
+    module_graph: TrustedModuleGraph | None = None
+    if raw_module_graph is not None:
+        try:
+            module_graph = validate_module_graph_evidence(raw_module_graph)
+        except OdooModuleGraphError as exc:
+            raise OdooWriteBootstrapError(
+                "write handler installed-module graph is invalid"
+            ) from exc
     if (
         raw.get("capability_id") != operation.capability_id
         or raw.get("company_id") != operation.company_id
@@ -1023,6 +1272,10 @@ def _execution_evidence(
             raise OdooWriteBootstrapError("write recovery target was not read back")
         target_records.append(dict(reference))
     if status == "available":
+        if module_graph is None:
+            raise OdooWriteBootstrapError(
+                "available recovery requires a trusted installed-module graph"
+            )
         if operation.capability_id == "acct.invoice.customer_create.v1":
             expected_method = DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
             expected_oracle = DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
@@ -1081,7 +1334,7 @@ def _execution_evidence(
                 )
             guard_identities.append(identity)
             guard_records.append(
-                {**reference, "expected_outcome": "survive_exact"}
+                {**reference, "expected_outcome": "survive_allowed_delta"}
             )
         if len(guard_identities) != len(set(guard_identities)):
             raise OdooWriteBootstrapError(
@@ -1103,6 +1356,7 @@ def _execution_evidence(
         raw_action = raw_by_key.get(action_identity)
         _assert_available_draft_document_snapshot(
             operation,
+            module_graph=module_graph,
             raw_action=raw_action,
             raw_by_key=raw_by_key,
             action_identity=action_identity,
@@ -1112,6 +1366,7 @@ def _execution_evidence(
         recovery_parameters = {
             "company_id": operation.company_id,
             "origin_operation_id": operation.operation_id,
+            "module_graph_digest": module_graph.digest,
             "method": method,
             "action_targets": [
                 {"model": action_identity[0], "record_id": action_identity[1]}
@@ -1141,6 +1396,7 @@ def _execution_evidence(
             "difference": difference,
             "recovery_plan": plan,
             "recovery_parameters": recovery_parameters,
+            "module_graph": module_graph.evidence,
             "failure_checks": [],
         }
     guard_records = [
@@ -1179,6 +1435,7 @@ def _execution_evidence(
         "difference": difference,
         "recovery_plan": plan,
         "recovery_parameters": recovery_parameters,
+        "module_graph": module_graph.evidence if module_graph is not None else None,
         "failure_checks": [],
     }
 
@@ -1209,6 +1466,7 @@ def _no_effect_failure_evidence(
             parameters=recovery_parameters,
         ),
         "recovery_parameters": recovery_parameters,
+        "module_graph": None,
         "failure_checks": [check],
     }
 
@@ -1454,6 +1712,7 @@ def _default_handler_factory(
     context: RequestContext,
     observed_at: datetime,
     trusted_recovery_plan: Mapping[str, Any] | None,
+    module_graph: Any,
 ) -> WriteHandler:
     from .write_handlers import OdooWriteContext, OdooWriteHandlers
 
@@ -1464,6 +1723,7 @@ def _default_handler_factory(
             allowed_company_ids=context.allowed_company_ids,
             today=observed_at.date(),
             environment=context.environment,
+            module_graph=module_graph,
             trusted_recovery_plan=trusted_recovery_plan,
         )
     )
@@ -1475,10 +1735,15 @@ def _handler_from_factory(
     context: RequestContext,
     observed_at: datetime,
     trusted_recovery_plan: Mapping[str, Any] | None,
+    module_graph: Any,
 ) -> WriteHandler:
     if handler_factory is None:
         return _default_handler_factory(
-            bound_env, context, observed_at, trusted_recovery_plan
+            bound_env,
+            context,
+            observed_at,
+            trusted_recovery_plan,
+            module_graph,
         )
     # Existing non-recovery test/runtime factories have a three-argument
     # contract.  Only a recovery factory receives the additional trusted plan;
@@ -1736,12 +2001,22 @@ def execute_write_from_odoo_shell(
     elif anchor.state != "claimed":
         raise OdooWriteBootstrapError("operation anchor is not executable")
     else:
+        from .module_graph import read_installed_module_graph
+
+        module_graph = (
+            read_installed_module_graph(
+                root_env, lock_for_transaction=True
+            )
+            if handler_factory is None
+            else None
+        )
         handler = _handler_from_factory(
             handler_factory,
             bound_env,
             context,
             observed_at,
             trusted_recovery_plan,
+            module_graph,
         )
         try:
             live_precheck = run_rollback_only_precheck(
@@ -1931,12 +2206,21 @@ def execute_write_from_odoo_shell(
                 context,
                 environment_factory=environment_factory,
             )
+            if handler_factory is None:
+                from .module_graph import read_installed_module_graph
+
+                verification_module_graph = read_installed_module_graph(
+                    root_env, lock_for_transaction=True
+                )
+            else:
+                verification_module_graph = None
             handler = _handler_from_factory(
                 handler_factory,
                 verification_env,
                 context,
                 verification_started_at,
                 trusted_recovery_plan,
+                verification_module_graph,
             )
             raw_verification = handler.verify(
                 operation.capability_id,
@@ -1945,6 +2229,7 @@ def execute_write_from_odoo_shell(
                     "capability_id": operation.capability_id,
                     "company_id": operation.company_id,
                     "parameters_digest": _digest(operation.parameters),
+                    "module_graph": execution_evidence.get("module_graph"),
                     "records": [
                         {"model": item["model"], "record_id": item["record_id"]}
                         for item in execution_evidence["odoo_records"]

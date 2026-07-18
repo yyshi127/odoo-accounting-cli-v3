@@ -32,6 +32,10 @@ from odoo_accounting_cli_v3.odoo.write_bootstrap import (
 from odoo_accounting_cli_v3.odoo.write_precheck import (
     canonical_precheck_evidence,
 )
+from odoo_accounting_cli_v3.odoo.module_graph import (
+    OPTIONAL_FIELD_PROVIDERS,
+    build_trusted_module_graph,
+)
 from odoo_accounting_cli_v3.operations import (
     State,
     approve_operation,
@@ -63,6 +67,21 @@ SOURCE = (
     / "odoo_accounting_cli_v3"
     / "odoo"
     / "write_bootstrap.py"
+)
+_TEST_MODULE_NAMES = {
+    "account",
+    *(
+        module
+        for fields in OPTIONAL_FIELD_PROVIDERS.values()
+        for providers in fields.values()
+        for module in providers
+    ),
+}
+TEST_MODULE_GRAPH = build_trusted_module_graph(
+    [
+        {"name": name, "latest_version": "19.0.test"}
+        for name in sorted(_TEST_MODULE_NAMES)
+    ]
 )
 
 
@@ -208,6 +227,7 @@ def _draft_invoice_available_raw(
             "draft",
             {
                 "state": "draft",
+                "name": "/",
                 "move_type": "in_invoice" if vendor else "out_invoice",
                 "company_id": [7, "Sandbox Company"],
                 "journal_id": [
@@ -219,25 +239,121 @@ def _draft_invoice_available_raw(
                     operation.parameters["partner_id"],
                     "Vendor" if vendor else "Customer",
                 ],
+                "date": operation.parameters["accounting_date"],
+                "invoice_date": operation.parameters["invoice_date"],
+                "invoice_date_due": operation.parameters["due_date"],
+                "invoice_line_ids": [502],
+                "invoice_payment_term_id": False,
+                "ref": operation.parameters.get(
+                    "vendor_reference",
+                    operation.parameters.get("reference", False),
+                ),
                 "line_ids": line_ids,
+                "journal_line_ids": line_ids,
                 "posted_before": False,
                 "auto_post": "no",
+                "auto_post_until": False,
                 "secure_sequence_number": 0,
+                "sequence_prefix": False,
+                "sequence_number": 0,
+                "made_sequence_gap": False,
                 "inalterable_hash": False,
+                "checked": False,
                 "is_manually_modified": False,
+                "need_cancel_request": False,
+                "auto_post_origin_id": False,
+                "origin_payment_id": False,
                 "payment_ids": [],
                 "matched_payment_ids": [],
                 "reconciled_payment_ids": [],
+                "statement_line_id": False,
+                "statement_id": False,
+                "tax_cash_basis_rec_id": False,
+                "tax_cash_basis_origin_move_id": False,
                 "tax_cash_basis_created_move_ids": [],
+                "reversed_entry_id": False,
                 "reversal_move_ids": [],
                 "adjusting_entry_origin_move_ids": [],
                 "adjusting_entries_move_ids": [],
                 "exchange_diff_partial_ids": [],
-                **(
-                    {"stock_move_ids": [], "landed_costs_ids": []}
-                    if vendor
-                    else {}
-                ),
+                "statement_line_ids": [],
+                "closing_return_id": False,
+                "transfer_model_id": False,
+                "transaction_ids": [],
+                "authorized_transaction_ids": [],
+                "purchase_id": False,
+                "asset_id": False,
+                "asset_ids": [],
+                "deferred_move_ids": [],
+                "deferred_original_move_ids": [],
+                "edi_document_ids": [],
+                "expense_ids": [],
+                "pos_order_ids": [],
+                "stock_move_ids": [],
+                "landed_costs_ids": [],
+                "debit_note_ids": [],
+                "debit_origin_id": False,
+                "invoice_pdf_report_id": False,
+                "invoice_vendor_bill_id": False,
+                "purchase_vendor_bill_id": False,
+                "ubl_cii_xml_id": False,
+                "l10n_es_edi_facturae_xml_id": False,
+                "invoice_pdf_report_file": {"present": False},
+                "l10n_es_edi_facturae_xml_file": {"present": False},
+                "ubl_cii_xml_file": {"present": False},
+                "signature": {"present": False},
+                "signing_user": False,
+                "is_move_sent": False,
+                "sending_data": False,
+                "is_being_sent": False,
+                "invoice_source_email": False,
+                "attachment_ids": [],
+                "message_main_attachment_id": False,
+                "audit_trail_message_ids": [],
+                "activity_ids": [],
+                "message_follower_ids": [],
+                "message_ids": [],
+                "rating_ids": [],
+                "website_message_ids": [],
+                "access_token": {"present": False},
+                "fiscal_position_id": False,
+                "invoice_cash_rounding_id": False,
+                "invoice_incoterm_id": False,
+                "incoterm_location": False,
+                "partner_shipping_id": False,
+                "partner_bank_id": False,
+                "preferred_payment_method_line_id": False,
+                "l10n_latam_document_type_id": False,
+                "invoice_origin": False,
+                "narration": False,
+                "quick_edit_total_amount": "0",
+                "always_tax_exigible": False,
+                "is_storno": False,
+                "asset_value_change": False,
+                "campaign_id": False,
+                "medium_id": False,
+                "source_id": False,
+                "team_id": False,
+                "delivery_date": False,
+                "fapiao": False,
+                "invoice_currency_rate": "1",
+                "invoice_user_id": [42, "V3 Executor"],
+                "l10n_es_edi_facturae_reason_code": False,
+                "l10n_es_invoicing_period_start_date": False,
+                "l10n_es_invoicing_period_end_date": False,
+                "l10n_es_is_simplified": False,
+                "l10n_es_payment_means": False,
+                "payment_reference": False,
+                "payment_state_before_switch": False,
+                "qr_code_method": False,
+                "taxable_supply_date": False,
+                "asset_depreciation_beginning_date": False,
+                "asset_number_days": 0,
+                "depreciation_value": "0",
+                "create_uid": [42, "V3 Executor"],
+                "create_date": "2026-07-10 09:00:00",
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:00:00",
                 "odoo_cli_v3_document_binding": (
                     vendor_bill_document_binding(operation.parameters)
                     if vendor
@@ -258,23 +374,71 @@ def _draft_invoice_available_raw(
             {
                 "company_id": [7, "Sandbox Company"],
                 "move_id": [501, "/"],
+                "account_id": [10, "Receivable"],
+                "currency_id": [operation.parameters["currency_id"], "USD"],
+                "parent_state": "draft",
                 "reconciled": False,
                 "full_reconcile_id": False,
                 "matched_debit_ids": [],
                 "matched_credit_ids": [],
                 "asset_ids": [],
                 "sale_line_ids": [],
-                **(
-                    {
-                        "cogs_origin_id": False,
-                        "is_landed_costs_line": False,
-                    }
-                    if vendor
-                    else {}
-                ),
+                "analytic_distribution": False,
+                "analytic_line_ids": [],
+                "tax_ids": [],
+                "tax_line_id": False,
+                "tax_repartition_line_id": False,
+                "tax_tag_ids": [],
+                "payment_id": False,
+                "statement_line_id": False,
+                "statement_id": False,
+                "purchase_line_id": False,
+                "purchase_order_id": False,
+                "expense_id": False,
+                "group_tax_id": False,
+                "distribution_analytic_account_ids": [],
+                "reconcile_model_id": False,
+                "reconciled_lines_ids": [],
+                "reconciled_lines_excluding_exchange_diff_ids": [],
+                "parent_id": False,
+                "cogs_origin_id": False,
+                "is_landed_costs_line": False,
+                "deferred_start_date": False,
+                "deferred_end_date": False,
+                "move_attachment_ids": [],
+                "tax_base_amount": "0",
+                "extra_tax_data": False,
+                "deductible_amount": "0",
+                "is_imported": False,
+                "is_downpayment": False,
+                "is_storno": False,
+                "sequence": 10,
+                "product_uom_id": False,
+                "discount": "0",
+                "discount_date": False,
+                "discount_amount_currency": "0",
+                "discount_balance": "0",
+                "l10n_latam_document_type_id": False,
+                "no_followup": False,
+                "collapse_composition": False,
+                "collapse_prices": False,
+                "date_maturity": False,
+                "matching_number": False,
+                "name": "Invoice line",
+                "partner_id": [operation.parameters["partner_id"], "Partner"],
+                "price_unit": "100",
+                "product_id": False,
+                "quantity": "1",
+                "create_uid": [42, "V3 Executor"],
+                "create_date": "2026-07-10 09:00:00",
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:00:00",
                 "display_type": "product",
                 "debit": "100",
                 "credit": "0",
+                "balance": "100",
+                "amount_currency": "100",
+                "odoo_cli_v3_line_reference": "line-1",
                 **(line_overrides or {}),
             },
         ),
@@ -285,23 +449,71 @@ def _draft_invoice_available_raw(
             {
                 "company_id": [7, "Sandbox Company"],
                 "move_id": [501, "/"],
+                "account_id": [20, "Revenue"],
+                "currency_id": [operation.parameters["currency_id"], "USD"],
+                "parent_state": "draft",
                 "reconciled": False,
                 "full_reconcile_id": False,
                 "matched_debit_ids": [],
                 "matched_credit_ids": [],
                 "asset_ids": [],
                 "sale_line_ids": [],
-                **(
-                    {
-                        "cogs_origin_id": False,
-                        "is_landed_costs_line": False,
-                    }
-                    if vendor
-                    else {}
-                ),
+                "analytic_distribution": False,
+                "analytic_line_ids": [],
+                "tax_ids": [],
+                "tax_line_id": False,
+                "tax_repartition_line_id": False,
+                "tax_tag_ids": [],
+                "payment_id": False,
+                "statement_line_id": False,
+                "statement_id": False,
+                "purchase_line_id": False,
+                "purchase_order_id": False,
+                "expense_id": False,
+                "group_tax_id": False,
+                "distribution_analytic_account_ids": [],
+                "reconcile_model_id": False,
+                "reconciled_lines_ids": [],
+                "reconciled_lines_excluding_exchange_diff_ids": [],
+                "parent_id": False,
+                "cogs_origin_id": False,
+                "is_landed_costs_line": False,
+                "deferred_start_date": False,
+                "deferred_end_date": False,
+                "move_attachment_ids": [],
+                "tax_base_amount": "0",
+                "extra_tax_data": False,
+                "deductible_amount": "0",
+                "is_imported": False,
+                "is_downpayment": False,
+                "is_storno": False,
+                "sequence": 20,
+                "product_uom_id": False,
+                "discount": "0",
+                "discount_date": False,
+                "discount_amount_currency": "0",
+                "discount_balance": "0",
+                "l10n_latam_document_type_id": False,
+                "no_followup": False,
+                "collapse_composition": False,
+                "collapse_prices": False,
+                "date_maturity": operation.parameters["due_date"],
+                "matching_number": False,
+                "name": "Payment term",
+                "partner_id": [operation.parameters["partner_id"], "Partner"],
+                "price_unit": "0",
+                "product_id": False,
+                "quantity": "0",
+                "create_uid": [42, "V3 Executor"],
+                "create_date": "2026-07-10 09:00:00",
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:00:00",
                 "display_type": "payment_term",
                 "debit": "0",
                 "credit": "100",
+                "balance": "-100",
+                "amount_currency": "-100",
+                "odoo_cli_v3_line_reference": "line-2",
                 **(line_overrides or {}),
             },
         ),
@@ -312,6 +524,7 @@ def _draft_invoice_available_raw(
         "parameters_digest": hashlib.sha256(
             canonical_json(operation.parameters)
         ).hexdigest(),
+        "module_graph": TEST_MODULE_GRAPH.evidence,
         "before": [],
         "after": after,
         "records": [
@@ -368,12 +581,13 @@ def test_draft_customer_invoice_descriptor_becomes_receipt_derived_available_v2_
         plan["guard_records"], key=canonical_json
     )
     assert all(
-        item["expected_outcome"] == "survive_exact"
+        item["expected_outcome"] == "survive_allowed_delta"
         for item in plan["guard_records"]
     )
     assert evidence["recovery_parameters"] == {
         "company_id": 7,
         "origin_operation_id": operation.operation_id,
+        "module_graph_digest": TEST_MODULE_GRAPH.digest,
         "method": "cancel_pristine_v3_draft_customer_invoice_v1",
         "action_targets": [{"model": "account.move", "record_id": 501}],
         "guard_records": [
@@ -402,6 +616,7 @@ def test_draft_vendor_bill_descriptor_becomes_receipt_derived_available_v2_plan(
     assert evidence["recovery_parameters"] == {
         "company_id": 7,
         "origin_operation_id": operation.operation_id,
+        "module_graph_digest": TEST_MODULE_GRAPH.digest,
         "method": "cancel_pristine_v3_draft_vendor_bill_v1",
         "action_targets": [{"model": "account.move", "record_id": 501}],
         "guard_records": [
@@ -410,6 +625,70 @@ def test_draft_vendor_bill_descriptor_becomes_receipt_derived_available_v2_plan(
         ],
         "oracle_id": "cancel_pristine_v3_draft_vendor_bill_exact_v1",
     }
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_available_recovery_accepts_fields_proven_absent_by_module_graph(
+    capability_id,
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+    absent_modules = _TEST_MODULE_NAMES - {"account"}
+    graph = build_trusted_module_graph(
+        [
+            {"name": name, "latest_version": "19.0.test"}
+            for name in sorted(_TEST_MODULE_NAMES - absent_modules)
+        ]
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    raw["module_graph"] = graph.evidence
+    for snapshot in raw["after"]:
+        values = snapshot["values"]
+        for field, providers in OPTIONAL_FIELD_PROVIDERS.get(
+            snapshot["model"], {}
+        ).items():
+            if not providers & graph.installed_modules:
+                values.pop(field, None)
+        snapshot["values_digest"] = hashlib.sha256(
+            canonical_json(values)
+        ).hexdigest()
+
+    evidence = _execution_evidence(operation, raw)
+
+    assert evidence["module_graph"] == graph.evidence
+    assert evidence["recovery_plan"]["status"] == "available"
+
+
+def test_available_recovery_rejects_field_presence_that_contradicts_module_graph():
+    parameters = {**_parameters(), "posting_mode": "draft"}
+    _context_value, operation, _approval = _executing(parameters)
+    graph = build_trusted_module_graph(
+        [
+            {"name": name, "latest_version": "19.0.test"}
+            for name in sorted(_TEST_MODULE_NAMES - {"point_of_sale"})
+        ]
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    raw["module_graph"] = graph.evidence
+
+    with pytest.raises(OdooWriteBootstrapError, match="schema differs"):
+        _execution_evidence(operation, raw)
 
 
 @pytest.mark.parametrize("field", ["stock_move_ids", "landed_costs_ids"])
@@ -433,11 +712,373 @@ def test_draft_vendor_bill_descriptor_requires_stock_effect_fields(field):
         _execution_evidence(operation, raw)
 
 
-@pytest.mark.parametrize("field", ["cogs_origin_id", "is_landed_costs_line"])
-def test_draft_vendor_bill_descriptor_requires_stock_effect_line_fields(field):
-    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+@pytest.mark.parametrize(
+    "field",
+    [
+        "name",
+        "auto_post_until",
+        "sequence_prefix",
+        "sequence_number",
+        "made_sequence_gap",
+        "checked",
+        "statement_line_ids",
+        "closing_return_id",
+        "transfer_model_id",
+        "transaction_ids",
+        "authorized_transaction_ids",
+        "purchase_id",
+        "asset_ids",
+        "debit_note_ids",
+        "debit_origin_id",
+        "invoice_pdf_report_id",
+        "invoice_vendor_bill_id",
+        "purchase_vendor_bill_id",
+        "ubl_cii_xml_id",
+        "l10n_es_edi_facturae_xml_id",
+        "signature",
+        "signing_user",
+        "is_move_sent",
+        "sending_data",
+        "is_being_sent",
+        "invoice_source_email",
+        "attachment_ids",
+        "message_main_attachment_id",
+        "audit_trail_message_ids",
+        "fiscal_position_id",
+        "invoice_cash_rounding_id",
+        "invoice_incoterm_id",
+        "incoterm_location",
+        "partner_shipping_id",
+        "partner_bank_id",
+        "preferred_payment_method_line_id",
+        "l10n_latam_document_type_id",
+        "invoice_origin",
+        "narration",
+        "quick_edit_total_amount",
+        "always_tax_exigible",
+        "is_storno",
+        "create_uid",
+        "create_date",
+        "write_uid",
+        "write_date",
+        "date",
+    ],
+)
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_requires_pristine_external_effect_fields(
+    field, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
     _context_value, operation, _approval = _executing(
-        parameters, capability_id="acct.bill.vendor_create.v1"
+        parameters, capability_id=capability_id
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    action = raw["after"][0]
+    action["values"].pop(field)
+    action["values_digest"] = hashlib.sha256(
+        canonical_json(action["values"])
+    ).hexdigest()
+
+    with pytest.raises(
+        OdooWriteBootstrapError, match="pristine V3 draft"
+    ):
+        _execution_evidence(operation, raw)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("name", "INV/2026/0001"),
+        ("auto_post_until", "2026-12-31"),
+        ("sequence_prefix", "INV/2026/"),
+        ("sequence_number", 1),
+        ("made_sequence_gap", True),
+        ("checked", True),
+    ],
+)
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_rejects_non_pristine_sequence_evidence(
+    field, value, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+
+    with pytest.raises(OdooWriteBootstrapError, match="pristine V3 draft"):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation,
+                guard_record_ids=(502, 503),
+                action_overrides={field: value},
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("statement_line_ids", [990]),
+        ("closing_return_id", [991, "Closing Return"]),
+        ("transfer_model_id", [992, "Transfer Model"]),
+        ("transaction_ids", [993]),
+        ("authorized_transaction_ids", [994]),
+        ("purchase_id", [995, "Purchase Order"]),
+        ("asset_ids", [996]),
+        ("debit_note_ids", [997]),
+        ("debit_origin_id", [998, "Debit Origin"]),
+        ("invoice_pdf_report_id", [999, "Invoice PDF"]),
+        ("invoice_vendor_bill_id", [1000, "Vendor Bill"]),
+        ("purchase_vendor_bill_id", [1001, "Purchase Vendor Bill"]),
+        ("ubl_cii_xml_id", [1002, "UBL XML"]),
+        ("l10n_es_edi_facturae_xml_id", [1003, "Facturae XML"]),
+        ("signature", "signed-payload"),
+        ("signing_user", [1004, "Signing User"]),
+        ("is_move_sent", True),
+        ("sending_data", {"mail": "queued"}),
+        ("is_being_sent", True),
+        ("invoice_source_email", "invoice@example.com"),
+        ("attachment_ids", [1005]),
+        ("message_main_attachment_id", [1006, "Attachment"]),
+    ],
+)
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_rejects_extended_move_effects(
+    field, value, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+
+    with pytest.raises(OdooWriteBootstrapError, match="external effects"):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation,
+                guard_record_ids=(502, 503),
+                action_overrides={field: value},
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_allows_fingerprinted_audit_messages(
+    capability_id,
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+
+    evidence = _execution_evidence(
+        operation,
+        _draft_invoice_available_raw(
+            operation,
+            guard_record_ids=(502, 503),
+            action_overrides={"audit_trail_message_ids": [1007]},
+        ),
+    )
+
+    assert evidence["recovery_plan"]["status"] == "available"
+
+
+@pytest.mark.parametrize("field", ["cogs_origin_id", "is_landed_costs_line"])
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_requires_stock_effect_line_fields(
+    field, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    line = raw["after"][1]
+    line["values"].pop(field)
+    line["values_digest"] = hashlib.sha256(
+        canonical_json(line["values"])
+    ).hexdigest()
+
+    with pytest.raises(
+        OdooWriteBootstrapError, match="outside the invoice line graph"
+    ):
+        _execution_evidence(operation, raw)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "move_attachment_ids",
+        "tax_base_amount",
+        "extra_tax_data",
+        "deductible_amount",
+        "is_imported",
+        "is_downpayment",
+        "is_storno",
+        "sequence",
+        "product_uom_id",
+        "discount",
+        "discount_date",
+        "discount_amount_currency",
+        "discount_balance",
+        "l10n_latam_document_type_id",
+        "create_uid",
+        "create_date",
+        "write_uid",
+        "write_date",
+        "account_id",
+        "currency_id",
+        "debit",
+        "credit",
+        "balance",
+        "amount_currency",
+        "odoo_cli_v3_line_reference",
+    ],
+)
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_requires_installed_tax_and_attachment_fields(
+    field, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+    raw = _draft_invoice_available_raw(
+        operation, guard_record_ids=(502, 503)
+    )
+    line = raw["after"][1]
+    line["values"].pop(field)
+    line["values_digest"] = hashlib.sha256(
+        canonical_json(line["values"])
+    ).hexdigest()
+
+    with pytest.raises(
+        OdooWriteBootstrapError, match="outside the invoice line graph"
+    ):
+        _execution_evidence(operation, raw)
+
+
+@pytest.mark.parametrize(
+    ("capability_id", "field"),
+    [
+        ("acct.invoice.customer_create.v1", "analytic_distribution"),
+        ("acct.invoice.customer_create.v1", "analytic_line_ids"),
+        ("acct.invoice.customer_create.v1", "tax_tag_ids"),
+        ("acct.invoice.customer_create.v1", "parent_state"),
+        ("acct.invoice.customer_create.v1", "payment_id"),
+        ("acct.invoice.customer_create.v1", "statement_id"),
+        ("acct.invoice.customer_create.v1", "purchase_order_id"),
+        ("acct.invoice.customer_create.v1", "group_tax_id"),
+        (
+            "acct.invoice.customer_create.v1",
+            "distribution_analytic_account_ids",
+        ),
+        ("acct.invoice.customer_create.v1", "reconcile_model_id"),
+        ("acct.invoice.customer_create.v1", "reconciled_lines_ids"),
+        (
+            "acct.invoice.customer_create.v1",
+            "reconciled_lines_excluding_exchange_diff_ids",
+        ),
+        ("acct.invoice.customer_create.v1", "parent_id"),
+        ("acct.bill.vendor_create.v1", "analytic_distribution"),
+        ("acct.bill.vendor_create.v1", "analytic_line_ids"),
+        ("acct.bill.vendor_create.v1", "tax_tag_ids"),
+        ("acct.bill.vendor_create.v1", "parent_state"),
+        ("acct.bill.vendor_create.v1", "payment_id"),
+        ("acct.bill.vendor_create.v1", "statement_id"),
+        ("acct.bill.vendor_create.v1", "purchase_order_id"),
+        ("acct.bill.vendor_create.v1", "group_tax_id"),
+        (
+            "acct.bill.vendor_create.v1",
+            "distribution_analytic_account_ids",
+        ),
+        ("acct.bill.vendor_create.v1", "reconcile_model_id"),
+        ("acct.bill.vendor_create.v1", "reconciled_lines_ids"),
+        (
+            "acct.bill.vendor_create.v1",
+            "reconciled_lines_excluding_exchange_diff_ids",
+        ),
+        ("acct.bill.vendor_create.v1", "parent_id"),
+    ],
+)
+def test_draft_document_descriptor_requires_financial_reporting_line_fields(
+    capability_id, field
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
     )
     raw = _draft_invoice_available_raw(
         operation, guard_record_ids=(502, 503)
@@ -457,14 +1098,109 @@ def test_draft_vendor_bill_descriptor_requires_stock_effect_line_fields(field):
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("analytic_distribution", {"17": 100}),
+        ("analytic_line_ids", [990]),
+    ],
+)
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_rejects_unapproved_analytic_effects(
+    field, value, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+
+    with pytest.raises(OdooWriteBootstrapError, match="external effects"):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation,
+                guard_record_ids=(502, 503),
+                line_overrides={field: value},
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("payment_id", [990, "Payment"]),
+        ("statement_id", [991, "Statement"]),
+        ("purchase_order_id", [992, "Purchase Order"]),
+        ("distribution_analytic_account_ids", [993]),
+        ("reconcile_model_id", [994, "Reconcile Model"]),
+        ("reconciled_lines_ids", [995]),
+        ("reconciled_lines_excluding_exchange_diff_ids", [996]),
+        ("move_attachment_ids", [997]),
+        ("is_imported", True),
+        ("is_downpayment", True),
+    ],
+)
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_rejects_extended_line_effects(
+    field, value, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
+    _context_value, operation, _approval = _executing(
+        parameters, capability_id=capability_id
+    )
+
+    with pytest.raises(OdooWriteBootstrapError, match="external effects"):
+        _execution_evidence(
+            operation,
+            _draft_invoice_available_raw(
+                operation,
+                guard_record_ids=(502, 503),
+                line_overrides={field: value},
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
         ("cogs_origin_id", [990, "Stock Move"]),
         ("is_landed_costs_line", True),
     ],
 )
-def test_draft_vendor_bill_descriptor_rejects_stock_effect_lines(field, value):
-    parameters = {**_vendor_parameters(), "posting_mode": "draft"}
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.invoice.customer_create.v1", "acct.bill.vendor_create.v1"],
+)
+def test_draft_document_descriptor_rejects_stock_effect_lines(
+    field, value, capability_id
+):
+    parameters = {
+        **(
+            _vendor_parameters()
+            if capability_id == "acct.bill.vendor_create.v1"
+            else _parameters()
+        ),
+        "posting_mode": "draft",
+    }
     _context_value, operation, _approval = _executing(
-        parameters, capability_id="acct.bill.vendor_create.v1"
+        parameters, capability_id=capability_id
     )
 
     with pytest.raises(OdooWriteBootstrapError, match="external effects"):
@@ -689,7 +1425,7 @@ def _recovery_case(
         "record_fingerprint": hashlib.sha256(
             f"account.move.line:{target_record_id + 1}:{target_company_id}".encode()
         ).hexdigest(),
-        "expected_outcome": "survive_exact",
+        "expected_outcome": "survive_allowed_delta",
     }
     plan = create_recovery_plan_v2(
         origin_operation_id=origin_operation_id,
@@ -1313,6 +2049,112 @@ def test_first_write_commits_atomic_execution_then_verified_readback():
         CAPABILITIES[0].data["verification"]["method"]
     )
     assert result["execution"]["evidence"]["odoo_records"][0]["record_id"] == 501
+
+
+def test_default_execution_path_locks_reads_and_reverifies_live_module_graph(
+    monkeypatch,
+):
+    parameters = _parameters()
+    graph = build_trusted_module_graph(
+        [{"name": "account", "latest_version": "19.0.2.0"}]
+    )
+
+    class DefaultPathHandler(Handler):
+        def __init__(self):
+            super().__init__()
+            self.module_graph = graph
+
+        def precheck(self, capability_id, values):
+            raw = super().precheck(capability_id, values)
+            return {
+                **raw,
+                "module_graph": self.module_graph.evidence,
+                "semantic_precheck": {"passed": True},
+            }
+
+        def execute(self, capability_id, values):
+            return {
+                **super().execute(capability_id, values),
+                "module_graph": self.module_graph.evidence,
+            }
+
+        def verify(self, capability_id, values, execution):
+            assert execution["module_graph"] == self.module_graph.evidence
+            return super().verify(capability_id, values, execution)
+
+    handler = DefaultPathHandler()
+    raw_precheck = handler.precheck(
+        "acct.invoice.customer_create.v1", parameters
+    )
+    context, operation, approval = _executing(
+        parameters, raw_precheck=raw_precheck
+    )
+    _root, cr, anchors, _selected_handler, kwargs = _harness(handler=handler)
+    lock_statements = []
+    cr.execute = lock_statements.append
+
+    class ModuleRecords:
+        def read(self, fields):
+            assert fields == ["name", "latest_version", "state"]
+            return [
+                {
+                    "name": "account",
+                    "latest_version": "19.0.2.0",
+                    "state": "installed",
+                }
+            ]
+
+    class ModuleModel:
+        def with_context(self, **context_values):
+            assert context_values == {"active_test": False}
+            return self
+
+        def search(self, domain, *, order):
+            assert domain == [("state", "=", "installed")]
+            assert order == "name, id"
+            return ModuleRecords()
+
+    class DefaultRootEnv(RootEnv):
+        su = True
+
+        def __getitem__(self, name):
+            if name == "ir.module.module":
+                return ModuleModel()
+            return super().__getitem__(name)
+
+    observed_graphs = []
+
+    def default_factory(
+        bound_env,
+        _context_value,
+        _observed_at,
+        _trusted_plan,
+        module_graph,
+    ):
+        assert bound_env.su is False
+        observed_graphs.append(module_graph)
+        handler.module_graph = module_graph
+        return handler
+
+    monkeypatch.setattr(
+        write_bootstrap, "_default_handler_factory", default_factory
+    )
+    kwargs["handler_factory"] = None
+
+    result = execute_write_from_odoo_shell(
+        DefaultRootEnv(cr),
+        _request(context, operation, approval),
+        **kwargs,
+    )
+
+    assert [item.digest for item in observed_graphs] == [graph.digest, graph.digest]
+    assert lock_statements == [
+        "LOCK TABLE ir_module_module IN SHARE MODE",
+        "LOCK TABLE ir_module_module IN SHARE MODE",
+    ]
+    assert handler.calls == ["execute", "verify"]
+    assert next(iter(anchors.by_scope.values())).state == "verified"
+    assert result["verification"]["evidence"]["passed"] is True
     assert result["verification"]["evidence"]["readback"]["records"] == (
         result["execution"]["evidence"]["odoo_records"]
     )
@@ -1321,7 +2163,8 @@ def test_first_write_commits_atomic_execution_then_verified_readback():
     ) == 1
     assert set(result["execution"]["evidence"]) == {
         "operation_id", "capability_id", "succeeded", "odoo_records",
-        "difference", "recovery_plan", "recovery_parameters", "failure_checks",
+        "difference", "recovery_plan", "recovery_parameters", "module_graph",
+        "failure_checks",
     }
     assert set(result["verification"]["evidence"]["readback"]) == {
         "company_id",
@@ -2673,7 +3516,13 @@ def test_valid_recovery_plan_reaches_handler_and_is_bound_to_control_anchor():
     assert trusted_result_from_mapping(result["verification"]["result"]).succeeded
 
     default_handler = _default_handler_factory(
-        SimpleNamespace(uid=context.user_id, su=False), context, NOW, plan
+        SimpleNamespace(uid=context.user_id, su=False),
+        context,
+        NOW,
+        plan,
+        build_trusted_module_graph(
+            [{"name": "account", "latest_version": "19.0.test"}]
+        ),
     )
     assert default_handler.context.trusted_recovery_plan == plan
 

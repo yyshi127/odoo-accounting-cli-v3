@@ -242,6 +242,7 @@ def _default_handler_factory(
     context: RequestContext,
     observed_at: datetime,
     trusted_recovery_plan: Mapping[str, Any] | None,
+    module_graph: Any,
 ) -> WritePrecheckHandler:
     from .write_handlers import OdooWriteContext, OdooWriteHandlers
 
@@ -252,6 +253,7 @@ def _default_handler_factory(
             allowed_company_ids=context.allowed_company_ids,
             today=observed_at.date(),
             environment=context.environment,
+            module_graph=module_graph,
             trusted_recovery_plan=trusted_recovery_plan,
         )
     )
@@ -431,8 +433,14 @@ def execute_write_precheck_from_odoo_shell(
         )
         _assert_executor_acl(bound_env, capability)
         if handler_factory is None:
+            from .module_graph import read_installed_module_graph
+
             handler = _default_handler_factory(
-                bound_env, context, observed_at, trusted_recovery_plan
+                bound_env,
+                context,
+                observed_at,
+                trusted_recovery_plan,
+                read_installed_module_graph(root_env),
             )
         elif trusted_recovery_plan is None:
             handler = handler_factory(bound_env, context, observed_at)

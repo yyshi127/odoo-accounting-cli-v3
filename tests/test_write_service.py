@@ -23,6 +23,7 @@ from odoo_accounting_cli_v3.operations import (
     sign_execution_result,
     sign_verification_result,
 )
+from odoo_accounting_cli_v3.odoo.module_graph import build_trusted_module_graph
 from odoo_accounting_cli_v3.persistence import ReplayRejected, SQLitePersistence
 from odoo_accounting_cli_v3.registry import validate_registry
 from odoo_accounting_cli_v3.write_receipts import (
@@ -50,6 +51,9 @@ APPROVAL_SECRET = b"approval-secret-material-at-least-32"
 EXECUTION_SECRET = b"execution-secret-material-at-least-32"
 VERIFICATION_SECRET = b"verification-secret-material-32-bytes"
 RECEIPT_SECRET = b"write-receipt-secret-material-32-bytes"
+TEST_MODULE_GRAPH = build_trusted_module_graph(
+    [{"name": "account", "latest_version": "19.0.test"}]
+)
 
 
 def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
@@ -305,11 +309,18 @@ def _execution_evidence(
         "record_fingerprint": hashlib.sha256(
             canonical_json(guard_after)
         ).hexdigest(),
-        "expected_outcome": "survive_exact" if succeeded else "manual_review",
+        "expected_outcome": (
+            "survive_allowed_delta"
+            if succeeded and draft_document
+            else "survive_exact"
+            if succeeded
+            else "manual_review"
+        ),
     }
     recovery_parameters = (
         {
             "move_id": 501,
+            "module_graph_digest": TEST_MODULE_GRAPH.digest,
             "action_targets": [{"model": "account.move", "record_id": 501}],
             "guard_records": [
                 {"model": "account.move.line", "record_id": 502}
@@ -358,6 +369,7 @@ def _execution_evidence(
         ),
         "recovery_plan": recovery,
         "recovery_parameters": recovery_parameters,
+        "module_graph": TEST_MODULE_GRAPH.evidence if succeeded else None,
         "failure_checks": [] if succeeded else ["execution_rejected_before_verified_effect"],
     }
 
@@ -1253,6 +1265,52 @@ def test_recovery_is_a_new_operation_derived_from_the_verified_origin_receipt(se
     gateway._policy._authenticate_context = gateway._authenticate_context
     with pytest.raises(WriteServiceError, match="revision changed"):
         gateway.prepare_recovery(changed_context, **changed_revision)
+
+
+def test_origin_recovery_rejects_forged_exact_line_outcome(service, monkeypatch):
+    gateway, _backend, _store = service
+    draft_parameters = {**_invoice_parameters(), "posting_mode": "draft"}
+    awaiting = _prepare_and_preview(gateway, parameters=draft_parameters)
+    approval = _approval(awaiting, "approval-forged-line-outcome")
+    gateway.approve_execute(
+        _context(parameters=draft_parameters),
+        approval,
+        reconciliation_only=False,
+    )
+    origin = gateway.status(
+        _context(parameters=draft_parameters), awaiting.operation_id
+    )
+    origin_result = gateway.result(
+        _context(parameters=draft_parameters), origin.operation_id
+    )
+    original_plan = origin_result["recovery_plan"]
+    forged_plan = create_recovery_plan_v2(
+        origin_operation_id=origin.operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method="cancel_pristine_v3_draft_customer_invoice_v1",
+        requires_approval=True,
+        action_targets=original_plan["action_targets"],
+        guard_records=[
+            {**guard, "expected_outcome": "survive_exact"}
+            for guard in original_plan["guard_records"]
+        ],
+        oracle_id="cancel_pristine_v3_draft_customer_invoice_exact_v1",
+        parameters={"origin_operation_id": origin.operation_id},
+    )
+    monkeypatch.setattr(
+        gateway,
+        "result",
+        lambda *_args: {**origin_result, "recovery_plan": forged_plan},
+    )
+
+    with pytest.raises(
+        WriteServiceError,
+        match="exact sandbox draft customer invoice receipt",
+    ):
+        gateway._validated_origin_recovery_plan(
+            _context(parameters=draft_parameters), origin
+        )
 
 
 def test_vendor_bill_recovery_has_its_own_approval_and_idempotency_operation(

@@ -462,6 +462,18 @@ durable signed final receipt, the capability remains closed. Passing one
 capability does not stage or enable another, and no sandbox result authorizes a
 production write.
 
+Dev21 canonicalizes the installed-module graph under a transaction-scoped
+`LOCK TABLE ir_module_module IN SHARE MODE` before execution and again before
+post-commit verification. The execution transaction commits before
+verification obtains its second lock, so a module installation, upgrade, or
+uninstall can still commit in that narrow interval. The graph re-read rejects
+the mismatch and prevents a false success, but it cannot roll back an already
+committed accounting effect. This is not cross-commit mutual exclusion. Until
+one coordinated guard spanning execution through verification and the Odoo
+module-management path is implemented and proven, stop all module-management
+traffic during every sandbox write or recovery drill. The transaction locks
+alone cannot stage or enable a production write capability.
+
 ## Promotion and Pi routing
 
 A staged capability is deliberately not enabled and is invisible to the normal

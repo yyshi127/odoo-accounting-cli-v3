@@ -41,6 +41,10 @@ from .operations import (
     complete_operation as validate_complete_operation,
     record_execution_result as validate_execution_result,
 )
+from .odoo.module_graph import (
+    OdooModuleGraphError,
+    validate_module_graph_evidence,
+)
 from .persistence import OperationNotFound, SQLitePersistence
 from .registry import Capability, registry_digest
 from .write_receipts import (
@@ -744,6 +748,7 @@ class DurableWriteService:
             "difference",
             "recovery_plan",
             "recovery_parameters",
+            "module_graph",
             "failure_checks",
         }:
             raise WriteServiceError("execution evidence fields are invalid")
@@ -759,6 +764,19 @@ class DurableWriteService:
             or not isinstance(evidence["failure_checks"], list)
         ):
             raise WriteServiceError("execution evidence binding is invalid")
+        module_graph = evidence["module_graph"]
+        trusted_module_graph = None
+        if module_graph is not None:
+            try:
+                trusted_module_graph = validate_module_graph_evidence(module_graph)
+            except OdooModuleGraphError as exc:
+                raise WriteServiceError(
+                    "execution installed-module graph is invalid"
+                ) from exc
+        if payload.result.succeeded and module_graph is None:
+            raise WriteServiceError(
+                "successful execution requires installed-module graph evidence"
+            )
         allowed_models = _ALLOWED_MODELS.get(capability.id)
         if allowed_models is None:
             raise WriteServiceError("write capability has no Odoo model allowlist")
@@ -799,6 +817,17 @@ class DurableWriteService:
             or plan["parameters_digest"] != _digest(evidence["recovery_parameters"])
         ):
             raise WriteServiceError("recovery plan is not bound to the execution evidence")
+        if plan.get("status") == "available" and plan.get("method") in {
+            DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+            DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+        } and (
+            trusted_module_graph is None
+            or evidence["recovery_parameters"].get("module_graph_digest")
+            != trusted_module_graph.digest
+        ):
+            raise WriteServiceError(
+                "available draft recovery is not bound to the installed-module graph"
+            )
         plan_targets = (
             [*plan["action_targets"], *plan["guard_records"]]
             if plan.get("plan_version") == 2
@@ -1433,7 +1462,7 @@ class DurableWriteService:
             or not guards
             or any(
                 guard["model"] != "account.move.line"
-                or guard["expected_outcome"] != "survive_exact"
+                or guard["expected_outcome"] != "survive_allowed_delta"
                 for guard in guards
             )
             or not isinstance(result_records, list)

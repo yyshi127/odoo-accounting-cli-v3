@@ -59,6 +59,22 @@ link fields, rejecting any linked effect. It does not stage or enable the
 vendor-bill capability and has no real-Odoo write receipt; production execution
 remains closed. A trusted installed/custom-module graph remains a staging gate.
 
+Dev21 adds a canonical local evidence contract for that module-graph
+prerequisite, derived from every installed module's name and `latest_version`,
+with strict schema, ordering, and digest validation. The graph is bound into
+precheck and execution evidence and into both draft recovery plans. For the two
+dormant pristine-draft customer-invoice and vendor-bill recovery slices, it
+closes the material stored-and-writable `account.move` and `account.move.line`
+snapshot/guard field sets observed on the target; an optional field may be
+absent only when its trusted provider module is absent. Tokens, signatures, and
+PDF/Facturae/UBL binary fields retain presence only, with binary reads using
+`bin_size=True`.
+Execution and verification each take a transaction-scoped module-table lock,
+but a narrow post-commit module-upgrade interval remains: drift fails closed
+without reporting success, while an already committed effect may require
+reconciliation. No write capability is staged or enabled, no real-Odoo sandbox
+write/recovery receipt exists, and production execution remains closed.
+
 All machine-facing output is JSON. Real accounting success additionally
 requires an Odoo-bound signed receipt. CLI-Anything v0.4.0 supplies the CLI and
 test-harness conventions only; Odoo 19 remains the backend and accounting

@@ -20,6 +20,7 @@ from odoo_accounting_cli_v3.operations import (
     sign_execution_result,
     sign_verification_result,
 )
+from odoo_accounting_cli_v3.odoo.module_graph import build_trusted_module_graph
 from odoo_accounting_cli_v3.persistence import SQLitePersistence
 from odoo_accounting_cli_v3.registry import registry_digest, validate_registry
 from odoo_accounting_cli_v3.write_api import parse_write_api_request
@@ -50,6 +51,9 @@ RECEIPT_SECRET = b"write-app-receipt-secret-material-0001"
 SECOND_RECEIPT_SECRET = b"write-app-second-receipt-secret-material"
 CAPABILITY_ID = "acct.bill.vendor_create.v1"
 CUSTOMER_INVOICE_CAPABILITY_ID = "acct.invoice.customer_create.v1"
+TEST_MODULE_GRAPH = build_trusted_module_graph(
+    [{"name": "account", "latest_version": "19.0.test"}]
+)
 
 
 def _capabilities():
@@ -299,20 +303,34 @@ class FakeOdoo:
                 canonical_json(after)
             ).hexdigest(),
         }
-        guard_values = {"company_id": operation.company_id, "move_id": record_id}
+        guard_before_values = {
+            "company_id": operation.company_id,
+            "move_id": record_id,
+            "parent_state": "draft",
+        }
+        guard_after_values = {
+            **guard_before_values,
+            "parent_state": (
+                "cancel"
+                if is_recovery
+                else "draft"
+                if is_draft_customer
+                else "posted"
+            ),
+        }
         guard_before = create_record_snapshot(
             model="account.move.line",
             record_id=record_id + 1,
             exists=is_recovery,
             record_state="unknown" if is_recovery else "absent",
-            values=guard_values if is_recovery else {},
+            values=guard_before_values if is_recovery else {},
         )
         guard_after = create_record_snapshot(
             model="account.move.line",
             record_id=record_id + 1,
             exists=True,
             record_state="unknown",
-            values=guard_values,
+            values=guard_after_values,
         )
         guard_reference = {
             "model": "account.move.line",
@@ -331,6 +349,7 @@ class FakeOdoo:
             recovery_parameters = {
                 "company_id": operation.company_id,
                 "origin_operation_id": operation.operation_id,
+                "module_graph_digest": TEST_MODULE_GRAPH.digest,
                 "method": "cancel_pristine_v3_draft_customer_invoice_v1",
                 "action_targets": [
                     {"model": "account.move", "record_id": 501}
@@ -363,7 +382,7 @@ class FakeOdoo:
                 after=[after, guard_after],
                 changed_fields=[
                     *(
-                        ["state"]
+                        ["parent_state", "state"]
                         if is_recovery
                         else [
                             "company_id", "currency_id", "invoice_date",
@@ -406,7 +425,7 @@ class FakeOdoo:
                     [
                         {
                             **guard_reference,
-                            "expected_outcome": "survive_exact",
+                            "expected_outcome": "survive_allowed_delta",
                         }
                     ]
                     if is_draft_customer
@@ -429,6 +448,7 @@ class FakeOdoo:
                 parameters=recovery_parameters,
             ),
             "recovery_parameters": recovery_parameters,
+            "module_graph": TEST_MODULE_GRAPH.evidence,
             "failure_checks": [],
         }
 
