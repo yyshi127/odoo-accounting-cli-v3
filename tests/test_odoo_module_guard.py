@@ -204,6 +204,10 @@ class FakeProcess:
         self.terminated = True
         self.returncode = -9
 
+    def send_signal(self, _signal):
+        self.terminated = True
+        self.returncode = -15
+
 
 def test_database_guard_takes_fixed_shared_advisory_before_table_share_and_returns_evidence():
     cursor = FakeCursor()

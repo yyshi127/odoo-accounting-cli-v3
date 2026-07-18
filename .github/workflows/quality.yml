@@ -788,6 +788,7 @@ jobs:
             printf 'port=%s\n' "$port"
           } >> "$GITHUB_OUTPUT"
       - name: Prove bootstrap rollback, ACLs, locks, epoch and crash quarantine
+        id: dev22_postgres_tests
         shell: bash
         run: |
           set -euo pipefail
@@ -820,6 +821,42 @@ jobs:
                   f"errors={len(errors)} skipped={len(skipped)}"
               )
           print("dev22_real_postgresql_tests=4")
+          PY
+      - name: Publish exact Dev22 PostgreSQL failures as check annotations
+        if: ${{ failure() && steps.dev22_postgres_tests.outcome == 'failure' }}
+        shell: bash
+        run: |
+          sudo "$(command -v python)" - "$RUNNER_TEMP/dev22-module-guard-postgresql.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+
+          def escape(value: str, *, property_value: bool = False) -> str:
+              value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              if property_value:
+                  value = value.replace(":", "%3A").replace(",", "%2C")
+              return value
+
+          failures = 0
+          for case in root.iter("testcase"):
+              problem = case.find("failure")
+              if problem is None:
+                  problem = case.find("error")
+              if problem is None:
+                  continue
+              failures += 1
+              path = case.get("file") or "tests/test_dev22_module_guard_postgres.py"
+              line = int(case.get("line") or "0") + 1
+              title = f"Dev22 PostgreSQL: {case.get('name', '')}"
+              detail = problem.get("message") or problem.text or problem.tag
+              print(
+                  f"::error file={escape(path, property_value=True)},"
+                  f"line={line},title={escape(title, property_value=True)}::"
+                  f"{escape(detail)}"
+              )
+          if failures == 0:
+              raise SystemExit("Dev22 PostgreSQL failed without a failure/error testcase")
           PY
 
   wheel-smoke:

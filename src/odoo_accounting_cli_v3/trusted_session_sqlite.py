@@ -580,7 +580,8 @@ class SQLiteTrustedSessionStore:
             timeout_seconds = retry_deadline - time.monotonic()
             if timeout_seconds <= 0:
                 raise TrustedSessionStoreError(
-                    "trusted session SQLite transaction deadline was exceeded"
+                    "trusted session SQLite transaction failed: transaction "
+                    "deadline was exceeded"
                 )
         try:
             with process_sqlite_lifecycle(timeout_seconds) as lease:
@@ -1078,7 +1079,8 @@ class SQLiteTrustedSessionStore:
         remaining_seconds = retry_deadline - time.monotonic()
         if remaining_seconds <= 0:
             raise TrustedSessionStoreError(
-                "trusted session SQLite transaction deadline was exceeded"
+                "trusted session SQLite transaction failed: transaction "
+                "deadline was exceeded"
             )
         return min(maximum_ms, max(0, int(remaining_seconds * 1000.0)))
 
