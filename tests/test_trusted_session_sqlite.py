@@ -1356,6 +1356,75 @@ def test_sqlite_sidecar_hardlink_is_rejected(tmp_path: Path) -> None:
         store._verify_sidecars()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar creation race contract")
+def test_transient_sqlite_sidecar_mode_is_rechecked_until_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"sqlite sidecar being initialized")
+    sidecar.chmod(0o400)
+    sleeps: list[float] = []
+
+    def finish_sqlite_creation(delay: float) -> None:
+        sleeps.append(delay)
+        sidecar.chmod(0o600)
+
+    monkeypatch.setattr(trusted_session_sqlite.time, "sleep", finish_sqlite_creation)
+
+    store._verify_sidecars()
+
+    assert sleeps == [trusted_session_sqlite._SQLITE_SIDECAR_MODE_RETRY_SECONDS]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar mode contract")
+def test_persistently_restricted_sqlite_sidecar_is_rejected_after_bounded_rechecks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"persistently restricted trusted-session sidecar")
+    sidecar.chmod(0o400)
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        trusted_session_sqlite.time,
+        "sleep",
+        lambda delay: sleeps.append(delay),
+    )
+
+    with pytest.raises(TrustedSessionStoreError, match="sidecar is not private"):
+        store._verify_sidecars()
+
+    assert len(sleeps) == trusted_session_sqlite._SQLITE_SIDECAR_MODE_ATTEMPTS - 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar mode contract")
+@pytest.mark.parametrize("unsafe_mode", (0o601, 0o610, 0o700, 0o640, 0o604))
+def test_sqlite_sidecar_with_extra_permission_bits_is_rejected_without_waiting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_mode: int,
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"unsafe trusted-session sidecar")
+    sidecar.chmod(unsafe_mode)
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        trusted_session_sqlite.time,
+        "sleep",
+        lambda delay: sleeps.append(delay),
+    )
+
+    with pytest.raises(TrustedSessionStoreError, match="sidecar is not private"):
+        store._verify_sidecars()
+
+    assert sleeps == []
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar race contract")
 def test_valid_sqlite_sidecar_replacement_after_open_is_reverified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

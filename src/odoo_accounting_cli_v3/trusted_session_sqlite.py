@@ -60,6 +60,9 @@ _RETRYABLE_SQLITE_SETUP_BASE_CODES = frozenset(
 _SQLITE_SETUP_RETRY_INITIAL_SECONDS = 0.001
 _SQLITE_SETUP_RETRY_MAX_SECONDS = 0.025
 _SQLITE_SETUP_ATTEMPT_MAX_BUSY_MS = 100
+_SQLITE_SIDECAR_IDENTITY_ATTEMPTS = 3
+_SQLITE_SIDECAR_MODE_ATTEMPTS = 32
+_SQLITE_SIDECAR_MODE_RETRY_SECONDS = 0.002
 _WRITER_LOCK_SUFFIX = ".writer.lock"
 
 
@@ -775,7 +778,9 @@ class SQLiteTrustedSessionStore:
             return
         for suffix in ("-wal", "-shm"):
             sidecar = Path(f"{self.path}{suffix}")
-            for _attempt in range(3):
+            identity_attempts = 0
+            mode_attempts = 0
+            while True:
                 if not os.path.lexists(sidecar):
                     break
                 descriptor: int | None = None
@@ -794,8 +799,6 @@ class SQLiteTrustedSessionStore:
                         or metadata.st_nlink != 1
                         or opened.st_uid != os.geteuid()
                         or metadata.st_uid != os.geteuid()
-                        or stat.S_IMODE(opened.st_mode) != 0o600
-                        or stat.S_IMODE(metadata.st_mode) != 0o600
                     ):
                         raise TrustedSessionStoreError(
                             "trusted session SQLite sidecar is not private"
@@ -804,15 +807,42 @@ class SQLiteTrustedSessionStore:
                         metadata.st_dev,
                         metadata.st_ino,
                     ):
+                        identity_attempts += 1
+                        if (
+                            identity_attempts
+                            >= _SQLITE_SIDECAR_IDENTITY_ATTEMPTS
+                        ):
+                            raise TrustedSessionStoreError(
+                                "trusted session SQLite sidecar changed while checked"
+                            )
                         continue
                     if opened.st_nlink != 1:
                         raise TrustedSessionStoreError(
                             "trusted session SQLite sidecar is not private"
                         )
+                    opened_mode = stat.S_IMODE(opened.st_mode)
+                    metadata_mode = stat.S_IMODE(metadata.st_mode)
+                    if opened_mode & ~0o600 or metadata_mode & ~0o600:
+                        raise TrustedSessionStoreError(
+                            "trusted session SQLite sidecar is not private"
+                        )
+                    if opened_mode != 0o600 or metadata_mode != 0o600:
+                        mode_attempts += 1
+                        if mode_attempts >= _SQLITE_SIDECAR_MODE_ATTEMPTS:
+                            raise TrustedSessionStoreError(
+                                "trusted session SQLite sidecar is not private"
+                            )
+                        time.sleep(_SQLITE_SIDECAR_MODE_RETRY_SECONDS)
+                        continue
                     break
                 except FileNotFoundError:
                     if not os.path.lexists(sidecar):
                         break
+                    identity_attempts += 1
+                    if identity_attempts >= _SQLITE_SIDECAR_IDENTITY_ATTEMPTS:
+                        raise TrustedSessionStoreError(
+                            "trusted session SQLite sidecar changed while checked"
+                        )
                 except TrustedSessionStoreError:
                     raise
                 except OSError as exc:
@@ -828,10 +858,6 @@ class SQLiteTrustedSessionStore:
                             lease,
                             label="trusted session SQLite sidecar",
                         )
-            else:
-                raise TrustedSessionStoreError(
-                    "trusted session SQLite sidecar changed while checked"
-                )
 
     @property
     def _writer_lock_path(self) -> Path:
