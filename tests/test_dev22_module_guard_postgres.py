@@ -249,6 +249,7 @@ class PostgreSQLHarness:
         timeout: float = 20,
     ) -> subprocess.CompletedProcess[str]:
         resolved = path.resolve(strict=True)
+        sql = resolved.read_text(encoding="utf-8")
         command = self.command(database)
         for name, value in sorted((variables or {}).items()):
             if SAFE_IDENTIFIER.fullmatch(name) is None:
@@ -256,13 +257,13 @@ class PostgreSQLHarness:
             if SAFE_IDENTIFIER.fullmatch(value) is None:
                 raise AssertionError(f"unsafe psql identifier value: {value!r}")
             command.extend(["-v", f"{name}={value}"])
-        command.extend(["-f", str(resolved)])
         return subprocess.run(
             command,
             check=check,
             capture_output=True,
             cwd="/",
             env=self.environment(),
+            input=sql,
             text=True,
             timeout=timeout,
         )
@@ -701,8 +702,12 @@ def _try_advisory(
         f"SELECT pg_catalog.{function}({key_a},{key_b})::text",
         database=database,
     )
-    assert result in {"t", "f"}
-    return result == "t"
+    return _postgres_boolean(result)
+
+
+def _postgres_boolean(value: str) -> bool:
+    assert value in {"t", "f", "true", "false"}
+    return value in {"t", "true"}
 
 
 def test_fixed_session_advisory_lock_commit_unlock_and_disconnect_semantics(
@@ -751,21 +756,21 @@ def test_fixed_session_advisory_lock_commit_unlock_and_disconnect_semantics(
         wrong_mode = shared_guard.execute(
             f"SELECT pg_catalog.pg_advisory_unlock({key_a},{key_b})::text;"
         )
-        assert wrong_key[-1] == "f"
-        assert wrong_mode[-1] == "f"
+        assert _postgres_boolean(wrong_key[-1]) is False
+        assert _postgres_boolean(wrong_mode[-1]) is False
         assert not _try_advisory(
             postgres, database, "pg_try_advisory_lock"
         )
 
-        assert shared_guard.execute(
+        assert _postgres_boolean(shared_guard.execute(
             f"SELECT pg_catalog.pg_advisory_unlock_shared({key_a},{key_b})::text;"
-        )[-1] == "t"
+        )[-1]) is True
         assert not _try_advisory(
             postgres, database, "pg_try_advisory_lock"
         )
-        assert parallel_shared_guard.execute(
+        assert _postgres_boolean(parallel_shared_guard.execute(
             f"SELECT pg_catalog.pg_advisory_unlock_shared({key_a},{key_b})::text;"
-        )[-1] == "t"
+        )[-1]) is True
         assert _try_advisory(postgres, database, "pg_try_advisory_lock")
 
     disconnected = postgres.session(database)
@@ -779,10 +784,10 @@ def test_fixed_session_advisory_lock_commit_unlock_and_disconnect_semantics(
         assert not _try_advisory(
             postgres, database, "pg_try_advisory_lock_shared"
         )
-        assert postgres.scalar(
+        assert _postgres_boolean(postgres.scalar(
             f"SELECT pg_catalog.pg_terminate_backend({disconnected_pid})::text",
             database=database,
-        ) == "t"
+        )) is True
         _wait_for(
             lambda: int(
                 postgres.scalar(
@@ -1237,10 +1242,10 @@ def _legacy_privileged_bootstrap_contract_reference(
             f"SELECT pg_catalog.pg_try_advisory_lock({key_a},{key_b})::text",
             database=database,
         )
-        assert blocked_exclusive == "f"
-        assert writer_guard.execute(
+        assert _postgres_boolean(blocked_exclusive) is False
+        assert _postgres_boolean(writer_guard.execute(
             f"SELECT pg_catalog.pg_advisory_unlock_shared({key_a},{key_b})::text;"
-        )[-1] == "t"
+        )[-1]) is True
 
     maintenance_id = uuid.uuid4()
     with postgres.session(database) as holder:
@@ -1325,10 +1330,10 @@ def _legacy_privileged_bootstrap_contract_reference(
             "WHERE name='account'",
             database=database,
         )
-        assert postgres.scalar(
+        assert _postgres_boolean(postgres.scalar(
             f"SELECT pg_catalog.pg_terminate_backend({crashed_pid})::text",
             database=database,
-        ) == "t"
+        )) is True
         _wait_for(
             lambda: int(
                 postgres.scalar(
@@ -1785,18 +1790,19 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
             f"2,'{authorization_id}'::uuid)::text; COMMIT;"
             f"SELECT pg_catalog.pg_advisory_unlock({key_a},{key_b})::text;"
         )
-        assert closed[-2:] == ["2", "t"]
+        assert closed[-2] == "2"
+        assert _postgres_boolean(closed[-1]) is True
     postgres.run(f"ALTER ROLE {maintenance_role} NOLOGIN VALID UNTIL 'epoch'")
     postgres.run("DROP TABLE public.dev22_guarded_ddl", database=database)
     closed_state = _guard_state(postgres, database)
     assert closed_state["module_guard_open"] is False
-    assert postgres.scalar(
+    assert _postgres_boolean(postgres.scalar(
         f"SELECT pg_catalog.pg_has_role('{maintenance_role}','{runtime_role}','MEMBER')::text"
-    ) == "f"
-    assert postgres.scalar(
+    )) is False
+    assert _postgres_boolean(postgres.scalar(
         f"SELECT pg_catalog.has_schema_privilege('{runtime_role}','public','CREATE')::text",
         database=database,
-    ) == "f"
+    )) is False
 
     crash_id = uuid.uuid4()
     crash_expiry = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=10)
@@ -1822,10 +1828,10 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
             "SELECT pg_catalog.pg_backend_pid()::text;"
         )
         crashed_pid = int(crash_rows[-1])
-        assert postgres.scalar(
+        assert _postgres_boolean(postgres.scalar(
             f"SELECT pg_catalog.pg_terminate_backend({crashed_pid})::text",
             database=database,
-        ) == "t"
+        )) is True
         _wait_for(
             lambda: postgres.scalar(
                 "SELECT pg_catalog.count(*)::text FROM pg_catalog.pg_stat_activity "
@@ -1855,7 +1861,7 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
     postgres.run(f"ALTER ROLE {maintenance_role} NOLOGIN VALID UNTIL 'epoch'")
     rescued_state = _guard_state(postgres, database)
     assert rescued_state["module_guard_open"] is False
-    assert postgres.scalar(
+    assert _postgres_boolean(postgres.scalar(
         f"SELECT pg_catalog.has_schema_privilege('{runtime_role}','public','CREATE')::text",
         database=database,
-    ) == "f"
+    )) is False
