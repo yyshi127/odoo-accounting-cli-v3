@@ -1113,9 +1113,10 @@ jobs:
             "READ_TRANSACTION_PGPORT=${{ steps.postgres.outputs.port }}"
             READ_TRANSACTION_PGUSER=odoo_probe
           )
-          sudo -u odoo_probe --chdir="$stage_root" env -i \
+          sudo -u odoo_probe env -i \
             "${probe_environment[@]}" \
-            "$python_path" - "$stage_root" <<'PY'
+            /bin/bash -c 'cd "$1"; shift; exec "$@"' \
+            _ "$stage_root" "$python_path" - "$stage_root" <<'PY'
           import sys
           from pathlib import Path
 
@@ -1128,9 +1129,10 @@ jobs:
           assert observed == expected, (observed, expected)
           print(f"read_transaction_module={observed}")
           PY
-          sudo -u odoo_probe --chdir="$stage_root" env -i \
+          sudo -u odoo_probe env -i \
             "${probe_environment[@]}" \
-            "$python_path" -m pytest -q -p no:cacheprovider \
+            /bin/bash -c 'cd "$1"; shift; exec "$@"' \
+            _ "$stage_root" "$python_path" -m pytest -q -p no:cacheprovider \
               -c "$stage_root/pyproject.toml" \
               --rootdir="$stage_root" \
               --junitxml="$report" \
