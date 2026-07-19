@@ -69,6 +69,10 @@ def test_missing_bootstrap_role_variables_exit_nonzero_on_postgresql_16():
         assert f"requires -v {role}=..." in preamble
 
 
+def test_postgresql_special_forms_are_not_schema_qualified_as_functions():
+    assert "pg_catalog.coalesce" not in _sql().lower()
+
+
 def test_maintenance_loader_has_no_persistent_login_or_runtime_membership():
     sql = _sql()
 

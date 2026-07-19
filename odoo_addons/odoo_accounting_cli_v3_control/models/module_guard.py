@@ -133,7 +133,7 @@ _FUNCTION_ACCESS = {
 # Filled from the exact dollar-quoted bodies in sql/module_guard_v1.sql.
 _FUNCTION_SOURCE_DIGESTS = {
     "effect_is_unresolved": "d9ccac6a470ea3187157e62661ab03011a1bd7c4a16f584e208b8bb007c583ad",
-    "result_is_bound": "8a04a89dcad136042dd0ca445b3bfdca95182417580f3a1e9c227b8868c67a67",
+    "result_is_bound": "3009c8e31b6d29bddce4a4ca770ed6959d03543586ba8c0bcd1ea034dc5aa718",
     "track_operation_effect": "e7c5dbf8dc6442b750b967a08568d69c9088a9b6d8595c752766208572506529",
     "reject_operation_truncate": "efd33d59e2ac5fb730319b546f7f1e0b12afb35f08c83d4982656adfc4d299e6",
     "guard_module_change": "8bf64023840d0bcbb71ce0331afc22d707b69197cdf283becad4a3f8cd3a9273",
@@ -144,7 +144,7 @@ _FUNCTION_SOURCE_DIGESTS = {
     "open_module_guard": "411a3bcd4f59d767b14689bd86edeff0c1defa88e625e606b7fe09ca5b66ca89",
     "close_module_guard": "e4e435f84971a67edab3f6e345b823ea4867eb40bc32c6a6aa35c7234c2a711c",
     "rescue_module_guard": "9aca79b0d05154276f14491e32fdbb86f44ee37edffabc720d6d53b2f9814241",
-    "module_maintenance_session_is_active": "261576c562352de619e3da377294a8cad6eb048aae2159b931d008cc3a00a6d5",
+    "module_maintenance_session_is_active": "c66b04c4376f3ec5d0dc66ff37b82b4d239057413e34c58373c3239e886a69ce",
     "guard_ddl_end": "4caa714dd07832a55350e82cb1fb0216bfd425bf887f0e7227c45773e5949186",
     "guard_sql_drop": "dd3d200c3182fd4b21f2cdaa5ff7cc9de0939d63ef8dbe6ca7398cf51543313d",
     "guard_table_rewrite": "9be5e5250aac3d84fc6222fd5a9410dff918544f42680f6fbc04a9a525b4100c",

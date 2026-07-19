@@ -741,7 +741,7 @@ BEGIN
     ]::text[] THEN
         RETURN false;
     END IF;
-    RETURN pg_catalog.coalesce((
+    RETURN COALESCE((
         pg_catalog.jsonb_typeof(document -> 'version') = 'number'
         AND document ->> 'version' = '2'
         AND pg_catalog.jsonb_typeof(document -> 'kind') = 'string'
@@ -2477,7 +2477,7 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $function$
-    SELECT pg_catalog.coalesce((
+    SELECT COALESCE((
         SELECT
             state.module_guard_open
             AND state.opened_epoch = state.epoch
