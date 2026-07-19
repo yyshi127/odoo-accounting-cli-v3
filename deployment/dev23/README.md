@@ -31,8 +31,9 @@ a canonical root-owned directory, group `odoo-v3-effect-finalizer`, mode
 `0750`, then install the finalizer HMAC
 credential and exact one-entry pgpass as distinct
 `odoo-v3-effect-finalizer:odoo-v3-effect-finalizer` regular files, each mode
-`0400`, beneath a root-owned, non-writable ancestor chain. The pgpass is read
-once by the finalizer and its password is passed directly to libpq; no
+`0400`, beneath a root-owned, non-writable ancestor chain. The pgpass is
+validated during credential preflight and securely reread when each direct
+connection is opened; its password is passed only in process to libpq and no
 `passfile` path is passed onward. The service also clears inherited Python,
 dynamic-loader, and PostgreSQL environment selectors.
 
@@ -41,6 +42,17 @@ document, HMAC credential, pgpass, database LOGIN, or their paths. Do not add
 an `EnvironmentFile` containing any of them. The broker receives only its
 permission to connect to the root-owned socket. The Odoo child must not inherit
 that connected descriptor.
+
+Install the independently reviewed Dev27 external-runtime manifest at
+`/etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json` as
+root-owned mode `0444` beneath the same trusted ancestor policy. It is not a
+secret and is not caller selectable. The fixed `ExecStartPre` verifies it with
+the exact release's `deployment/dev27/finalizer_runtime_gate.py` before the
+service can start. The strict schema-v2 runtime document must contain that exact
+fixed path and the independently reviewed manifest SHA-256. The finalizer
+process itself imports and retains the PostgreSQL connector, reruns the same
+gate with that schema digest, and binds its loaded driver paths/version before
+it preflights the pgpass or reads the HMAC.
 
 The finalizer database LOGIN must be a distinct direct PostgreSQL LOGIN with
 only the reviewed guard functions/relations granted by the module-guard SQL.
@@ -66,18 +78,31 @@ in `docs/RUNTIME_CONFIGURATION.md` from host evidence. In particular:
   numeric GID of `odoo-v3-broker`;
 - `broker_service_uid` is the actual broker UID and the broker/finalizer unit
   names match these examples;
-- the Odoo configuration digest, database UUID/OID, guard installation UUID,
+- `dependency_manifest_path` is the fixed production path above and
+  `dependency_manifest_sha256` is the exact independently reviewed canonical
+  manifest digest also supplied to the systemd renderer;
+- the database socket/port, database UUID/OID, guard installation UUID,
   finalizer Key ID, and all paths are independently pinned; and
 - `database_connect_timeout_seconds * 1000 + statement_timeout_ms + 1000` is
   strictly less than `request_io_timeout_seconds * 1000`. Equality is invalid.
 
 The launcher currently uses the root-managed `/usr/bin/python3` isolated
 runtime, matching the other canonical release launchers. Before starting the
-service, prove that this exact interpreter can import the required Odoo and
-PostgreSQL driver dependencies without `PYTHONPATH`, record their canonical
-paths, owners, modes, versions, and SHA-256 values, and retain that evidence.
-If this cannot be proved, leave the finalizer and all production writes
-disabled; do not weaken isolated mode or inject a user-controlled module path.
+service, prove that this exact interpreter can import the root-owned PostgreSQL
+driver without `PYTHONPATH`, record its canonical path, owner, mode, package
+version, imported driver files, observed file-backed native mappings, and
+SHA-256 values, and retain that evidence. The finalizer must not import Odoo or
+reuse the Odoo-managed virtual environment. If this reviewed runtime evidence
+cannot be produced, leave the finalizer and all production writes disabled; do
+not weaken isolated mode or inject a user-controlled module path.
+
+The service starts with `WorkingDirectory=/` and uses
+`InaccessiblePaths=-/opt/odoo -/mnt/odoo` in its mount namespace. The `-`
+prefix only permits a tree to be absent; any tree that exists is still masked.
+Retain these exact systemd settings: they prevent the finalizer from reading or
+executing the Odoo source, configuration, virtual environment, or writable
+add-ons while leaving the separate immutable `/opt/odoo-accounting-cli-v3`
+release accessible.
 
 ## Side-by-side installation
 
@@ -87,14 +112,23 @@ disabled; do not weaken isolated mode or inject a user-controlled module path.
    checkout or install a second source tree.
 2. Create the identities, configuration, credential files, journal parent, and
    PostgreSQL grants above. Verify numeric IDs and modes; do not use example
-   numbers as production values.
-3. Render the service only from the selected externally anchored release:
+   numbers as production values. After an independently authorized root-owned
+   PostgreSQL-driver installation, collect, review, externally anchor, and
+   install the exact manifest using `deployment/dev27/README.md`. Do not
+   generate a replacement merely to make a failed startup pass.
+3. Atomically replace any schema-v1 finalizer runtime document with the strict
+   schema-v2 document. Extra fields, including the former Odoo config path and
+   digest, are rejected; never point the finalizer at the Odoo configuration.
+   Put the fixed manifest path and exact externally reviewed digest into that
+   document, and pass the same digest to the renderer. Render the service only
+   from the selected externally anchored release:
 
    ```sh
    python3 -I \
      /opt/odoo-accounting-cli-v3/releases/<release>/deployment/dev9/render-systemd-service.py \
      --release-root /opt/odoo-accounting-cli-v3/releases/<release> \
-     --component effect-finalizer
+     --component effect-finalizer \
+     --finalizer-runtime-manifest-sha256 <EXTERNALLY_REVIEWED_64_LOWERCASE_HEX>
    ```
 
    Install stdout as
@@ -103,7 +137,12 @@ disabled; do not weaken isolated mode or inject a user-controlled module path.
    Install the sibling socket unit with the same owner/mode. Install the Dev9
    tmpfiles rule first so the shared runtime parent has its documented owner
    and mode.
-4. Run `systemd-analyze verify` on the rendered service and socket, then
+4. Confirm the rendered `ExecStartPre` names the selected immutable release,
+   `/usr/bin/python3`, the fixed root-owned manifest, and the exact externally
+   reviewed manifest SHA-256 supplied to the renderer and stored in schema v2.
+   Confirm the finalizer launcher also performs its in-process gate and retains
+   the eagerly imported connector before credential preflight. Run
+   `systemd-analyze verify` on the rendered service and socket, then
    `systemctl daemon-reload`. Enable/start the socket only; socket activation
    starts the service:
 
@@ -123,9 +162,11 @@ disabled; do not weaken isolated mode or inject a user-controlled module path.
 An upgrade is a new immutable release and a newly reviewed runtime document;
 never patch the installed release or reuse an unverified launcher. First stop
 new V3 write routing and drain the broker. Stop the finalizer socket/service,
-retain the journal and database ledger, render the new anchored service, run
-all gates, and start its socket without enabling production writes. Only a
-passing sandbox replay/recovery gate may allow later canary consideration.
+retain the journal and database ledger, re-verify or deliberately replace the
+external runtime manifest as part of the reviewed dependency change, render the
+new anchored service, run all gates, and start its socket without enabling
+production writes. Only a passing sandbox replay/recovery gate may allow later
+canary consideration.
 V2 remains running and unchanged throughout.
 
 Rollback likewise removes V3 write routing first. Stop the finalizer socket

@@ -33,6 +33,7 @@ archive.
   runtime-sandbox.json
   write-runtime.json
   effect-finalizer-runtime.json
+  effect-finalizer-runtime-manifest.json
   effect-finalizer/attestation.hmac
   effect-finalizer/finalizer.pgpass
   secrets/test/auth.hmac
@@ -79,9 +80,9 @@ Build the same clean commit twice and retain both command results. The archive
 SHA-256 and manifest SHA-256 must be identical. Refuse a dirty worktree,
 untracked release input, version/commit mismatch, or non-deterministic output.
 The archive gate must explicitly find `write_app.py`, `write_service.py`, the
-Odoo write runner, all isolated effect-finalizer modules and deployment units,
-and every file in the V3 control add-on; equality with an incomplete Git file
-list is not sufficient.
+Odoo write runner, all isolated effect-finalizer modules, the Dev27 external
+runtime gate, deployment units, and every file in the V3 control add-on;
+equality with an incomplete Git file list is not sufficient.
 
 Before transfer, record the archive name, byte size, archive SHA-256, manifest
 SHA-256, registry digest, version, commit, builder, and UTC time. Transfer to a
@@ -243,7 +244,20 @@ publication contract, not permission to replace it with ad hoc extraction.
 9. Render and stage the isolated finalizer service/socket exactly as documented
    in `deployment/dev23/README.md`; this does not enable a write capability.
    Keep its config, pgpass, HMAC, database LOGIN, and journal inaccessible to
-   the broker and Odoo write child.
+   the broker and Odoo write child. This release requires finalizer runtime
+   schema v2 and rejects schema v1 and its former Odoo-config fields; the
+   finalizer derives its local PostgreSQL endpoint only from that strict
+   document and its one-entry pgpass. Collect and verify the separately anchored
+   root-owned dependency manifest with `deployment/dev27/README.md`; the fixed
+   release member `deployment/dev27/finalizer_runtime_gate.py` runs as
+   `ExecStartPre` and must pass before the service can start. Store its fixed
+   path and exact externally reviewed digest in schema v2, and supply that same
+   digest to the service renderer. The actual finalizer process must then
+   eagerly import and retain the driver, rerun the gate, and bind the loaded
+   paths/version before reading either credential. Retain the read-only target
+   findings in
+   `docs/TARGET_HOST_FINALIZER_RUNTIME_AUDIT_2026-07-19.md` as evidence that the
+   Odoo-managed virtual environment is not an acceptable substitute.
 10. For the dedicated sandbox only, add the exact immutable release's
    `odoo_addons/` directory to that sandbox process's add-ons path and install
    `odoo_accounting_cli_v3_control` from it. Do not copy the add-on into V2, Pi
@@ -590,11 +604,12 @@ again report the same identity.
 
 Before changing a route, verify the selected binary supports the current state
 schema. Write persistence is currently schema v4, while the write runtime
-configuration document is schema v1. Restore a pre-upgrade state snapshot only
-as part of a coordinated rollback with all traffic stopped and only with the
-exact release, configuration fingerprint, Key IDs, and verified snapshot that
-belong together. Preserve the rejected/newer state as evidence; never merge
-divergent state files or idempotency tables by hand.
+configuration document is schema v1 and the isolated finalizer runtime document
+is schema v2. Restore a pre-upgrade state snapshot only as part of a coordinated
+rollback with all traffic stopped and only with the exact release,
+configuration fingerprint, Key IDs, and verified snapshot that belong together.
+Preserve the rejected/newer state as evidence; never merge divergent state
+files or idempotency tables by hand.
 
 A rollback that includes the effect finalizer must also verify compatibility
 with its retained attempt journal, attestation identity, guard installation,

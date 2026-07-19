@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -18,8 +20,11 @@ INSTALLATION_ID = "22222222-2222-4222-8222-222222222222"
 
 
 def _document(tmp_path):
-    odoo_config = tmp_path / "odoo.conf"
-    odoo_config.write_bytes(b"[options]\ndb_host = /var/run/postgresql\n")
+    dependency_manifest = tmp_path / "dependency-manifest.json"
+    if dependency_manifest.exists():
+        dependency_manifest.chmod(0o644)
+    dependency_manifest.write_bytes(b'{"fixture":true}\n')
+    dependency_manifest.chmod(0o444)
     secret = tmp_path / "finalizer.hmac"
     secret.write_bytes(b"finalizer-runtime-hmac-secret-at-least-32-bytes")
     secret.chmod(0o600)
@@ -30,7 +35,7 @@ def _document(tmp_path):
     )
     pgpass.chmod(0o600)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "service_uid": 3104,
         "service_gid": 3104,
         "database_name": "odoo_sandbox",
@@ -39,8 +44,10 @@ def _document(tmp_path):
         "database_host": "/var/run/postgresql",
         "database_port": 5432,
         "database_connect_timeout_seconds": 2,
-        "odoo_config_path": str(odoo_config),
-        "odoo_config_sha256": hashlib.sha256(odoo_config.read_bytes()).hexdigest(),
+        "dependency_manifest_path": str(dependency_manifest),
+        "dependency_manifest_sha256": hashlib.sha256(
+            dependency_manifest.read_bytes()
+        ).hexdigest(),
         "pgpass_path": str(pgpass),
         "attestation_key_id": "effect-finalizer-v1",
         "expected_guard_installation_id": INSTALLATION_ID,
@@ -91,6 +98,12 @@ def test_runtime_is_strict_role_separated_and_exposes_only_secret_free_client_va
     assert config.client_runtime.finalization_identity.database_oid == 16384
     assert config.database.expected_guard_installation_id == INSTALLATION_ID
     assert config.database.expected_database_oid == 16384
+    assert config.dependency_manifest_path == Path(
+        document["dependency_manifest_path"]
+    )
+    assert config.dependency_manifest_sha256 == document[
+        "dependency_manifest_sha256"
+    ]
     assert "secret" not in repr(config.client_runtime).lower()
     assert "pgpass" not in repr(config.client_runtime).lower()
     secrets = load_effect_finalizer_runtime_secrets(config)
@@ -113,17 +126,6 @@ def test_runtime_rejects_same_broker_and_finalizer_uid_or_extra_fields(tmp_path)
             _write(tmp_path, document), require_root_owner=False
         )
 
-
-def test_runtime_rejects_odoo_config_digest_drift_and_credential_inode_alias(
-    tmp_path,
-) -> None:
-    document = _document(tmp_path)
-    document["odoo_config_sha256"] = "0" * 64
-    with pytest.raises(EffectFinalizerRuntimeError, match="digest differs"):
-        load_effect_finalizer_runtime_config(
-            _write(tmp_path, document), require_root_owner=False
-        )
-
     document = _document(tmp_path)
     document["pgpass_path"] = document["attestation_secret_path"]
     with pytest.raises(EffectFinalizerRuntimeError, match="paths must be distinct"):
@@ -132,11 +134,57 @@ def test_runtime_rejects_odoo_config_digest_drift_and_credential_inode_alias(
         )
 
 
+def test_runtime_rejects_schema_v1_and_removed_odoo_field(
+    tmp_path,
+) -> None:
+    document = _document(tmp_path)
+    document["schema_version"] = 1
+    with pytest.raises(EffectFinalizerRuntimeError, match="schema version"):
+        load_effect_finalizer_runtime_config(
+            _write(tmp_path, document), require_root_owner=False
+        )
+
+    document = _document(tmp_path)
+    document["odoo_config_path"] = str(tmp_path / "odoo.conf")
+    with pytest.raises(EffectFinalizerRuntimeError, match="fields"):
+        load_effect_finalizer_runtime_config(
+            _write(tmp_path, document), require_root_owner=False
+        )
+
+
+def test_runtime_rejects_distinct_credential_paths_with_same_inode(
+    tmp_path,
+) -> None:
+    document = _document(tmp_path)
+    secret_path = Path(document["attestation_secret_path"])
+    pgpass_path = Path(document["pgpass_path"])
+    pgpass_path.unlink()
+    try:
+        os.link(secret_path, pgpass_path)
+    except OSError:
+        pytest.skip("hard links are unavailable")
+    config = load_effect_finalizer_runtime_config(
+        _write(tmp_path, document), require_root_owner=False
+    )
+
+    with pytest.raises(EffectFinalizerRuntimeError, match="inodes"):
+        load_effect_finalizer_runtime_secrets(config)
+
+
+def test_runtime_rejects_dependency_manifest_digest_drift(tmp_path) -> None:
+    document = _document(tmp_path)
+    document["dependency_manifest_sha256"] = "0" * 64
+
+    with pytest.raises(EffectFinalizerRuntimeError, match="digest differs"):
+        load_effect_finalizer_runtime_config(
+            _write(tmp_path, document), require_root_owner=False
+        )
+
 def test_runtime_rejects_duplicate_json_keys(tmp_path) -> None:
     document = _document(tmp_path)
     path = _write(tmp_path, document)
     raw = path.read_text(encoding="utf-8")
-    path.write_text(raw[:-1] + ', "schema_version": 1}', encoding="utf-8")
+    path.write_text(raw[:-1] + ', "schema_version": 2}', encoding="utf-8")
 
     with pytest.raises(EffectFinalizerRuntimeError, match="duplicate"):
         load_effect_finalizer_runtime_config(path, require_root_owner=False)

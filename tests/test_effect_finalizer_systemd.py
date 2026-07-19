@@ -89,14 +89,36 @@ def test_finalizer_service_is_dedicated_secret_free_and_hardened() -> None:
     )
     assert _one(service, "StateDirectoryMode") == "0700"
     assert service["Environment"] == [
-        "HOME=/var/lib/odoo-accounting-cli-v3-effect-finalizer"
+        "HOME=/var/lib/odoo-accounting-cli-v3-effect-finalizer",
+        "LD_BIND_NOW=1",
     ]
     assert "EnvironmentFile" not in service
+    assert _one(service, "WorkingDirectory") == "/"
 
     assert shlex.split(_one(service, "ExecStart")) == [
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
         "/opt/odoo-accounting-cli-v3/releases/@V3_RELEASE@/bin/odoo-accounting-cli-v3-effect-finalizer",
         "--config",
         "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json",
+    ]
+    assert shlex.split(_one(service, "ExecStartPre")) == [
+        "/usr/bin/python3",
+        "-I",
+        "-B",
+        "-X",
+        "utf8",
+        "/opt/odoo-accounting-cli-v3/releases/@V3_RELEASE@/deployment/dev27/finalizer_runtime_gate.py",
+        "verify",
+        "--interpreter",
+        "/usr/bin/python3",
+        "--manifest",
+        "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json",
+        "--expected-manifest-sha256",
+        "@V3_FINALIZER_RUNTIME_MANIFEST_SHA256@",
     ]
     unset = set(shlex.split(_one(service, "UnsetEnvironment")))
     assert {
@@ -116,6 +138,10 @@ def test_finalizer_service_is_dedicated_secret_free_and_hardened() -> None:
     assert _one(service, "ProtectHome") == "yes"
     assert _one(service, "ProtectProc") == "invisible"
     assert _one(service, "ProtectSystem") == "strict"
+    assert set(shlex.split(_one(service, "InaccessiblePaths"))) == {
+        "-/opt/odoo",
+        "-/mnt/odoo",
+    }
     assert _one(service, "RestrictAddressFamilies") == "AF_UNIX"
     assert _one(service, "RestrictNamespaces") == "yes"
     assert "odoo-v3-broker" not in service["SupplementaryGroups"]
@@ -135,7 +161,8 @@ def test_console_entry_and_runbook_keep_dependency_and_production_gates() -> Non
     assert "socket_group_gid" in normalized
     assert "actual numeric GID of `odoo-v3-broker`" in normalized
     assert "/usr/bin/python3" in normalized
-    assert "import the required Odoo and" in normalized
+    assert "import the root-owned PostgreSQL driver" in normalized
+    assert "must not import Odoo" in normalized
     assert "leave the finalizer and all production writes" in normalized
     assert "V2 remains running and unchanged" in normalized
     assert "Do not add an `EnvironmentFile`" in normalized

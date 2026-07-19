@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable
 
 from ..effect_finalizer import (
     EffectFinalizationAttestation,
@@ -300,31 +300,13 @@ def _without_libpq_environment():
 
 
 def sanitized_direct_connection_info(
-    odoo_connection_info: Mapping[str, Any],
     config: EffectFinalizerDatabaseConfig,
 ) -> dict[str, Any]:
     """Bind a direct LOGIN to one local socket and one securely read password."""
 
-    if not isinstance(odoo_connection_info, Mapping) or not isinstance(
-        config, EffectFinalizerDatabaseConfig
-    ):
-        raise EffectFinalizerDatabaseError("Odoo connection information is invalid")
-    observed_database = odoo_connection_info.get(
-        "dbname", odoo_connection_info.get("database")
-    )
-    try:
-        observed_port = int(odoo_connection_info.get("port", config.port))
-    except (TypeError, ValueError) as exc:
+    if not isinstance(config, EffectFinalizerDatabaseConfig):
         raise EffectFinalizerDatabaseError(
-            "Odoo database endpoint is invalid"
-        ) from exc
-    if (
-        observed_database != config.database_name
-        or odoo_connection_info.get("host") != config.host
-        or observed_port != config.port
-    ):
-        raise EffectFinalizerDatabaseError(
-            "Odoo database endpoint differs from finalizer configuration"
+            "effect finalizer database configuration is invalid"
         )
     password = _read_exact_passfile(config)
     return {
@@ -340,7 +322,6 @@ def sanitized_direct_connection_info(
 
 def open_direct_finalizer_connection(
     *,
-    odoo_connection_info: Mapping[str, Any],
     config: EffectFinalizerDatabaseConfig,
     connect: Callable[..., Any],
 ) -> Any:
@@ -348,7 +329,7 @@ def open_direct_finalizer_connection(
 
     if not callable(connect):
         raise EffectFinalizerDatabaseError("database connector is invalid")
-    parameters = sanitized_direct_connection_info(odoo_connection_info, config)
+    parameters = sanitized_direct_connection_info(config)
     try:
         with _without_libpq_environment():
             return connect(**parameters)
@@ -359,39 +340,6 @@ def open_direct_finalizer_connection(
     finally:
         # Do not retain the credential in this adapter after libpq consumed it.
         parameters["password"] = ""
-
-
-def odoo_connection_info_for(
-    odoo_config_path: Path,
-    database_name: str,
-) -> dict[str, Any]:
-    """Load Odoo's endpoint settings; callers replace every LOGIN parameter."""
-
-    if (
-        not isinstance(odoo_config_path, Path)
-        or not odoo_config_path.is_absolute()
-        or not isinstance(database_name, str)
-        or not database_name
-    ):
-        raise EffectFinalizerDatabaseError("Odoo connection request is invalid")
-    try:
-        from odoo import sql_db
-        from odoo.tools import config as odoo_config
-
-        odoo_config.parse_config(["--config", str(odoo_config_path)])
-        observed_database, connection_info = sql_db.connection_info_for(
-            database_name
-        )
-    except Exception as exc:
-        raise EffectFinalizerDatabaseError(
-            "Odoo database connection information is unavailable"
-        ) from exc
-    if observed_database != database_name or not isinstance(connection_info, dict):
-        raise EffectFinalizerDatabaseError(
-            "Odoo database connection identity is invalid"
-        )
-    return dict(connection_info)
-
 
 def _one_row(cursor: Any, sql: str, parameters: Any = None) -> tuple[Any, ...]:
     cursor.execute(sql, parameters)
@@ -587,7 +535,6 @@ __all__ = [
     "EffectFinalizerDatabaseError",
     "finalize_effect_attempt",
     "open_direct_finalizer_connection",
-    "odoo_connection_info_for",
     "preflight_effect_finalizer_database_config",
     "sanitized_direct_connection_info",
 ]

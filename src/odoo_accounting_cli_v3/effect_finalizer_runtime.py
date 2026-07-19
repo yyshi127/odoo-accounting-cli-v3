@@ -27,7 +27,10 @@ class EffectFinalizerRuntimeError(ValueError):
     """The finalizer service configuration or HMAC credential is unsafe."""
 
 
-EFFECT_FINALIZER_RUNTIME_SCHEMA_VERSION = 1
+EFFECT_FINALIZER_RUNTIME_SCHEMA_VERSION = 2
+EFFECT_FINALIZER_DEPENDENCY_MANIFEST_PATH = Path(
+    "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json"
+)
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _UNIT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\.service\Z")
 _CONFIG_FIELDS = frozenset(
@@ -41,8 +44,8 @@ _CONFIG_FIELDS = frozenset(
         "database_host",
         "database_port",
         "database_connect_timeout_seconds",
-        "odoo_config_path",
-        "odoo_config_sha256",
+        "dependency_manifest_path",
+        "dependency_manifest_sha256",
         "pgpass_path",
         "attestation_key_id",
         "expected_guard_installation_id",
@@ -72,6 +75,7 @@ _UDS_FIELDS = frozenset(
 )
 _MAX_CONFIG_BYTES = 65_536
 _MAX_SECRET_BYTES = 4096
+_MAX_DEPENDENCY_MANIFEST_BYTES = 4 * 1024 * 1024
 _DATABASE_RESPONSE_COMMIT_MARGIN_MS = 1000
 
 
@@ -254,8 +258,8 @@ class EffectFinalizerRuntimeConfig:
     schema_version: int
     service_uid: int
     service_gid: int
-    odoo_config_path: Path
-    odoo_config_sha256: str
+    dependency_manifest_path: Path
+    dependency_manifest_sha256: str
     finalization_identity: EffectFinalizationIdentity
     attestation_secret_path: Path
     journal_path: Path
@@ -445,16 +449,17 @@ def load_effect_finalizer_runtime_config(
     document, raw = _load_document(
         config_path, require_root_owner=require_root_owner
     )
-    if set(document) != _CONFIG_FIELDS:
-        raise EffectFinalizerRuntimeError(
-            "effect finalizer runtime configuration fields are invalid"
-        )
     if (
-        type(document["schema_version"]) is not int
-        or document["schema_version"] != EFFECT_FINALIZER_RUNTIME_SCHEMA_VERSION
+        type(document.get("schema_version")) is not int
+        or document.get("schema_version")
+        != EFFECT_FINALIZER_RUNTIME_SCHEMA_VERSION
     ):
         raise EffectFinalizerRuntimeError(
             "effect finalizer runtime schema version is invalid"
+        )
+    if set(document) != _CONFIG_FIELDS:
+        raise EffectFinalizerRuntimeError(
+            "effect finalizer runtime configuration fields are invalid"
         )
     service_uid = _identity(document["service_uid"], "finalizer service UID")
     service_gid = _identity(document["service_gid"], "finalizer service GID")
@@ -467,27 +472,48 @@ def load_effect_finalizer_runtime_config(
         raise EffectFinalizerRuntimeError(
             "finalizer service and broker socket GIDs must be distinct"
         )
-    odoo_config_path = _absolute_path(document["odoo_config_path"], "odoo config path")
-    odoo_config_sha256 = document["odoo_config_sha256"]
-    if not isinstance(odoo_config_sha256, str) or _SHA256.fullmatch(odoo_config_sha256) is None:
-        raise EffectFinalizerRuntimeError("Odoo configuration digest is invalid")
-    odoo_config = _secure_regular_file(
-        odoo_config_path,
-        label="Odoo configuration",
-        maximum=_MAX_CONFIG_BYTES,
-        require_root_owner=require_root_owner,
-        allowed_owners=frozenset({0}),
-    )
-    if hashlib.sha256(odoo_config).hexdigest() != odoo_config_sha256:
-        raise EffectFinalizerRuntimeError("Odoo configuration digest differs")
     secret_path = _absolute_path(
         document["attestation_secret_path"], "attestation secret path"
     )
+    dependency_manifest_path = _absolute_path(
+        document["dependency_manifest_path"], "dependency manifest path"
+    )
+    if (
+        require_root_owner
+        and dependency_manifest_path
+        != EFFECT_FINALIZER_DEPENDENCY_MANIFEST_PATH
+    ):
+        raise EffectFinalizerRuntimeError(
+            "dependency manifest path differs from the production path"
+        )
+    dependency_manifest_sha256 = document["dependency_manifest_sha256"]
+    if (
+        not isinstance(dependency_manifest_sha256, str)
+        or _SHA256.fullmatch(dependency_manifest_sha256) is None
+    ):
+        raise EffectFinalizerRuntimeError("dependency manifest digest is invalid")
+    dependency_manifest = _secure_regular_file(
+        dependency_manifest_path,
+        label="effect finalizer dependency manifest",
+        maximum=_MAX_DEPENDENCY_MANIFEST_BYTES,
+        require_root_owner=require_root_owner,
+        allowed_owners=frozenset({0}),
+        allowed_posix_modes=frozenset({0o444}),
+    )
+    if hashlib.sha256(dependency_manifest).hexdigest() != dependency_manifest_sha256:
+        raise EffectFinalizerRuntimeError("dependency manifest digest differs")
     pgpass_path = _absolute_path(document["pgpass_path"], "pgpass path")
     journal_path = _absolute_path(document["journal_path"], "journal path")
-    paths = {os.path.normcase(os.path.abspath(value)) for value in (
-        config_path, odoo_config_path, secret_path, pgpass_path, journal_path
-    )}
+    paths = {
+        os.path.normcase(os.path.abspath(value))
+        for value in (
+            config_path,
+            dependency_manifest_path,
+            secret_path,
+            pgpass_path,
+            journal_path,
+        )
+    }
     if len(paths) != 5:
         raise EffectFinalizerRuntimeError("finalizer runtime paths must be distinct")
     proof_ttl = document["proof_ttl_seconds"]
@@ -548,8 +574,8 @@ def load_effect_finalizer_runtime_config(
         schema_version=EFFECT_FINALIZER_RUNTIME_SCHEMA_VERSION,
         service_uid=service_uid,
         service_gid=service_gid,
-        odoo_config_path=odoo_config_path,
-        odoo_config_sha256=odoo_config_sha256,
+        dependency_manifest_path=dependency_manifest_path,
+        dependency_manifest_sha256=dependency_manifest_sha256,
         finalization_identity=finalization_identity,
         attestation_secret_path=secret_path,
         journal_path=journal_path,
@@ -559,14 +585,6 @@ def load_effect_finalizer_runtime_config(
         config_fingerprint=fingerprint,
         require_posix_owner=require_root_owner,
     )
-    # Startup preflight must prove both credentials are readable and distinct.
-    try:
-        preflight_effect_finalizer_database_config(config.database)
-    except EffectFinalizerDatabaseError as exc:
-        raise EffectFinalizerRuntimeError(
-            "effect finalizer pgpass preflight failed"
-        ) from exc
-    load_effect_finalizer_runtime_secrets(config)
     return config
 
 
@@ -606,8 +624,25 @@ def load_effect_finalizer_runtime_secrets(
     return EffectFinalizerRuntimeSecrets(attestation_secret=secret)
 
 
+def preflight_effect_finalizer_runtime_credentials(
+    config: EffectFinalizerRuntimeConfig,
+) -> EffectFinalizerRuntimeSecrets:
+    """Read credentials only after the external Python runtime was verified."""
+
+    if not isinstance(config, EffectFinalizerRuntimeConfig):
+        raise EffectFinalizerRuntimeError("effect finalizer runtime is invalid")
+    try:
+        preflight_effect_finalizer_database_config(config.database)
+    except EffectFinalizerDatabaseError as exc:
+        raise EffectFinalizerRuntimeError(
+            "effect finalizer pgpass preflight failed"
+        ) from exc
+    return load_effect_finalizer_runtime_secrets(config)
+
+
 __all__ = [
     "EFFECT_FINALIZER_RUNTIME_SCHEMA_VERSION",
+    "EFFECT_FINALIZER_DEPENDENCY_MANIFEST_PATH",
     "EffectFinalizerClientRuntime",
     "EffectFinalizerRuntimeConfig",
     "EffectFinalizerRuntimeError",
@@ -615,4 +650,5 @@ __all__ = [
     "EffectFinalizerUdsConfig",
     "load_effect_finalizer_runtime_config",
     "load_effect_finalizer_runtime_secrets",
+    "preflight_effect_finalizer_runtime_credentials",
 ]

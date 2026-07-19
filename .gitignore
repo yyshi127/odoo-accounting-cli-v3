@@ -36,6 +36,7 @@ id_rsa
 **/authority-runtime.json
 **/broker-runtime.json
 **/effect-finalizer-runtime.json
+**/effect-finalizer-runtime-manifest.json
 **/historical-routes.json
 **/read-runtime.json
 **/write-runtime.json

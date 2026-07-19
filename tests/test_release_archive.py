@@ -33,6 +33,8 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
         "bin/odoo-accounting-cli-v3-broker",
         "bin/odoo-accounting-cli-v3-effect-finalizer",
         "deployment/dev23/README.md",
+        "deployment/dev27/README.md",
+        "deployment/dev27/finalizer_runtime_gate.py",
         "deployment/dev9/README.md",
         "deployment/dev9/render-systemd-service.py",
         "deployment/dev9/run-private-mount-gate.sh",
@@ -41,6 +43,7 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
         "deployment/dev18/sandbox_capacity_gate.py",
         "docs/TARGET_HOST_CAPACITY_AUDIT_2026-07-17.md",
         "docs/TARGET_HOST_DEV18_SQL_PROBE_2026-07-17.md",
+        "docs/TARGET_HOST_FINALIZER_RUNTIME_AUDIT_2026-07-19.md",
         "tools/build_release.py",
         "tools/check_source_boundary.py",
         "tools/verify_release.py",
@@ -162,6 +165,14 @@ DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS = frozenset(
         "tests/test_dev18_sandbox_capacity_gate.py",
     }
 )
+DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS = frozenset(
+    {
+        "deployment/dev27/README.md",
+        "deployment/dev27/finalizer_runtime_gate.py",
+        "docs/TARGET_HOST_FINALIZER_RUNTIME_AUDIT_2026-07-19.md",
+        "tests/test_dev27_finalizer_runtime_gate.py",
+    }
+)
 EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3-effect-finalizer",
@@ -182,7 +193,7 @@ EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
         "tests/test_effect_finalizer_systemd.py",
         "tests/test_effect_finalizer_uds.py",
     }
-)
+) | DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS
 WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
     {
         "VERSION",
@@ -298,6 +309,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
 REQUIRED_WRITE_RELEASE_MEMBERS = (
     DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS
     | DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS
+    | DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS
     | EFFECT_FINALIZER_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
@@ -324,6 +336,7 @@ class ReleaseArchiveTest(unittest.TestCase):
             "deployment/dev15",
             "deployment/dev18",
             "deployment/dev23",
+            "deployment/dev27",
             "deployment/dev9",
             "odoo_addons/odoo_accounting_cli_v3_control",
             "pi_bridge",
@@ -425,6 +438,25 @@ class ReleaseArchiveTest(unittest.TestCase):
             )
         )
 
+    def test_dev27_finalizer_runtime_gate_is_an_exact_release_member_set(self) -> None:
+        directory = PROJECT_ROOT / "deployment" / "dev27"
+        discovered = {
+            path.relative_to(PROJECT_ROOT).as_posix()
+            for path in directory.iterdir()
+            if path.is_file() and not path.name.endswith((".pyc", ".pyo"))
+        }
+        expected = {
+            name
+            for name in DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS
+            if name.startswith("deployment/dev27/")
+        }
+        self.assertEqual(discovered, expected)
+        self.assertTrue(
+            DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS.issubset(
+                REQUIRED_WRITE_RELEASE_MEMBERS
+            )
+        )
+
     def test_deployment_document_references_only_declared_release_dependencies(
         self,
     ) -> None:
@@ -445,6 +477,7 @@ class ReleaseArchiveTest(unittest.TestCase):
             (Path("local/private.ppk"), b"private"),
             (Path("local/write-runtime.json"), b"{}"),
             (Path("local/effect-finalizer-runtime.json"), b"{}"),
+            (Path("local/effect-finalizer-runtime-manifest.json"), b"{}"),
             (Path("local/finalizer.hmac"), b"secret"),
             (Path("local/finalizer.pgpass"), b"binding:secret\n"),
             (Path("local/pi-attestation-keys.json"), b"{}"),
@@ -473,6 +506,19 @@ class ReleaseArchiveTest(unittest.TestCase):
                 ).encode("utf-8"),
             )
 
+        with self.assertRaises(release_builder.ReleaseError):
+            release_builder.validate_release_member(
+                Path("local/renamed-host-capture.json"),
+                json.dumps(
+                    {
+                        "schema_version": (
+                            "odoo-accounting-cli-v3."
+                            "finalizer-runtime-manifest.v2"
+                        )
+                    }
+                ).encode("utf-8"),
+            )
+
         release_builder.validate_release_member(
             Path("deployment/dev9/broker-runtime.example.json"),
             b'{"current_release_digest":"' + b"a" * 64 + b'"}',
@@ -497,6 +543,7 @@ class ReleaseArchiveTest(unittest.TestCase):
                 "**/authority-runtime.json",
                 "**/broker-runtime.json",
                 "**/effect-finalizer-runtime.json",
+                "**/effect-finalizer-runtime-manifest.json",
                 "**/read-runtime.json",
                 "**/write-runtime.json",
                 "**/pi-attestation-keys*.json",
@@ -512,6 +559,7 @@ class ReleaseArchiveTest(unittest.TestCase):
             "local/write-runtime.json",
             "local/broker-runtime.json",
             "local/effect-finalizer-runtime.json",
+            "local/effect-finalizer-runtime-manifest.json",
             "local/finalizer.hmac",
             "local/finalizer.pgpass",
             "local/pi-attestation-keys.json",

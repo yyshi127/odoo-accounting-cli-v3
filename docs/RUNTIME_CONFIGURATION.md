@@ -151,7 +151,7 @@ The standard lifecycle actions are `operation prepare`, `operation preview`,
 success additionally requires a terminal result, passing verification, signed
 Odoo evidence, and the durable final audit receipt.
 
-## Isolated effect-finalizer runtime configuration schema v1
+## Isolated effect-finalizer runtime configuration schema v2
 
 The dedicated finalizer accepts one fixed root-managed document at
 `/etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json`. The service gets
@@ -165,7 +165,7 @@ Numeric UID/GID tokens must become JSON integers, not quoted strings:
 
 ```jsonc
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "service_uid": <FINALIZER_NUMERIC_UID>,
   "service_gid": <FINALIZER_NUMERIC_GID>,
   "database_name": "<SANDBOX_DATABASE_NAME>",
@@ -174,8 +174,8 @@ Numeric UID/GID tokens must become JSON integers, not quoted strings:
   "database_host": "/var/run/postgresql",
   "database_port": 5432,
   "database_connect_timeout_seconds": 2,
-  "odoo_config_path": "<ABSOLUTE_PINNED_ODOO_CONFIG_PATH>",
-  "odoo_config_sha256": "<64_LOWERCASE_HEX>",
+  "dependency_manifest_path": "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json",
+  "dependency_manifest_sha256": "<EXTERNALLY_REVIEWED_64_LOWERCASE_HEX>",
   "pgpass_path": "/etc/odoo-accounting-cli-v3/effect-finalizer/finalizer.pgpass",
   "attestation_key_id": "<FINALIZER_KEY_ID>",
   "expected_guard_installation_id": "<CANONICAL_GUARD_INSTALLATION_UUID>",
@@ -201,7 +201,9 @@ Numeric UID/GID tokens must become JSON integers, not quoted strings:
 }
 ```
 
-The object and nested `uds` object reject missing or extra fields. The service
+The object and nested `uds` object reject missing or extra fields. Schema v1 is
+not migrated or accepted: replace it atomically with an independently reviewed
+schema-v2 document before starting this release. The service
 UID/GID must be the dedicated non-root finalizer identity and must differ from
 the broker. The socket is root-owned, group-owned by the broker client group,
 and mode decimal `432` (octal `0660`). The configured broker UID and systemd
@@ -211,10 +213,34 @@ insufficient.
 Only `/run/postgresql` and `/var/run/postgresql` are accepted database hosts.
 Remote TCP is not a fallback. The pgpass must be a mode-`0400` or `0600`
 single regular file with exactly one non-wildcard row bound to the configured
-socket directory, port, database, and direct LOGIN. The finalizer securely
-reads that row once, passes only the in-process password to libpq, explicitly
+socket directory, port, database, and direct LOGIN. The finalizer validates
+that row during credential preflight and securely rereads it when opening each
+direct connection. It passes only the in-process password to libpq, explicitly
 sets `connect_timeout`, and clears all inherited `PG*` selectors around
-connection establishment. The HMAC and pgpass paths/inodes must be distinct.
+connection establishment. Its endpoint and LOGIN are constructed only from the
+strict schema-v2 database fields plus that row; the finalizer neither reads an
+Odoo configuration nor imports Odoo. The HMAC and pgpass paths/inodes must be
+distinct.
+
+The separate, secret-free external dependency manifest is fixed at
+`/etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json`. Its fixed
+path and the SHA-256 of its exact canonical JSON bytes are mandatory schema-v2
+fields, but the manifest contents cannot alter database identity or
+credentials. `dependency_manifest_sha256` must equal both the independently
+reviewed digest and the digest embedded in the rendered systemd service.
+
+The systemd `ExecStartPre` from the same immutable release first invokes
+`deployment/dev27/finalizer_runtime_gate.py`. The finalizer process then
+independently imports and retains the root-managed `psycopg2` connector under
+isolated `/usr/bin/python3`, reruns that exact gate with the schema-v2 digest,
+and checks the loaded driver paths and version against the manifest. Only after
+those checks pass does it preflight the one-entry pgpass and read the HMAC. The
+manifest records the loaded Python module files, psycopg2 files, `sys.path`
+directories/files/missing entries, `.pth` files, and file-backed native mappings
+observed after importing the exact release finalizer and driver; do not describe
+it as proof of unobserved Python imports or future lazy-loaded dependencies.
+Follow `deployment/dev27/README.md`;
+manifest drift is a startup rejection, not permission to regenerate evidence.
 
 The attempt budget is
 `database_connect_timeout_seconds * 1000 + statement_timeout_ms + 1000`; it

@@ -121,6 +121,14 @@ def _write_anchored_release(
     )
     service_path.write_text(service, encoding="utf-8")
     finalizer_service_path.parent.mkdir(parents=True)
+    finalizer_gate_path = (
+        release_root
+        / "deployment"
+        / "dev27"
+        / "finalizer_runtime_gate.py"
+    )
+    finalizer_gate_path.parent.mkdir(parents=True)
+    finalizer_gate_path.write_text("# retained runtime gate fixture\n", encoding="utf-8")
     finalizer_service = (
         FINALIZER_SYSTEMD_ROOT / FINALIZER_SERVICE_NAME
     ).read_text(encoding="utf-8")
@@ -387,20 +395,42 @@ def test_service_renderer_binds_effect_finalizer_to_same_verified_release(
         exec_releases_root=install_root / "releases",
     )
     monkeypatch.setattr(renderer, "_PRODUCTION_RELEASES_ROOT", release_root.parent)
+    runtime_manifest_digest = "b" * 64
 
     rendered = renderer.render_service(
         release_root,
         script_root=release_root,
         require_root_owner=False,
         component="effect-finalizer",
+        finalizer_runtime_manifest_sha256=runtime_manifest_digest,
     )
 
     assert "@V3_RELEASE@" not in rendered
     assert (
         "ExecStart="
+        "/usr/bin/python3 -I -B -X utf8 "
         f"{release_root.as_posix()}/bin/odoo-accounting-cli-v3-effect-finalizer "
         "--config /etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json"
     ) in rendered
+    assert (
+        "ExecStartPre=/usr/bin/python3 -I -B -X utf8 "
+        f"{release_root.as_posix()}/deployment/dev27/finalizer_runtime_gate.py "
+        "verify --interpreter /usr/bin/python3 "
+        "--manifest /etc/odoo-accounting-cli-v3/"
+        "effect-finalizer-runtime-manifest.json "
+        "--expected-manifest-sha256 "
+        f"{runtime_manifest_digest}"
+    ) in rendered
+    assert rendered.count("ExecStartPre=") == 1
+    assert "@V3_FINALIZER_RUNTIME_MANIFEST_SHA256@" not in rendered
+
+    with pytest.raises(renderer.RenderError, match="manifest digest"):
+        renderer.render_service(
+            release_root,
+            script_root=release_root,
+            require_root_owner=False,
+            component="effect-finalizer",
+        )
 
     with pytest.raises(renderer.RenderError, match="component"):
         renderer.render_service(

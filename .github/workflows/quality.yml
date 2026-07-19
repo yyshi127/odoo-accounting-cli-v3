@@ -346,6 +346,8 @@ jobs:
           rendered_root="$RUNNER_TEMP/odoo-v3-systemd"
           release_name="ci-verified-release"
           broker_bin="/opt/odoo-accounting-cli-v3/releases/$release_name/bin/odoo-accounting-cli-v3-broker"
+          finalizer_bin="/opt/odoo-accounting-cli-v3/releases/$release_name/bin/odoo-accounting-cli-v3-effect-finalizer"
+          finalizer_gate="/opt/odoo-accounting-cli-v3/releases/$release_name/deployment/dev27/finalizer_runtime_gate.py"
           install -d -m 0755 "$rendered_root"
           RELEASE_NAME="$release_name" python - <<'PY'
           import os
@@ -377,12 +379,35 @@ jobs:
           (target / "odoo-accounting-cli-v3-pi-bridge.socket").write_bytes(
               (pi_source / "odoo-accounting-cli-v3-pi-bridge.socket").read_bytes()
           )
+
+          finalizer_source = Path(os.environ["GITHUB_WORKSPACE"]) / "deployment/dev23/systemd"
+          finalizer_service = (
+              finalizer_source / "odoo-accounting-cli-v3-effect-finalizer.service"
+          ).read_text()
+          assert finalizer_service.count("@V3_RELEASE@") == 2
+          assert finalizer_service.count(
+              "@V3_FINALIZER_RUNTIME_MANIFEST_SHA256@"
+          ) == 1
+          (target / "odoo-accounting-cli-v3-effect-finalizer.service").write_text(
+              finalizer_service.replace(
+                  "@V3_RELEASE@", os.environ["RELEASE_NAME"]
+              ).replace(
+                  "@V3_FINALIZER_RUNTIME_MANIFEST_SHA256@", "f" * 64
+              )
+          )
+          (target / "odoo-accounting-cli-v3-effect-finalizer.socket").write_bytes(
+              (
+                  finalizer_source
+                  / "odoo-accounting-cli-v3-effect-finalizer.socket"
+              ).read_bytes()
+          )
           PY
           for group in \
             odoo-v3-broker \
             odoo-v3-runtime \
             odoo-v3-pi-broker \
-            odoo-v3-odoo-control; do
+            odoo-v3-odoo-control \
+            odoo-v3-effect-finalizer; do
             if ! getent group "$group" >/dev/null; then
               sudo groupadd --system "$group"
             fi
@@ -403,8 +428,21 @@ jobs:
               --shell /usr/sbin/nologin \
               odoo-v3-pi-broker
           fi
+          if ! getent passwd odoo-v3-effect-finalizer >/dev/null; then
+            sudo useradd --system \
+              --gid odoo-v3-effect-finalizer \
+              --groups odoo-v3-runtime \
+              --home-dir /nonexistent \
+              --shell /usr/sbin/nologin \
+              odoo-v3-effect-finalizer
+          fi
           sudo install -d -m 0755 "$(dirname "$broker_bin")"
           sudo install -m 0755 /bin/true "$broker_bin"
+          sudo install -m 0755 /bin/true "$finalizer_bin"
+          sudo install -d -m 0755 "$(dirname "$finalizer_gate")"
+          sudo install -m 0444 \
+            "$GITHUB_WORKSPACE/deployment/dev27/finalizer_runtime_gate.py" \
+            "$finalizer_gate"
           if [ ! -x /usr/bin/node ]; then
             sudo install -m 0755 /bin/true /usr/bin/node
           fi
@@ -418,8 +456,212 @@ jobs:
             "$rendered_root/odoo-accounting-cli-v3-pi-broker.socket" \
             "$rendered_root/odoo-accounting-cli-v3-session-mint.socket" \
             "$rendered_root/odoo-accounting-cli-v3-trusted-approval.socket" \
+            "$rendered_root/odoo-accounting-cli-v3-effect-finalizer.service" \
+            "$rendered_root/odoo-accounting-cli-v3-effect-finalizer.socket" \
             "$rendered_root/odoo-accounting-cli-v3-pi-bridge.service" \
             "$rendered_root/odoo-accounting-cli-v3-pi-bridge.socket"
+
+  dev27-finalizer-runtime:
+    name: Dev27 isolated finalizer runtime gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the root-managed PostgreSQL driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes python3-psycopg2
+          /usr/bin/python3 -I -B -X utf8 - <<'PY'
+          import importlib.util
+          import psycopg2
+          import sys
+
+          assert sys.flags.isolated
+          assert importlib.util.find_spec("odoo") is None
+          assert psycopg2.__version__
+          print(f"system_python={sys.version.split()[0]}")
+          print(f"psycopg2={psycopg2.__version__}")
+          PY
+          dpkg-query -W -f='python3-psycopg2=${Version}\nlibpq5=${Version}\n' \
+            python3-psycopg2 libpq5
+      - name: Collect twice and verify as the non-root service boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_name=ci-dev27-finalizer-runtime
+          release_root="/opt/odoo-accounting-cli-v3/releases/$release_name"
+          gate="$release_root/deployment/dev27/finalizer_runtime_gate.py"
+          config_root=/etc/odoo-accounting-cli-v3
+          manifest="$config_root/effect-finalizer-runtime-manifest.json"
+          first="$RUNNER_TEMP/finalizer-runtime-1.json"
+          second="$RUNNER_TEMP/finalizer-runtime-2.json"
+
+          sudo install -d -m 0755 -o root -g root "$release_root/src"
+          sudo cp -a "$GITHUB_WORKSPACE/src/." "$release_root/src/"
+          test -z "$(sudo find "$release_root/src" -type l -print -quit)"
+          sudo find "$release_root/src" -exec chown root:root {} +
+          sudo find "$release_root/src" -type d -exec chmod 0755 {} +
+          sudo find "$release_root/src" -type f -exec chmod 0444 {} +
+          sudo install -d -m 0755 -o root -g root "$(dirname "$gate")"
+          sudo install -m 0444 -o root -g root \
+            "$GITHUB_WORKSPACE/deployment/dev27/finalizer_runtime_gate.py" \
+            "$gate"
+          sudo /usr/bin/python3 -I -B -X utf8 "$gate" collect \
+            --interpreter /usr/bin/python3 > "$first"
+          sudo /usr/bin/python3 -I -B -X utf8 "$gate" collect \
+            --interpreter /usr/bin/python3 > "$second"
+          cmp "$first" "$second"
+
+          sudo install -d -m 0755 -o root -g root "$config_root"
+          sudo install -m 0444 -o root -g root "$first" "$manifest"
+          manifest_sha256="$(sha256sum "$first" | cut -d' ' -f1)"
+          sudo -u nobody /usr/bin/python3 -I -B -X utf8 "$gate" verify \
+            --interpreter /usr/bin/python3 \
+            --manifest "$manifest" \
+            --expected-manifest-sha256 "$manifest_sha256" > /dev/null
+          sha256sum "$first"
+
+          service_uid="$(id -u nobody)"
+          service_gid="$(id -g nobody)"
+          broker_uid="$(id -u daemon)"
+          socket_gid="$(id -g daemon)"
+          test "$service_uid" != "$broker_uid"
+          test "$service_gid" != "$socket_gid"
+          journal_root=/var/lib/odoo-accounting-cli-v3-effect-finalizer-ci
+          pgpass="$config_root/effect-finalizer-ci.pgpass"
+          hmac="$config_root/effect-finalizer-ci.hmac"
+          runtime_config="$config_root/effect-finalizer-runtime.json"
+          printf '%s\n' \
+            '/var/run/postgresql:5432:odoo_sandbox:odoo_v3_finalizer:ci-password' \
+            > "$RUNNER_TEMP/effect-finalizer-ci.pgpass"
+          printf '%s' \
+            'ci-effect-finalizer-hmac-secret-at-least-32-bytes' \
+            > "$RUNNER_TEMP/effect-finalizer-ci.hmac"
+          sudo install -m 0400 -o "$service_uid" -g "$service_gid" \
+            "$RUNNER_TEMP/effect-finalizer-ci.pgpass" "$pgpass"
+          sudo install -m 0400 -o "$service_uid" -g "$service_gid" \
+            "$RUNNER_TEMP/effect-finalizer-ci.hmac" "$hmac"
+          sudo install -d -m 0700 -o "$service_uid" -g "$service_gid" \
+            "$journal_root"
+          SERVICE_UID="$service_uid" \
+          SERVICE_GID="$service_gid" \
+          BROKER_UID="$broker_uid" \
+          SOCKET_GID="$socket_gid" \
+          MANIFEST_PATH="$manifest" \
+          MANIFEST_SHA256="$manifest_sha256" \
+          PGPASS_PATH="$pgpass" \
+          HMAC_PATH="$hmac" \
+          JOURNAL_PATH="$journal_root/attempts.sqlite3" \
+          /usr/bin/python3 -I -B -X utf8 - \
+            > "$RUNNER_TEMP/effect-finalizer-runtime.json" <<'PY'
+          import json
+          import os
+
+          document = {
+              "schema_version": 2,
+              "service_uid": int(os.environ["SERVICE_UID"]),
+              "service_gid": int(os.environ["SERVICE_GID"]),
+              "database_name": "odoo_sandbox",
+              "database_uuid": "11111111-1111-4111-8111-111111111111",
+              "database_user": "odoo_v3_finalizer",
+              "database_host": "/var/run/postgresql",
+              "database_port": 5432,
+              "database_connect_timeout_seconds": 2,
+              "dependency_manifest_path": os.environ["MANIFEST_PATH"],
+              "dependency_manifest_sha256": os.environ["MANIFEST_SHA256"],
+              "pgpass_path": os.environ["PGPASS_PATH"],
+              "attestation_key_id": "effect-finalizer-ci-v1",
+              "expected_guard_installation_id": (
+                  "22222222-2222-4222-8222-222222222222"
+              ),
+              "expected_database_oid": 16384,
+              "attestation_secret_path": os.environ["HMAC_PATH"],
+              "journal_path": os.environ["JOURNAL_PATH"],
+              "proof_ttl_seconds": 120,
+              "statement_timeout_ms": 500,
+              "uds": {
+                  "socket_path": "/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+                  "socket_owner_uid": 0,
+                  "socket_group_gid": int(os.environ["SOCKET_GID"]),
+                  "socket_mode": 432,
+                  "broker_service_uid": int(os.environ["BROKER_UID"]),
+                  "broker_systemd_unit": (
+                      "odoo-accounting-cli-v3-broker.service"
+                  ),
+                  "finalizer_systemd_unit": (
+                      "odoo-accounting-cli-v3-effect-finalizer.service"
+                  ),
+                  "handoff_idle_timeout_seconds": 115,
+                  "request_io_timeout_seconds": 10,
+                  "max_request_bytes": 16384,
+                  "max_response_bytes": 32768,
+                  "max_inflight_requests": 4,
+              },
+          }
+          print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+          PY
+          sudo install -m 0444 -o root -g root \
+            "$RUNNER_TEMP/effect-finalizer-runtime.json" "$runtime_config"
+          sudo -u nobody env -i LD_BIND_NOW=1 \
+            /usr/bin/python3 -I -B -X utf8 - \
+            "$release_root/src" "$runtime_config" <<'PY'
+          import sys
+          from pathlib import Path
+
+          source_root = Path(sys.argv[1]).resolve(strict=True)
+          sys.path.insert(0, str(source_root))
+          from odoo_accounting_cli_v3.effect_finalizer_main import (
+              build_effect_finalizer_application,
+          )
+
+          application = build_effect_finalizer_application(sys.argv[2])
+          assert application.config.dependency_manifest_path == Path(
+              "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json"
+          )
+          assert application.config.require_posix_owner is True
+          print("finalizer_in_process_preflight=ok")
+          PY
+
+          tampered_source="$RUNNER_TEMP/finalizer-runtime-tampered.json"
+          tampered_manifest="$config_root/effect-finalizer-runtime-tampered.json"
+          /usr/bin/python3 -I -B -X utf8 - "$first" "$tampered_source" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          source = Path(sys.argv[1])
+          target = Path(sys.argv[2])
+          document = json.loads(source.read_text("utf-8"))
+          document["runtime"]["psycopg2_version"] += "-tampered"
+          target.write_text(
+              json.dumps(
+                  document,
+                  ensure_ascii=True,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+          sudo install -m 0444 -o root -g root \
+            "$tampered_source" "$tampered_manifest"
+          set +e
+          sudo -u nobody /usr/bin/python3 -I -B -X utf8 "$gate" verify \
+            --interpreter /usr/bin/python3 \
+            --manifest "$tampered_manifest" \
+            --expected-manifest-sha256 "$manifest_sha256" \
+            > "$RUNNER_TEMP/tampered.stdout" \
+            2> "$RUNNER_TEMP/tampered.stderr"
+          status=$?
+          set -e
+          test "$status" -eq 1
+          test ! -s "$RUNNER_TEMP/tampered.stdout"
+          grep -Fxq 'finalizer runtime dependency gate failed closed' \
+            "$RUNNER_TEMP/tampered.stderr"
 
   pi-bridge:
     name: Pi trusted broker contracts

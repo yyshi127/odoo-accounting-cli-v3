@@ -35,6 +35,7 @@ LOCAL_RUNTIME_FILENAMES = frozenset(
         "authority-runtime.json",
         "broker-runtime.json",
         "effect-finalizer-runtime.json",
+        "effect-finalizer-runtime-manifest.json",
         "historical-routes.json",
         "read-runtime.json",
         "write-runtime.json",
@@ -122,16 +123,24 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
             document = json.loads(payload)
         except (UnicodeDecodeError, json.JSONDecodeError):
             document = None
-        if (
-            isinstance(document, dict)
-            and document.get("schema_version")
-            == "odoo-accounting-cli-v3.pi-attestation-keys.v1"
-            and isinstance(document.get("keys"), dict)
-        ):
-            raise ReleaseError(
-                "refusing Pi attestation key document in release: "
-                f"{relative.as_posix()}"
-            )
+        if isinstance(document, dict):
+            schema_version = document.get("schema_version")
+            if (
+                schema_version
+                == "odoo-accounting-cli-v3.pi-attestation-keys.v1"
+                and isinstance(document.get("keys"), dict)
+            ):
+                raise ReleaseError(
+                    "refusing Pi attestation key document in release: "
+                    f"{relative.as_posix()}"
+                )
+            if schema_version == (
+                "odoo-accounting-cli-v3.finalizer-runtime-manifest.v2"
+            ):
+                raise ReleaseError(
+                    "refusing finalizer runtime manifest in release: "
+                    f"{relative.as_posix()}"
+                )
     for label, pattern in SENSITIVE_CONTENT_PATTERNS:
         if pattern.search(payload) is not None:
             raise ReleaseError(

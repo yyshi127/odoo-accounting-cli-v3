@@ -490,8 +490,16 @@ At the current local development checkpoint:
   bindings, same-operation recovery, and mismatched two-anchor finalization are
   rejected. A signed creation plan marked `available` is necessary incident
   evidence but is not by itself execution authority. The capability remains
-  disabled, and the PostgreSQL two-anchor tests still require their real CI
-  job before this checkpoint is accepted;
+  disabled. The real PostgreSQL two-anchor job passed in GitHub Actions run
+  `29677961982`; this proves the Dev26 database guard/finalizer contract, not a
+  real Odoo write or recovery receipt;
+- dev27 changes the isolated finalizer runtime document to strict schema v2 and
+  requires one externally anchored dependency-manifest path/digest to agree
+  with the installed canonical JSON and rendered systemd service. Its tests are
+  required to cover digest drift, standalone non-root Linux verification, and
+  the actual finalizer's eager driver import/reverification before credential
+  preflight. These contracts do not produce a target-host runtime manifest,
+  real Odoo receipt, sandbox write, or production authorization;
 - every current registry `evidence.receipts` array is empty: zero capabilities
   are enabled and zero write capabilities are staged. E00b, a real sandbox
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox

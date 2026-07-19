@@ -13,6 +13,7 @@ from typing import Any
 
 
 _TOKEN = "@V3_RELEASE@"
+_FINALIZER_MANIFEST_SHA_TOKEN = "@V3_FINALIZER_RUNTIME_MANIFEST_SHA256@"
 _SERVICE = Path("deployment/dev9/systemd/odoo-accounting-cli-v3-broker.service")
 _EFFECT_FINALIZER_SERVICE = Path(
     "deployment/dev23/systemd/odoo-accounting-cli-v3-effect-finalizer.service"
@@ -31,7 +32,15 @@ _BROKER_RUNTIME_CONFIG = "/etc/odoo-accounting-cli-v3/broker-runtime.json"
 _EFFECT_FINALIZER_RUNTIME_CONFIG = (
     "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json"
 )
+_EFFECT_FINALIZER_RUNTIME_GATE = Path(
+    "deployment/dev27/finalizer_runtime_gate.py"
+)
+_EFFECT_FINALIZER_RUNTIME_MANIFEST = (
+    "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json"
+)
+_SYSTEM_PYTHON = "/usr/bin/python3"
 _RELEASE_NAME = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,255}\Z")
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _ANCHOR_FIELDS = {"commit", "manifest_sha256", "package_sha256", "release"}
 
 
@@ -124,6 +133,7 @@ def render_service(
     script_root: Path,
     require_root_owner: bool = True,
     component: str = "broker",
+    finalizer_runtime_manifest_sha256: str | None = None,
 ) -> str:
     if type(require_root_owner) is not bool:
         raise RenderError("root ownership policy is invalid")
@@ -131,6 +141,14 @@ def render_service(
         raise RenderError("release paths must be absolute")
     if component not in {"broker", "effect-finalizer"}:
         raise RenderError("service component is invalid")
+    if component == "effect-finalizer":
+        if (
+            not isinstance(finalizer_runtime_manifest_sha256, str)
+            or _SHA256.fullmatch(finalizer_runtime_manifest_sha256) is None
+        ):
+            raise RenderError("finalizer runtime manifest digest is invalid")
+    elif finalizer_runtime_manifest_sha256 is not None:
+        raise RenderError("broker service cannot bind a finalizer runtime digest")
     if release_root.parent != _PRODUCTION_RELEASES_ROOT:
         raise RenderError("release is outside the production releases root")
     if (
@@ -148,10 +166,22 @@ def render_service(
     template_path = release_root / (
         _SERVICE if component == "broker" else _EFFECT_FINALIZER_SERVICE
     )
+    finalizer_gate_path = release_root / _EFFECT_FINALIZER_RUNTIME_GATE
+    if component == "effect-finalizer":
+        try:
+            gate_metadata = os.lstat(finalizer_gate_path)
+        except OSError as exc:
+            raise RenderError("effect-finalizer runtime gate is unavailable") from exc
+        if finalizer_gate_path.is_symlink() or not stat.S_ISREG(
+            gate_metadata.st_mode
+        ):
+            raise RenderError("effect-finalizer runtime gate is invalid")
     if require_root_owner:
         _secure_root_path(release_root, regular_file=False)
         for trusted_file in (manifest_path, anchor_path, template_path):
             _secure_root_path(trusted_file, regular_file=True)
+        if component == "effect-finalizer":
+            _secure_root_path(finalizer_gate_path, regular_file=True)
     _verify_canonical_launchers(
         release_root, require_root_owner=require_root_owner
     )
@@ -192,10 +222,23 @@ def render_service(
     if _RELEASE_NAME.fullmatch(release_name) is None:
         raise RenderError("release name is invalid")
     template = template_path.read_text(encoding="utf-8")
-    if template.count(_TOKEN) != 1:
+    expected_token_count = 1 if component == "broker" else 2
+    if template.count(_TOKEN) != expected_token_count:
         raise RenderError("service template release token is invalid")
+    expected_manifest_tokens = 1 if component == "effect-finalizer" else 0
+    if template.count(_FINALIZER_MANIFEST_SHA_TOKEN) != expected_manifest_tokens:
+        raise RenderError("service template finalizer digest token is invalid")
     rendered = template.replace(_TOKEN, release_name)
-    if _TOKEN in rendered or not rendered.endswith("\n"):
+    if component == "effect-finalizer":
+        rendered = rendered.replace(
+            _FINALIZER_MANIFEST_SHA_TOKEN,
+            finalizer_runtime_manifest_sha256,
+        )
+    if (
+        _TOKEN in rendered
+        or _FINALIZER_MANIFEST_SHA_TOKEN in rendered
+        or not rendered.endswith("\n")
+    ):
         raise RenderError("rendered service is invalid")
     launcher = (
         _BROKER_LAUNCHER
@@ -207,9 +250,14 @@ def render_service(
         if component == "broker"
         else _EFFECT_FINALIZER_RUNTIME_CONFIG
     )
+    exec_prefix = (
+        f"{_SYSTEM_PYTHON} -I -B -X utf8 "
+        if component == "effect-finalizer"
+        else ""
+    )
     expected_exec_start = (
         "ExecStart="
-        f"{(release_root / launcher).as_posix()} "
+        f"{exec_prefix}{(release_root / launcher).as_posix()} "
         f"--config {runtime_config}"
     )
     exec_starts = [
@@ -217,6 +265,24 @@ def render_service(
     ]
     if exec_starts != [expected_exec_start]:
         raise RenderError("rendered service ExecStart is not the verified launcher")
+    exec_start_pres = [
+        line for line in rendered.splitlines() if line.startswith("ExecStartPre=")
+    ]
+    expected_exec_start_pres = []
+    if component == "effect-finalizer":
+        expected_exec_start_pres = [
+            "ExecStartPre="
+            f"{_SYSTEM_PYTHON} -I -B -X utf8 "
+            f"{(release_root / _EFFECT_FINALIZER_RUNTIME_GATE).as_posix()} "
+            f"verify --interpreter {_SYSTEM_PYTHON} "
+            f"--manifest {_EFFECT_FINALIZER_RUNTIME_MANIFEST} "
+            "--expected-manifest-sha256 "
+            f"{finalizer_runtime_manifest_sha256}"
+        ]
+    if exec_start_pres != expected_exec_start_pres:
+        raise RenderError(
+            "rendered service ExecStartPre is not the verified runtime gate"
+        )
     return rendered
 
 
@@ -228,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("broker", "effect-finalizer"),
         default="broker",
     )
+    parser.add_argument("--finalizer-runtime-manifest-sha256")
     arguments = parser.parse_args(argv)
     release_root = Path(arguments.release_root)
     script = Path(__file__)
@@ -239,6 +306,9 @@ def main(argv: list[str] | None = None) -> int:
             release_root,
             script_root=script_root,
             component=arguments.component,
+            finalizer_runtime_manifest_sha256=(
+                arguments.finalizer_runtime_manifest_sha256
+            ),
         )
     )
     return 0

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import json
 import os
 import queue
 import signal
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass
@@ -15,7 +19,7 @@ from typing import Any, Callable, Sequence
 from .effect_finalizer_runtime import (
     EffectFinalizerRuntimeConfig,
     load_effect_finalizer_runtime_config,
-    load_effect_finalizer_runtime_secrets,
+    preflight_effect_finalizer_runtime_credentials,
 )
 from .effect_finalizer_service import (
     EffectFinalizerAttemptJournal,
@@ -24,7 +28,6 @@ from .effect_finalizer_service import (
 from .effect_finalizer_uds import create_effect_finalizer_uds_server_from_fd
 from .odoo.effect_finalizer_db import (
     finalize_effect_attempt,
-    odoo_connection_info_for,
     open_direct_finalizer_connection,
 )
 from .systemd_activation import activated_socket_fds
@@ -33,6 +36,9 @@ from .systemd_activation import activated_socket_fds
 EFFECT_FINALIZER_SOCKET_NAME = "odoo-v3-effect-finalizer"
 _USAGE = "usage: odoo-accounting-cli-v3-effect-finalizer --config ABSOLUTE_PATH"
 _STARTUP_FAILURE = "effect finalizer service failed closed"
+_SYSTEM_PYTHON = Path("/usr/bin/python3")
+_DEPENDENCY_GATE = Path("deployment/dev27/finalizer_runtime_gate.py")
+_MAX_GATE_OUTPUT_BYTES = 4096
 
 
 class EffectFinalizerMainError(RuntimeError):
@@ -45,14 +51,131 @@ class EffectFinalizerApplication:
     service: EffectFinalizerService
 
 
-def _default_connect(**parameters: Any) -> Any:
-    try:
-        import psycopg2
+def _verified_postgresql_connect(
+    config: EffectFinalizerRuntimeConfig,
+) -> Callable[..., Any]:
+    """Eagerly retain the exact driver before any finalizer secret is read."""
 
-        return psycopg2.connect(**parameters)
+    try:
+        if (
+            sys.flags.isolated != 1
+            or sys.flags.dont_write_bytecode != 1
+            or sys.flags.utf8_mode != 1
+            or not sys.dont_write_bytecode
+            or os.environ.get("LD_BIND_NOW") != "1"
+            or importlib.util.find_spec("odoo") is not None
+        ):
+            raise EffectFinalizerMainError(
+                "finalizer Python isolation is unavailable"
+            )
+        interpreter = Path(sys.executable).resolve(strict=True)
+        if interpreter != _SYSTEM_PYTHON.resolve(strict=True):
+            raise EffectFinalizerMainError(
+                "finalizer Python interpreter identity differs"
+            )
+        psycopg2 = importlib.import_module("psycopg2")
+        native = importlib.import_module("psycopg2._psycopg")
+        actual_paths = {
+            str(Path(module.__file__).resolve(strict=True))
+            for module in (psycopg2, native)
+            if isinstance(getattr(module, "__file__", None), str)
+        }
+        if len(actual_paths) != 2:
+            raise EffectFinalizerMainError(
+                "finalizer PostgreSQL driver identity is incomplete"
+            )
+        release_root = Path(__file__).resolve(strict=True).parents[2]
+        gate_path = release_root / _DEPENDENCY_GATE
+        if gate_path.is_symlink() or not gate_path.is_file():
+            raise EffectFinalizerMainError(
+                "finalizer dependency gate is unavailable"
+            )
+        process = subprocess.run(
+            [
+                str(_SYSTEM_PYTHON),
+                "-I",
+                "-B",
+                "-X",
+                "utf8",
+                str(gate_path),
+                "verify",
+                "--interpreter",
+                str(_SYSTEM_PYTHON),
+                "--manifest",
+                str(config.dependency_manifest_path),
+                "--expected-manifest-sha256",
+                config.dependency_manifest_sha256,
+            ],
+            cwd="/",
+            env={"LD_BIND_NOW": "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+            close_fds=True,
+        )
+        expected_gate_receipt = (
+            json.dumps(
+                {
+                    "manifest_sha256": config.dependency_manifest_sha256,
+                    "ok": True,
+                },
+                ensure_ascii=True,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if (
+            process.returncode != 0
+            or process.stderr
+            or process.stdout != expected_gate_receipt
+            or len(process.stdout) > _MAX_GATE_OUTPUT_BYTES
+        ):
+            raise EffectFinalizerMainError(
+                "finalizer dependency gate rejected the runtime"
+            )
+        manifest = json.loads(
+            config.dependency_manifest_path.read_text("utf-8")
+        )
+        driver_records = manifest["psycopg2_files"]
+        module_records = manifest["python_module_files"]
+        expected_driver_paths = {
+            item["canonical_path"]
+            for item in driver_records
+            if isinstance(item, dict)
+            and isinstance(item.get("canonical_path"), str)
+        }
+        expected_module_paths = {
+            item["canonical_path"]
+            for item in module_records
+            if isinstance(item, dict)
+            and isinstance(item.get("canonical_path"), str)
+        }
+        expected_finalizer_path = str(Path(__file__).resolve(strict=True))
+        expected_source_root = str((release_root / "src").resolve(strict=True))
+        if (
+            not actual_paths.issubset(expected_driver_paths)
+            or not actual_paths.issubset(expected_module_paths)
+            or manifest["finalizer_module_file"]["canonical_path"]
+            != expected_finalizer_path
+            or manifest["source_root"]["canonical_path"]
+            != expected_source_root
+            or manifest["runtime"]["psycopg2_version"]
+            != str(psycopg2.__version__)
+            or not callable(psycopg2.connect)
+        ):
+            raise EffectFinalizerMainError(
+                "finalizer PostgreSQL driver differs from the manifest"
+            )
+        return psycopg2.connect
+    except EffectFinalizerMainError:
+        raise
     except Exception as exc:
         raise EffectFinalizerMainError(
-            "finalizer PostgreSQL driver is unavailable"
+            "finalizer PostgreSQL runtime is unavailable"
         ) from exc
 
 
@@ -60,15 +183,16 @@ def build_effect_finalizer_application(
     config_path: str | os.PathLike[str],
     *,
     require_root_owner: bool = True,
-    connection_info_loader: Callable[[Path, str], dict[str, Any]] = (
-        odoo_connection_info_for
-    ),
-    connect: Callable[..., Any] = _default_connect,
+    connect: Callable[..., Any] | None = None,
 ) -> EffectFinalizerApplication:
     """Load finalizer-only credentials and construct the durable service."""
 
-    if not callable(connection_info_loader) or not callable(connect):
+    if connect is not None and not callable(connect):
         raise EffectFinalizerMainError("finalizer database adapters are invalid")
+    if require_root_owner and connect is not None:
+        raise EffectFinalizerMainError(
+            "production finalizer connector cannot be injected"
+        )
     config = load_effect_finalizer_runtime_config(
         config_path, require_root_owner=require_root_owner
     )
@@ -80,18 +204,16 @@ def build_effect_finalizer_application(
         raise EffectFinalizerMainError(
             "finalizer process identity differs from configuration"
         )
-    secrets = load_effect_finalizer_runtime_secrets(config)
+    if connect is None:
+        connect = _verified_postgresql_connect(config)
+    secrets = preflight_effect_finalizer_runtime_credentials(config)
     journal = EffectFinalizerAttemptJournal(
         config.journal_path,
         require_posix_owner=require_root_owner,
     )
 
     def database_finalize(request: Any, attestation: Any) -> Any:
-        connection_info = connection_info_loader(
-            config.odoo_config_path, config.database.database_name
-        )
         connection = open_direct_finalizer_connection(
-            odoo_connection_info=connection_info,
             config=config.database,
             connect=connect,
         )

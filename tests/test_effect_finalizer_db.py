@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -63,23 +64,12 @@ def _config(tmp_path) -> EffectFinalizerDatabaseConfig:
     )
 
 
-def test_connection_info_replaces_runtime_credentials_with_one_read_password(
+def test_connection_info_is_built_only_from_config_and_one_read_password(
     tmp_path,
 ) -> None:
     config = _config(tmp_path)
 
-    result = sanitized_direct_connection_info(
-        {
-            "dbname": "odoo_sandbox",
-            "host": "/var/run/postgresql",
-            "port": 5432,
-            "user": "odoo_runtime",
-            "password": "runtime-secret",
-            "options": "-c role=owner",
-            "sslmode": "verify-full",
-        },
-        config,
-    )
+    result = sanitized_direct_connection_info(config)
 
     assert result == {
         "dbname": "odoo_sandbox",
@@ -94,20 +84,23 @@ def test_connection_info_replaces_runtime_credentials_with_one_read_password(
     assert "options" not in result
 
 
+def test_connection_surface_has_no_external_endpoint_input() -> None:
+    assert tuple(inspect.signature(sanitized_direct_connection_info).parameters) == (
+        "config",
+    )
+    assert tuple(inspect.signature(open_direct_finalizer_connection).parameters) == (
+        "config",
+        "connect",
+    )
+
+
 def test_pgpass_rejects_wildcard_or_more_than_one_entry(tmp_path) -> None:
     config = _config(tmp_path)
     config.passfile_path.write_text(
         "*:5432:odoo_sandbox:odoo_v3_finalizer:secret\n", encoding="utf-8"
     )
     with pytest.raises(EffectFinalizerDatabaseError, match="pgpass"):
-        sanitized_direct_connection_info(
-            {
-                "dbname": "odoo_sandbox",
-                "host": "/var/run/postgresql",
-                "port": 5432,
-            },
-            config,
-        )
+        sanitized_direct_connection_info(config)
 
 
 def test_database_config_rejects_remote_tcp_endpoint(tmp_path) -> None:
@@ -142,13 +135,6 @@ def test_direct_connect_clears_pg_environment_and_never_reopens_passfile(
         return connection
 
     result = open_direct_finalizer_connection(
-        odoo_connection_info={
-            "dbname": "odoo_sandbox",
-            "host": "/var/run/postgresql",
-            "port": 5432,
-            "password": "odoo-runtime-secret",
-            "options": "-c role=odoo_owner",
-        },
         config=config,
         connect=connect,
     )
@@ -173,11 +159,6 @@ def test_direct_connect_restores_pg_environment_when_connector_fails(
 
     with pytest.raises(EffectFinalizerDatabaseError, match="connection failed"):
         open_direct_finalizer_connection(
-            odoo_connection_info={
-                "dbname": "odoo_sandbox",
-                "host": "/var/run/postgresql",
-                "port": 5432,
-            },
             config=config,
             connect=connect,
         )

@@ -11,9 +11,12 @@ SupplementaryGroups=odoo-v3-runtime
 StateDirectory=odoo-accounting-cli-v3-effect-finalizer
 StateDirectoryMode=0700
 Environment=HOME=/var/lib/odoo-accounting-cli-v3-effect-finalizer
+Environment=LD_BIND_NOW=1
 UnsetEnvironment=PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONINSPECT LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD PGAPPNAME PGCHANNELBINDING PGCONNECT_TIMEOUT PGDATABASE PGHOST PGHOSTADDR PGPASSFILE PGPASSWORD PGPORT PGSERVICE PGSERVICEFILE PGSSLCERT PGSSLKEY PGSSLMODE PGSSLROOTCERT PGUSER PGOPTIONS
+WorkingDirectory=/
 Sockets=odoo-accounting-cli-v3-effect-finalizer.socket
-ExecStart=/opt/odoo-accounting-cli-v3/releases/@V3_RELEASE@/bin/odoo-accounting-cli-v3-effect-finalizer --config /etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json
+ExecStartPre=/usr/bin/python3 -I -B -X utf8 /opt/odoo-accounting-cli-v3/releases/@V3_RELEASE@/deployment/dev27/finalizer_runtime_gate.py verify --interpreter /usr/bin/python3 --manifest /etc/odoo-accounting-cli-v3/effect-finalizer-runtime-manifest.json --expected-manifest-sha256 @V3_FINALIZER_RUNTIME_MANIFEST_SHA256@
+ExecStart=/usr/bin/python3 -I -B -X utf8 /opt/odoo-accounting-cli-v3/releases/@V3_RELEASE@/bin/odoo-accounting-cli-v3-effect-finalizer --config /etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=135s
@@ -39,6 +42,7 @@ ProtectKernelTunables=yes
 ProtectProc=invisible
 ProcSubset=pid
 ProtectSystem=strict
+InaccessiblePaths=-/opt/odoo -/mnt/odoo
 RemoveIPC=yes
 RestrictAddressFamilies=AF_UNIX
 RestrictNamespaces=yes
