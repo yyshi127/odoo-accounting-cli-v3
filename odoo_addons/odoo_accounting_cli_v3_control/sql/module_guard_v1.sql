@@ -113,6 +113,11 @@ SELECT format(
     current_setting('odoo_accounting_cli_v3.runtime_role')
 ) \gexec
 SELECT format(
+    'GRANT %I TO odoo_accounting_cli_v3_guard_owner '
+    'WITH ADMIN FALSE, INHERIT TRUE, SET FALSE',
+    current_setting('odoo_accounting_cli_v3.maintenance_role')
+) \gexec
+SELECT format(
     'REVOKE %I FROM %I',
     current_setting('odoo_accounting_cli_v3.runtime_role'),
     current_setting('odoo_accounting_cli_v3.finalizer_role')
@@ -149,15 +154,26 @@ BEGIN
             )
         )
         AND NOT (
-            membership.roleid = runtime_oid
-            AND membership.member = owner_oid
-            AND membership.admin_option
-            AND NOT membership.inherit_option
-            AND NOT membership.set_option
+            (
+                membership.roleid = runtime_oid
+                AND membership.member = owner_oid
+                AND membership.admin_option
+                AND NOT membership.inherit_option
+                AND NOT membership.set_option
+            ) OR (
+                membership.roleid = maintenance_oid
+                AND membership.member = owner_oid
+                AND NOT membership.admin_option
+                AND membership.inherit_option
+                AND NOT membership.set_option
+            )
         )
     )
        OR pg_catalog.pg_has_role(maintenance_oid, runtime_oid, 'MEMBER')
        OR NOT pg_catalog.pg_has_role(owner_oid, runtime_oid, 'MEMBER')
+       OR NOT pg_catalog.pg_has_role(owner_oid, maintenance_oid, 'MEMBER')
+       OR NOT pg_catalog.pg_has_role(owner_oid, maintenance_oid, 'USAGE')
+       OR pg_catalog.pg_has_role(owner_oid, runtime_oid, 'USAGE')
        OR pg_catalog.pg_has_role(runtime_oid, owner_oid, 'MEMBER')
        OR pg_catalog.pg_has_role(maintenance_oid, owner_oid, 'MEMBER')
        OR pg_catalog.pg_has_role(finalizer_oid, owner_oid, 'MEMBER')

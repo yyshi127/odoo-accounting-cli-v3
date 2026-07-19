@@ -84,6 +84,8 @@ def test_maintenance_loader_has_no_persistent_login_or_runtime_membership():
     assert "GRANT %I TO %I WITH INHERIT FALSE, SET TRUE" in sql
     assert "REVOKE %I FROM %I" in sql
     assert "WITH ADMIN TRUE, INHERIT FALSE, SET FALSE" in sql
+    assert "WITH ADMIN FALSE, INHERIT TRUE, SET FALSE" in sql
+    assert "pg_has_role(owner_oid, maintenance_oid, 'USAGE')" in sql
     assert "module guard maintenance role must be temporarily login-enabled" in sql
     assert "module guard maintenance role has concurrent sessions" in sql
 

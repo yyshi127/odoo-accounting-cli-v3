@@ -295,7 +295,14 @@ class OdooAccountingCliModuleGuard(models.AbstractModel):
                 True,
                 False,
                 False,
-            )
+            ),
+            (
+                snapshot["maintenance_role"],
+                _GUARD_OWNER,
+                False,
+                True,
+                False,
+            ),
         }:
             self._fail("module guard role membership topology is invalid")
         self.env.cr.execute(

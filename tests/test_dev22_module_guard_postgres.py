@@ -1599,6 +1599,33 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
         "inherit_option": False,
         "set_option": False,
     }
+    maintenance_visibility_membership = json.loads(
+        postgres.scalar(
+            "SELECT pg_catalog.row_to_json(edge)::text FROM (SELECT "
+            "granted.rolname AS granted,member.rolname AS member,"
+            "membership.admin_option,membership.inherit_option,"
+            "membership.set_option FROM pg_catalog.pg_auth_members membership "
+            "JOIN pg_catalog.pg_roles granted ON granted.oid=membership.roleid "
+            "JOIN pg_catalog.pg_roles member ON member.oid=membership.member "
+            f"WHERE granted.rolname='{maintenance_role}' "
+            f"AND member.rolname='{GUARD_OWNER}') edge"
+        )
+    )
+    assert maintenance_visibility_membership == {
+        "granted": maintenance_role,
+        "member": GUARD_OWNER,
+        "admin_option": False,
+        "inherit_option": True,
+        "set_option": False,
+    }
+    assert _postgres_boolean(postgres.scalar(
+        "SELECT pg_catalog.pg_has_role("
+        f"'{GUARD_OWNER}','{maintenance_role}','USAGE')::text"
+    )) is True
+    assert _postgres_boolean(postgres.scalar(
+        "SELECT pg_catalog.pg_has_role("
+        f"'{GUARD_OWNER}','{runtime_role}','USAGE')::text"
+    )) is False
     config_acl = json.loads(
         postgres.scalar(
             "SELECT pg_catalog.json_build_object("
