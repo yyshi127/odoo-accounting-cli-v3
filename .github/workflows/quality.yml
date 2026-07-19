@@ -564,13 +564,14 @@ jobs:
               path_failures = []
 
               def check_path(label, value, checker):
+                  text = os.fspath(value)
                   try:
-                      checker(value, require_root_owner=True)
+                      checker(text, require_root_owner=True)
                   except BaseException as error:
                       path_failures.append(
                           {
                               "label": label,
-                              "path": value,
+                              "path": text,
                               "type": type(error).__name__,
                               "message": str(error)[:1024],
                           }
