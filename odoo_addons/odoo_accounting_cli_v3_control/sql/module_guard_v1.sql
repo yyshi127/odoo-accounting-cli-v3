@@ -1621,6 +1621,7 @@ DECLARE
     target_anchor odoo_accounting_cli_v3_guard.operation_effect_anchor%ROWTYPE;
     resolution_anchor odoo_accounting_cli_v3_guard.operation_effect_anchor%ROWTYPE;
     stored_receipt odoo_accounting_cli_v3_guard.effect_finalization_receipt%ROWTYPE;
+    freshness_checked_at timestamp with time zone;
 BEGIN
     IF expected_guard_installation_id IS NULL
        OR expected_database_oid IS NULL
@@ -1633,10 +1634,7 @@ BEGIN
        OR proof_verified_at IS NULL
        OR proof_expires_at IS NULL
        OR proof_expires_at <= proof_verified_at
-       OR proof_expires_at <= pg_catalog.clock_timestamp()
        OR proof_expires_at > proof_verified_at + interval '5 minutes'
-       OR proof_verified_at > pg_catalog.clock_timestamp() + interval '1 minute'
-       OR proof_verified_at < pg_catalog.clock_timestamp() - interval '15 minutes'
        OR expected_operation_id IS NULL
        OR expected_operation_id = ''
        OR expected_operation_digest !~ '^[0-9a-f]{64}$'
@@ -1891,7 +1889,6 @@ BEGIN
            OR stored_receipt.verifier_key_id <> requested_verifier_key_id
            OR stored_receipt.verified_at <> proof_verified_at
            OR stored_receipt.expires_at <> proof_expires_at
-           OR stored_receipt.guard_epoch <> current_epoch
            OR stored_receipt.resolved_anchor_count <> anchors_to_resolve
            OR (
                SELECT pg_catalog.count(*)
@@ -1919,6 +1916,15 @@ BEGIN
         replayed := true;
         RETURN NEXT;
         RETURN;
+    END IF;
+    freshness_checked_at := pg_catalog.clock_timestamp();
+    IF proof_expires_at <= freshness_checked_at
+       OR proof_verified_at > freshness_checked_at + interval '1 minute'
+       OR proof_verified_at < freshness_checked_at - interval '15 minutes'
+    THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '22000',
+            MESSAGE = 'operation effect finalization request is invalid';
     END IF;
     IF EXISTS (
         SELECT 1
@@ -2980,6 +2986,9 @@ ALTER TABLE public.ir_module_module
     OWNER TO odoo_accounting_cli_v3_guard_owner;
 ALTER TABLE public.odoo_accounting_cli_operation
     OWNER TO odoo_accounting_cli_v3_guard_owner;
+
+REVOKE ALL ON TABLE public.ir_config_parameter FROM odoo_accounting_cli_v3_guard_owner;
+GRANT SELECT ON TABLE public.ir_config_parameter TO odoo_accounting_cli_v3_guard_owner;
 
 REVOKE ALL ON TABLE public.ir_module_module FROM PUBLIC;
 SELECT format('REVOKE ALL ON TABLE public.ir_module_module FROM %I', role.rolname)

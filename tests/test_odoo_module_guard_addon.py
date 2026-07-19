@@ -176,6 +176,10 @@ def test_privileged_bootstrap_uses_protected_owner_and_least_privilege_roles():
     assert "REVOKE DELETE, TRUNCATE, REFERENCES, TRIGGER" in sql
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.odoo_accounting_cli_operation" in sql
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.ir_module_module" in sql
+    assert (
+        "GRANT SELECT ON TABLE public.ir_config_parameter "
+        "TO odoo_accounting_cli_v3_guard_owner"
+    ) in sql
     assert sql.count("GRANT EXECUTE ON FUNCTION ") == 8
     for signature in (
         "odoo_accounting_cli_v3_guard.read_module_guard_state()",

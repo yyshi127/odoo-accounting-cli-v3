@@ -1599,6 +1599,45 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
         "inherit_option": False,
         "set_option": False,
     }
+    config_acl = json.loads(
+        postgres.scalar(
+            "SELECT pg_catalog.json_build_object("
+            "'owner',pg_catalog.json_build_array("
+            + ",".join(
+                "pg_catalog.has_table_privilege("
+                f"'{GUARD_OWNER}','public.ir_config_parameter','{privilege}')"
+                for privilege in (
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "TRUNCATE",
+                    "REFERENCES",
+                    "TRIGGER",
+                )
+            )
+            + "),'finalizer',pg_catalog.json_build_array("
+            + ",".join(
+                "pg_catalog.has_table_privilege("
+                f"'{finalizer_role}','public.ir_config_parameter','{privilege}')"
+                for privilege in (
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "TRUNCATE",
+                    "REFERENCES",
+                    "TRIGGER",
+                )
+            )
+            + "))::text",
+            database=database,
+        )
+    )
+    assert config_acl == {
+        "owner": [True, False, False, False, False, False, False],
+        "finalizer": [False, False, False, False, False, False, False],
+    }
 
     function_catalog = json.loads(
         postgres.scalar(
@@ -1719,7 +1758,7 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
 
     proof_id = uuid.uuid4()
     verified_at = datetime.now(timezone.utc).replace(microsecond=0)
-    expires_at = verified_at + timedelta(minutes=4)
+    expires_at = verified_at + timedelta(seconds=8)
     finalizer_call = (
         f"SET SESSION AUTHORIZATION {finalizer_role};"
         "SELECT pg_catalog.row_to_json(receipt)::text FROM "
@@ -1766,6 +1805,28 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
     assert results[0] == results[1]
     assert results[0]["remaining_unresolved_count"] == 0
     assert _guard_state(postgres, database)["unresolved_effect_count"] == 0
+
+    time.sleep(
+        max(0.0, (expires_at - datetime.now(timezone.utc)).total_seconds())
+        + 1.0
+    )
+    expired_replay = json.loads(
+        postgres.scalar(finalizer_call, database=database)
+    )
+    assert expired_replay.pop("replayed") is True
+    assert expired_replay == results[0]
+    expired_new_proof = finalizer_call.replace(
+        f"'{proof_id}'::uuid", f"'{uuid.uuid4()}'::uuid", 1
+    )
+    rejected_expired_new_proof = postgres.run(
+        expired_new_proof,
+        database=database,
+        check=False,
+    )
+    assert rejected_expired_new_proof.returncode != 0
+    assert "operation effect finalization request is invalid" in (
+        rejected_expired_new_proof.stderr
+    )
 
     authorization_id = uuid.uuid4()
     maintenance_expiry = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(

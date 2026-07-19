@@ -140,7 +140,7 @@ _FUNCTION_SOURCE_DIGESTS = {
     "verify_module_change": "060ac6b1af665bebbf6ad3c7d14b0ed7beca392889396396a3657691c85e8a3c",
     "read_module_guard_state": "5ec7e9cb13cd258721b57a804e0c867445993b96e95e0571c6983422647ae03f",
     "authorize_module_maintenance": "53e0f2ebc29dd11149c66b8157872d7bef8048571d679dc88117f6f017e62f89",
-    "finalize_operation_effect": "8f402aa622c00465d3b2cc91629b469e028aa9bb908c074cb7d7c843f1018562",
+    "finalize_operation_effect": "56349ee88cb879ccdae51b7183909ca8dfd76499233f20063ea2771b1d1137e3",
     "open_module_guard": "411a3bcd4f59d767b14689bd86edeff0c1defa88e625e606b7fe09ca5b66ca89",
     "close_module_guard": "e4e435f84971a67edab3f6e345b823ea4867eb40bc32c6a6aa35c7234c2a711c",
     "rescue_module_guard": "9aca79b0d05154276f14491e32fdbb86f44ee37edffabc720d6d53b2f9814241",
@@ -432,6 +432,7 @@ class OdooAccountingCliModuleGuard(models.AbstractModel):
         ]:
             self._fail("module guard schema ACL contract is invalid")
         expected_runtime = {
+            ("public", "ir_config_parameter"): (True,) * 7,
             ("public", "ir_module_module"): (True, True, True, True, False, False, False),
             ("public", "odoo_accounting_cli_operation"): (
                 True,
@@ -458,6 +459,7 @@ class OdooAccountingCliModuleGuard(models.AbstractModel):
                 FROM pg_class AS relation
                 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
                 WHERE (namespace.nspname, relation.relname) IN (
+                    ('public', 'ir_config_parameter'),
                     ('public', 'ir_module_module'),
                     ('public', 'odoo_accounting_cli_operation')
                 ) OR (namespace.nspname = %s AND relation.relname = ANY(%s))
@@ -470,6 +472,29 @@ class OdooAccountingCliModuleGuard(models.AbstractModel):
             }
             if observed != expected:
                 self._fail("module guard table ACL contract is invalid")
+        self.env.cr.execute(
+            """
+            SELECT
+                has_table_privilege(%s, 'public.ir_config_parameter', 'SELECT'),
+                has_table_privilege(%s, 'public.ir_config_parameter', 'INSERT'),
+                has_table_privilege(%s, 'public.ir_config_parameter', 'UPDATE'),
+                has_table_privilege(%s, 'public.ir_config_parameter', 'DELETE'),
+                has_table_privilege(%s, 'public.ir_config_parameter', 'TRUNCATE'),
+                has_table_privilege(%s, 'public.ir_config_parameter', 'REFERENCES'),
+                has_table_privilege(%s, 'public.ir_config_parameter', 'TRIGGER')
+            """,
+            [_GUARD_OWNER] * 7,
+        )
+        if self.env.cr.fetchone() != (
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+        ):
+            self._fail("module guard owner database identity ACL is invalid")
 
     @api.model
     def _verify_trigger_contract(self):

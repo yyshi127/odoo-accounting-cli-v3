@@ -199,6 +199,28 @@ def test_finalizer_attestation_is_database_bound_and_uses_global_lock_order():
     state_lock = finalizer.index("module_guard_state", operation_lock)
     anchor_lock = finalizer.index("operation_effect_anchor", state_lock)
     assert operation_lock < state_lock < anchor_lock
+    sql = _sql()
+    assert (
+        "GRANT SELECT ON TABLE public.ir_config_parameter "
+        "TO odoo_accounting_cli_v3_guard_owner"
+    ) in sql
+    assert (
+        "REVOKE ALL ON TABLE public.ir_config_parameter "
+        "FROM odoo_accounting_cli_v3_guard_owner"
+    ) in sql
+
+
+def test_finalizer_replays_exact_persisted_receipt_after_proof_expiry():
+    finalizer = _function("finalize_operation_effect")
+
+    receipt_lookup = finalizer.index("SELECT receipt.* INTO stored_receipt")
+    freshness_check = finalizer.index(
+        "freshness_checked_at := pg_catalog.clock_timestamp()"
+    )
+    replay_return = finalizer.index("replayed := true", receipt_lookup)
+    assert receipt_lookup < replay_return < freshness_check
+    assert "proof_expires_at <= freshness_checked_at" in finalizer[freshness_check:]
+    assert "stored_receipt.guard_epoch <> current_epoch" not in finalizer
 
 
 def test_guard_checks_use_explicit_null_safe_constraints_and_ledger_reconciliation():
