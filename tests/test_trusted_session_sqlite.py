@@ -266,7 +266,7 @@ def test_nonempty_wal_header_without_committed_schema_is_initialized(
     assert store.verify_integrity() is True
 
 
-def test_v1_store_is_rejected_without_in_place_mutation(tmp_path: Path) -> None:
+def test_v1_store_is_rejected_without_database_mutation(tmp_path: Path) -> None:
     path = (tmp_path / "sessions-v1.sqlite3").resolve()
     old_tables = dict(trusted_session_sqlite._TABLES)
     old_tables["trusted_sessions"] = old_tables["trusted_sessions"].replace(
@@ -313,7 +313,14 @@ def test_v1_store_is_rejected_without_in_place_mutation(tmp_path: Path) -> None:
         before_stat.st_size,
         before_stat.st_mtime_ns,
     )
-    assert tuple(sorted(item.name for item in path.parent.iterdir())) == siblings
+    expected_siblings = set(siblings)
+    if os.name == "posix":
+        # The persistent flock inode is coordination state, not a database
+        # migration; it must never be unlinked after another process can see it.
+        expected_siblings.add(f"{path.name}.writer.lock")
+    assert tuple(sorted(item.name for item in path.parent.iterdir())) == tuple(
+        sorted(expected_siblings)
+    )
 
 
 def test_empty_store_initialization_is_atomic_across_processes(tmp_path: Path) -> None:
@@ -1566,7 +1573,7 @@ def test_transient_sqlite_sidecar_mode_is_rechecked_until_private(
     def finish_sqlite_creation(delay: float) -> None:
         sleeps.append(delay)
         now["value"] += delay
-        if now["value"] >= 100.2:
+        if len(sleeps) >= 100:
             sidecar.chmod(0o600)
 
     monkeypatch.setattr(monotonic_deadline, "_monotonic", monotonic)
@@ -1576,6 +1583,7 @@ def test_transient_sqlite_sidecar_mode_is_rechecked_until_private(
     store._verify_sidecars()
 
     assert sum(sleeps) > 0.064
+    assert len(sleeps) == 100
     assert sum(sleeps) == pytest.approx(0.2)
 
 
