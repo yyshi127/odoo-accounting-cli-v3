@@ -175,9 +175,10 @@ def test_real_postgresql_rejects_dml_with_25006_and_preserves_row(
 def test_real_postgresql_hidden_rollback_discards_result(live_cursor):
     def cross_boundary():
         live_cursor.rollback()
+        live_cursor.execute("SELECT 1")
         return {"must": "discard"}
 
-    with pytest.raises(OdooReadTransactionError, match="boundary changed"):
+    with pytest.raises(OdooReadTransactionError, match="attestation failed"):
         run_readonly_odoo_transaction(
             SimpleNamespace(cr=live_cursor),
             cross_boundary,
@@ -189,9 +190,10 @@ def test_real_postgresql_hidden_rollback_discards_result(live_cursor):
 def test_real_postgresql_hidden_commit_discards_result(live_cursor):
     def cross_boundary():
         live_cursor.connection.commit()
+        live_cursor.execute("SELECT 1")
         return {"must": "discard"}
 
-    with pytest.raises(OdooReadTransactionError, match="boundary changed"):
+    with pytest.raises(OdooReadTransactionError, match="attestation failed"):
         run_readonly_odoo_transaction(
             SimpleNamespace(cr=live_cursor),
             cross_boundary,

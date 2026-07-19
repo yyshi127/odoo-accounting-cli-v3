@@ -1080,21 +1080,61 @@ jobs:
         run: |
           set -euo pipefail
           python_path="$(command -v python)"
-          report="$RUNNER_TEMP/read-transaction-postgresql.xml"
+          stage_root="/var/lib/odoo-accounting-cli-v3-read-transaction-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          sudo install -d -m 0755 -o root -g root \
+            "$stage_root/src/odoo_accounting_cli_v3/odoo" \
+            "$stage_root/tests"
+          gate_files=(
+            VERSION
+            pyproject.toml
+            src/odoo_accounting_cli_v3/__init__.py
+            src/odoo_accounting_cli_v3/odoo/__init__.py
+            src/odoo_accounting_cli_v3/odoo/read_transaction.py
+            tests/test_odoo_read_transaction_postgres.py
+          )
+          for path in "${gate_files[@]}"; do
+            sudo install -m 0444 -o root -g root "$path" "$stage_root/$path"
+            cmp -s "$path" "$stage_root/$path"
+            test "$(sudo stat -c '%U:%G:%a' "$stage_root/$path")" = \
+              root:root:444
+          done
+          test "$(sudo stat -c '%U:%G:%a' "$stage_root")" = root:root:755
+          report="$stage_root/read-transaction-postgresql.xml"
           sudo install -m 0600 -o odoo_probe -g odoo_probe /dev/null "$report"
-          sudo -u odoo_probe env -i \
-            HOME=/home/odoo_probe \
-            LANG=C.UTF-8 \
-            LC_ALL=C.UTF-8 \
-            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
-            PYTHONDONTWRITEBYTECODE=1 \
-            READ_TRANSACTION_POSTGRES_INTEGRATION=1 \
-            READ_TRANSACTION_PGHOST='${{ steps.postgres.outputs.socket_directory }}' \
-            READ_TRANSACTION_PGPORT='${{ steps.postgres.outputs.port }}' \
-            READ_TRANSACTION_PGUSER=odoo_probe \
+          probe_environment=(
+            HOME=/home/odoo_probe
+            LANG=C.UTF-8
+            LC_ALL=C.UTF-8
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin
+            "PYTHONPATH=$stage_root/src"
+            PYTHONDONTWRITEBYTECODE=1
+            READ_TRANSACTION_POSTGRES_INTEGRATION=1
+            "READ_TRANSACTION_PGHOST=${{ steps.postgres.outputs.socket_directory }}"
+            "READ_TRANSACTION_PGPORT=${{ steps.postgres.outputs.port }}"
+            READ_TRANSACTION_PGUSER=odoo_probe
+          )
+          sudo -u odoo_probe --chdir="$stage_root" env -i \
+            "${probe_environment[@]}" \
+            "$python_path" - "$stage_root" <<'PY'
+          import sys
+          from pathlib import Path
+
+          from odoo_accounting_cli_v3.odoo import read_transaction
+
+          root = Path(sys.argv[1]).resolve(strict=True)
+          observed = Path(read_transaction.__file__).resolve(strict=True)
+          expected = root / "src/odoo_accounting_cli_v3/odoo/read_transaction.py"
+          assert Path.cwd() == root, Path.cwd()
+          assert observed == expected, (observed, expected)
+          print(f"read_transaction_module={observed}")
+          PY
+          sudo -u odoo_probe --chdir="$stage_root" env -i \
+            "${probe_environment[@]}" \
             "$python_path" -m pytest -q -p no:cacheprovider \
+              -c "$stage_root/pyproject.toml" \
+              --rootdir="$stage_root" \
               --junitxml="$report" \
-              tests/test_odoo_read_transaction_postgres.py
+              "$stage_root/tests/test_odoo_read_transaction_postgres.py"
           sudo "$python_path" - "$report" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
