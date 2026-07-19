@@ -252,6 +252,18 @@ def reversal_parameters() -> dict:
     }
 
 
+def draft_cancel_parameters() -> dict:
+    return {
+        "company_id": 7,
+        "move_id": 881,
+        "expected_move_type": "out_invoice",
+        "expected_document_binding": "a" * 64,
+        "expected_business_binding": "b" * 64,
+        "reason": "Cancel duplicate pristine draft",
+        "idempotency_key": "cancel-draft-881",
+    }
+
+
 def recovery_parameters() -> dict:
     return {
         "company_id": 7,
@@ -276,6 +288,7 @@ VALID_CASES = {
     "acct.deferred.create.v1": deferred_parameters,
     "acct.period.adjustment_create.v1": adjustment_parameters,
     "acct.move.reverse.v1": reversal_parameters,
+    "acct.move.draft_cancel.v1": draft_cancel_parameters,
     "acct.recovery.execute.v1": recovery_parameters,
 }
 
@@ -448,6 +461,24 @@ def test_reversal_semantics_fail_closed_to_post_only():
 
     with pytest.raises(WriteSemanticError, match="posting_mode must be post"):
         validate_write_semantics("acct.move.reverse.v1", parameters)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("move_id", 0, "move_id"),
+        ("expected_move_type", "entry", "expected_move_type"),
+        ("expected_document_binding", "not-a-digest", "document_binding"),
+        ("expected_business_binding", "A" * 64, "business_binding"),
+    ),
+)
+def test_draft_cancel_semantics_bind_exact_pristine_document(
+    field, value, error
+):
+    parameters = draft_cancel_parameters()
+    parameters[field] = value
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.move.draft_cancel.v1", parameters)
 
 
 def test_depreciation_requires_real_asset_move_reference():

@@ -373,6 +373,7 @@ def persist_completed_with_recovery_plan(
     signed_plan_method: str = "cancel_draft_move",
     plan_version: int = 2,
     tamper_plan: bool = False,
+    verification_succeeds: bool = True,
 ):
     started = persist_executing(store, suffix)
     origin = started.operation
@@ -424,12 +425,12 @@ def persist_completed_with_recovery_plan(
         operation=verifying.operation,
         issuer="odoo-verifier",
         key_id="verification-v1",
-        succeeded=True,
+        succeeded=verification_succeeds,
         evidence_digest=content_digest(verification_evidence),
         issued_at=NOW,
         secret=VERIFICATION_SECRET,
     )
-    completed = store.complete_operation(
+    terminal = store.complete_operation(
         verification,
         evidence=verification_evidence,
         now=NOW,
@@ -443,7 +444,7 @@ def persist_completed_with_recovery_plan(
             "recovery_plan": recovery_plan,
         },
     )
-    return completed.operation, recovery_plan
+    return terminal.operation, recovery_plan
 
 
 def prepared_recovery_operation(
@@ -509,6 +510,7 @@ def append_historical_recovery_binding(
         origin_receipt=receipt,
         origin_execution=execution,
         plan_digest=plan["plan_digest"],
+        binding_version=1,
     )
     with store._transaction() as connection:
         store._append_audit_event(
@@ -3467,7 +3469,9 @@ class SQLitePersistenceTest(unittest.TestCase):
 
     def test_recovery_operation_binding_is_deterministic_idempotent_and_restart_safe(self) -> None:
         origin, plan = persist_completed_with_recovery_plan(
-            self.store, "fresh-recovery-binding"
+            self.store,
+            "fresh-recovery-binding",
+            verification_succeeds=False,
         )
         recovery = prepared_recovery_operation(origin, plan, "fresh-binding")
         self.store.get_or_create_operation(recovery, scope="recovery-fresh-binding")
@@ -3487,7 +3491,8 @@ class SQLitePersistenceTest(unittest.TestCase):
         self.assertEqual(binding.origin_operation_id, origin.operation_id)
         self.assertEqual(binding.origin_operation_digest, origin.digest)
         self.assertEqual(binding.origin_operation_revision, origin.revision)
-        self.assertEqual(binding.origin_terminal_state, State.COMPLETED.value)
+        self.assertEqual(binding.origin_terminal_state, State.FAILED.value)
+        self.assertEqual(binding.audit_event.payload["binding_version"], 2)
         self.assertEqual(binding.recovery_operation_id, recovery.operation_id)
         self.assertEqual(binding.recovery_operation_digest, recovery.digest)
         self.assertEqual(binding.recovery_operation_revision, 0)
@@ -3602,7 +3607,7 @@ class SQLitePersistenceTest(unittest.TestCase):
         ):
             SQLitePersistence(path)
 
-    def test_recovery_operation_binding_accepts_failed_origin_with_signed_plan(self) -> None:
+    def test_recovery_operation_binding_rejects_failed_execution_without_verification(self) -> None:
         started = persist_executing(self.store, "failed-origin-binding")
         origin = started.operation
         plan = recovery_plan_v2(
@@ -3645,25 +3650,17 @@ class SQLitePersistenceTest(unittest.TestCase):
             recovery, scope="recovery-failed-origin"
         )
 
-        binding = self.store.bind_recovery_operation(
-            origin_operation_id=failed.operation.operation_id,
-            recovery_operation_id=recovery.operation_id,
-            expected_origin_revision=failed.operation.revision,
-            plan_digest=plan["plan_digest"],
-            occurred_at=NOW + timedelta(seconds=1),
-        )
-
-        self.assertEqual(binding.origin_terminal_state, State.FAILED.value)
-        self.assertEqual(
-            binding.origin_execution_result_id,
-            binding.origin_result_id,
-        )
-        self.assertEqual(
-            SQLitePersistence(self.path).get_recovery_operation_binding(
-                recovery.operation_id
-            ),
-            binding,
-        )
+        with self.assertRaisesRegex(
+            PersistenceIntegrityError,
+            "successful execution and failed verification",
+        ):
+            self.store.bind_recovery_operation(
+                origin_operation_id=failed.operation.operation_id,
+                recovery_operation_id=recovery.operation_id,
+                expected_origin_revision=failed.operation.revision,
+                plan_digest=plan["plan_digest"],
+                occurred_at=NOW + timedelta(seconds=1),
+            )
 
     def test_recovery_operation_binding_fails_closed_on_origin_plan_and_context_drift(self) -> None:
         origin, plan = persist_completed_with_recovery_plan(
@@ -3783,7 +3780,9 @@ class SQLitePersistenceTest(unittest.TestCase):
 
     def test_recovery_binding_reserved_evidence_rejects_rehashed_tamper_and_orphan(self) -> None:
         origin, plan = persist_completed_with_recovery_plan(
-            self.store, "recovery-binding-tamper"
+            self.store,
+            "recovery-binding-tamper",
+            verification_succeeds=False,
         )
         recovery = prepared_recovery_operation(origin, plan, "tamper")
         self.store.get_or_create_operation(recovery, scope="recovery-tamper")

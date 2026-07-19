@@ -173,6 +173,7 @@ class FakeOdoo:
         self.executor_authorized = True
         self.approver_authorized = True
         self.raise_approved = False
+        self.verification_passes = True
         self.executor_requests: list[dict[str, Any]] = []
         self.approver_requests: list[dict[str, Any]] = []
         self.precheck_requests: list[dict[str, Any]] = []
@@ -532,10 +533,21 @@ class FakeOdoo:
             allowed_issuers=frozenset({self.harness.config.execution.issuer}),
             expected_revision=operation.revision,
         )
+        verification_passes = self.verification_passes
+        fresh_records = (
+            copy.deepcopy(execution_evidence["odoo_records"])
+            if verification_passes
+            else []
+        )
+        fresh_snapshots = (
+            copy.deepcopy(execution_evidence["difference"]["after"])
+            if verification_passes
+            else []
+        )
         verification_evidence = {
             "operation_id": operation.operation_id,
             "capability_id": operation.capability_id,
-            "passed": True,
+            "passed": verification_passes,
             "method": (
                 "read_back_trusted_plan_target_fingerprints_and_action_specific_compensation_state_v1"
                 if operation.capability_id == "acct.recovery.execute.v1"
@@ -551,12 +563,10 @@ class FakeOdoo:
             "verified_at": NOW.isoformat(),
             "readback": {
                 "company_id": operation.company_id,
-                "records": copy.deepcopy(execution_evidence["odoo_records"]),
-                "fresh_snapshots": copy.deepcopy(
-                    execution_evidence["difference"]["after"]
-                ),
+                "records": fresh_records,
+                "fresh_snapshots": fresh_snapshots,
                 "fresh_snapshots_digest": hashlib.sha256(
-                    canonical_json(execution_evidence["difference"]["after"])
+                    canonical_json(fresh_snapshots)
                 ).hexdigest(),
                 "request_parameters_digest": hashlib.sha256(
                     canonical_json(operation.parameters)
@@ -565,7 +575,9 @@ class FakeOdoo:
                     "operation_id": operation.operation_id,
                     "capability_id": operation.capability_id,
                     "company_id": operation.company_id,
-                    "state": "verified",
+                    "state": (
+                        "verified" if verification_passes else "failed"
+                    ),
                     "execution_evidence_digest": verifying.execution_result_digest,
                 },
             },
@@ -574,7 +586,7 @@ class FakeOdoo:
             operation=verifying,
             issuer=self.harness.config.verification.issuer,
             key_id=self.harness.config.verification.key_id,
-            succeeded=True,
+            succeeded=verification_passes,
             evidence_digest=hashlib.sha256(
                 canonical_json(verification_evidence)
             ).hexdigest(),
@@ -1374,6 +1386,7 @@ def test_recover_creates_durable_binding_then_previews_receipt_plan(harness: Har
     draft_parameters = _draft_customer_invoice_parameters(
         "customer-draft-recover-origin"
     )
+    harness.odoo.verification_passes = False
     _parameters_value, prepared, _preview, _approval, _payload, _executed, result = (
         harness.complete(
             "recover-origin",
@@ -1381,9 +1394,11 @@ def test_recover_creates_durable_binding_then_previews_receipt_plan(harness: Har
             parameters=draft_parameters,
         )
     )
+    harness.odoo.verification_passes = True
     origin_status = harness.call(
         "operation.status", {"operation_id": prepared["operation_id"]}
     )
+    assert origin_status["operation_state"] == "failed"
     recovery_payload = {
         "origin_operation_id": prepared["operation_id"],
         "expected_origin_revision": origin_status["operation_revision"],
@@ -1427,6 +1442,7 @@ def test_recovery_operation_executes_with_trusted_plan_and_returns_verified_rece
     draft_parameters = _draft_customer_invoice_parameters(
         "customer-draft-recover-execute-origin"
     )
+    harness.odoo.verification_passes = False
     _parameters_value, prepared, _preview, _approval, _payload, _executed, result = (
         harness.complete(
             "recover-execute-origin",
@@ -1434,6 +1450,7 @@ def test_recovery_operation_executes_with_trusted_plan_and_returns_verified_rece
             parameters=draft_parameters,
         )
     )
+    harness.odoo.verification_passes = True
     origin_status = harness.call(
         "operation.status", {"operation_id": prepared["operation_id"]}
     )
@@ -1472,12 +1489,14 @@ def test_recovery_operation_executes_with_trusted_plan_and_returns_verified_rece
     assert executed["verification"]["passed"] is True
     assert executed["recovery_plan"]["status"] == "not_applicable"
     assert executed["audit_receipt"]["capability_id"] == "acct.recovery.execute.v1"
+    assert executed["database_finalization"]["resolution_kind"] == "recovered"
+    assert executed["database_finalization"]["resolved_anchor_count"] == 2
     assert harness.odoo.approved_requests[-1]["trusted_recovery_plan"] == result[
         "recovery_plan"
     ]
     assert harness.call(
         "operation.status", {"operation_id": prepared["operation_id"]}
-    )["operation_state"] == "completed"
+    )["operation_state"] == "failed"
 
 
 def test_v2_parameter_tamper_and_cross_action_replay_are_rejected(harness: Harness):

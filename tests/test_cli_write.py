@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import types
@@ -16,7 +17,7 @@ from odoo_accounting_cli_v3.effect_finalizer import (
     EffectFinalizationRequest,
     create_effect_attestation,
 )
-from odoo_accounting_cli_v3.operations import Approval
+from odoo_accounting_cli_v3.operations import Approval, canonical_json
 from odoo_accounting_cli_v3.write_protocol import approval_to_mapping
 
 
@@ -24,18 +25,26 @@ NOW = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
 EFFECT_SECRET = b"cli-effect-finalizer-secret-material-32-bytes"
 
 
-def _completed_result(operation_id: str = "op-1") -> dict[str, Any]:
+def _completed_result(
+    operation_id: str = "op-1",
+    *,
+    recovered_origin_operation_id: str | None = None,
+) -> dict[str, Any]:
+    resolved_operation_id = recovered_origin_operation_id or operation_id
+    resolution_kind = (
+        "recovered" if recovered_origin_operation_id is not None else "verified"
+    )
     intent = EffectFinalizationIntent(
         database_name="odoo_v3_sandbox",
         database_uuid="11111111-1111-4111-8111-111111111111",
-        operation_id=operation_id,
-        operation_digest="1" * 64,
-        execution_result_digest="2" * 64,
+        operation_id=resolved_operation_id,
+        operation_digest="4" * 64 if recovered_origin_operation_id else "1" * 64,
+        execution_result_digest="5" * 64 if recovered_origin_operation_id else "2" * 64,
         resolution_operation_id=operation_id,
         resolution_operation_digest="1" * 64,
         resolution_execution_result_digest="2" * 64,
         resolution_result_digest="3" * 64,
-        resolution_kind="verified",
+        resolution_kind=resolution_kind,
     )
     request = EffectFinalizationRequest.from_intent(
         intent,
@@ -55,11 +64,11 @@ def _completed_result(operation_id: str = "op-1") -> dict[str, Any]:
             ),
             "receipt_database_oid": 16384,
             "receipt_database_uuid": intent.database_uuid,
-            "resolved_operation_id": operation_id,
+            "resolved_operation_id": resolved_operation_id,
             "receipt_resolution_operation_id": operation_id,
-            "applied_resolution_kind": "verified",
-            "resolved_anchor_count": 1,
-            "remaining_unresolved_count": 3,
+            "applied_resolution_kind": resolution_kind,
+            "resolved_anchor_count": 2 if recovered_origin_operation_id else 1,
+            "remaining_unresolved_count": 0 if recovered_origin_operation_id else 3,
             "guard_epoch": 0,
             "receipt_attestation_digest": attestation.attestation_digest,
             "finalized_at": "2026-07-15T08:00:01Z",
@@ -282,6 +291,73 @@ def test_cli_never_reports_success_without_operation_bound_database_receipt(
             result["audit_receipt"]["database_uuid"] = (
                 "33333333-3333-4333-8333-333333333333"
             )
+        return result
+
+    _install_dispatcher(monkeypatch, dispatch)
+    response = _invoke("operation.result", _request("operation.result"))
+
+    assert response.exit_code == 0, response.output
+    assert json.loads(response.stdout)["business_succeeded"] is False
+
+
+def test_cli_accepts_recovered_result_only_with_two_anchor_database_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def dispatch(_action: str, _parsed: Any) -> dict[str, Any]:
+        return _completed_result(
+            "op-1", recovered_origin_operation_id="op-failed-origin"
+        )
+
+    _install_dispatcher(monkeypatch, dispatch)
+    response = _invoke("operation.result", _request("operation.result"))
+
+    assert response.exit_code == 0, response.output
+    payload = json.loads(response.stdout)
+    assert payload["business_succeeded"] is True
+    assert payload["data"]["operation_state"] == "completed"
+    finalization = payload["data"]["database_finalization"]
+    assert {
+        key: finalization[key]
+        for key in (
+            "operation_id",
+            "resolution_operation_id",
+            "resolved_anchor_count",
+            "remaining_unresolved_count",
+        )
+    } == {
+        "operation_id": "op-failed-origin",
+        "resolution_operation_id": "op-1",
+        "resolved_anchor_count": 2,
+        "remaining_unresolved_count": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("operation_id", "op-1"),
+        ("resolution_operation_id", "op-other-recovery"),
+        ("resolved_anchor_count", 1),
+    ),
+)
+def test_cli_rejects_misbound_recovered_database_receipt(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: Any
+) -> None:
+    def dispatch(_action: str, _parsed: Any) -> dict[str, Any]:
+        result = _completed_result(
+            "op-1", recovered_origin_operation_id="op-failed-origin"
+        )
+        finalization = result["database_finalization"]
+        finalization[field] = value
+        finalization["receipt_digest"] = hashlib.sha256(
+            canonical_json(
+                {
+                    key: item
+                    for key, item in finalization.items()
+                    if key != "receipt_digest"
+                }
+            )
+        ).hexdigest()
         return result
 
     _install_dispatcher(monkeypatch, dispatch)

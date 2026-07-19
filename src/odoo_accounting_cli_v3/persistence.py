@@ -68,6 +68,7 @@ _RECEIPT_KEY_ID_META = "receipt_verifier_key_id"
 _RECEIPT_KEY_DIGEST_META = "receipt_verifier_secret_sha256"
 _RECOVERY_BINDING_EVENT_PREFIX = "recovery-binding:"
 _RECOVERY_BINDING_EVENT_TYPE = "recovery.binding.created"
+_RECOVERY_BINDING_VERSION = 2
 _RECOVERY_BINDING_FIELDS = frozenset(
     {
         "binding_version",
@@ -2301,9 +2302,10 @@ def _recovery_operation_binding_payload(
     origin_receipt: StoredFinalWriteReceipt,
     origin_execution: StoredTrustedResultRecord,
     plan_digest: str,
+    binding_version: int = _RECOVERY_BINDING_VERSION,
 ) -> dict[str, Any]:
     return {
-        "binding_version": 1,
+        "binding_version": binding_version,
         "company_id": origin.company_id,
         "database_name": origin.database_name,
         "database_uuid": origin.database_uuid,
@@ -4837,6 +4839,52 @@ class SQLitePersistence:
         return execution
 
     @classmethod
+    def _validate_incident_recovery_origin(
+        cls,
+        connection: sqlite3.Connection,
+        origin: Operation,
+        origin_receipt: StoredFinalWriteReceipt,
+    ) -> None:
+        """Require the two durable result anchors that define an incident."""
+
+        rows = tuple(
+            connection.execute(
+                "SELECT result_id FROM trusted_result_records "
+                "WHERE operation_id = ? ORDER BY operation_revision",
+                (origin.operation_id,),
+            )
+        )
+        records = tuple(
+            cls._load_trusted_result_record(connection, row["result_id"])
+            for row in rows
+        )
+        executions = tuple(
+            record for record in records if record.kind == "execution"
+        )
+        verifications = tuple(
+            record for record in records if record.kind == "verification"
+        )
+        if (
+            origin.state != State.FAILED
+            or origin_receipt.terminal_state != State.FAILED.value
+            or len(records) != 2
+            or len(executions) != 1
+            or len(verifications) != 1
+            or executions[0].succeeded is not True
+            or verifications[0].succeeded is not False
+            or origin.execution_result_digest != executions[0].evidence_digest
+            or origin.verification_result_digest != verifications[0].evidence_digest
+            or verifications[0].prior_evidence_digest
+            != executions[0].evidence_digest
+            or origin_receipt.result_id != verifications[0].result_id
+            or origin_receipt.evidence_digest != verifications[0].evidence_digest
+        ):
+            raise PersistenceIntegrityError(
+                "incident recovery requires a failed origin with successful "
+                "execution and failed verification evidence"
+            )
+
+    @classmethod
     def _load_origin_receipt_for_recovery_binding(
         cls,
         connection: sqlite3.Connection,
@@ -4900,7 +4948,7 @@ class SQLitePersistence:
                 )
             if (
                 type(payload["binding_version"]) is not int
-                or payload["binding_version"] != 1
+                or payload["binding_version"] not in {1, _RECOVERY_BINDING_VERSION}
             ):
                 raise PersistenceIntegrityError(
                     "stored recovery operation binding version is invalid"
@@ -4987,6 +5035,10 @@ class SQLitePersistence:
                 expected_plan_digest=plan_digest,
                 require_executable=False,
             )
+            if payload["binding_version"] == _RECOVERY_BINDING_VERSION:
+                cls._validate_incident_recovery_origin(
+                    connection, origin, origin_receipt
+                )
             if event.occurred_at < origin_receipt.recorded_at:
                 raise PersistenceIntegrityError(
                     "stored recovery operation binding predates its origin receipt"
@@ -5020,6 +5072,7 @@ class SQLitePersistence:
                 origin_receipt=origin_receipt,
                 origin_execution=origin_execution,
                 plan_digest=plan_digest,
+                binding_version=payload["binding_version"],
             )
             if canonical_json(payload) != canonical_json(expected_payload):
                 raise PersistenceIntegrityError(
@@ -6608,6 +6661,9 @@ class SQLitePersistence:
                 origin_receipt,
                 expected_plan_digest=plan_digest,
                 require_executable=True,
+            )
+            self._validate_incident_recovery_origin(
+                connection, origin, origin_receipt
             )
             if normalized_occurred_at < origin_receipt.recorded_at:
                 raise PersistenceIntegrityError(

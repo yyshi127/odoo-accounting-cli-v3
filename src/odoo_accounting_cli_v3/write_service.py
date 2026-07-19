@@ -130,6 +130,9 @@ _ALLOWED_MODELS = {
     "acct.move.reverse.v1": frozenset(
         {"account.move", "account.move.line"}
     ),
+    "acct.move.draft_cancel.v1": frozenset(
+        {"account.move", "account.move.line"}
+    ),
     "acct.recovery.execute.v1": frozenset(
         {
             "account.asset",
@@ -1243,8 +1246,71 @@ class DurableWriteService:
             raise WriteServiceError("durable final receipt differs from verified result")
         return pinned_channel
 
-    @staticmethod
+    def _validated_incident_origin_results(
+        self,
+        origin: Operation,
+        *,
+        binding: Any | None = None,
+    ) -> tuple[BackendEvidence, BackendEvidence]:
+        if origin.state != State.FAILED:
+            raise WriteServiceError(
+                "incident recovery requires a failed origin operation"
+            )
+        records = self._store.get_trusted_result_records(origin.operation_id)
+        executions = [record for record in records if record.kind == "execution"]
+        verifications = [
+            record for record in records if record.kind == "verification"
+        ]
+        if (
+            len(records) != 2
+            or len(executions) != 1
+            or len(verifications) != 1
+            or executions[0].succeeded is not True
+            or verifications[0].succeeded is not False
+            or origin.execution_result_digest != executions[0].evidence_digest
+            or origin.verification_result_digest
+            != verifications[0].evidence_digest
+            or verifications[0].prior_evidence_digest
+            != executions[0].evidence_digest
+        ):
+            raise WriteServiceError(
+                "incident recovery requires durable successful execution and "
+                "failed verification evidence"
+            )
+        if binding is not None and (
+            binding.origin_execution_result_id != executions[0].result_id
+            or binding.origin_execution_evidence_digest
+            != executions[0].evidence_digest
+            or binding.origin_result_id != verifications[0].result_id
+            or binding.origin_result_evidence_digest
+            != verifications[0].evidence_digest
+            or binding.origin_terminal_state != State.FAILED.value
+            or binding.audit_event.payload.get("binding_version") != 2
+        ):
+            raise WriteServiceError(
+                "incident recovery binding differs from durable origin results"
+            )
+        execution = self._stored_backend_evidence(executions[0])
+        verification = self._stored_backend_evidence(verifications[0])
+        self._verify_terminal_trusted_results(
+            operation=origin,
+            execution=execution,
+            verification=verification,
+        )
+        try:
+            capability = self._capabilities[origin.capability_id]
+        except KeyError as exc:
+            raise WriteServiceError(
+                "incident recovery origin capability is unavailable"
+            ) from exc
+        self._validate_execution_evidence(execution, origin, capability)
+        self._validate_verification_evidence(
+            verification, origin, capability, execution
+        )
+        return execution, verification
+
     def _verified_effect_finalization_intent(
+        self,
         operation: Operation,
         execution: BackendEvidence,
         verification: BackendEvidence,
@@ -1253,18 +1319,57 @@ class DurableWriteService:
             raise WriteServiceError(
                 "effect finalization requires a completed operation"
             )
-        execution_digest = trusted_result_envelope_digest(
+        resolution_execution_digest = trusted_result_envelope_digest(
             execution.result, operation
         )
+        if operation.capability_id == "acct.recovery.execute.v1":
+            try:
+                binding = self._store.get_recovery_operation_binding(
+                    operation.operation_id
+                )
+                origin = self._store.get_operation(binding.origin_operation_id)
+            except Exception as exc:
+                raise WriteServiceError(
+                    "incident recovery has no durable origin binding"
+                ) from exc
+            self._assert_recovery_operation_binding(
+                operation,
+                origin,
+                operation.parameters.get("expected_recovery_plan_digest"),
+                binding,
+            )
+            origin_execution, _origin_verification = (
+                self._validated_incident_origin_results(
+                    origin, binding=binding
+                )
+            )
+            return EffectFinalizationIntent(
+                database_name=origin.database_name,
+                database_uuid=origin.database_uuid,
+                operation_id=origin.operation_id,
+                operation_digest=origin.digest,
+                execution_result_digest=trusted_result_envelope_digest(
+                    origin_execution.result, origin
+                ),
+                resolution_operation_id=operation.operation_id,
+                resolution_operation_digest=operation.digest,
+                resolution_execution_result_digest=(
+                    resolution_execution_digest
+                ),
+                resolution_result_digest=trusted_result_envelope_digest(
+                    verification.result, operation
+                ),
+                resolution_kind="recovered",
+            )
         return EffectFinalizationIntent(
             database_name=operation.database_name,
             database_uuid=operation.database_uuid,
             operation_id=operation.operation_id,
             operation_digest=operation.digest,
-            execution_result_digest=execution_digest,
+            execution_result_digest=resolution_execution_digest,
             resolution_operation_id=operation.operation_id,
             resolution_operation_digest=operation.digest,
-            resolution_execution_result_digest=execution_digest,
+            resolution_execution_result_digest=resolution_execution_digest,
             resolution_result_digest=trusted_result_envelope_digest(
                 verification.result, operation
             ),
@@ -1510,8 +1615,7 @@ class DurableWriteService:
         *,
         expected_plan_digest: str | None = None,
     ) -> dict[str, Any]:
-        if origin_operation.state not in {State.COMPLETED, State.FAILED}:
-            raise WriteServiceError("origin operation has no terminal recovery plan")
+        self._validated_incident_origin_results(origin_operation)
         output = self.result(context, origin_operation.operation_id)
         plan = output.get("recovery_plan")
         try:
@@ -1539,52 +1643,13 @@ class DurableWriteService:
             raise WriteServiceError(
                 "origin recovery plan is unavailable or outside the bound company"
             )
-        actions = plan["action_targets"]
-        guards = plan["guard_records"]
-        result_records = output.get("odoo_records")
-        if origin_operation.capability_id == "acct.invoice.customer_create.v1":
-            expected_method = DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
-            expected_oracle = DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
-            document_label = "customer invoice"
-        elif origin_operation.capability_id == "acct.bill.vendor_create.v1":
-            expected_method = DRAFT_VENDOR_BILL_RECOVERY_METHOD
-            expected_oracle = DRAFT_VENDOR_BILL_RECOVERY_ORACLE
-            document_label = "vendor bill"
-        else:
-            expected_method = None
-            expected_oracle = None
-            document_label = "document"
         if (
-            origin_operation.state != State.COMPLETED
-            or origin_operation.environment != "sandbox"
-            or expected_method is None
-            or origin_operation.parameters.get("posting_mode") != "draft"
-            or plan["method"] != expected_method
-            or plan["oracle_id"] != expected_oracle
-            or len(actions) != 1
-            or actions[0]["model"] != "account.move"
-            or actions[0]["record_state"] != "draft"
-            or not guards
-            or any(
-                guard["model"] != "account.move.line"
-                or guard["expected_outcome"] != "survive_allowed_delta"
-                for guard in guards
-            )
-            or not isinstance(result_records, list)
-            or {
-                (record.get("model"), record.get("record_id"))
-                for record in result_records
-                if isinstance(record, dict)
-            }
-            != {
-                (actions[0]["model"], actions[0]["record_id"]),
-                *((guard["model"], guard["record_id"]) for guard in guards),
-            }
+            output.get("operation_state") != State.FAILED.value
+            or output.get("verification", {}).get("passed") is not False
+            or output.get("database_finalization") is not None
         ):
             raise WriteServiceError(
-                "origin recovery is restricted to an exact sandbox draft "
-                + document_label
-                + " receipt"
+                "incident recovery origin result is not a failed verification"
             )
         return json.loads(canonical_json(plan))
 
@@ -1609,6 +1674,10 @@ class DurableWriteService:
             or origin.revision != expected_origin_revision
         ):
             raise WriteServiceError("origin operation revision changed")
+        if recovery_operation_id == origin.operation_id:
+            raise WriteServiceError(
+                "recovery operation must be distinct from its origin"
+            )
         plan = self._validated_origin_recovery_plan(context, origin)
         parameters = {
             "company_id": origin.company_id,
@@ -1639,7 +1708,7 @@ class DurableWriteService:
                 occurred_at=self._now(),
             )
         self._assert_recovery_operation_binding(
-            recovery, origin, plan, binding
+            recovery, origin, plan["plan_digest"], binding
         )
         return {
             "operation": recovery,
@@ -1653,11 +1722,12 @@ class DurableWriteService:
     def _assert_recovery_operation_binding(
         operation: Operation,
         origin: Operation,
-        plan: dict[str, Any],
+        plan_digest: Any,
         binding: Any,
     ) -> None:
         if (
-            binding.recovery_operation_id != operation.operation_id
+            operation.operation_id == origin.operation_id
+            or binding.recovery_operation_id != operation.operation_id
             or binding.recovery_request_id != operation.request_id
             or binding.recovery_operation_digest != operation.digest
             or binding.origin_operation_id != origin.operation_id
@@ -1665,7 +1735,10 @@ class DurableWriteService:
             or binding.origin_operation_digest != origin.digest
             or binding.origin_operation_revision != origin.revision
             or binding.origin_terminal_state != origin.state.value
-            or not hmac.compare_digest(binding.plan_digest, plan["plan_digest"])
+            or binding.audit_event.payload.get("binding_version") != 2
+            or not isinstance(plan_digest, str)
+            or not hmac.compare_digest(binding.plan_digest, plan_digest)
+            or binding.origin_terminal_state != State.FAILED.value
             or binding.principal != operation.principal
             or binding.user_id != operation.user_id
             or binding.company_id != operation.company_id
@@ -1709,7 +1782,7 @@ class DurableWriteService:
             ],
         )
         self._assert_recovery_operation_binding(
-            operation, origin, plan, binding
+            operation, origin, plan["plan_digest"], binding
         )
         return plan
 

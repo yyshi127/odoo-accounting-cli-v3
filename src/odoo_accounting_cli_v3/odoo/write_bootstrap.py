@@ -236,7 +236,10 @@ def _resource_lock_digests(
         add("account.move", parameters.get("depreciation_move_id"))
     elif capability_id == "acct.deferred.create.v1":
         add("account.move.line", parameters.get("source_move_line_id"))
-    elif capability_id == "acct.move.reverse.v1":
+    elif capability_id in {
+        "acct.move.reverse.v1",
+        "acct.move.draft_cancel.v1",
+    }:
         add("account.move", parameters.get("move_id"))
     elif capability_id in {
         "acct.invoice.customer_create.v1",
@@ -2066,7 +2069,11 @@ def execute_write_from_odoo_shell(
                 live_precheck,
                 company_id=operation.company_id,
                 exclusive_before=(
-                    operation.capability_id == "acct.recovery.execute.v1"
+                    operation.capability_id
+                    in {
+                        "acct.move.draft_cancel.v1",
+                        "acct.recovery.execute.v1",
+                    }
                 ),
             )
         except Exception as exc:

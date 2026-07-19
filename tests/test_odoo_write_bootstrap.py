@@ -112,6 +112,24 @@ def test_overlapping_accounting_resources_share_a_stable_advisory_lock():
     assert all(len(value) == 64 for value in first)
 
 
+def test_draft_cancel_uses_the_same_move_resource_lock_as_move_reversal():
+    draft_cancel = _resource_lock_digests(
+        "acct.move.draft_cancel.v1",
+        7,
+        {"move_id": 501},
+        None,
+    )
+    reversal = _resource_lock_digests(
+        "acct.move.reverse.v1",
+        7,
+        {"move_id": 501},
+        None,
+    )
+
+    assert draft_cancel == reversal
+    assert len(draft_cancel) == 1
+
+
 def test_difference_marks_every_created_record_absent_before_it_exists():
     values = {
         "company_id": 7,
@@ -1345,6 +1363,7 @@ def _capabilities():
     for capability_id in (
         "acct.invoice.customer_create.v1",
         "acct.bill.vendor_create.v1",
+        "acct.move.draft_cancel.v1",
         "acct.recovery.execute.v1",
     ):
         capability = copy.deepcopy(
@@ -1397,6 +1416,20 @@ def _vendor_parameters(*, company_id=7, idempotency_key="bill-1"):
     parameters.pop("reference")
     parameters["vendor_reference"] = "BILL-SANDBOX-1"
     return parameters
+
+
+def _draft_cancel_parameters(
+    *, company_id=7, idempotency_key="draft-cancel-501"
+):
+    return {
+        "company_id": company_id,
+        "move_id": 501,
+        "expected_move_type": "out_invoice",
+        "expected_document_binding": "a" * 64,
+        "expected_business_binding": "b" * 64,
+        "reason": "Cancel duplicate pristine draft",
+        "idempotency_key": idempotency_key,
+    }
 
 
 def _recovery_case(
@@ -3137,6 +3170,108 @@ def test_recovery_precheck_exclusively_locks_action_and_guards_but_not_dependenc
     assert line.lock_calls == [False]
     assert journal.lock_calls == [True]
     assert env.cache_invalidations == 1
+
+
+@pytest.mark.parametrize("drift_after_lock", [False, True])
+def test_draft_cancel_requires_null_plan_exclusive_graph_lock_and_no_drift(
+    drift_after_lock,
+):
+    parameters = _draft_cancel_parameters()
+
+    def mutate_on_lock(record):
+        if drift_after_lock:
+            record.snapshot_state = "fingerprint-drift"
+
+    move = LockableRecordset(501, on_lock=mutate_on_lock)
+    line = LockableRecordset(502)
+    journal = LockableRecordset(5)
+
+    def snapshot(model, record):
+        values = {"company_id": 7, "state": record.snapshot_state}
+        return {
+            "model": model,
+            "record_id": record.id,
+            "company_id": 7,
+            "state": record.snapshot_state,
+            "values": values,
+            "values_digest": hashlib.sha256(
+                canonical_json(values)
+            ).hexdigest(),
+        }
+
+    class DraftCancelLockHandler(Handler):
+        def evidence(self):
+            result = _raw_precheck(
+                "acct.move.draft_cancel.v1", parameters
+            )
+            result["before"] = [
+                snapshot("account.move", move),
+                snapshot("account.move.line", line),
+            ]
+            result["dependencies"] = [
+                snapshot("account.journal", journal)
+            ]
+            return result
+
+        def precheck(self, capability_id, request_parameters):
+            assert capability_id == "acct.move.draft_cancel.v1"
+            assert request_parameters == parameters
+            self.precheck_calls += 1
+            return self.evidence()
+
+        def execute_prechecked(self, capability_id, request_parameters, checked):
+            assert move.lock_calls == [False]
+            assert line.lock_calls == [False]
+            assert journal.lock_calls == [True]
+            return super().execute_prechecked(
+                capability_id, request_parameters, checked
+            )
+
+    handler = DraftCancelLockHandler()
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.move.draft_cancel.v1",
+        operation_id=("op-draft-cancel-drift" if drift_after_lock else "op-draft-cancel"),
+        raw_precheck=handler.evidence(),
+    )
+    root, cr, anchors, handler, kwargs = _harness(handler=handler)
+    anchors.bound_env._models.update({
+        "account.move": LockableModel(move),
+        "account.move.line": LockableModel(line),
+        "account.journal": LockableModel(journal),
+    })
+
+    result = execute_write_from_odoo_shell(
+        root,
+        _request(
+            context,
+            operation,
+            approval,
+            trusted_recovery_plan=None,
+        ),
+        **kwargs,
+    )
+
+    execution = trusted_result_from_mapping(result["execution"]["result"])
+    assert handler.factory_plans == [None] + ([] if drift_after_lock else [None])
+    assert move.lock_calls == [False]
+    assert line.lock_calls == [False]
+    assert journal.lock_calls == [True]
+    if drift_after_lock:
+        assert execution.succeeded is False
+        assert result["execution"]["evidence"]["failure_checks"] == [
+            "precheck_drift_after_dependency_lock"
+        ]
+        assert handler.calls == []
+        assert cr.commits == 1
+    else:
+        assert execution.succeeded is True
+        assert handler.calls == ["execute", "verify"]
+        assert cr.commits == 2
+        anchor = next(iter(anchors.by_scope.values()))
+        assert anchor.resource_locks == _resource_lock_digests(
+            "acct.move.draft_cancel.v1", 7, parameters, None
+        )
 
 
 def test_dependency_drift_after_row_lock_is_anchored_before_any_business_write():

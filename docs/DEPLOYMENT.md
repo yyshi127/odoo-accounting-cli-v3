@@ -390,13 +390,26 @@ and negative-test results. A command exit code alone is not evidence.
 
 ## Dedicated write-sandbox candidate verification
 
-All 13 registered write capabilities are closed by default. Local contracts,
+All 14 registered write capabilities are closed by default. Local contracts,
 handlers, and tests do not authorize staging. After the complete local gate,
 create a new reviewed release that stages only the selected capabilities for a
 dedicated sandbox. The sandbox must have its own database UUID, filestore,
 database filter, disabled scheduled jobs, non-superuser executor, separately
 authorized approver, and isolated write state. Do not reuse a production clone
 whose UUID, filestore, cron workers, or live connections are shared.
+
+`acct.move.draft_cancel.v1` is one of those closed capabilities: its registry
+`enabled_environments` is empty and these deployment instructions do not stage
+it. Its `expected_document_binding` and `expected_business_binding` must come
+from a trusted, ACL- and company-scoped read of the exact V3-created
+`account.move` fields `odoo_cli_v3_document_binding` and
+`odoo_cli_v3_business_binding`; Pi and users must not invent, recompute, or
+copy them from an untrusted business message. Before this write can be staged,
+a separately registered candidate-read path must return the exact company,
+move ID, move type, both immutable bindings, and pristine-draft eligibility in
+a signed Odoo receipt. Its strict-schema, ACL, cross-company, parameter-transit,
+tamper, and real-sandbox Odoo tests must be retained. No such candidate-read
+receipt exists yet, so draft cancellation remains disabled.
 
 Before any provisioning action, run the exact immutable release member
 `deployment/dev18/sandbox_capacity_gate.py` as specified in

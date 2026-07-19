@@ -2040,6 +2040,471 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
         database=database,
     )) is False
 
+    def append_verification(
+        operation: dict[str, str], *, succeeded: bool
+    ) -> None:
+        verification_evidence = hashlib.sha256(
+            f"{operation['operation_id']}:verification-evidence".encode()
+        ).hexdigest()
+        verification_digest = hashlib.sha256(
+            f"{operation['operation_id']}:verification-result:{succeeded}".encode()
+        ).hexdigest()
+        verification = _trusted_result_envelope(
+            kind="verification",
+            purpose="verification_result_v2",
+            operation_id=operation["operation_id"],
+            request_id=operation["request_id"],
+            operation_digest=operation["operation_digest"],
+            company_id=int(operation["company_id"]),
+            capability_id=operation["capability_id"],
+            registry_digest=operation["registry_digest"],
+            release_digest=operation["release_digest"],
+            evidence_digest=verification_evidence,
+            prior_evidence_digest=operation["execution_evidence_digest"],
+            succeeded=succeeded,
+            revision=2,
+        )
+        state_after_verification = "verified" if succeeded else "failed"
+        postgres.run(
+            f"SET SESSION AUTHORIZATION {runtime_role};"
+            "UPDATE public.odoo_accounting_cli_operation SET "
+            f"state='{state_after_verification}',"
+            "verification_evidence_json='{}',"
+            f"verification_evidence_digest='{verification_evidence}',"
+            f"verification_result_json=$result${verification}$result$,"
+            f"verification_result_digest='{verification_digest}' "
+            f"WHERE operation_id='{operation['operation_id']}';",
+            database=database,
+        )
+        operation["verification_result_digest"] = verification_digest
+
+    def create_operation(
+        operation_id: str,
+        capability_id: str,
+        *,
+        execution_succeeded: bool,
+        verification_succeeded: bool | None,
+        state_without_verification: str = "committed",
+        company_id: int = 7,
+        principal: str = "principal-incident-recovery",
+        requester_id: int = 11,
+        approver_id: int = 12,
+        environment: str = "sandbox",
+        operation_registry_digest: str = registry_digest,
+        operation_release_digest: str = release_digest,
+        idempotency_scope: str | None = None,
+    ) -> dict[str, str]:
+        request_id = f"{operation_id}-request"
+        operation_digest_value = hashlib.sha256(
+            f"{operation_id}:operation".encode()
+        ).hexdigest()
+        execution_evidence = hashlib.sha256(
+            f"{operation_id}:execution-evidence".encode()
+        ).hexdigest()
+        execution_digest = hashlib.sha256(
+            f"{operation_id}:execution-result".encode()
+        ).hexdigest()
+        execution = _trusted_result_envelope(
+            kind="execution",
+            purpose="execution_result_v2",
+            operation_id=operation_id,
+            request_id=request_id,
+            operation_digest=operation_digest_value,
+            company_id=company_id,
+            capability_id=capability_id,
+            registry_digest=operation_registry_digest,
+            release_digest=operation_release_digest,
+            evidence_digest=execution_evidence,
+            prior_evidence_digest=None,
+            succeeded=execution_succeeded,
+            revision=1,
+        )
+        execution_state = "committed" if execution_succeeded else "failed"
+        operation = {
+            "operation_id": operation_id,
+            "request_id": request_id,
+            "capability_id": capability_id,
+            "operation_digest": operation_digest_value,
+            "execution_evidence_digest": execution_evidence,
+            "execution_result_digest": execution_digest,
+            "company_id": str(company_id),
+            "principal": principal,
+            "requester_id": str(requester_id),
+            "approver_id": str(approver_id),
+            "environment": environment,
+            "registry_digest": operation_registry_digest,
+            "release_digest": operation_release_digest,
+            "idempotency_scope": idempotency_scope or f"{operation_id}-scope",
+        }
+        postgres.run(
+            f"SET SESSION AUTHORIZATION {runtime_role};"
+            "INSERT INTO public.odoo_accounting_cli_operation("
+            "operation_id,request_id,capability_id,idempotency_scope,"
+            "operation_digest,protocol_version,precheck_digest,principal,"
+            "requester_id,approver_id,company_id,environment,capability_channel,"
+            "registry_digest,release_digest,state)"
+            f"VALUES('{operation_id}','{request_id}','{capability_id}',"
+            f"'{operation['idempotency_scope']}','{operation_digest_value}',1,"
+            f"'{hashlib.sha256(f'{operation_id}:precheck'.encode()).hexdigest()}',"
+            f"'{principal}',{requester_id},{approver_id},{company_id},"
+            f"'{environment}','staged','{operation_registry_digest}',"
+            f"'{operation_release_digest}','claimed');"
+            "UPDATE public.odoo_accounting_cli_operation SET "
+            f"state='{execution_state}',execution_evidence_json='{{}}',"
+            f"execution_evidence_digest='{execution_evidence}',"
+            f"execution_result_json=$result${execution}$result$,"
+            f"execution_result_digest='{execution_digest}' "
+            f"WHERE operation_id='{operation_id}';",
+            database=database,
+        )
+        if verification_succeeded is not None:
+            append_verification(operation, succeeded=verification_succeeded)
+        elif execution_succeeded and state_without_verification == "failed":
+            postgres.run(
+                f"SET SESSION AUTHORIZATION {runtime_role};"
+                "UPDATE public.odoo_accounting_cli_operation SET state='failed' "
+                f"WHERE operation_id='{operation_id}';",
+                database=database,
+            )
+        return operation
+
+    def recovery_finalizer_call(
+        origin: dict[str, str],
+        resolution: dict[str, str],
+        *,
+        proof_id: uuid.UUID,
+        resolution_result_digest_value: str,
+    ) -> str:
+        proof_time = datetime.now(timezone.utc).replace(microsecond=0)
+        proof_expiry = proof_time + timedelta(minutes=1)
+        return (
+            f"SET SESSION AUTHORIZATION {finalizer_role};"
+            "SELECT pg_catalog.row_to_json(receipt)::text FROM "
+            "odoo_accounting_cli_v3_guard.finalize_operation_effect("
+            f"'{state['guard_installation_id']}'::uuid,{state['database_oid']}::oid,"
+            f"'{database_uuid}'::uuid,'{proof_id}'::uuid,'{'1' * 64}',"
+            "'dev22-incident-finalizer-key',"
+            f"'{proof_time.isoformat()}'::timestamptz,"
+            f"'{proof_expiry.isoformat()}'::timestamptz,"
+            f"'{origin['operation_id']}','{origin['operation_digest']}',"
+            f"'{origin['execution_result_digest']}',"
+            f"'{resolution['operation_id']}','{resolution['operation_digest']}',"
+            f"'{resolution['execution_result_digest']}','recovered',"
+            f"'{resolution_result_digest_value}') receipt"
+        )
+
+    def verified_finalizer_call(
+        operation: dict[str, str], *, proof_id: uuid.UUID
+    ) -> str:
+        proof_time = datetime.now(timezone.utc).replace(microsecond=0)
+        proof_expiry = proof_time + timedelta(minutes=1)
+        attestation_digest = hashlib.sha256(
+            f"{operation['operation_id']}:finalization".encode()
+        ).hexdigest()
+        return (
+            f"SET SESSION AUTHORIZATION {finalizer_role};"
+            "SELECT pg_catalog.row_to_json(receipt)::text FROM "
+            "odoo_accounting_cli_v3_guard.finalize_operation_effect("
+            f"'{state['guard_installation_id']}'::uuid,{state['database_oid']}::oid,"
+            f"'{database_uuid}'::uuid,'{proof_id}'::uuid,"
+            f"'{attestation_digest}','dev22-incident-finalizer-key',"
+            f"'{proof_time.isoformat()}'::timestamptz,"
+            f"'{proof_expiry.isoformat()}'::timestamptz,"
+            f"'{operation['operation_id']}','{operation['operation_digest']}',"
+            f"'{operation['execution_result_digest']}',"
+            f"'{operation['operation_id']}','{operation['operation_digest']}',"
+            f"'{operation['execution_result_digest']}','verified',"
+            f"'{operation['verification_result_digest']}') receipt"
+        )
+
+    def recovery_scope(origin_operation_id: str) -> str:
+        canonical = json.dumps(
+            {"operation_id": origin_operation_id},
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(canonical).hexdigest()
+
+    origin = create_operation(
+        "dev22-incident-origin",
+        "acct.invoice.customer.create.v1",
+        execution_succeeded=True,
+        verification_succeeded=None,
+        state_without_verification="failed",
+    )
+    recovery = create_operation(
+        "dev22-incident-recovery",
+        "acct.recovery.execute.v1",
+        execution_succeeded=True,
+        verification_succeeded=True,
+        approver_id=15,
+        idempotency_scope=recovery_scope(origin["operation_id"]),
+    )
+    missing_verification_call = recovery_finalizer_call(
+        origin,
+        recovery,
+        proof_id=uuid.uuid4(),
+        resolution_result_digest_value=recovery["verification_result_digest"],
+    )
+    missing_verification = postgres.run(
+        missing_verification_call,
+        database=database,
+        check=False,
+    )
+    assert missing_verification.returncode != 0
+    assert "recovered operation result is not finalizable" in (
+        missing_verification.stderr
+    )
+    append_verification(origin, succeeded=False)
+
+    cross_binding_candidates: list[dict[str, str]] = []
+    cross_binding_overrides: tuple[tuple[str, dict[str, object]], ...] = (
+        ("company", {"company_id": 8}),
+        ("principal", {"principal": "principal-cross-boundary"}),
+        ("requester", {"requester_id": 13}),
+        ("environment", {"environment": "production"}),
+        ("registry", {"operation_registry_digest": "5" * 64}),
+        ("release", {"operation_release_digest": "6" * 64}),
+    )
+    for label, overrides in cross_binding_overrides:
+        candidate = create_operation(
+            f"dev22-incident-cross-{label}",
+            "acct.recovery.execute.v1",
+            execution_succeeded=True,
+            verification_succeeded=True,
+            idempotency_scope=recovery_scope(origin["operation_id"]),
+            **overrides,
+        )
+        cross_binding_candidates.append(candidate)
+        rejected_cross_binding = postgres.run(
+            recovery_finalizer_call(
+                origin,
+                candidate,
+                proof_id=uuid.uuid4(),
+                resolution_result_digest_value=candidate[
+                    "verification_result_digest"
+                ],
+            ),
+            database=database,
+            check=False,
+        )
+        assert rejected_cross_binding.returncode != 0
+        assert "recovered operation result is not finalizable" in (
+            rejected_cross_binding.stderr
+        )
+
+    unrelated_recovery = create_operation(
+        "dev22-incident-unrelated-recovery",
+        "acct.recovery.execute.v1",
+        execution_succeeded=True,
+        verification_succeeded=True,
+        idempotency_scope=recovery_scope("dev22-unrelated-origin"),
+    )
+    rejected_unrelated_recovery = postgres.run(
+        recovery_finalizer_call(
+            origin,
+            unrelated_recovery,
+            proof_id=uuid.uuid4(),
+            resolution_result_digest_value=unrelated_recovery[
+                "verification_result_digest"
+            ],
+        ),
+        database=database,
+        check=False,
+    )
+    assert rejected_unrelated_recovery.returncode != 0
+    assert "recovered operation result is not finalizable" in (
+        rejected_unrelated_recovery.stderr
+    )
+
+    failed_execution = create_operation(
+        "dev22-incident-failed-execution",
+        "acct.invoice.customer.create.v1",
+        execution_succeeded=False,
+        verification_succeeded=None,
+    )
+    rejected_failed_execution = postgres.run(
+        recovery_finalizer_call(
+            failed_execution,
+            recovery,
+            proof_id=uuid.uuid4(),
+            resolution_result_digest_value=recovery["verification_result_digest"],
+        ),
+        database=database,
+        check=False,
+    )
+    assert rejected_failed_execution.returncode != 0
+    assert "operation effect finalization binding is invalid" in (
+        rejected_failed_execution.stderr
+    )
+
+    rejected_same_operation = postgres.run(
+        recovery_finalizer_call(
+            origin,
+            origin,
+            proof_id=uuid.uuid4(),
+            resolution_result_digest_value=origin["verification_result_digest"],
+        ),
+        database=database,
+        check=False,
+    )
+    assert rejected_same_operation.returncode != 0
+    assert "operation effect finalization request is invalid" in (
+        rejected_same_operation.stderr
+    )
+
+    wrong_capability = create_operation(
+        "dev22-incident-wrong-capability",
+        "acct.move.reverse.v1",
+        execution_succeeded=True,
+        verification_succeeded=True,
+    )
+    rejected_wrong_capability = postgres.run(
+        recovery_finalizer_call(
+            origin,
+            wrong_capability,
+            proof_id=uuid.uuid4(),
+            resolution_result_digest_value=wrong_capability[
+                "verification_result_digest"
+            ],
+        ),
+        database=database,
+        check=False,
+    )
+    assert rejected_wrong_capability.returncode != 0
+    assert "recovered operation result is not finalizable" in (
+        rejected_wrong_capability.stderr
+    )
+
+    unverified_recovery = create_operation(
+        "dev22-incident-unverified-recovery",
+        "acct.recovery.execute.v1",
+        execution_succeeded=True,
+        verification_succeeded=None,
+    )
+    rejected_unverified_recovery = postgres.run(
+        recovery_finalizer_call(
+            origin,
+            unverified_recovery,
+            proof_id=uuid.uuid4(),
+            resolution_result_digest_value="2" * 64,
+        ),
+        database=database,
+        check=False,
+    )
+    assert rejected_unverified_recovery.returncode != 0
+    assert "recovered operation result is not finalizable" in (
+        rejected_unverified_recovery.stderr
+    )
+
+    unresolved_before = _guard_state(postgres, database)["unresolved_effect_count"]
+    assert unresolved_before == 5 + len(cross_binding_candidates)
+    proof_id = uuid.uuid4()
+    recovered_call = recovery_finalizer_call(
+        origin,
+        recovery,
+        proof_id=proof_id,
+        resolution_result_digest_value=recovery["verification_result_digest"],
+    )
+    recovered = json.loads(postgres.scalar(recovered_call, database=database))
+    assert recovered["replayed"] is False
+    assert recovered["applied_resolution_kind"] == "recovered"
+    assert recovered["resolved_anchor_count"] == 2
+    assert recovered["remaining_unresolved_count"] == unresolved_before - 2
+    resolution_rows = json.loads(
+        postgres.scalar(
+            "SELECT pg_catalog.json_build_object("
+            "'count',pg_catalog.count(*),"
+            "'attestations',pg_catalog.count(DISTINCT attestation_id),"
+            "'all_recovered',pg_catalog.bool_and(resolution_kind='recovered'))::text "
+            "FROM odoo_accounting_cli_v3_guard.operation_effect_resolution "
+            f"WHERE attestation_id='{proof_id}'::uuid",
+            database=database,
+        )
+    )
+    assert resolution_rows == {
+        "count": 2,
+        "attestations": 1,
+        "all_recovered": True,
+    }
+    durable_binding = json.loads(
+        postgres.scalar(
+            "SELECT pg_catalog.json_build_object("
+            "'origin_id',origin.operation_id,"
+            "'recovery_id',recovery.operation_id,"
+            "'recovery_scope',recovery.idempotency_scope,"
+            "'same_company',origin.company_id=recovery.company_id,"
+            "'same_principal',origin.principal=recovery.principal,"
+            "'same_requester',origin.requester_id=recovery.requester_id,"
+            "'origin_approver',origin.approver_id,"
+            "'recovery_approver',recovery.approver_id,"
+            "'same_environment',origin.environment=recovery.environment,"
+            "'same_registry',origin.registry_digest=recovery.registry_digest,"
+            "'same_release',origin.release_digest=recovery.release_digest)::text "
+            "FROM odoo_accounting_cli_v3_guard.effect_finalization_receipt receipt "
+            "JOIN public.odoo_accounting_cli_operation origin "
+            "ON origin.id=receipt.expected_operation_record_id "
+            "JOIN public.odoo_accounting_cli_operation recovery "
+            "ON recovery.id=receipt.resolution_operation_record_id "
+            f"WHERE receipt.attestation_id='{proof_id}'::uuid",
+            database=database,
+        )
+    )
+    assert durable_binding == {
+        "origin_id": origin["operation_id"],
+        "recovery_id": recovery["operation_id"],
+        "recovery_scope": recovery_scope(origin["operation_id"]),
+        "same_company": True,
+        "same_principal": True,
+        "same_requester": True,
+        "origin_approver": 12,
+        "recovery_approver": 15,
+        "same_environment": True,
+        "same_registry": True,
+        "same_release": True,
+    }
+
+    replayed_recovery = json.loads(
+        postgres.scalar(recovered_call, database=database)
+    )
+    assert replayed_recovery.pop("replayed") is True
+    recovered_without_replay = dict(recovered)
+    recovered_without_replay.pop("replayed")
+    assert replayed_recovery == recovered_without_replay
+    different_proof = recovered_call.replace(
+        f"'{proof_id}'::uuid", f"'{uuid.uuid4()}'::uuid", 1
+    )
+    rejected_different_proof = postgres.run(
+        different_proof,
+        database=database,
+        check=False,
+    )
+    assert rejected_different_proof.returncode != 0
+    assert "operation effect anchor was resolved by a different proof" in (
+        rejected_different_proof.stderr
+    )
+    assert _guard_state(postgres, database)["unresolved_effect_count"] == (
+        unresolved_before - 2
+    )
+    append_verification(unverified_recovery, succeeded=True)
+    for extra_operation in (
+        wrong_capability,
+        unverified_recovery,
+        unrelated_recovery,
+        *cross_binding_candidates,
+    ):
+        finalized_extra = json.loads(
+            postgres.scalar(
+                verified_finalizer_call(extra_operation, proof_id=uuid.uuid4()),
+                database=database,
+            )
+        )
+        assert finalized_extra["applied_resolution_kind"] == "verified"
+        assert finalized_extra["resolved_anchor_count"] == 1
+    assert _guard_state(postgres, database)["unresolved_effect_count"] == 0
+
     crash_id = uuid.uuid4()
     crash_expiry = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=10)
     postgres.run(

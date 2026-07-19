@@ -67,6 +67,7 @@ _CAPABILITIES = frozenset(
         "acct.deferred.create.v1",
         "acct.period.adjustment_create.v1",
         "acct.move.reverse.v1",
+        "acct.move.draft_cancel.v1",
         "acct.recovery.execute.v1",
     }
 )
@@ -886,6 +887,7 @@ class OdooWriteHandlers:
             "acct.depreciation.post.v1",
             "acct.deferred.create.v1",
             "acct.move.reverse.v1",
+            "acct.move.draft_cancel.v1",
             "acct.recovery.execute.v1",
         }:
             checks = method(
@@ -970,6 +972,7 @@ class OdooWriteHandlers:
             "acct.deferred.create.v1": "deferred",
             "acct.period.adjustment_create.v1": "adjustment",
             "acct.move.reverse.v1": "reversal",
+            "acct.move.draft_cancel.v1": "draft_cancel",
             "acct.recovery.execute.v1": "recovery",
         }[capability_id]
         return f"{phase}_{key}"
@@ -5895,6 +5898,7 @@ class OdooWriteHandlers:
         journal = getattr(move, "journal_id", None)
         if (
             _record_id(journal) is None
+            or _record_id(getattr(journal, "company_id", None)) != company.id
             or str(getattr(journal, "type", ""))
             != ("purchase" if vendor else "sale")
             or getattr(journal, "active", True) is False
@@ -5912,6 +5916,21 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "recovery target lacks immutable V3 document bindings"
             )
+        currency = getattr(move, "currency_id", None)
+        if _record_id(currency) is None:
+            raise OdooWriteHandlerError(
+                "recovery target has no auditable currency"
+            )
+        if str(getattr(move, "payment_state", "")) != "not_paid":
+            raise OdooWriteHandlerError(
+                "recovery target is not a fully unpaid draft"
+            )
+        self.assert_amount(
+            abs(_decimal(getattr(move, "amount_residual", None), "amount_residual")),
+            abs(_decimal(getattr(move, "amount_total", None), "amount_total")),
+            currency,
+            "recovery target unpaid residual",
+        )
         if (
             getattr(move, "secure_sequence_number", 0) not in {False, 0}
             or bool(getattr(move, "inalterable_hash", False))
@@ -6040,6 +6059,188 @@ class OdooWriteHandlers:
                 raise OdooWriteHandlerError(
                     "recovery line graph has reconciliation or external business effects"
                 )
+
+    def _draft_cancel_graph(
+        self,
+        parameters: Mapping[str, Any],
+        company: Any,
+    ) -> tuple[Any, list[Any], list[tuple[str, Any]], bool]:
+        if self.context.trusted_recovery_plan is not None:
+            raise OdooWriteHandlerError(
+                "trusted recovery plan must be null for draft cancellation"
+            )
+        expected_move_type = parameters["expected_move_type"]
+        vendor = expected_move_type == "in_invoice"
+        if expected_move_type not in {"out_invoice", "in_invoice"}:
+            raise OdooWriteHandlerError(
+                "draft cancellation move type is not allowlisted"
+            )
+        move = self.record(
+            "account.move", parameters["move_id"], company, write=True
+        )
+        line_ids = _ids(getattr(move, "line_ids", []))
+        if not line_ids:
+            raise OdooWriteHandlerError(
+                "draft cancellation requires a complete non-empty line graph"
+            )
+        lines = [
+            self.record("account.move.line", record_id, company)
+            for record_id in line_ids
+        ]
+        self._assert_pristine_draft_document(
+            move,
+            lines,
+            company,
+            expected_state="draft",
+            vendor=vendor,
+        )
+        if (
+            str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
+            != parameters["expected_document_binding"]
+            or str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
+            != parameters["expected_business_binding"]
+        ):
+            raise OdooWriteHandlerError(
+                "draft cancellation immutable document binding differs"
+            )
+        records = [
+            ("account.move", move),
+            *(("account.move.line", line) for line in lines),
+        ]
+        return move, lines, records, vendor
+
+    def _execute_pristine_draft_cancel(
+        self,
+        move: Any,
+        lines: list[Any],
+        records: list[tuple[str, Any]],
+        company: Any,
+        checked: Mapping[str, Any],
+        *,
+        vendor: bool,
+        completion_method: str,
+    ) -> tuple[list[tuple[str, Any]], dict[str, Any]]:
+        # Active button_cancel overrides can trigger EDI cron work, unlink
+        # COGS, or mutate sale/asset/expense records, so this path avoids that
+        # high-level action.  Public ORM write overrides and database
+        # automations still require a separate module/automation safety gate
+        # plus real-sandbox evidence before this disabled capability is staged.
+        result = move.with_context(
+            tracking_disable=True,
+            skip_account_move_synchronization=True,
+            skip_invoice_sync=True,
+            skip_is_manually_modified=True,
+        ).write({"state": "cancel"})
+        if result is not True or str(getattr(move, "state", "")) != "cancel":
+            raise OdooWriteHandlerError(
+                "draft "
+                + ("vendor bill" if vendor else "customer invoice")
+                + " cancellation returned no exact result"
+            )
+        self._assert_recovery_exact_delta(
+            move,
+            lines,
+            company,
+            self.trusted_before_values(
+                {"before": checked.get("before")}, company
+            ),
+            vendor=vendor,
+        )
+        return records, _recovery(
+            "not_applicable", completion_method, []
+        )
+
+    def precheck_draft_cancel(
+        self, p: dict[str, Any], company: Any
+    ) -> dict[str, Any]:
+        move, _lines, records, vendor = self._draft_cancel_graph(p, company)
+        return {
+            "checks": [
+                "single_pristine_v3_draft_document",
+                (
+                    "draft_vendor_bill_target"
+                    if vendor
+                    else "draft_customer_invoice_target"
+                ),
+                "never_posted_or_hashed",
+                "no_payment_reconciliation_or_external_effects",
+                "fully_unpaid_residual_matches_total",
+                "complete_line_guard_graph",
+                "immutable_document_bindings_match",
+                "write_acl",
+            ],
+            "before": self.snapshots(records, company),
+            "dependencies": self.snapshots(
+                [("account.journal", move.journal_id)], company
+            ),
+        }
+
+    def execute_draft_cancel(self, p, company, checked):
+        move, lines, records, vendor = self._draft_cancel_graph(p, company)
+        return self._execute_pristine_draft_cancel(
+            move,
+            lines,
+            records,
+            company,
+            checked,
+            vendor=vendor,
+            completion_method="draft_cancel_completed",
+        )
+
+    def verify_draft_cancel(self, p, company, records, before):
+        if self.context.trusted_recovery_plan is not None:
+            raise OdooWriteHandlerError(
+                "trusted recovery plan must be null for draft cancellation"
+            )
+        keyed = {(model_name, record.id): record for model_name, record in records}
+        move_key = ("account.move", p["move_id"])
+        move = keyed.get(move_key)
+        if move is None:
+            raise OdooWriteHandlerError(
+                "draft cancellation read-back move is missing"
+            )
+        line_ids = _ids(getattr(move, "line_ids", []))
+        expected_keys = {
+            move_key,
+            *(("account.move.line", record_id) for record_id in line_ids),
+        }
+        if (
+            not line_ids
+            or len(keyed) != len(records)
+            or set(keyed) != expected_keys
+            or set(before) != expected_keys
+        ):
+            raise OdooWriteHandlerError(
+                "draft cancellation read-back graph differs from the approved graph"
+            )
+        lines = [keyed[("account.move.line", record_id)] for record_id in line_ids]
+        vendor = p["expected_move_type"] == "in_invoice"
+        if (
+            p["expected_move_type"] not in {"out_invoice", "in_invoice"}
+            or str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
+            != p["expected_document_binding"]
+            or str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
+            != p["expected_business_binding"]
+        ):
+            raise OdooWriteHandlerError(
+                "draft cancellation immutable document binding differs"
+            )
+        self._assert_recovery_exact_delta(
+            move, lines, company, before, vendor=vendor
+        )
+        return [
+            (
+                "draft_vendor_bill_cancelled_exactly"
+                if vendor
+                else "draft_customer_invoice_cancelled_exactly"
+            ),
+            "never_posted_evidence_preserved",
+            "document_and_business_bindings_preserved",
+            "payment_reconciliation_and_external_links_absent",
+            "unpaid_residual_and_payment_state_preserved",
+            "line_guard_graph_matched_approved_allowed_delta",
+            "no_delete_or_button_cancel_path_used",
+        ]
 
     def _draft_document_recovery_graph(
         self,
@@ -6277,36 +6478,17 @@ class OdooWriteHandlers:
         plan = self.context.trusted_recovery_plan
         if not isinstance(plan, Mapping):
             raise OdooWriteHandlerError("trusted recovery plan is unavailable")
-        move, _lines, records, vendor = self._draft_document_recovery_graph(
+        move, lines, records, vendor = self._draft_document_recovery_graph(
             plan, company
         )
-        # Active button_cancel overrides can trigger EDI cron work, unlink
-        # COGS, or mutate sale/asset/expense records.  The precheck proves
-        # those graphs absent, then this non-sudo primitive changes only the
-        # approved state plus ORM-managed write_uid/write_date audit fields.
-        result = move.with_context(
-            tracking_disable=True,
-            skip_account_move_synchronization=True,
-            skip_invoice_sync=True,
-            skip_is_manually_modified=True,
-        ).write({"state": "cancel"})
-        if result is not True or str(getattr(move, "state", "")) != "cancel":
-            raise OdooWriteHandlerError(
-                "draft "
-                + ("vendor bill" if vendor else "customer invoice")
-                + " cancellation returned no exact result"
-            )
-        self._assert_recovery_exact_delta(
+        return self._execute_pristine_draft_cancel(
             move,
-            _lines,
+            lines,
+            records,
             company,
-            self.trusted_before_values(
-                {"before": checked.get("before")}, company
-            ),
+            checked,
             vendor=vendor,
-        )
-        return records, _recovery(
-            "not_applicable", "recovery_completed", []
+            completion_method="recovery_completed",
         )
 
     def _assert_recovery_exact_delta(

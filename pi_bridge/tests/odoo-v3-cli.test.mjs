@@ -180,6 +180,25 @@ if (mutation === "__test_non_terminal") data.operation_state = "executing";
 if (mutation === "__test_missing_finalization") delete data.database_finalization;
 if (mutation === "__test_wrong_finalization_operation") data.database_finalization.operation_id = "op-other";
 if (mutation === "__test_invalid_remaining_count") data.database_finalization.remaining_unresolved_count = -1;
+if (mutation.startsWith("__test_recovered")) {
+  // Current incident recovery is a distinct operation that completes while
+  // its database receipt resolves the failed origin as "recovered".
+  data.operation_state = "completed";
+  data.database_finalization.operation_id = "op-failed-origin";
+  data.database_finalization.resolution_kind = "recovered";
+  data.database_finalization.resolution_operation_id = request.operation_id ?? "op-1";
+  data.database_finalization.resolved_anchor_count = 2;
+  data.database_finalization.remaining_unresolved_count = 0;
+}
+if (mutation === "__test_recovered_wrong_target") {
+  data.database_finalization.operation_id = request.operation_id ?? "op-1";
+}
+if (mutation === "__test_recovered_wrong_resolution") {
+  data.database_finalization.resolution_operation_id = "op-other-recovery";
+}
+if (mutation === "__test_recovered_wrong_anchor_count") {
+  data.database_finalization.resolved_anchor_count = 1;
+}
 const payload = { command, data, ok: true };
 if (["operation.approve_execute", "operation.result"].includes(command)) {
   payload.business_succeeded = true;
@@ -486,6 +505,15 @@ function writeParameterFixtures() {
 			posting_mode: "post",
 			idempotency_key: "reverse-6001-2026-08-01",
 		},
+		"acct.move.draft_cancel.v1": {
+			company_id: 7,
+			move_id: 6002,
+			expected_move_type: "out_invoice",
+			expected_document_binding: "d".repeat(64),
+			expected_business_binding: "e".repeat(64),
+			reason: "Cancel the explicitly bound pristine draft invoice",
+			idempotency_key: "draft-cancel-6002",
+		},
 		"acct.recovery.execute.v1": {
 			company_id: 7,
 			origin_operation_id: "op-origin-0001",
@@ -774,6 +802,50 @@ test("write success fails closed on unsigned, unverified, or non-terminal eviden
 	}
 });
 
+test("recovered write success requires the exact two-anchor database binding", async (t) => {
+	const validRun = createBoundRunner({
+		cliPath: process.execPath,
+		prefixArgs: [trustedFixture, "__test_recovered"],
+		timeoutMs: 5000,
+	});
+	for (const action of ["operation.approve_execute", "operation.result"]) {
+		const result = await validRun(action, requests()[action]);
+		assert.equal(result.ok, true);
+		assert.equal(result.business_succeeded, true);
+		assert.equal(result.data.operation_state, "completed");
+		assert.deepEqual({
+			operation_id: result.data.database_finalization.operation_id,
+			resolution_operation_id: result.data.database_finalization.resolution_operation_id,
+			resolved_anchor_count: result.data.database_finalization.resolved_anchor_count,
+			remaining_unresolved_count: result.data.database_finalization.remaining_unresolved_count,
+		}, {
+			operation_id: "op-failed-origin",
+			resolution_operation_id: requests()[action].operation_id,
+			resolved_anchor_count: 2,
+			remaining_unresolved_count: 0,
+		});
+	}
+
+	for (const mutation of [
+		"__test_recovered_wrong_target",
+		"__test_recovered_wrong_resolution",
+		"__test_recovered_wrong_anchor_count",
+	]) {
+		await t.test(mutation, async () => {
+			const run = createBoundRunner({
+				cliPath: process.execPath,
+				prefixArgs: [trustedFixture, mutation],
+				timeoutMs: 5000,
+			});
+			for (const action of ["operation.approve_execute", "operation.result"]) {
+				const result = await run(action, requests()[action]);
+				assert.equal(result.ok, false);
+				assert.equal(result.error.code, "bridge_invalid_v3_broker_response");
+			}
+		});
+	}
+});
+
 test("complex financial parameters are retained byte-for-byte through the test broker transport", async () => {
 	const run = createBoundRunner({
 		cliPath: process.execPath,
@@ -814,12 +886,12 @@ test("complex financial parameters are retained byte-for-byte through the test b
 	assert.deepEqual(result.data.argv, ["operation", "prepare"]);
 });
 
-test("all 13 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
+test("all 14 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
 	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
 	const registry = JSON.parse(await readFile(registryPath, "utf8"));
 	const writeCapabilities = registry.capabilities.filter((item) => item.access === "write");
 	const fixtures = writeParameterFixtures();
-	assert.equal(writeCapabilities.length, 13);
+	assert.equal(writeCapabilities.length, 14);
 	assert.deepEqual(Object.keys(fixtures).sort(), writeCapabilities.map((item) => item.id).sort());
 
 	const run = createBoundRunner({

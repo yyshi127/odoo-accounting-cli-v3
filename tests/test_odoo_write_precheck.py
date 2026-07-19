@@ -26,6 +26,7 @@ DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
 AUTH_SECRET = b"auth-secret-material-at-least-32-bytes"
 RELEASE_DIGEST = "d" * 64
 CAPABILITY_ID = "acct.invoice.customer_create.v1"
+DRAFT_CANCEL_CAPABILITY_ID = "acct.move.draft_cancel.v1"
 RECOVERY_CAPABILITY_ID = "acct.recovery.execute.v1"
 EXECUTOR_GROUP = "odoo_accounting_cli_v3_control.group_executor"
 CAPABILITY_GROUP = "account.group_account_invoice"
@@ -85,6 +86,33 @@ RECOVERY_CAPABILITIES = _recovery_capabilities()
 RECOVERY_REGISTRY_DIGEST = registry_digest(RECOVERY_CAPABILITIES)
 
 
+def _draft_cancel_capabilities():
+    document = json.loads(
+        (
+            Path(__file__).resolve().parents[1]
+            / "registry"
+            / "capabilities.json"
+        ).read_text(encoding="utf-8")
+    )
+    capability = copy.deepcopy(
+        next(
+            item
+            for item in document["capabilities"]
+            if item["id"] == DRAFT_CANCEL_CAPABILITY_ID
+        )
+    )
+    capability["enabled_environments"] = []
+    capability["staged_environments"] = ["sandbox"]
+    capability["evidence"] = {"level": "contract_tested", "receipts": []}
+    return validate_registry(
+        {"schema_version": 1, "capabilities": [capability]}
+    )
+
+
+DRAFT_CANCEL_CAPABILITIES = _draft_cancel_capabilities()
+DRAFT_CANCEL_REGISTRY_DIGEST = registry_digest(DRAFT_CANCEL_CAPABILITIES)
+
+
 def _parameters(*, company_id=7):
     return {
         "company_id": company_id,
@@ -119,6 +147,18 @@ def _recovery_parameters(plan_digest, *, company_id=7):
         "recovery_date": "2026-07-16",
         "reason": "Reverse the sandbox posting after verification",
         "idempotency_key": "recover-origin-op-501",
+    }
+
+
+def _draft_cancel_parameters(*, company_id=7):
+    return {
+        "company_id": company_id,
+        "move_id": 501,
+        "expected_move_type": "out_invoice",
+        "expected_document_binding": "a" * 64,
+        "expected_business_binding": "b" * 64,
+        "reason": "Cancel duplicate pristine draft",
+        "idempotency_key": "draft-cancel-501",
     }
 
 
@@ -649,6 +689,52 @@ def test_recovery_precheck_requires_and_passes_receipt_derived_trusted_plan():
     assert observed["trusted_plan"] == plan
     assert handler.calls == [(RECOVERY_CAPABILITY_ID, parameters)]
     assert cr.commits == 0
+
+
+def test_draft_cancel_precheck_is_normal_write_and_requires_null_trusted_plan():
+    parameters = _draft_cancel_parameters()
+    context = _context(
+        parameters, capability_id=DRAFT_CANCEL_CAPABILITY_ID
+    )
+    root, cr, handler, kwargs = _harness()
+    kwargs.update(
+        capabilities=DRAFT_CANCEL_CAPABILITIES,
+        expected_registry_digest=DRAFT_CANCEL_REGISTRY_DIGEST,
+    )
+
+    result = execute_write_precheck_from_odoo_shell(
+        root,
+        _request(
+            context,
+            parameters,
+            capability_id=DRAFT_CANCEL_CAPABILITY_ID,
+            trusted_recovery_plan=None,
+        ),
+        **kwargs,
+    )
+
+    assert result["capability_id"] == DRAFT_CANCEL_CAPABILITY_ID
+    assert handler.calls == [(DRAFT_CANCEL_CAPABILITY_ID, parameters)]
+    assert cr.commits == 0
+
+    plan = _recovery_plan()
+    root, _cr, handler, kwargs = _harness()
+    kwargs.update(
+        capabilities=DRAFT_CANCEL_CAPABILITIES,
+        expected_registry_digest=DRAFT_CANCEL_REGISTRY_DIGEST,
+    )
+    with pytest.raises(OdooWritePrecheckError, match="must be null"):
+        execute_write_precheck_from_odoo_shell(
+            root,
+            _request(
+                context,
+                parameters,
+                capability_id=DRAFT_CANCEL_CAPABILITY_ID,
+                trusted_recovery_plan=plan,
+            ),
+            **kwargs,
+        )
+    assert handler.calls == []
 
 
 def test_recovery_plan_cannot_be_missing_tampered_or_injected_into_normal_write():

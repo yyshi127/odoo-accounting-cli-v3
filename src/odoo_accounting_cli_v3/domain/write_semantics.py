@@ -440,6 +440,36 @@ def _validate_reversal(parameters: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_draft_cancel(parameters: dict[str, Any]) -> dict[str, Any]:
+    _positive_id(_field(parameters, "move_id"), "move_id")
+    move_type = _field(parameters, "expected_move_type")
+    if move_type not in {"out_invoice", "in_invoice"}:
+        raise WriteSemanticError(
+            "expected_move_type must be out_invoice or in_invoice"
+        )
+    computed: dict[str, str] = {"expected_move_type": move_type}
+    for field in (
+        "expected_document_binding",
+        "expected_business_binding",
+    ):
+        digest = _field(parameters, field)
+        if (
+            not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise WriteSemanticError(f"{field} must be a SHA-256 digest")
+        computed[field] = digest
+    return {
+        "checks": (
+            "draft_cancel_target_explicit",
+            "draft_cancel_move_type_explicit",
+            "draft_cancel_document_binding_explicit",
+            "draft_cancel_business_binding_explicit",
+        ),
+        "computed": computed,
+    }
+
+
 def _validate_recovery(parameters: dict[str, Any]) -> dict[str, Any]:
     _date(_field(parameters, "recovery_date"), "recovery_date")
     digest = _field(parameters, "expected_recovery_plan_digest")
@@ -464,6 +494,7 @@ _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.deferred.create.v1": _validate_deferred,
     "acct.period.adjustment_create.v1": _validate_adjustment,
     "acct.move.reverse.v1": _validate_reversal,
+    "acct.move.draft_cancel.v1": _validate_draft_cancel,
     "acct.recovery.execute.v1": _validate_recovery,
 }
 

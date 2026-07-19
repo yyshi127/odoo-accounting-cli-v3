@@ -1824,7 +1824,60 @@ BEGIN
         END IF;
     ELSE
         IF operation_row.state <> 'failed'
+           OR NOT odoo_accounting_cli_v3_guard.result_is_bound(
+               operation_row.execution_result_json,
+               'execution',
+               'execution_result_v2',
+               operation_row.operation_id,
+               operation_row.request_id,
+               operation_row.operation_digest,
+               operation_row.company_id,
+               operation_row.capability_id,
+               operation_row.registry_digest,
+               operation_row.release_digest,
+               operation_row.execution_evidence_digest,
+               NULL,
+               true
+           )
+           OR operation_row.verification_result_digest IS NULL
+           OR NOT odoo_accounting_cli_v3_guard.result_is_bound(
+               operation_row.verification_result_json,
+               'verification',
+               'verification_result_v2',
+               operation_row.operation_id,
+               operation_row.request_id,
+               operation_row.operation_digest,
+               operation_row.company_id,
+               operation_row.capability_id,
+               operation_row.registry_digest,
+               operation_row.release_digest,
+               operation_row.verification_evidence_digest,
+               operation_row.execution_evidence_digest,
+               false
+           )
            OR resolution_operation_row.capability_id <> 'acct.recovery.execute.v1'
+           OR resolution_operation_row.company_id <> operation_row.company_id
+           OR resolution_operation_row.principal <> operation_row.principal
+           OR resolution_operation_row.requester_id <> operation_row.requester_id
+           OR resolution_operation_row.environment <> operation_row.environment
+           OR resolution_operation_row.registry_digest <> operation_row.registry_digest
+           OR resolution_operation_row.release_digest <> operation_row.release_digest
+           -- company_origin_operation is the immutable PostgreSQL-side
+           -- origin/recovery link.  Recompute the Python canonical JSON scope
+           -- instead of trusting the finalizer request or the SQLite binding.
+           OR resolution_operation_row.idempotency_scope <> pg_catalog.encode(
+               pg_catalog.sha256(
+                   pg_catalog.convert_to(
+                       pg_catalog.concat(
+                           '{"operation_id":',
+                           pg_catalog.to_json(operation_row.operation_id)::text,
+                           '}'
+                       ),
+                       'UTF8'
+                   )
+               ),
+               'hex'
+           )
            OR resolution_operation_row.state <> 'verified'
            OR resolution_operation_row.operation_digest <> (
                resolution_operation_digest
@@ -1834,6 +1887,21 @@ BEGIN
            )
            OR resolution_operation_row.verification_result_digest IS DISTINCT FROM (
                resolution_result_digest
+           )
+           OR NOT odoo_accounting_cli_v3_guard.result_is_bound(
+               resolution_operation_row.execution_result_json,
+               'execution',
+               'execution_result_v2',
+               resolution_operation_row.operation_id,
+               resolution_operation_row.request_id,
+               resolution_operation_row.operation_digest,
+               resolution_operation_row.company_id,
+               resolution_operation_row.capability_id,
+               resolution_operation_row.registry_digest,
+               resolution_operation_row.release_digest,
+               resolution_operation_row.execution_evidence_digest,
+               NULL,
+               true
            )
            OR NOT odoo_accounting_cli_v3_guard.result_is_bound(
                resolution_operation_row.verification_result_json,

@@ -21,6 +21,7 @@ from odoo_accounting_cli_v3.effect_finalizer import (
     EffectFinalizationReceipt,
     EffectFinalizationRequest,
     create_effect_attestation,
+    trusted_result_envelope_digest,
 )
 from odoo_accounting_cli_v3.gateway import RequestContext
 from odoo_accounting_cli_v3.operations import (
@@ -32,7 +33,11 @@ from odoo_accounting_cli_v3.operations import (
     sign_verification_result,
 )
 from odoo_accounting_cli_v3.odoo.module_graph import build_trusted_module_graph
-from odoo_accounting_cli_v3.persistence import ReplayRejected, SQLitePersistence
+from odoo_accounting_cli_v3.persistence import (
+    IdempotencyConflict,
+    ReplayRejected,
+    SQLitePersistence,
+)
 from odoo_accounting_cli_v3.registry import validate_registry
 from odoo_accounting_cli_v3.write_receipts import (
     create_difference,
@@ -98,6 +103,7 @@ def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
         "acct.accrual.create.v1",
         "acct.period.adjustment_create.v1",
         "acct.move.reverse.v1",
+        "acct.move.draft_cancel.v1",
     ):
         assert {"account.move", "account.move.line"} <= _ALLOWED_MODELS[
             capability_id
@@ -254,18 +260,35 @@ def _vendor_bill_parameters(
     return parameters
 
 
+def _draft_cancel_parameters(
+    idempotency_key: str = "draft-cancel-1",
+    *,
+    move_id: int = 501,
+) -> dict[str, object]:
+    return {
+        "company_id": 7,
+        "move_id": move_id,
+        "expected_move_type": "out_invoice",
+        "expected_document_binding": "a" * 64,
+        "expected_business_binding": "b" * 64,
+        "reason": "Cancel an explicitly bound pristine draft invoice",
+        "idempotency_key": idempotency_key,
+    }
+
+
 def _execution_evidence(
     operation_id: str,
     *,
+    capability_id: str = "acct.invoice.customer_create.v1",
     succeeded: bool = True,
     draft_customer_invoice: bool = False,
     draft_vendor_bill: bool = False,
 ) -> dict[str, object]:
     draft_document = draft_customer_invoice or draft_vendor_bill
-    capability_id = (
+    document_capability_id = (
         "acct.bill.vendor_create.v1"
         if draft_vendor_bill
-        else "acct.invoice.customer_create.v1"
+        else capability_id
     )
     recovery_method = (
         "cancel_pristine_v3_draft_vendor_bill_v1"
@@ -374,7 +397,7 @@ def _execution_evidence(
     )
     return {
         "operation_id": operation_id,
-        "capability_id": capability_id,
+        "capability_id": document_capability_id,
         "succeeded": succeeded,
         "odoo_records": [target, {key: guard[key] for key in target}] if succeeded else [],
         "difference": create_difference(
@@ -433,6 +456,98 @@ def _verification_evidence(
     }
 
 
+def _draft_cancel_execution_evidence(operation) -> dict[str, object]:
+    move_id = operation.parameters["move_id"]
+    line_id = move_id + 1
+    before = [
+        create_record_snapshot(
+            model="account.move",
+            record_id=move_id,
+            exists=True,
+            record_state="draft",
+            values={
+                "company_id": operation.company_id,
+                "move_type": operation.parameters["expected_move_type"],
+                "state": "draft",
+            },
+        ),
+        create_record_snapshot(
+            model="account.move.line",
+            record_id=line_id,
+            exists=True,
+            record_state="draft",
+            values={
+                "company_id": operation.company_id,
+                "move_id": move_id,
+                "parent_state": "draft",
+            },
+        ),
+    ]
+    after = [
+        create_record_snapshot(
+            model="account.move",
+            record_id=move_id,
+            exists=True,
+            record_state="cancel",
+            values={
+                "company_id": operation.company_id,
+                "move_type": operation.parameters["expected_move_type"],
+                "state": "cancel",
+            },
+        ),
+        create_record_snapshot(
+            model="account.move.line",
+            record_id=line_id,
+            exists=True,
+            record_state="cancel",
+            values={
+                "company_id": operation.company_id,
+                "move_id": move_id,
+                "parent_state": "cancel",
+            },
+        ),
+    ]
+    records = [
+        {
+            "model": snapshot["model"],
+            "record_id": snapshot["record_id"],
+            "company_id": operation.company_id,
+            "record_state": snapshot["record_state"],
+            "record_fingerprint": hashlib.sha256(
+                canonical_json(snapshot)
+            ).hexdigest(),
+        }
+        for snapshot in after
+    ]
+    recovery_parameters = {"move_id": move_id}
+    recovery_plan = create_recovery_plan_v2(
+        origin_operation_id=operation.operation_id,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="not_applicable",
+        method="not_applicable_pristine_draft_cancel_is_terminal",
+        requires_approval=False,
+        action_targets=[],
+        guard_records=[],
+        oracle_id="not_applicable",
+        parameters=recovery_parameters,
+    )
+    return {
+        "operation_id": operation.operation_id,
+        "capability_id": operation.capability_id,
+        "succeeded": True,
+        "odoo_records": records,
+        "difference": create_difference(
+            before=before,
+            after=after,
+            changed_fields=["parent_state", "state"],
+        ),
+        "recovery_plan": recovery_plan,
+        "recovery_parameters": recovery_parameters,
+        "module_graph": TEST_MODULE_GRAPH.evidence,
+        "failure_checks": [],
+    }
+
+
 class Backend:
     def __init__(self, *, execution_succeeds: bool = True, verification_passes: bool = True):
         self.execution_succeeds = execution_succeeds
@@ -466,6 +581,7 @@ class Backend:
         self.calls.append("execute")
         evidence = _execution_evidence(
             operation.operation_id,
+            capability_id=operation.capability_id,
             succeeded=self.execution_succeeds,
             draft_customer_invoice=(
                 operation.capability_id == "acct.invoice.customer_create.v1"
@@ -496,6 +612,7 @@ class Backend:
             execution_evidence,
             passed=self.verification_passes,
         )
+        evidence["method"] = capability.data["verification"]["method"]
         digest = hashlib.sha256(canonical_json(evidence)).hexdigest()
         result = sign_verification_result(
             operation=operation,
@@ -548,6 +665,58 @@ class Backend:
             execution=execution,
             verification=verification,
         )
+
+
+class DraftCancelBackend(Backend):
+    def execute(
+        self,
+        _context,
+        _capability,
+        operation,
+        _approval,
+        _registry_digest,
+        _release_digest,
+    ):
+        self.calls.append("execute")
+        evidence = _draft_cancel_execution_evidence(operation)
+        result = sign_execution_result(
+            operation=operation,
+            issuer="odoo-write-executor",
+            key_id="execution-v1",
+            succeeded=True,
+            evidence_digest=hashlib.sha256(canonical_json(evidence)).hexdigest(),
+            issued_at=NOW,
+            secret=EXECUTION_SECRET,
+        )
+        return BackendEvidence(result=result, evidence=evidence)
+
+    def verify(
+        self,
+        _context,
+        capability,
+        operation,
+        execution_evidence,
+        _registry_digest,
+        _release_digest,
+    ):
+        self.calls.append("verify")
+        evidence = _verification_evidence(operation, execution_evidence)
+        evidence["method"] = capability.data["verification"]["method"]
+        evidence["checks"] = [
+            "move_state_is_cancel",
+            "line_parent_state_is_cancel",
+            "document_and_business_bindings_match",
+        ]
+        result = sign_verification_result(
+            operation=operation,
+            issuer="odoo-write-verifier",
+            key_id="verification-v1",
+            succeeded=True,
+            evidence_digest=hashlib.sha256(canonical_json(evidence)).hexdigest(),
+            issued_at=NOW,
+            secret=VERIFICATION_SECRET,
+        )
+        return BackendEvidence(result=result, evidence=evidence)
 
 
 class Finalizer:
@@ -745,6 +914,50 @@ def _clone_service(
         effect_finalizer=original._effect_finalizer,
         effect_finalizer_identity=original._effect_finalizer_identity,
     )
+
+
+def _draft_cancel_service(service):
+    original, _original_backend, store = service
+    backend = DraftCancelBackend()
+    return (
+        _clone_service(original, backend, store),
+        backend,
+        store,
+        original._test_effect_finalizer,
+    )
+
+
+def _prepare_draft_cancel(
+    gateway: DurableWriteService,
+    parameters: dict[str, object],
+    *,
+    suffix: str,
+):
+    capability_id = "acct.move.draft_cancel.v1"
+    prepared = gateway.prepare(
+        _context(
+            parameters=parameters,
+            token_id=f"token-draft-cancel-{suffix}-prepare",
+            capability_id=capability_id,
+        ),
+        operation_id=f"op-draft-cancel-{suffix}",
+        request_id=f"request-draft-cancel-{suffix}",
+        capability_id=capability_id,
+        parameters=parameters,
+    )
+    preview = gateway.preview(
+        _context(
+            parameters=parameters,
+            token_id=f"token-draft-cancel-{suffix}-preview",
+            capability_id=capability_id,
+        ),
+        prepared.operation_id,
+    )
+    awaiting = gateway.status(
+        _context(parameters=parameters, capability_id=capability_id),
+        prepared.operation_id,
+    )
+    return prepared, preview, awaiting
 
 
 def test_prepare_preview_persists_every_preapproval_state_and_full_parameters(service):
@@ -1021,6 +1234,211 @@ def test_response_loss_replays_same_database_proof_before_one_local_completion(s
     assert len(finalizer.calls) == 2
     assert finalizer.calls[0] == finalizer.calls[1]
     assert len(store.get_final_write_receipts(awaiting.operation_id)) == 1
+
+
+def test_draft_cancel_runs_the_full_write_lifecycle_and_replays_without_duplicates(
+    service,
+):
+    gateway, backend, store, finalizer = _draft_cancel_service(service)
+    parameters = _draft_cancel_parameters()
+    capability_id = "acct.move.draft_cancel.v1"
+
+    prepared, preview, awaiting = _prepare_draft_cancel(
+        gateway, parameters, suffix="lifecycle"
+    )
+
+    assert prepared.state == State.PREPARED
+    assert preview["operation_state"] == State.AWAITING_APPROVAL
+    assert awaiting.state == State.AWAITING_APPROVAL
+    approval = _approval(awaiting, "approval-draft-cancel-lifecycle")
+    output = gateway.approve_execute(
+        _context(
+            parameters=parameters,
+            token_id="token-draft-cancel-lifecycle-execute",
+            capability_id=capability_id,
+        ),
+        approval,
+        reconciliation_only=False,
+    )
+
+    assert output["operation_state"] == "completed"
+    assert output["verification"]["passed"] is True
+    assert output["verification"]["method"] == (
+        gateway._capabilities[capability_id].data["verification"]["method"]
+    )
+    assert output["recovery_plan"]["status"] == "not_applicable"
+    assert gateway.status(
+        _context(parameters=parameters, capability_id=capability_id),
+        awaiting.operation_id,
+    ).state == State.COMPLETED
+    assert backend.calls == ["precheck", "precheck", "execute", "verify"]
+    assert [
+        event.event_type
+        for event in store.audit_events()
+        if event.operation_id == awaiting.operation_id
+    ] == [
+        "operation.prechecked",
+        "operation.awaiting_approval",
+        "operation.approved",
+        "operation.executing",
+        "operation.verifying",
+        "operation.completed",
+    ]
+    assert [
+        record.kind
+        for record in store.get_trusted_result_records(awaiting.operation_id)
+    ] == ["execution", "verification"]
+
+    assert len(finalizer.calls) == 1
+    intent = finalizer.calls[0]
+    assert intent.operation_id == awaiting.operation_id
+    assert intent.resolution_operation_id == awaiting.operation_id
+    assert intent.operation_digest == awaiting.digest
+    assert intent.resolution_operation_digest == awaiting.digest
+    assert intent.resolution_kind == "verified"
+    assert output["database_finalization"]["resolved_anchor_count"] == 1
+    assert output["database_finalization"]["operation_id"] == awaiting.operation_id
+    assert (
+        output["database_finalization"]["resolution_operation_id"]
+        == awaiting.operation_id
+    )
+    assert len(store.get_final_write_receipts(awaiting.operation_id)) == 1
+    assert gateway.result(
+        _context(parameters=parameters, capability_id=capability_id),
+        awaiting.operation_id,
+    ) == output
+
+    duplicate = gateway.prepare(
+        _context(
+            parameters=parameters,
+            token_id="token-draft-cancel-lifecycle-prepare-replay",
+            capability_id=capability_id,
+        ),
+        operation_id="op-draft-cancel-lifecycle-replay",
+        request_id="request-draft-cancel-lifecycle-replay",
+        capability_id=capability_id,
+        parameters=copy.deepcopy(parameters),
+    )
+    assert duplicate.operation_id == awaiting.operation_id
+    replay = gateway.approve_execute(
+        _context(
+            parameters=parameters,
+            token_id="token-draft-cancel-lifecycle-result-replay",
+            capability_id=capability_id,
+        ),
+        approval,
+        reconciliation_only=True,
+    )
+    assert replay == output
+    assert backend.calls == ["precheck", "precheck", "execute", "verify"]
+    assert len(finalizer.calls) == 1
+    assert len(finalizer.receipts) == 1
+    assert len(store.get_final_write_receipts(awaiting.operation_id)) == 1
+
+
+def test_draft_cancel_same_move_rejects_changed_content_and_idempotency_key(service):
+    gateway, _backend, _store, _finalizer = _draft_cancel_service(service)
+    capability_id = "acct.move.draft_cancel.v1"
+    parameters = _draft_cancel_parameters("draft-cancel-scope")
+    first = gateway.prepare(
+        _context(
+            parameters=parameters,
+            token_id="token-draft-cancel-scope-first",
+            capability_id=capability_id,
+        ),
+        operation_id="op-draft-cancel-scope-first",
+        request_id="request-draft-cancel-scope-first",
+        capability_id=capability_id,
+        parameters=parameters,
+    )
+    assert first.state == State.PREPARED
+
+    changed_content = {**parameters, "reason": "A different cancellation reason"}
+    with pytest.raises(
+        IdempotencyConflict, match="different request content"
+    ):
+        gateway.prepare(
+            _context(
+                parameters=changed_content,
+                token_id="token-draft-cancel-scope-changed-content",
+                capability_id=capability_id,
+            ),
+            operation_id="op-draft-cancel-scope-changed-content",
+            request_id="request-draft-cancel-scope-changed-content",
+            capability_id=capability_id,
+            parameters=changed_content,
+        )
+
+    changed_key = {**parameters, "idempotency_key": "draft-cancel-other-key"}
+    with pytest.raises(
+        IdempotencyConflict, match="different request content"
+    ):
+        gateway.prepare(
+            _context(
+                parameters=changed_key,
+                token_id="token-draft-cancel-scope-changed-key",
+                capability_id=capability_id,
+            ),
+            operation_id="op-draft-cancel-scope-changed-key",
+            request_id="request-draft-cancel-scope-changed-key",
+            capability_id=capability_id,
+            parameters=changed_key,
+        )
+
+
+def test_draft_cancel_finalizer_response_loss_replays_one_verified_anchor(service):
+    gateway, backend, store, finalizer = _draft_cancel_service(service)
+    parameters = _draft_cancel_parameters("draft-cancel-response-loss")
+    capability_id = "acct.move.draft_cancel.v1"
+    _prepared, _preview, awaiting = _prepare_draft_cancel(
+        gateway, parameters, suffix="response-loss"
+    )
+    approval = _approval(awaiting, "approval-draft-cancel-response-loss")
+    finalizer.lose_first_response = True
+
+    with pytest.raises(WriteServiceError, match="database effect finalization"):
+        gateway.approve_execute(
+            _context(
+                parameters=parameters,
+                token_id="token-draft-cancel-response-loss-first",
+                capability_id=capability_id,
+            ),
+            approval,
+            reconciliation_only=False,
+        )
+
+    assert gateway.status(
+        _context(parameters=parameters, capability_id=capability_id),
+        awaiting.operation_id,
+    ).state == State.VERIFYING
+    assert store.get_final_write_receipts(awaiting.operation_id) == ()
+    assert len(finalizer.calls) == 1
+    assert len(finalizer.requests) == 1
+    assert len(finalizer.receipts) == 1
+
+    output = gateway.approve_execute(
+        _context(
+            parameters=parameters,
+            token_id="token-draft-cancel-response-loss-replay",
+            capability_id=capability_id,
+        ),
+        approval,
+        reconciliation_only=True,
+    )
+
+    assert output["operation_state"] == "completed"
+    assert output["database_finalization"]["resolution_kind"] == "verified"
+    assert output["database_finalization"]["resolved_anchor_count"] == 1
+    assert len(finalizer.calls) == 2
+    assert finalizer.calls[0] == finalizer.calls[1]
+    assert len(finalizer.requests) == 1
+    assert len(finalizer.receipts) == 1
+    assert backend.calls.count("execute") == 1
+    assert len(store.get_final_write_receipts(awaiting.operation_id)) == 1
+    assert gateway.result(
+        _context(parameters=parameters, capability_id=capability_id),
+        awaiting.operation_id,
+    ) == output
 
 
 def test_terminal_result_reverifies_stored_trusted_result_hmac(service, monkeypatch):
@@ -1327,8 +1745,9 @@ def test_combined_odoo_invocation_replays_anchor_after_execution_persistence(ser
     assert backend.calls == ["execute", "verify"]
 
 
-def test_recovery_is_a_new_operation_derived_from_the_verified_origin_receipt(service):
-    gateway, _backend, store = service
+def test_recovery_is_a_new_operation_derived_from_a_failed_verification_receipt(service):
+    gateway, backend, store = service
+    backend.verification_passes = False
     draft_parameters = {**_invoice_parameters(), "posting_mode": "draft"}
     awaiting = _prepare_and_preview(gateway, parameters=draft_parameters)
     approval = _approval(awaiting, "approval-origin-for-recovery")
@@ -1337,9 +1756,11 @@ def test_recovery_is_a_new_operation_derived_from_the_verified_origin_receipt(se
         approval,
         reconciliation_only=False,
     )
+    backend.verification_passes = True
     origin = gateway.status(
         _context(parameters=draft_parameters), awaiting.operation_id
     )
+    assert origin.state == State.FAILED
     recovery_request = {
         "origin_operation_id": origin.operation_id,
         "expected_origin_revision": origin.revision,
@@ -1447,8 +1868,9 @@ def test_recovery_is_a_new_operation_derived_from_the_verified_origin_receipt(se
         gateway.prepare_recovery(changed_context, **changed_revision)
 
 
-def test_origin_recovery_rejects_forged_exact_line_outcome(service, monkeypatch):
-    gateway, _backend, _store = service
+def test_origin_recovery_rejects_a_plan_not_bound_to_the_requested_digest(service, monkeypatch):
+    gateway, backend, _store = service
+    backend.verification_passes = False
     draft_parameters = {**_invoice_parameters(), "posting_mode": "draft"}
     awaiting = _prepare_and_preview(gateway, parameters=draft_parameters)
     approval = _approval(awaiting, "approval-forged-line-outcome")
@@ -1457,6 +1879,7 @@ def test_origin_recovery_rejects_forged_exact_line_outcome(service, monkeypatch)
         approval,
         reconciliation_only=False,
     )
+    backend.verification_passes = True
     origin = gateway.status(
         _context(parameters=draft_parameters), awaiting.operation_id
     )
@@ -1486,17 +1909,20 @@ def test_origin_recovery_rejects_forged_exact_line_outcome(service, monkeypatch)
 
     with pytest.raises(
         WriteServiceError,
-        match="exact sandbox draft customer invoice receipt",
+        match="unavailable or outside the bound company",
     ):
         gateway._validated_origin_recovery_plan(
-            _context(parameters=draft_parameters), origin
+            _context(parameters=draft_parameters),
+            origin,
+            expected_plan_digest=original_plan["plan_digest"],
         )
 
 
 def test_vendor_bill_recovery_has_its_own_approval_and_idempotency_operation(
-    service, monkeypatch
+    service,
 ):
-    gateway, _backend, store = service
+    gateway, backend, store = service
+    backend.verification_passes = False
     bill_parameters = {
         **_vendor_bill_parameters(),
         "posting_mode": "draft",
@@ -1537,6 +1963,7 @@ def test_vendor_bill_recovery_has_its_own_approval_and_idempotency_operation(
         origin_approval,
         reconciliation_only=False,
     )
+    backend.verification_passes = True
     origin = gateway.status(
         _context(
             parameters=bill_parameters,
@@ -1614,35 +2041,14 @@ def test_vendor_bill_recovery_has_its_own_approval_and_idempotency_operation(
     assert recovery_approval.operation_digest == awaiting_recovery.digest
     assert recovery_approval.signature != origin_approval.signature
 
-    original_plan = origin_result["recovery_plan"]
-    forged_plan = create_recovery_plan_v2(
-        origin_operation_id=origin.operation_id,
-        recovery_capability_id="acct.recovery.execute.v1",
-        status="available",
-        method="cancel_pristine_v3_draft_customer_invoice_v1",
-        requires_approval=True,
-        action_targets=original_plan["action_targets"],
-        guard_records=original_plan["guard_records"],
-        oracle_id="cancel_pristine_v3_draft_customer_invoice_exact_v1",
-        parameters={"origin_operation_id": origin.operation_id},
-    )
-    forged_output = {**origin_result, "recovery_plan": forged_plan}
-    monkeypatch.setattr(gateway, "result", lambda *_args: forged_output)
-
-    with pytest.raises(WriteServiceError, match="draft vendor bill receipt"):
-        gateway._validated_origin_recovery_plan(
-            recovery_context("token-forged-vendor-method"), origin
-        )
-
-
-def test_posted_customer_invoice_receipt_cannot_be_reinterpreted_as_draft_cancel(service):
+def test_completed_customer_invoice_cannot_be_reinterpreted_as_incident_recovery(service):
     gateway, _backend, _store = service
     awaiting = _prepare_and_preview(gateway)
     approval = _approval(awaiting, "approval-posted-origin-recovery-rejected")
     gateway.approve_execute(_context(), approval, reconciliation_only=False)
     origin = gateway.status(_context(), awaiting.operation_id)
 
-    with pytest.raises(WriteServiceError, match="draft customer invoice"):
+    with pytest.raises(WriteServiceError, match="failed origin"):
         gateway.prepare_recovery(
             _context(token_id="token-posted-origin-recovery-rejected"),
             origin_operation_id=origin.operation_id,
@@ -1655,7 +2061,7 @@ def test_posted_customer_invoice_receipt_cannot_be_reinterpreted_as_draft_cancel
         )
 
 
-def test_production_origin_can_never_reuse_the_sandbox_draft_recovery_contract(service):
+def test_completed_origin_is_rejected_before_environment_reinterpretation(service):
     gateway, _backend, _store = service
     draft_parameters = {**_invoice_parameters(), "posting_mode": "draft"}
     awaiting = _prepare_and_preview(gateway, parameters=draft_parameters)
@@ -1669,10 +2075,328 @@ def test_production_origin_can_never_reuse_the_sandbox_draft_recovery_contract(s
         _context(parameters=draft_parameters), awaiting.operation_id
     )
 
-    with pytest.raises(WriteServiceError, match="sandbox draft customer invoice"):
+    with pytest.raises(WriteServiceError, match="failed origin"):
         gateway._validated_origin_recovery_plan(
             _context(parameters=draft_parameters),
             replace(origin, environment="production"),
+        )
+
+
+def _failed_verification_origin(
+    gateway: DurableWriteService,
+    backend: Backend,
+):
+    backend.verification_passes = False
+    awaiting = _prepare_and_preview(gateway)
+    output = gateway.approve_execute(
+        _context(token_id="token-incident-origin-execute"),
+        _approval(awaiting, "approval-incident-origin"),
+        reconciliation_only=False,
+    )
+    origin = gateway.status(
+        _context(token_id="token-incident-origin-status"),
+        awaiting.operation_id,
+    )
+    assert output["operation_state"] == "failed"
+    assert output["verification"]["passed"] is False
+    assert origin.state == State.FAILED
+    backend.verification_passes = True
+    return origin
+
+
+def _incident_recovery_request(origin, *, suffix: str) -> dict[str, object]:
+    return {
+        "origin_operation_id": origin.operation_id,
+        "expected_origin_revision": origin.revision,
+        "recovery_operation_id": f"op-incident-recovery-{suffix}",
+        "request_id": f"request-incident-recovery-{suffix}",
+        "recovery_date": "2026-07-16",
+        "reason": "Resolve a durably failed verification incident",
+        "idempotency_key": f"incident-recovery-{suffix}",
+    }
+
+
+def _install_incident_recovery_auth(
+    gateway: DurableWriteService,
+    origin,
+    request: dict[str, object],
+):
+    def context(token_id: str):
+        return sign_write_action_context(
+            auth_token_id=token_id,
+            principal=origin.principal,
+            odoo_instance_id=origin.odoo_instance_id,
+            database_name=origin.database_name,
+            database_uuid=origin.database_uuid,
+            user_id=origin.user_id,
+            company_id=origin.company_id,
+            allowed_company_ids=frozenset({origin.company_id}),
+            environment=origin.environment,
+            action="operation.recover",
+            request=request,
+            issued_at=NOW - timedelta(seconds=10),
+            expires_at=NOW + timedelta(minutes=4),
+            key_id="write-auth-v2",
+            secret=APPROVAL_SECRET,
+        )
+
+    def authenticate(value):
+        return verify_write_action_context(
+            value,
+            action="operation.recover",
+            request=request,
+            now=NOW,
+            secret=APPROVAL_SECRET,
+            expected_key_id="write-auth-v2",
+        )
+
+    gateway._authenticate_context = authenticate
+    gateway._policy._authenticate_context = authenticate
+    return context
+
+
+def _prepare_incident_recovery_awaiting(
+    gateway: DurableWriteService,
+    backend: Backend,
+    *,
+    suffix: str,
+):
+    origin = _failed_verification_origin(gateway, backend)
+    request = _incident_recovery_request(origin, suffix=suffix)
+    context = _install_incident_recovery_auth(gateway, origin, request)
+    prepared = gateway.prepare_recovery(
+        context(f"token-{suffix}-prepare"), **request
+    )
+    recovery = prepared["operation"]
+    gateway.preview(context(f"token-{suffix}-preview"), recovery.operation_id)
+    awaiting = gateway.status(
+        context(f"token-{suffix}-status"), recovery.operation_id
+    )
+    return origin, recovery, awaiting, context
+
+
+def test_incident_recovery_requires_failed_verification_and_finalizes_two_anchors(
+    service,
+):
+    gateway, backend, store = service
+    origin = _failed_verification_origin(gateway, backend)
+    request = _incident_recovery_request(origin, suffix="success")
+    context = _install_incident_recovery_auth(gateway, origin, request)
+
+    prepared = gateway.prepare_recovery(
+        context("token-incident-recovery-prepare"), **request
+    )
+    recovery = prepared["operation"]
+    assert recovery.operation_id != origin.operation_id
+    gateway.preview(
+        context("token-incident-recovery-preview"), recovery.operation_id
+    )
+    awaiting = gateway.status(
+        context("token-incident-recovery-status"), recovery.operation_id
+    )
+    output = gateway.approve_execute(
+        context("token-incident-recovery-execute"),
+        _approval(awaiting, "approval-incident-recovery"),
+        reconciliation_only=False,
+    )
+
+    assert output["operation_state"] == "completed"
+    assert store.get_operation(origin.operation_id).state == State.FAILED
+    assert store.get_operation(recovery.operation_id).state == State.COMPLETED
+    intent = gateway._test_effect_finalizer.calls[-1]
+    origin_execution = gateway._stored_backend_evidence(
+        next(
+            record
+            for record in store.get_trusted_result_records(origin.operation_id)
+            if record.kind == "execution"
+        )
+    )
+    recovery_records = store.get_trusted_result_records(recovery.operation_id)
+    recovery_execution = gateway._stored_backend_evidence(
+        next(record for record in recovery_records if record.kind == "execution")
+    )
+    recovery_verification = gateway._stored_backend_evidence(
+        next(record for record in recovery_records if record.kind == "verification")
+    )
+    assert intent.operation_id == origin.operation_id
+    assert intent.operation_digest == origin.digest
+    assert intent.execution_result_digest == trusted_result_envelope_digest(
+        origin_execution.result, origin
+    )
+    assert intent.resolution_operation_id == recovery.operation_id
+    assert intent.resolution_operation_digest == recovery.digest
+    assert (
+        intent.resolution_execution_result_digest
+        == trusted_result_envelope_digest(recovery_execution.result, recovery)
+    )
+    assert intent.resolution_result_digest == trusted_result_envelope_digest(
+        recovery_verification.result, recovery
+    )
+    assert intent.resolution_kind == "recovered"
+    assert output["database_finalization"]["resolved_anchor_count"] == 2
+    assert output["database_finalization"]["operation_id"] == origin.operation_id
+    assert (
+        output["database_finalization"]["resolution_operation_id"]
+        == recovery.operation_id
+    )
+    assert len(store.get_final_write_receipts(recovery.operation_id)) == 1
+    assert gateway.result(
+        context("token-incident-recovery-result"), recovery.operation_id
+    ) == output
+
+
+def test_incident_recovery_finalizer_failure_leaves_verifying_without_local_receipt(
+    service,
+):
+    gateway, backend, store = service
+    origin, recovery, awaiting, context = _prepare_incident_recovery_awaiting(
+        gateway, backend, suffix="finalizer-failure"
+    )
+    finalizer = gateway._test_effect_finalizer
+    finalizer.error = EffectFinalizationError("simulated recovered finalization failure")
+
+    with pytest.raises(WriteServiceError, match="database effect finalization"):
+        gateway.approve_execute(
+            context("token-incident-finalizer-failure-execute"),
+            _approval(awaiting, "approval-incident-finalizer-failure"),
+            reconciliation_only=False,
+        )
+
+    assert gateway.status(
+        context("token-incident-finalizer-failure-status"),
+        recovery.operation_id,
+    ).state == State.VERIFYING
+    assert store.get_final_write_receipts(recovery.operation_id) == ()
+    assert finalizer.calls[-1].operation_id == origin.operation_id
+    assert finalizer.calls[-1].resolution_operation_id == recovery.operation_id
+    assert finalizer.calls[-1].resolution_kind == "recovered"
+
+
+def test_incident_recovery_response_loss_replays_the_same_two_anchor_intent(service):
+    gateway, backend, store = service
+    _origin, recovery, awaiting, context = _prepare_incident_recovery_awaiting(
+        gateway, backend, suffix="response-loss"
+    )
+    approval = _approval(awaiting, "approval-incident-response-loss")
+    finalizer = gateway._test_effect_finalizer
+    finalizer.lose_first_response = True
+
+    with pytest.raises(WriteServiceError, match="database effect finalization"):
+        gateway.approve_execute(
+            context("token-incident-response-loss-first"),
+            approval,
+            reconciliation_only=False,
+        )
+    assert gateway.status(
+        context("token-incident-response-loss-verifying"),
+        recovery.operation_id,
+    ).state == State.VERIFYING
+    assert store.get_final_write_receipts(recovery.operation_id) == ()
+
+    output = gateway.approve_execute(
+        context("token-incident-response-loss-replay"),
+        approval,
+        reconciliation_only=True,
+    )
+
+    assert output["operation_state"] == "completed"
+    assert output["database_finalization"]["resolved_anchor_count"] == 2
+    assert len(finalizer.calls) == 2
+    assert finalizer.calls[0] == finalizer.calls[1]
+    assert len(store.get_final_write_receipts(recovery.operation_id)) == 1
+
+
+def test_incident_recovery_rejects_execution_failure_without_verification(service):
+    gateway, backend, _store = service
+    backend.execution_succeeds = False
+    awaiting = _prepare_and_preview(gateway)
+    gateway.approve_execute(
+        _context(token_id="token-failed-execution-origin"),
+        _approval(awaiting, "approval-failed-execution-origin"),
+        reconciliation_only=False,
+    )
+    origin = gateway.status(
+        _context(token_id="token-failed-execution-origin-status"),
+        awaiting.operation_id,
+    )
+    request = _incident_recovery_request(origin, suffix="execution-failed")
+    context = _install_incident_recovery_auth(gateway, origin, request)
+
+    with pytest.raises(
+        WriteServiceError,
+        match="durable successful execution and failed verification",
+    ):
+        gateway.prepare_recovery(
+            context("token-failed-execution-recovery"), **request
+        )
+
+
+def test_incident_recovery_rejects_missing_durable_verification(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, backend, store = service
+    origin = _failed_verification_origin(gateway, backend)
+    records = store.get_trusted_result_records(origin.operation_id)
+    original = store.get_trusted_result_records
+    monkeypatch.setattr(
+        store,
+        "get_trusted_result_records",
+        lambda operation_id: (
+            tuple(record for record in records if record.kind == "execution")
+            if operation_id == origin.operation_id
+            else original(operation_id)
+        ),
+    )
+    request = _incident_recovery_request(origin, suffix="missing-verification")
+    context = _install_incident_recovery_auth(gateway, origin, request)
+
+    with pytest.raises(
+        WriteServiceError,
+        match="durable successful execution and failed verification",
+    ):
+        gateway.prepare_recovery(
+            context("token-missing-verification-recovery"), **request
+        )
+
+
+def test_incident_recovery_operation_must_be_distinct_from_origin(service):
+    gateway, backend, _store = service
+    origin = _failed_verification_origin(gateway, backend)
+    request = _incident_recovery_request(origin, suffix="same-operation")
+    request["recovery_operation_id"] = origin.operation_id
+    context = _install_incident_recovery_auth(gateway, origin, request)
+
+    with pytest.raises(WriteServiceError, match="distinct from its origin"):
+        gateway.prepare_recovery(
+            context("token-same-operation-recovery"), **request
+        )
+
+
+def test_current_release_rejects_a_legacy_recovery_binding_before_execution(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, backend, store = service
+    _origin, recovery, _awaiting, context = _prepare_incident_recovery_awaiting(
+        gateway, backend, suffix="legacy-binding"
+    )
+    binding = store.get_recovery_operation_binding(recovery.operation_id)
+    legacy = replace(
+        binding,
+        audit_event=replace(
+            binding.audit_event,
+            payload={**binding.audit_event.payload, "binding_version": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        store, "get_recovery_operation_binding", lambda _operation_id: legacy
+    )
+
+    with pytest.raises(
+        WriteServiceError,
+        match="binding differs from durable origin evidence",
+    ):
+        gateway.trusted_recovery_plan(
+            context("token-legacy-binding-plan"), recovery
         )
 
 

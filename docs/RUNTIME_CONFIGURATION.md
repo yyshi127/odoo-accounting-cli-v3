@@ -373,12 +373,41 @@ dependency set, or an equivalent pre-import cryptographic binding removes this
 identity gap.
 
 Runtime configuration never enables a capability by itself. The registry must
-contain the same environment in the selected channel. All 13 registered write
+contain the same environment in the selected channel. All 14 registered write
 capabilities remain closed by default. They may move to staged only in a
 dedicated sandbox after their local contract gate passes, and may advance again
 only from retained capability-specific real Odoo lifecycle evidence. Nothing
 in this document is evidence that such a run has occurred. Production writes
 require separate explicit authorization and production-safety review.
+
+In particular, `acct.move.draft_cancel.v1` has no enabled or staged environment.
+Its two 64-character inputs are not caller-generated secrets: the trusted value
+source is the exact V3-created `account.move` record's
+`odoo_cli_v3_document_binding` and `odoo_cli_v3_business_binding`, read under the
+bound user, company, ACL, database, release, and Odoo receipt identity. Runtime
+configuration must not supply defaults for either value. Before enabling this
+write in any sandbox, register and evidence a candidate-read path that returns
+the exact company, move ID, `out_invoice`/`in_invoice` type, both bindings, and
+pristine-draft eligibility. The read must pass strict output-schema, ACL,
+cross-company, tamper, Pi parameter-transit, and real-Odoo receipt gates. That
+read evidence does not yet exist, so the write remains disabled.
+Staging also requires a reviewed target-module graph and a database automation
+inventory proving that `account.move.write` has no active override, server
+action, base automation, webhook, mail, or queue side effect outside the
+approved move/line graph. The local exact-delta verifier cannot observe an
+external call or an unrelated record created by an override, so fake-ORM tests
+do not satisfy this gate.
+
+The current `acct.recovery.execute.v1` contract is also disabled and is limited
+to an incident whose origin is durably `failed` after one successful execution
+result and one bound failed-verification result. It is not a general cancel
+command and cannot act on a normally completed invoice or bill. A completed
+creation receipt may retain its signed version-2 recovery plan because that
+same plan is the evidence needed if verification fails; `status=available` in
+that receipt alone is therefore not current execution authority. The FAILED
+state, the two-result chain, a fresh approval, and the distinct recovery
+operation binding are all required. Historical version-1 bindings remain
+readable for frozen-route audit but are rejected by the current executor.
 
 The role-separated HMAC files and SQLite controls protect protocol boundaries
 against ordinary misconfiguration and out-of-protocol application writes; they

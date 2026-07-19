@@ -288,11 +288,18 @@ requests across all enabled domains.
 ### Frozen F01-F03 scoring contract
 
 `tests/fixtures/pi_scenarios.v1.json` is the revision-1 frozen Chinese key
-scenario corpus. It covers every one of the 22 registered capabilities and the
+scenario corpus. Its 24 scenarios cover every one of the 23 registered
+capabilities and the
 ordinary, ambiguous, adversarial, multi-company, multi-currency, and recovery
 classes. Environment-specific Odoo record IDs are named fixture bindings, so a
 capture run binds the same intent to its own sandbox fixtures without changing
 the frozen expectations.
+
+Two scenarios select `acct.move.draft_cancel.v1`, one for a customer draft
+invoice and one for a vendor draft bill. Each preserves all seven strict input
+parameters through CLI input and preview and binds that same parameter digest
+to approval. Their document and business bindings model values returned by a
+trusted candidate read, never free-form values invented by Pi or the user.
 
 `tools/pi_scenario_gate.py` is an offline scorer. It requires an HMAC-attested
 Pi trace export and a host-local trusted key file; it does not invoke Pi, an
@@ -409,7 +416,7 @@ At the current local development checkpoint:
   prepare idempotency, retained release/key routing, real per-release read/write
   HMAC response verification, and a separate append-only Broker attempt audit.
   It contains strict precheck/handler/verification/recovery implementations
-  for the 13 registered write capabilities. Local loss-response, replay,
+  for all 14 registered write capabilities. Local loss-response, replay,
   cross-company, tamper, audit-failure, wrong-key, and historical-route tests are
   historical development evidence, not current-HEAD Odoo receipts or promotion
   evidence;
@@ -465,6 +472,26 @@ At the current local development checkpoint:
   prevents a false success while an already committed effect may require
   reconciliation. These remain local contract/fake-ORM tests; no real Odoo
   write/recovery receipt was produced; and
+- the normal approved `acct.move.draft_cancel.v1` path is separately registered
+  but remains disabled and unstaged. Its expected document and business
+  bindings must be read from the exact V3-created `account.move` fields under
+  trusted user/company/ACL and signed Odoo receipt identity. Before staging,
+  a registered candidate-read path must return the exact company, move ID,
+  move type, both bindings, and pristine-draft eligibility and pass strict
+  schema, ACL, cross-company, tamper, Pi transit, and real-sandbox Odoo tests.
+  It also requires a target-module and active-automation inventory proving no
+  `account.move.write` override, server action, webhook, mail, queue, or
+  unrelated-record side effect escapes the approved move/line graph. There is
+  no retained candidate-read or automation-safety receipt yet;
+- dev26 limits the current `acct.recovery.execute.v1` path to a distinct,
+  separately approved resolution of a durable FAILED origin with exactly one
+  successful execution result followed by one bound failed-verification
+  result. Completed origins, execution-only failures, legacy version-1
+  bindings, same-operation recovery, and mismatched two-anchor finalization are
+  rejected. A signed creation plan marked `available` is necessary incident
+  evidence but is not by itself execution authority. The capability remains
+  disabled, and the PostgreSQL two-anchor tests still require their real CI
+  job before this checkpoint is accepted;
 - every current registry `evidence.receipts` array is empty: zero capabilities
   are enabled and zero write capabilities are staged. E00b, a real sandbox
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox

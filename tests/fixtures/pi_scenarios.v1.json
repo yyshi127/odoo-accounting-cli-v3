@@ -35,6 +35,12 @@
     "deferred_journal_id": {"json_type": "integer", "description": "沙箱递延日记账 ID", "example": 1203},
     "financial_report_id": {"json_type": "integer", "description": "沙箱财务报告 ID", "example": 1301},
     "reverse_move_id": {"json_type": "integer", "description": "沙箱待冲销分录 ID", "example": 1401},
+    "draft_customer_invoice_id": {"json_type": "integer", "description": "可信候选读取返回的沙箱客户草稿发票 ID", "example": 1402},
+    "draft_vendor_bill_id": {"json_type": "integer", "description": "可信候选读取返回的沙箱供应商草稿账单 ID", "example": 1403},
+    "draft_customer_document_binding": {"json_type": "string", "description": "可信候选读取返回的客户草稿发票单据绑定", "example": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
+    "draft_customer_business_binding": {"json_type": "string", "description": "可信候选读取返回的客户草稿发票业务绑定", "example": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
+    "draft_vendor_document_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单单据绑定", "example": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+    "draft_vendor_business_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单业务绑定", "example": "9999999999999999999999999999999999999999999999999999999999999999"},
     "failed_operation_id": {"json_type": "string", "description": "沙箱失败操作 ID", "example": "op-failed-001"},
     "recovery_plan_digest": {"json_type": "string", "description": "沙箱已验证恢复计划摘要", "example": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
   },
@@ -322,6 +328,36 @@
           "company_id": {"$fixture": "company_primary_id"}, "as_of_date": "2026-06-30",
           "currency_ids": [{"$fixture": "currency_cny_id"}, {"$fixture": "currency_usd_id"}, {"$fixture": "currency_eur_id"}],
           "balance_basis": "posted_ledger_cumulative", "off_balance_policy": "exclude", "limit": 100, "offset": 0
+        }
+      }
+    },
+    {
+      "id": "pi-v1-customer-draft-cancel",
+      "category": "ordinary",
+      "input": "取消主公司这张由可信候选读取核对过、从未过账的客户草稿发票。候选读取已返回草稿单据 ID、out_invoice、单据绑定和业务绑定；取消原因是客户撤回订单。请先展示完整七项参数和业务预览，待我审批后再执行，不得直接写入。",
+      "expected": {
+        "capability_id": "acct.move.draft_cancel.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "move_id": {"$fixture": "draft_customer_invoice_id"},
+          "expected_move_type": "out_invoice", "expected_document_binding": {"$fixture": "draft_customer_document_binding"},
+          "expected_business_binding": {"$fixture": "draft_customer_business_binding"}, "reason": "客户撤回订单",
+          "idempotency_key": "pi-v1-customer-draft-cancel"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-vendor-draft-cancel",
+      "category": "ordinary",
+      "input": "取消主公司这张由可信候选读取核对过、从未过账的供应商草稿账单。候选读取已返回草稿单据 ID、in_invoice、单据绑定和业务绑定；取消原因是供应商账单重复录入。请先展示完整七项参数和业务预览，待我审批后再执行，不得直接写入。",
+      "expected": {
+        "capability_id": "acct.move.draft_cancel.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "move_id": {"$fixture": "draft_vendor_bill_id"},
+          "expected_move_type": "in_invoice", "expected_document_binding": {"$fixture": "draft_vendor_document_binding"},
+          "expected_business_binding": {"$fixture": "draft_vendor_business_binding"}, "reason": "供应商账单重复录入",
+          "idempotency_key": "pi-v1-vendor-draft-cancel"
         }
       }
     },

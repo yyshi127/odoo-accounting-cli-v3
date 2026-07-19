@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -212,6 +213,78 @@ def test_finalizer_attestation_is_database_bound_and_uses_global_lock_order():
     state_lock = finalizer.index("module_guard_state", operation_lock)
     anchor_lock = finalizer.index("operation_effect_anchor", state_lock)
     assert operation_lock < state_lock < anchor_lock
+    recovered_branch = finalizer[
+        finalizer.index("IF requested_resolution_kind = 'verified' THEN") :
+        finalizer.index("SELECT anchor.* INTO target_anchor")
+    ]
+    assert "operation_row.state <> 'failed'" in recovered_branch
+    assert "operation_row.verification_result_digest IS NULL" in recovered_branch
+    assert re.search(
+        r"result_is_bound\(\s*operation_row\.execution_result_json,.*?\s+true\s*\)",
+        recovered_branch,
+        flags=re.DOTALL,
+    )
+    assert re.search(
+        r"result_is_bound\(\s*operation_row\.verification_result_json,.*?\s+false\s*\)",
+        recovered_branch,
+        flags=re.DOTALL,
+    )
+    assert "resolution_operation_row.capability_id <> 'acct.recovery.execute.v1'" in (
+        recovered_branch
+    )
+    for immutable_runtime_field in (
+        "company_id",
+        "principal",
+        "requester_id",
+        "environment",
+        "registry_digest",
+        "release_digest",
+    ):
+        assert (
+            f"resolution_operation_row.{immutable_runtime_field} <> "
+            f"operation_row.{immutable_runtime_field}"
+        ) in re.sub(r"\s+", " ", recovered_branch)
+    assert "resolution_operation_row.approver_id <> operation_row.approver_id" not in (
+        recovered_branch
+    )
+    for scope_binding_marker in (
+        "resolution_operation_row.idempotency_scope <> pg_catalog.encode(",
+        "pg_catalog.sha256(",
+        "pg_catalog.convert_to(",
+        "pg_catalog.to_json(operation_row.operation_id)::text",
+        "'{\"operation_id\":'",
+    ):
+        assert scope_binding_marker in recovered_branch
+    assert "resolution_operation_row.state <> 'verified'" in recovered_branch
+    assert re.search(
+        r"result_is_bound\(\s*resolution_operation_row\.execution_result_json,"
+        r".*?\s+true\s*\)",
+        recovered_branch,
+        flags=re.DOTALL,
+    )
+    assert re.search(
+        r"result_is_bound\(\s*resolution_operation_row\.verification_result_json,"
+        r".*?\s+true\s*\)",
+        recovered_branch,
+        flags=re.DOTALL,
+    )
+    assert "expected_operation_record_id bigint NOT NULL REFERENCES" in _sql()
+    assert "resolution_operation_record_id bigint NOT NULL REFERENCES" in _sql()
+    assert "UNIQUE (expected_operation_record_id, resolution_kind)" in _sql()
+    assert finalizer.count(
+        "INSERT INTO odoo_accounting_cli_v3_guard.operation_effect_resolution"
+    ) == 2
+    body = re.search(
+        r"AS \$function\$(.*?)\$function\$;",
+        finalizer,
+        flags=re.DOTALL,
+    )
+    assert body is not None
+    source_digest = hashlib.sha256(body.group(1).encode()).hexdigest()
+    assert (
+        f'"finalize_operation_effect": "{source_digest}"'
+        in MODEL.read_text(encoding="utf-8")
+    )
     sql = _sql()
     assert (
         "GRANT SELECT ON TABLE public.ir_config_parameter "

@@ -23,6 +23,7 @@ WRITE_IDS = (
     "acct.deferred.create.v1",
     "acct.period.adjustment_create.v1",
     "acct.move.reverse.v1",
+    "acct.move.draft_cancel.v1",
     "acct.recovery.execute.v1",
 )
 
@@ -87,6 +88,11 @@ EXPECTED_INPUT_FIELDS = {
     "acct.move.reverse.v1": {
         "company_id", "move_id", "reversal_date", "journal_id", "currency_id",
         "expected_total_amount", "reason", "posting_mode", "idempotency_key",
+    },
+    "acct.move.draft_cancel.v1": {
+        "company_id", "move_id", "expected_move_type",
+        "expected_document_binding", "expected_business_binding", "reason",
+        "idempotency_key",
     },
     "acct.recovery.execute.v1": {
         "company_id", "origin_operation_id", "expected_recovery_plan_digest",
@@ -310,6 +316,14 @@ VALID_INPUTS = {
         "journal_id": 8, "currency_id": 12, "expected_total_amount": "100.00",
         "reason": "Approved correction", "posting_mode": "post",
         "idempotency_key": "reversal-1",
+    },
+    "acct.move.draft_cancel.v1": {
+        "company_id": 7, "move_id": 702,
+        "expected_move_type": "out_invoice",
+        "expected_document_binding": "a" * 64,
+        "expected_business_binding": "b" * 64,
+        "reason": "Cancel duplicate pristine draft",
+        "idempotency_key": "draft-cancel-1",
     },
     "acct.recovery.execute.v1": {
         "company_id": 7, "origin_operation_id": "op-original-1",
@@ -631,6 +645,17 @@ def test_domain_line_contracts_and_cross_field_inputs_are_explicit():
     reversal = writes["acct.move.reverse.v1"]["input_schema"]
     assert reversal["properties"]["posting_mode"]["enum"] == ["post"]
 
+    draft_cancel = writes["acct.move.draft_cancel.v1"]
+    assert draft_cancel["input_schema"]["properties"]["expected_move_type"][
+        "enum"
+    ] == ["out_invoice", "in_invoice"]
+    assert draft_cancel["idempotency"] == {
+        "required": True,
+        "scope": "company_origin_move",
+    }
+    assert draft_cancel["enabled_environments"] == []
+    assert draft_cancel.get("staged_environments", []) == []
+
     assert writes["acct.bank.statement_import.v1"]["recovery"][
         "method"
     ].startswith("manual_escalation_")
@@ -684,8 +709,26 @@ def test_period_reversal_and_recovery_metadata_do_not_overclaim_automation():
         "method": "manual_escalation_review_move_reversal"
     }
 
+    draft_cancel = writes["acct.move.draft_cancel.v1"]
+    assert "normal approved write state machine" in draft_cancel[
+        "business_description"
+    ]
+    assert draft_cancel["verification"] == {
+        "method": (
+            "read_back_exact_pristine_draft_cancel_graph_bindings_and_"
+            "allowlisted_state_audit_delta_v1"
+        )
+    }
+    assert draft_cancel["recovery"] == {
+        "method": "not_applicable_pristine_draft_cancel_is_terminal"
+    }
+
     recovery = writes["acct.recovery.execute.v1"]
-    assert "separate approved operation" in recovery["business_description"]
+    assert "failed-verification accounting incident" in recovery[
+        "business_description"
+    ]
+    assert "distinct approved operation" in recovery["business_description"]
+    assert "completed origins" in recovery["business_description"]
     assert recovery["verification"] == {
         "method": (
             "read_back_trusted_plan_target_fingerprints_and_action_specific_"

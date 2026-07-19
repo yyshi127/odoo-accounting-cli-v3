@@ -978,7 +978,8 @@ def draft_invoice_creation_graph(
     reconciled=False,
     adjusting_entry_origin_move_ids=None,
 ):
-    journal = Record(2, type="sale", active=True)
+    currency = Record(1, active=True, rounding=0.01)
+    journal = Record(2, company_id=Record(7), type="sale", active=True)
     move = Record(
         101,
         name="/",
@@ -986,6 +987,10 @@ def draft_invoice_creation_graph(
         move_type="out_invoice",
         company_id=Record(7),
         journal_id=journal,
+        currency_id=currency,
+        amount_total=50,
+        amount_residual=50,
+        payment_state="not_paid",
         line_ids=[],
         auto_post="no",
         auto_post_until=False,
@@ -4950,7 +4955,13 @@ def test_reversal_verification_requires_exact_linewise_graph_and_approved_origin
 
 
 def draft_move_recovery_fixture(*, vendor=False):
-    journal = Record(2, type="purchase" if vendor else "sale", active=True)
+    currency = Record(1, active=True, rounding=0.01)
+    journal = Record(
+        2,
+        company_id=Record(7),
+        type="purchase" if vendor else "sale",
+        active=True,
+    )
     move = Record(
         1101,
         state="draft",
@@ -4958,6 +4969,10 @@ def draft_move_recovery_fixture(*, vendor=False):
         move_type="in_invoice" if vendor else "out_invoice",
         company_id=Record(7),
         journal_id=journal,
+        currency_id=currency,
+        amount_total=100,
+        amount_residual=100,
+        payment_state="not_paid",
         invoice_date="2026-07-10",
         invoice_date_due="2026-08-10",
         invoice_line_ids=[],
@@ -5208,6 +5223,9 @@ def draft_move_recovery_fixture(*, vendor=False):
         "company_id": 7,
         "journal_id": 2,
         "currency_id": 1,
+        "amount_total": "100",
+        "amount_residual": "100",
+        "payment_state": "not_paid",
         "partner_id": 10,
         "date": "2026-07-10",
         "invoice_date": "2026-07-10",
@@ -5530,6 +5548,193 @@ def draft_move_recovery_fixture(*, vendor=False):
         ),
     )
     return move, line1, line2, records, plan
+
+
+def draft_cancel_parameters(*, vendor=False):
+    return {
+        "company_id": 7,
+        "move_id": 1101,
+        "expected_move_type": "in_invoice" if vendor else "out_invoice",
+        "expected_document_binding": "a" * 64,
+        "expected_business_binding": "b" * 64,
+        "reason": "cancel duplicate pristine draft",
+        "idempotency_key": (
+            "cancel-pristine-vendor-bill-1101"
+            if vendor
+            else "cancel-pristine-customer-invoice-1101"
+        ),
+    }
+
+
+@pytest.mark.parametrize("vendor", [False, True])
+def test_draft_cancel_is_normal_exact_verified_write_without_recovery_plan(
+    vendor,
+):
+    move, line1, _line2, records_by_key, _plan = (
+        draft_move_recovery_fixture(vendor=vendor)
+    )
+    handler = Harness(records=records_by_key, recovery_plan=None)
+    parameters = draft_cancel_parameters(vendor=vendor)
+
+    checked = handler.precheck("acct.move.draft_cancel.v1", parameters)
+    assert checked["semantic_precheck"]["computed"] == {
+        "expected_move_type": parameters["expected_move_type"],
+        "expected_document_binding": "a" * 64,
+        "expected_business_binding": "b" * 64,
+    }
+    assert {
+        (item["model"], item["record_id"])
+        for item in checked["before"]
+    } == {
+        ("account.move", 1101),
+        ("account.move.line", 1102),
+        ("account.move.line", 1103),
+    }
+
+    execution = handler.execute_prechecked(
+        "acct.move.draft_cancel.v1", parameters, checked
+    )
+    assert move.writes == [{"state": "cancel"}]
+    assert line1.parent_state == "cancel"
+    assert execution["recovery"] == {
+        "status": "not_applicable",
+        "method": "draft_cancel_completed",
+        "targets": [],
+    }
+
+    verification = handler.verify(
+        "acct.move.draft_cancel.v1", parameters, execution
+    )
+    assert verification["passed"] is True
+    assert (
+        "draft_vendor_bill_cancelled_exactly"
+        if vendor
+        else "draft_customer_invoice_cancelled_exactly"
+    ) in verification["checks"]
+
+
+def test_draft_cancel_rejects_injected_trusted_recovery_plan_and_binding_drift():
+    _move, _line1, _line2, records_by_key, plan = (
+        draft_move_recovery_fixture()
+    )
+    parameters = draft_cancel_parameters()
+
+    with pytest.raises(OdooWriteHandlerError, match="must be null"):
+        Harness(
+            records=records_by_key, recovery_plan=plan
+        ).precheck("acct.move.draft_cancel.v1", parameters)
+
+    handler = Harness(records=records_by_key)
+    for field in (
+        "expected_document_binding",
+        "expected_business_binding",
+    ):
+        tampered = {**parameters, field: "c" * 64}
+        with pytest.raises(OdooWriteHandlerError, match="binding differs"):
+            handler.precheck("acct.move.draft_cancel.v1", tampered)
+
+
+@pytest.mark.parametrize(
+    ("target", "field", "value"),
+    [
+        ("move", "state", "posted"),
+        ("move", "posted_before", True),
+        ("move", "inalterable_hash", "hash"),
+        ("move", "edi_document_ids", [Record(1901)]),
+        ("move", "payment_ids", [Record(1902)]),
+        ("move", "asset_ids", [Record(1903)]),
+        ("move", "stock_move_ids", [Record(1904)]),
+        ("line", "reconciled", True),
+        ("line", "purchase_line_id", Record(1905)),
+        ("line", "sale_line_ids", [Record(1906)]),
+        ("line", "analytic_distribution", {"7": 100}),
+    ],
+)
+def test_draft_cancel_rejects_posting_and_external_effect_graphs(
+    target, field, value
+):
+    move, line1, _line2, records_by_key, _plan = (
+        draft_move_recovery_fixture()
+    )
+    setattr(move if target == "move" else line1, field, value)
+    handler = Harness(records=records_by_key)
+
+    with pytest.raises(OdooWriteHandlerError):
+        handler.precheck(
+            "acct.move.draft_cancel.v1", draft_cancel_parameters()
+        )
+
+
+@pytest.mark.parametrize(
+    ("payment_state", "amount_residual"),
+    [
+        ("paid", 0),
+        ("partial", 50),
+        ("in_payment", 0),
+        ("blocked", 100),
+        ("reversed", 0),
+        ("invoicing_legacy", 100),
+    ],
+)
+def test_draft_cancel_rejects_non_pristine_payment_state(
+    payment_state, amount_residual
+):
+    move, _line1, _line2, records_by_key, _plan = (
+        draft_move_recovery_fixture()
+    )
+    move.payment_state = payment_state
+    move.amount_residual = amount_residual
+    move.snapshot_values["payment_state"] = payment_state
+    move.snapshot_values["amount_residual"] = str(amount_residual)
+
+    with pytest.raises(OdooWriteHandlerError, match="fully unpaid draft"):
+        Harness(records=records_by_key).precheck(
+            "acct.move.draft_cancel.v1", draft_cancel_parameters()
+        )
+
+
+def test_draft_cancel_rejects_not_paid_residual_mismatch():
+    move, _line1, _line2, records_by_key, _plan = (
+        draft_move_recovery_fixture()
+    )
+    move.amount_residual = 0
+    move.snapshot_values["amount_residual"] = "0"
+
+    with pytest.raises(OdooWriteHandlerError, match="unpaid residual"):
+        Harness(records=records_by_key).precheck(
+            "acct.move.draft_cancel.v1", draft_cancel_parameters()
+        )
+
+
+def test_draft_cancel_rejects_cross_company_graph_and_fingerprint_drift():
+    move, line1, _line2, records_by_key, _plan = (
+        draft_move_recovery_fixture()
+    )
+    handler = Harness(records=records_by_key)
+    parameters = draft_cancel_parameters()
+
+    move.company_id = Record(8)
+    with pytest.raises(OdooWriteHandlerError, match="pristine V3 draft"):
+        handler.precheck("acct.move.draft_cancel.v1", parameters)
+
+    move.company_id = Record(7)
+    line1.company_id = Record(8)
+    with pytest.raises(OdooWriteHandlerError, match="external business effects"):
+        handler.precheck("acct.move.draft_cancel.v1", parameters)
+
+    line1.company_id = Record(7)
+    move.journal_id.company_id = Record(8)
+    with pytest.raises(OdooWriteHandlerError, match="active sales journal"):
+        handler.precheck("acct.move.draft_cancel.v1", parameters)
+
+    move.journal_id.company_id = Record(7)
+    checked = handler.precheck("acct.move.draft_cancel.v1", parameters)
+    move.ref = "DRIFTED-AFTER-APPROVAL"
+    move.snapshot_values["ref"] = move.ref
+    with pytest.raises(OdooWriteHandlerError, match="changed outside the approved"):
+        handler.execute_prechecked(
+            "acct.move.draft_cancel.v1", parameters, checked
+        )
 
 
 @pytest.mark.parametrize("phase", ["precheck", "execute", "verify"])
