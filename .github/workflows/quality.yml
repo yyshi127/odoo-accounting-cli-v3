@@ -508,10 +508,90 @@ jobs:
           sudo install -m 0444 -o root -g root \
             "$GITHUB_WORKSPACE/deployment/dev27/finalizer_runtime_gate.py" \
             "$gate"
-          sudo /usr/bin/python3 -I -B -X utf8 "$gate" collect \
-            --interpreter /usr/bin/python3 > "$first"
-          sudo /usr/bin/python3 -I -B -X utf8 "$gate" collect \
-            --interpreter /usr/bin/python3 > "$second"
+          collect_runtime() {
+            local output=$1
+            if sudo /usr/bin/python3 -I -B -X utf8 "$gate" collect \
+              --interpreter /usr/bin/python3 > "$output"
+            then
+              return 0
+            fi
+            sudo /usr/bin/python3 -I -B -X utf8 - "$gate" <<'PY'
+          import importlib.util
+          import json
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          gate_path = Path(sys.argv[1]).resolve(strict=True)
+          spec = importlib.util.spec_from_file_location(
+              "dev27_finalizer_runtime_gate_diagnostic", gate_path
+          )
+          assert spec is not None and spec.loader is not None
+          gate_module = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = gate_module
+          spec.loader.exec_module(gate_module)
+          source_root = gate_module._finalizer_source_root()
+          probe = subprocess.run(
+              [
+                  "/usr/bin/python3",
+                  "-I",
+                  "-B",
+                  "-X",
+                  "utf8",
+                  "-c",
+                  gate_module._PROBE_CODE,
+                  str(source_root),
+              ],
+              cwd="/",
+              env={"LD_BIND_NOW": "1"},
+              stdin=subprocess.DEVNULL,
+              stdout=subprocess.PIPE,
+              stderr=subprocess.PIPE,
+              timeout=15,
+              check=False,
+              close_fds=True,
+          )
+          diagnostic = {
+              "probe_returncode": probe.returncode,
+              "probe_stderr": probe.stderr[:2048].decode(
+                  "utf-8", errors="backslashreplace"
+              ),
+              "probe_stdout_bytes": len(probe.stdout),
+          }
+          try:
+              gate_module.collect_manifest("/usr/bin/python3")
+          except BaseException as error:
+              chain = []
+              observed = error
+              while observed is not None and len(chain) < 8:
+                  chain.append(
+                      {
+                          "type": type(observed).__name__,
+                          "message": str(observed)[:1024],
+                      }
+                  )
+                  observed = observed.__cause__ or observed.__context__
+              diagnostic["collect_error_chain"] = chain
+          else:
+              diagnostic["collect_error_chain"] = [
+                  {"type": "unexpected_success", "message": ""}
+              ]
+          print(
+              json.dumps(
+                  diagnostic,
+                  ensure_ascii=True,
+                  allow_nan=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ),
+              file=sys.stderr,
+          )
+          PY
+            return 1
+          }
+          collect_runtime "$first"
+          collect_runtime "$second"
           cmp "$first" "$second"
 
           sudo install -d -m 0755 -o root -g root "$config_root"
