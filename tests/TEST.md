@@ -116,6 +116,7 @@ with the declared Odoo groups and explicit allowed-company context.
 | D08 | Currency | Company and transaction currency values, rounding, and rate dates reconcile to authoritative Odoo records |
 | D09 | Read receipt | Record counts, request/result digests, instance/database/user/company identity, registry/release digests, timestamp, and signature verify |
 | D10 | No false success | Missing, invalid, or mismatched real-Odoo receipt prevents a business-success response |
+| D11 | Database read-only boundary | Before any V3 ORM query the dedicated shell connection is idle, autocommit-off, explicitly `READ ONLY` and `REPEATABLE READ`; the same transaction marker survives the handler, every started/hardened path rolls back to libpq `IDLE`, real PostgreSQL rejects DML with SQLSTATE `25006`, and no result is released after boundary or rollback drift |
 
 For the trial-balance vertical slice, the oracle must independently verify
 posted-only filtering, ledger-cumulative opening, period debit and credit,
@@ -500,6 +501,21 @@ At the current local development checkpoint:
   the actual finalizer's eager driver import/reverification before credential
   preflight. These contracts do not produce a target-host runtime manifest,
   real Odoo receipt, sandbox write, or production authorization;
+- dev28 adds the database-enforced rollback-only boundary for all five staged
+  reads. Unit tests cover writable/autocommit/isolation drift, hidden
+  commit/rollback, DML rejection, rollback failure, reopened rollback hooks,
+  direct static write/network escapes, the package-parent plus explicit
+  transitive import closure, source-bound explicit imports, reviewed local-state
+  mutations with plain-dict provenance, source-root/importable-binary release
+  rejection, and the transaction helper's source digest and privileged
+  structure. Full-source bootstrap/executor digests and critical-binding
+  immutability protect the public call chain. A dedicated GitHub PostgreSQL
+  16 job uses psycopg2 2.9.9 to require `READ ONLY`, `REPEATABLE READ`,
+  transaction-local marker continuity, real hidden commit/rollback rejection,
+  SQLSTATE `25006`, unchanged independent-witness rows, and final libpq `IDLE`.
+  The static policy is defense in depth and does not prove absence of a second
+  connection or external effect. This is not yet an exact-release Odoo 19 target
+  receipt;
 - every current registry `evidence.receipts` array is empty: zero capabilities
   are enabled and zero write capabilities are staged. E00b, a real sandbox
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox

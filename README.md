@@ -75,6 +75,30 @@ without reporting success, while an already committed effect may require
 reconciliation. No write capability is staged or enabled, no real-Odoo sandbox
 write/recovery receipt exists, and production execution remains closed.
 
+Dev28 hardens every staged Odoo read on the shell's dedicated PostgreSQL
+connection before the first V3 ORM query. The connection must start idle with
+autocommit disabled; V3 explicitly requests `READ ONLY` and `REPEATABLE READ`,
+attests both server settings, binds a transaction-local marker, re-attests the
+same transaction after the handler, and releases the detached JSON result only
+after rollback returns libpq to `IDLE`. A static source gate rejects ORM writes,
+raw SQL, transaction control, privilege switching, dynamic write-method access,
+and network imports for the direct patterns encoded in the reviewed read
+dependency graph; it also pins the package-parent plus explicit transitive
+import closure rooted at `odoo.bootstrap`, with every explicit internal and
+external import binding fixed to its reviewed source module. Direct
+attribute/subscript mutations are denied except for explicit local-state
+allowlists. The privileged
+transaction helper has a source digest and separate structural allowlist; the
+complete public bootstrap and executor sources are also digest-pinned, and
+critical bindings cannot be reassigned.
+The release builder rejects import-shadowing `src` roots and tracked
+bytecode/native importables. For business data, PostgreSQL `READ ONLY` is the
+authoritative barrier for Odoo operations issued on that dedicated connection.
+The static policy does not prove that second
+connections, files, or network effects are absent. Authentication replay and
+receipt audit SQLite state still persist by design, and no Dev28 exact-release
+target Odoo receipt exists yet. Reads remain staged and none is enabled.
+
 All machine-facing output is JSON. Real accounting success additionally
 requires an Odoo-bound signed receipt. CLI-Anything v0.4.0 supplies the CLI and
 test-harness conventions only; Odoo 19 remains the backend and accounting

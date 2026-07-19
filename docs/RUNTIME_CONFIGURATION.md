@@ -48,6 +48,65 @@ and read receipts are consumed atomically and survive process restart. A
 verified read is appended to the receipt database's tamper-evident audit chain
 before the CLI may report success.
 
+### Odoo PostgreSQL read-only transaction boundary
+
+Odoo 19's `registry.cursor(readonly=True)` is not a safety boundary: when no
+replica is configured or available it deliberately falls back to a read/write
+cursor on the primary. V3 therefore uses the dedicated cursor created by the
+noninteractive Odoo shell and fails before any model access unless the
+underlying psycopg2 connection is idle with autocommit disabled.
+
+The read bootstrap explicitly calls
+`set_session(readonly=True, isolation_level="REPEATABLE READ")` before reading
+the database UUID, binding the non-superuser environment, checking company/ACL,
+or invoking a handler. It then requires both the Odoo cursor and psycopg2
+connection to report read-only, and queries PostgreSQL for exact
+`transaction_read_only=on` and `transaction_isolation=repeatable read`. A
+random transaction-local custom setting binds the pre- and post-handler checks
+to the same top-level transaction. A hidden commit or rollback, writable-state
+drift, failed server attestation, callback failure, failed rollback, or
+post-rollback libpq status other than `IDLE` discards the business result. The
+helper never calls commit.
+
+The trusted staged read entrypoint's package parents and explicit transitive
+internal imports, rooted at `odoo.bootstrap`, are AST-gated together with each
+explicit internal and external import binding fixed to its reviewed source
+module. Every
+reviewed dependency except the transaction helper is scanned for direct ORM
+persistence, raw SQL/cursors, transaction controls, `sudo`/user-environment
+switching, dynamic
+access through the explicitly guarded reflection patterns, filesystem mutation,
+command execution, and network client imports. The transaction helper has a
+pinned source digest and separate structural allowlist that pins its imports,
+marker, two `SELECT` statements, one `set_session` call, and the rollback in
+`finally`. A new explicit helper or external import fails until the reviewed
+closure is deliberately updated. Attribute and subscript assignment targets
+fail unless they match the reviewed constructors or local in-memory mappings.
+Those mappings must have exactly one earlier plain-dict binding; rebinding them
+to an Odoo record fails. The release gate permits only the canonical package
+under `src` and rejects tracked bytecode, native extensions, and external-module
+shadows on every platform. The full bootstrap and executor source files are
+digest-pinned, their critical callable/class bindings cannot be reassigned, and
+the explicit import-binding digest includes local aliases.
+This source gate is defense in depth; it is not a complete proof against
+reflection or an indirect external effect.
+
+This boundary proves rollback-only behavior for Odoo/PostgreSQL business work
+issued through the dedicated shell connection; it is not a claim that the read
+process cannot open a second connection or cause other state changes.
+Authentication token consumption and verified-receipt audit append to the two
+private SQLite stores are required durable security effects. Second database
+connections, files, mail, webhooks, and other external effects remain outside
+this database guarantee and require separate source, OS/addon, and exact-release
+runtime evidence before enablement.
+
+Before any read becomes enabled, the exact immutable release must reproduce the
+same pre/post transaction attestation in `odoo_test`, demonstrate PostgreSQL
+SQLSTATE `25006` for a controlled no-candidate-row DML probe, return to `IDLE`,
+and match an independent read-only SQL witness and the capability's financial
+standard answer. Local fake-ORM or CI PostgreSQL results do not replace that
+Odoo-bound signed receipt.
+
 ## Write runtime configuration schema v1
 
 The six write-lifecycle actions use the fixed root-managed path

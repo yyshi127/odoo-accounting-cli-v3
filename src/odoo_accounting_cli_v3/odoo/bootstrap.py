@@ -14,6 +14,7 @@ from ..gateway import CapabilityGateway, RequestContext
 from ..operations import canonical_json
 from ..registry import Capability
 from .executor import OdooReadExecutor
+from .read_transaction import run_readonly_odoo_transaction
 
 
 class OdooBootstrapError(ValueError):
@@ -144,7 +145,7 @@ def _validate_request_document(value: Any) -> tuple[str, Mapping[str, Any], dict
     return capability_id, value["context"], parameters
 
 
-def execute_read_from_odoo_shell(
+def _execute_read_from_hardened_odoo_shell(
     root_env: Any,
     request: Any,
     *,
@@ -163,7 +164,7 @@ def execute_read_from_odoo_shell(
     environment_factory: Callable[[Any, int, dict[str, Any]], Any] | None = None,
     executor_factory: Callable[..., OdooReadExecutor] = OdooReadExecutor,
 ) -> dict[str, Any]:
-    """Execute one enabled read capability with a signed, DB-bound context."""
+    """Execute one read after the caller has hardened the Odoo cursor."""
     if not callable(consume_auth_token) or not callable(consume_receipt):
         raise OdooBootstrapError("durable request and receipt replay stores are required")
     capability_list = tuple(capabilities)
@@ -255,6 +256,50 @@ def execute_read_from_odoo_shell(
         availability_channel=capability_channel,
     )
     return gateway.read(context, capability_id, parameters)
+
+
+def execute_read_from_odoo_shell(
+    root_env: Any,
+    request: Any,
+    *,
+    capabilities: Iterable[Capability],
+    auth_secret: bytes,
+    auth_key_id: str,
+    consume_auth_token: Callable[[str, str, datetime, datetime], bool],
+    receipt_secret: bytes,
+    receipt_key_id: str,
+    consume_receipt: Callable[[str, str, datetime, datetime], bool],
+    release_digest: str,
+    odoo_instance_id: str,
+    environment: str,
+    capability_channel: str = "enabled",
+    now: datetime | None = None,
+    environment_factory: Callable[[Any, int, dict[str, Any]], Any] | None = None,
+    executor_factory: Callable[..., OdooReadExecutor] = OdooReadExecutor,
+) -> dict[str, Any]:
+    """Execute one signed read inside a proven rollback-only Odoo transaction."""
+
+    return run_readonly_odoo_transaction(
+        root_env,
+        lambda: _execute_read_from_hardened_odoo_shell(
+            root_env,
+            request,
+            capabilities=capabilities,
+            auth_secret=auth_secret,
+            auth_key_id=auth_key_id,
+            consume_auth_token=consume_auth_token,
+            receipt_secret=receipt_secret,
+            receipt_key_id=receipt_key_id,
+            consume_receipt=consume_receipt,
+            release_digest=release_digest,
+            odoo_instance_id=odoo_instance_id,
+            environment=environment,
+            capability_channel=capability_channel,
+            now=now,
+            environment_factory=environment_factory,
+            executor_factory=executor_factory,
+        ),
+    )
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

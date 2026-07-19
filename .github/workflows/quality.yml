@@ -20,6 +20,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: python -m pip install -e ".[test]"
+      - name: Gate trusted Odoo reads against write escapes
+        run: python -m pytest -q tests/test_read_handler_static_safety.py
       - name: Provision the fixed child HOME
         shell: bash
         run: |
@@ -1000,7 +1002,7 @@ jobs:
           done
 
   dev18-postgresql-integration:
-    name: Dev18 real PostgreSQL relation gate
+    name: Dev18 + Dev28 real PostgreSQL gates
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -1009,7 +1011,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install the test runtime
-        run: python -m pip install -e ".[test]"
+        run: python -m pip install -e ".[test]" "psycopg2-binary==2.9.9"
       - name: Start an isolated CI PostgreSQL authority
         id: postgres
         shell: bash
@@ -1073,6 +1075,43 @@ jobs:
             printf 'socket_directory=%s\n' "$socket_directory"
             printf 'port=%s\n' "$port"
           } >> "$GITHUB_OUTPUT"
+      - name: Prove the Odoo read boundary against real PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_path="$(command -v python)"
+          report="$RUNNER_TEMP/read-transaction-postgresql.xml"
+          sudo install -m 0600 -o odoo_probe -g odoo_probe /dev/null "$report"
+          sudo -u odoo_probe env -i \
+            HOME=/home/odoo_probe \
+            LANG=C.UTF-8 \
+            LC_ALL=C.UTF-8 \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            PYTHONDONTWRITEBYTECODE=1 \
+            READ_TRANSACTION_POSTGRES_INTEGRATION=1 \
+            READ_TRANSACTION_PGHOST='${{ steps.postgres.outputs.socket_directory }}' \
+            READ_TRANSACTION_PGPORT='${{ steps.postgres.outputs.port }}' \
+            READ_TRANSACTION_PGUSER=odoo_probe \
+            "$python_path" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_odoo_read_transaction_postgres.py
+          sudo "$python_path" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 5 or failures or errors or skipped:
+              raise SystemExit(
+                  "read transaction PostgreSQL gate did not execute exactly five tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("read_transaction_real_postgresql_tests=5")
+          PY
       - name: Execute the Dev18 SQL and configuration gates against real PostgreSQL
         shell: bash
         run: |

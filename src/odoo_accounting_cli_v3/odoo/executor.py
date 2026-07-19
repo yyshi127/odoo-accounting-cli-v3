@@ -200,6 +200,49 @@ class OdooReadExecutor:
             "page": {"count": count, "total_count": count},
         }
 
+    def _read_trial_balance(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._trial_balance_backend_factory(
+            self._env, context.user_id, context.allowed_company_ids
+        )
+        return read_trial_balance(backend, parameters)
+
+    def _read_ar_open_items(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._ar_open_items_backend_factory(
+            self._env, context.user_id, context.allowed_company_ids
+        )
+        return read_ar_open_items(backend, parameters)
+
+    def _read_ap_open_items(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._ap_open_items_backend_factory(
+            self._env, context.user_id, context.allowed_company_ids
+        )
+        return read_ap_open_items(backend, parameters)
+
+    def _read_multicurrency_balance(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._multicurrency_balance_backend_factory(
+            self._env, context.user_id, context.allowed_company_ids
+        )
+        return read_multicurrency_balance(backend, parameters)
+
+    def _read_handlers(
+        self,
+    ) -> dict[str, Callable[[RequestContext, dict[str, Any]], dict[str, Any]]]:
+        return {
+            "acct.registry.list.v1": self._read_registry,
+            "acct.gl.trial_balance.v1": self._read_trial_balance,
+            "acct.ar.open_items.v1": self._read_ar_open_items,
+            "acct.ap.open_items.v1": self._read_ap_open_items,
+            "acct.multicurrency.balance_read.v1": self._read_multicurrency_balance,
+        }
+
     def __call__(
         self,
         context: RequestContext,
@@ -212,30 +255,10 @@ class OdooReadExecutor:
         registered = self._capability_map.get(capability.id)
         if registered is None or registered.data != capability.data:
             raise OdooExecutionError("read capability is not in the trusted registry")
-        if capability.id == "acct.registry.list.v1":
-            body = self._read_registry(context, parameters)
-        elif capability.id == "acct.gl.trial_balance.v1":
-            backend = self._trial_balance_backend_factory(
-                self._env, context.user_id, context.allowed_company_ids
-            )
-            body = read_trial_balance(backend, parameters)
-        elif capability.id == "acct.ar.open_items.v1":
-            backend = self._ar_open_items_backend_factory(
-                self._env, context.user_id, context.allowed_company_ids
-            )
-            body = read_ar_open_items(backend, parameters)
-        elif capability.id == "acct.ap.open_items.v1":
-            backend = self._ap_open_items_backend_factory(
-                self._env, context.user_id, context.allowed_company_ids
-            )
-            body = read_ap_open_items(backend, parameters)
-        elif capability.id == "acct.multicurrency.balance_read.v1":
-            backend = self._multicurrency_balance_backend_factory(
-                self._env, context.user_id, context.allowed_company_ids
-            )
-            body = read_multicurrency_balance(backend, parameters)
-        else:
+        handler = self._read_handlers().get(capability.id)
+        if handler is None:
             raise OdooExecutionError("read capability has no trusted Odoo handler")
+        body = handler(context, parameters)
         receipt = create_read_receipt(
             receipt_id=self._receipt_id_factory(),
             capability_id=capability.id,

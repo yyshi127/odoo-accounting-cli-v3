@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest import mock
 
 from odoo_accounting_cli_v3.domain.ar_open_items import (
     CurrencyInfo as ArCurrencyInfo,
@@ -351,6 +352,128 @@ class OdooReadExecutorTest(unittest.TestCase):
             executor(context(database_name="odoo_sg"), capability(), parameters(), "c" * 64, "d" * 64)
         with self.assertRaisesRegex(OdooExecutionError, "binding mismatch"):
             executor(context(user_id=43, principal="pi:user-43"), capability(), parameters(), "c" * 64, "d" * 64)
+
+    def test_unregistered_capability_is_rejected_before_dispatch(self) -> None:
+        executor = self.executor(registry=[capability()])
+        executor._read_handlers = mock.Mock(  # type: ignore[method-assign]
+            side_effect=AssertionError("dispatch must not be consulted")
+        )
+
+        with self.assertRaisesRegex(OdooExecutionError, "not in the trusted registry"):
+            executor(
+                context(),
+                capability("acct.registry.list.v1"),
+                {"company_id": 7},
+                "c" * 64,
+                "d" * 64,
+            )
+
+        executor._read_handlers.assert_not_called()
+
+    def test_registered_capability_without_handler_is_rejected_without_receipt(self) -> None:
+        unsupported = next(
+            item
+            for item in capabilities()
+            if item.id
+            not in {
+                "acct.registry.list.v1",
+                "acct.gl.trial_balance.v1",
+                "acct.ar.open_items.v1",
+                "acct.ap.open_items.v1",
+                "acct.multicurrency.balance_read.v1",
+            }
+        )
+        executor = self.executor()
+
+        with mock.patch(
+            "odoo_accounting_cli_v3.odoo.executor.create_read_receipt"
+        ) as create_receipt:
+            with self.assertRaisesRegex(OdooExecutionError, "no trusted Odoo handler"):
+                executor(context(), unsupported, {}, "c" * 64, "d" * 64)
+
+        create_receipt.assert_not_called()
+
+    def test_handler_failure_propagates_without_creating_receipt(self) -> None:
+        failure = RuntimeError("handler failed")
+        executor = self.executor()
+        executor._read_handlers = lambda: {  # type: ignore[method-assign]
+            "acct.gl.trial_balance.v1": mock.Mock(side_effect=failure)
+        }
+
+        with mock.patch(
+            "odoo_accounting_cli_v3.odoo.executor.create_read_receipt"
+        ) as create_receipt:
+            with self.assertRaisesRegex(RuntimeError, "handler failed") as raised:
+                executor(
+                    context(), capability(), parameters(), "c" * 64, "d" * 64
+                )
+
+        self.assertIs(raised.exception, failure)
+        create_receipt.assert_not_called()
+
+    def test_domain_backend_factories_receive_exact_bound_identity(self) -> None:
+        open_items_parameters = {
+            "company_id": 7,
+            "as_of_date": "2026-03-31",
+            "partner_id": None,
+            "currency_id": None,
+            "limit": 100,
+            "offset": 0,
+        }
+        multicurrency_parameters = {
+            "company_id": 7,
+            "as_of_date": "2026-07-13",
+            "currency_ids": [6, 1],
+            "balance_basis": "posted_ledger_cumulative",
+            "off_balance_policy": "exclude",
+            "limit": 100,
+            "offset": 0,
+        }
+        cases = (
+            (
+                "_trial_balance_backend_factory",
+                "acct.gl.trial_balance.v1",
+                parameters(),
+                Backend(),
+            ),
+            (
+                "_ar_open_items_backend_factory",
+                "acct.ar.open_items.v1",
+                open_items_parameters,
+                ArBackend(),
+            ),
+            (
+                "_ap_open_items_backend_factory",
+                "acct.ap.open_items.v1",
+                open_items_parameters,
+                ApBackend(),
+            ),
+            (
+                "_multicurrency_balance_backend_factory",
+                "acct.multicurrency.balance_read.v1",
+                multicurrency_parameters,
+                MulticurrencyBackend(),
+            ),
+        )
+        for factory_attribute, capability_id, requested, backend in cases:
+            with self.subTest(capability_id=capability_id):
+                executor = self.executor()
+                factory = mock.Mock(return_value=backend)
+                setattr(executor, factory_attribute, factory)
+
+                executor(
+                    context(),
+                    capability(capability_id),
+                    requested,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+                factory.assert_called_once_with(
+                    executor._env,
+                    42,
+                    frozenset({7}),
+                )
 
     def test_registry_list_is_acl_filtered_sorted_and_receipted(self) -> None:
         env = Environment()

@@ -30,24 +30,73 @@ RECEIPT_KEY_ID = "test-receipt-2026-07"
 DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
 
 
+class Connection:
+    def __init__(self, events):
+        self.events = events
+        self.autocommit = False
+        self.readonly = False
+        self.transaction_status = 0
+
+    def set_session(self, *, readonly, isolation_level):
+        self.events.append(("set_session", readonly, isolation_level))
+        self.readonly = readonly
+
+    def get_transaction_status(self):
+        self.events.append(("transaction_status", self.transaction_status))
+        return self.transaction_status
+
+
 class Cursor:
     dbname = "odoo_test"
 
+    def __init__(self):
+        self.events = []
+        self.connection = Connection(self.events)
+        self.marker = None
+        self._row = None
+
+    @property
+    def readonly(self):
+        return self.connection.readonly
+
+    def execute(self, sql, parameters=None):
+        self.events.append(("execute", sql, parameters))
+        self.connection.transaction_status = 2
+        if "set_config" in sql:
+            self.marker = parameters[1]
+        self._row = ("on", "repeatable read", self.marker)
+
+    def fetchone(self):
+        self.events.append(("fetchone",))
+        return self._row
+
+    def rollback(self):
+        self.events.append(("rollback",))
+        self.marker = None
+        self.connection.transaction_status = 0
+
 
 class ConfigParameters:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
     def get_param(self, name):
         if name != "database.uuid":
             raise AssertionError("unexpected config parameter")
+        if not self.cursor.readonly or not self.cursor.marker:
+            raise AssertionError("database UUID read occurred outside hardened transaction")
+        self.cursor.events.append(("odoo_read", name))
         return DATABASE_UUID
 
 
 class RootEnvironment:
-    cr = Cursor()
+    def __init__(self):
+        self.cr = Cursor()
 
     def __getitem__(self, name):
         if name != "ir.config_parameter":
             raise AssertionError("unexpected root model")
-        return ConfigParameters()
+        return ConfigParameters(self.cr)
 
 
 class Companies:
@@ -110,10 +159,10 @@ class Company:
 
 
 class BoundEnvironment:
-    def __init__(self, user):
+    def __init__(self, user, cursor):
         self.uid = 42
         self.su = False
-        self.cr = Cursor()
+        self.cr = cursor
         self.user = user
         self.company = Company()
 
@@ -294,10 +343,14 @@ def request_document(
 class OdooBootstrapTest(unittest.TestCase):
     def execute(self, request=None, *, user=None, consume_auth_token=None):
         factory_contexts = []
-        bound = BoundEnvironment(user or User())
+        root_env = RootEnvironment()
+        bound = BoundEnvironment(user or User(), root_env.cr)
 
-        def environment_factory(_cr, uid, context):
+        def environment_factory(cr, uid, context):
             self.assertEqual(uid, 42)
+            self.assertIs(cr, root_env.cr)
+            self.assertTrue(cr.readonly)
+            self.assertTrue(cr.marker)
             factory_contexts.append(context)
             return bound
 
@@ -312,7 +365,7 @@ class OdooBootstrapTest(unittest.TestCase):
             )
 
         result = execute_read_from_odoo_shell(
-            RootEnvironment(),
+            root_env,
             request or request_document(),
             capabilities=staged_capabilities(),
             auth_secret=AUTH_SECRET,
@@ -329,6 +382,7 @@ class OdooBootstrapTest(unittest.TestCase):
             environment_factory=environment_factory,
             executor_factory=executor_factory,
         )
+        self.transaction_cursor = root_env.cr
         return result, factory_contexts
 
     def test_executes_with_bound_non_superuser_and_signed_receipt(self):
@@ -337,6 +391,11 @@ class OdooBootstrapTest(unittest.TestCase):
         self.assertEqual(result["ledger_summary"]["period_debit"], "100.00")
         self.assertEqual(result["receipt"]["database_uuid"], DATABASE_UUID)
         self.assertEqual(result["receipt"]["user_id"], 42)
+        event_names = [item[0] for item in self.transaction_cursor.events]
+        self.assertLess(event_names.index("set_session"), event_names.index("execute"))
+        self.assertLess(event_names.index("execute"), event_names.index("odoo_read"))
+        self.assertEqual(event_names[-2:], ["rollback", "transaction_status"])
+        self.assertIsNone(self.transaction_cursor.marker)
 
     def test_runtime_database_mismatch_is_rejected_before_environment_binding(self):
         context = signed_context(database_name="odoo_sg")

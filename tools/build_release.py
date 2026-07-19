@@ -52,6 +52,16 @@ PRIVATE_KEY_FILENAMES = frozenset(
         "id_rsa",
     }
 )
+FORBIDDEN_SOURCE_IMPORT_SUFFIXES = (
+    ".bundle",
+    ".dll",
+    ".dylib",
+    ".pyc",
+    ".pyd",
+    ".pyo",
+    ".pyw",
+    ".so",
+)
 SENSITIVE_CONTENT_PATTERNS = (
     ("SQLite database", re.compile(rb"\ASQLite format 3\x00")),
     (
@@ -101,6 +111,26 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
     """Reject credentials and host-local mutable state from the release."""
 
     name = relative.name.lower()
+    parts = relative.parts
+    if parts and parts[0].lower() == "src":
+        if parts[0] != "src":
+            raise ReleaseError(
+                "refusing case-variant canonical source root: "
+                f"{relative.as_posix()}"
+            )
+        if len(parts) < 2 or parts[1] != "odoo_accounting_cli_v3":
+            raise ReleaseError(
+                "refusing import-shadowing source outside the canonical package: "
+                f"{relative.as_posix()}"
+            )
+        if (
+            name.endswith(FORBIDDEN_SOURCE_IMPORT_SUFFIXES)
+            or any(part.lower() == "__pycache__" for part in parts[2:-1])
+        ):
+            raise ReleaseError(
+                "refusing bytecode/native importable in canonical source: "
+                f"{relative.as_posix()}"
+            )
     sensitive_name = (
         name == ".env"
         or name.startswith(".env.")

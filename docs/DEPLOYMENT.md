@@ -79,6 +79,10 @@ python tools/build_release.py
 Build the same clean commit twice and retain both command results. The archive
 SHA-256 and manifest SHA-256 must be identical. Refuse a dirty worktree,
 untracked release input, version/commit mismatch, or non-deterministic output.
+The build must also reject every tracked importable source outside
+`src/odoo_accounting_cli_v3` and every tracked `.pyc`, `.pyo`, `.pyw`, native
+extension, or `__pycache__` member below `src`; otherwise an approved import
+could execute different code on Windows or Linux.
 The archive gate must explicitly find `write_app.py`, `write_service.py`, the
 Odoo write runner, all isolated effect-finalizer modules, the Dev27 external
 runtime gate, deployment units, and every file in the V3 control add-on;
@@ -274,6 +278,19 @@ Create the strict root-managed read and write runtime files described in
 well as the SHA-256 of the resolved Odoo Python interpreter, `odoo-bin`, and
 Odoo configuration. The fixed write path is
 `/etc/odoo-accounting-cli-v3/write-runtime.json`; callers cannot override it.
+
+For a staged read, first run the exact release's Dev28 read-transaction gate on
+the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,
+explicitly become `READ ONLY`/`REPEATABLE READ` before any V3 ORM access, retain
+the same transaction-local marker across every successful handler path, and
+release a result only after rollback returns the connection to `IDLE`. Retain a
+controlled SQLSTATE `25006` DML-rejection result and
+an independent pre/post read-only witness showing unchanged Odoo relation
+identity and counts. Do not use the full authenticated read runner as a
+zero-state-change diagnostic: it intentionally consumes replay state and
+appends verified audit state in SQLite. No staged read may become enabled from
+CI evidence alone; it also needs an exact-release signed Odoo receipt and its
+capability-specific financial oracle.
 
 The write runtime configuration schema is version 1. Its
 `write_execution_mode` starts as `disabled`. A sandbox candidate may use

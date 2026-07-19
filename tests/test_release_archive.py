@@ -225,6 +225,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/odoo/module_guard.py",
         "src/odoo_accounting_cli_v3/odoo/module_graph.py",
         "src/odoo_accounting_cli_v3/odoo/multicurrency_balance.py",
+        "src/odoo_accounting_cli_v3/odoo/read_transaction.py",
         "src/odoo_accounting_cli_v3/odoo/runner.py",
         "src/odoo_accounting_cli_v3/odoo/trial_balance.py",
         "src/odoo_accounting_cli_v3/odoo/write_bootstrap.py",
@@ -250,6 +251,9 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "tests/test_odoo_approval_client.py",
         "tests/test_odoo_approval_wizard.py",
         "tests/test_odoo_bootstrap.py",
+        "tests/test_odoo_read_transaction.py",
+        "tests/test_odoo_read_transaction_postgres.py",
+        "tests/test_read_handler_static_safety.py",
         "tests/test_odoo_control_addon.py",
         "tests/test_odoo_multicurrency_balance_backend.py",
         "tests/test_odoo_module_graph.py",
@@ -522,6 +526,32 @@ class ReleaseArchiveTest(unittest.TestCase):
         release_builder.validate_release_member(
             Path("deployment/dev9/broker-runtime.example.json"),
             b'{"current_release_digest":"' + b"a" * 64 + b'"}',
+        )
+
+    def test_release_rejects_import_shadows_bytecode_and_native_source(self) -> None:
+        candidates = (
+            "src/json.py",
+            "src/pathlib/__init__.py",
+            "src/odoo/api.py",
+            "src/odoo_accounting_cli_v3.egg-info/PKG-INFO",
+            "SRC/socket.py",
+            "SRC/odoo_accounting_cli_v3/evil.py",
+            "src/odoo_accounting_cli_v3/native.cp312-win_amd64.pyd",
+            "src/odoo_accounting_cli_v3/native.cpython-312-x86_64-linux-gnu.so",
+            "src/odoo_accounting_cli_v3/native.dll",
+            "src/odoo_accounting_cli_v3/native.dylib",
+            "src/odoo_accounting_cli_v3/unsafe.pyw",
+            "src/odoo_accounting_cli_v3/unsafe.pyc",
+            "src/odoo_accounting_cli_v3/__pycache__/tracked.txt",
+        )
+        for name in candidates:
+            with self.subTest(name=name):
+                with self.assertRaises(release_builder.ReleaseError):
+                    release_builder.validate_release_member(Path(name), b"unsafe")
+
+        release_builder.validate_release_member(
+            Path("src/odoo_accounting_cli_v3/safe.py"),
+            b"SAFE = True\n",
         )
 
     def test_gitignore_covers_host_local_release_inputs(self) -> None:
