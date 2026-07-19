@@ -177,6 +177,38 @@ def receive_linux_credentialed_chunk(
         raise EffectFinalizerUdsError(
             "finalizer response descriptor injection was rejected"
         )
+    if not chunk:
+        if not ancillary:
+            return b"", None
+        if len(ancillary) != 1:
+            raise EffectFinalizerUdsError(
+                "finalizer response EOF credentials are invalid"
+            )
+        level, kind, payload = ancillary[0]
+        if (
+            level != socket.SOL_SOCKET
+            or kind != socket.SCM_CREDENTIALS
+            or len(payload) != credential_size
+        ):
+            raise EffectFinalizerUdsError(
+                "finalizer response EOF credentials are invalid"
+            )
+        try:
+            pid, _uid, _gid = struct.unpack("3i", payload)
+        except struct.error as exc:
+            raise EffectFinalizerUdsError(
+                "finalizer response EOF credentials are invalid"
+            ) from exc
+        # With SO_PASSCRED enabled, Linux can attach an all-dummy ucred to
+        # stream EOF.  It authenticates no bytes and therefore is not a
+        # response-sender credential.  Accept only the kernel's pid=0 EOF
+        # sentinel; every data-bearing chunk still requires a valid, exact
+        # service UID/GID/MainPID credential below.
+        if pid != 0:
+            raise EffectFinalizerUdsError(
+                "finalizer response EOF credentials are invalid"
+            )
+        return b"", None
     credentials: list[EffectFinalizerPeerCredentials] = []
     for level, kind, payload in ancillary:
         if (
@@ -204,12 +236,6 @@ def receive_linux_credentialed_chunk(
             raise EffectFinalizerUdsError(
                 "finalizer response credentials are invalid"
             ) from exc
-    if not chunk:
-        if credentials:
-            raise EffectFinalizerUdsError(
-                "finalizer response EOF credentials are invalid"
-            )
-        return b"", None
     if len(credentials) > 1:
         raise EffectFinalizerUdsError(
             "finalizer response credentials are ambiguous"

@@ -27,6 +27,7 @@ from odoo_accounting_cli_v3.write_runtime import (
     WriteRuntimeConfig,
     WriteRuntimeSecrets,
 )
+from odoo_accounting_cli_v3.odoo import runner as base_runner
 from odoo_accounting_cli_v3.odoo import write_runner as runner
 from odoo_accounting_cli_v3.odoo.runner import OdooRunnerError, RuntimeConfig
 
@@ -349,7 +350,7 @@ def test_real_odoo_child_receives_guard_payload_but_not_finalizer_socket(
         environment = runner._safe_environment()
         environment_validator = Mock()
         monkeypatch.setattr(
-            runner, "_validate_child_environment", environment_validator
+            base_runner, "_validate_child_environment", environment_validator
         )
         with runner._private_payload_fd(payload) as payload_descriptor:
             payload_metadata = os.fstat(payload_descriptor)

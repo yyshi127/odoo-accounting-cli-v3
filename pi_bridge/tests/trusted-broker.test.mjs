@@ -55,6 +55,31 @@ function signedWriteReceipt(operationId = "op-1") {
 	};
 }
 
+function databaseFinalization(operationId = "op-1") {
+	return {
+		attestation_digest: "a".repeat(64),
+		attestation_id: "22222222-2222-5222-8222-222222222222",
+		attestation_key_id: "effect-finalizer-v1",
+		database_oid: 16384,
+		database_uuid: "11111111-1111-4111-8111-111111111111",
+		finalized_at: "2026-07-15T08:01:00Z",
+		finalized_txid: "9123",
+		guard_epoch: 0,
+		guard_installation_id: "33333333-3333-4333-8333-333333333333",
+		intent_digest: "b".repeat(64),
+		operation_id: operationId,
+		proof_expires_at: "2026-07-15T08:05:00Z",
+		proof_verified_at: "2026-07-15T08:00:00Z",
+		protocol_version: 1,
+		receipt_digest: "c".repeat(64),
+		remaining_unresolved_count: 0,
+		request_digest: "d".repeat(64),
+		resolution_kind: "verified",
+		resolution_operation_id: operationId,
+		resolved_anchor_count: 1,
+	};
+}
+
 function responseFor(action, request) {
 	if (action === "read") {
 		return {
@@ -108,6 +133,7 @@ function responseFor(action, request) {
 					evidence_digest: "1".repeat(64),
 					verified_at: "2026-07-15T08:01:00Z",
 				},
+				database_finalization: databaseFinalization(request.operation_id),
 				audit_receipt: signedWriteReceipt(request.operation_id),
 			},
 			ok: true,

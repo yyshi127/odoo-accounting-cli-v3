@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import socket
 import socketserver
+import struct
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
@@ -203,6 +204,35 @@ def test_linux_credential_receiver_rejects_ancillary_truncation(
 
     with pytest.raises(EffectFinalizerUdsError, match="truncated"):
         receive_linux_credentialed_chunk(Connection(), 1)
+
+
+def test_linux_credential_receiver_accepts_only_kernel_dummy_at_eof(
+    monkeypatch,
+) -> None:
+    class Connection:
+        def __init__(self, credentials):
+            self.credentials = credentials
+
+        def recvmsg(self, _maximum, _ancillary_size, _flags):
+            return (
+                b"",
+                [(socket.SOL_SOCKET, socket.SCM_CREDENTIALS, self.credentials)],
+                0,
+                None,
+            )
+
+    monkeypatch.setattr(finalizer_uds, "_LINUX_SCM_AVAILABLE", True)
+    monkeypatch.setattr(socket, "SO_PASSCRED", 16, raising=False)
+    monkeypatch.setattr(socket, "SCM_CREDENTIALS", 2, raising=False)
+    monkeypatch.setattr(socket, "CMSG_SPACE", lambda size: size + 16, raising=False)
+
+    assert receive_linux_credentialed_chunk(
+        Connection(struct.pack("3i", 0, 0, 0)), 1
+    ) == (b"", None)
+    with pytest.raises(EffectFinalizerUdsError, match="EOF credentials"):
+        receive_linux_credentialed_chunk(
+            Connection(struct.pack("3i", 9984, 3104, 3104)), 1
+        )
 
 
 @pytest.mark.skipif(
