@@ -75,6 +75,7 @@ def test_postgresql_special_forms_are_not_schema_qualified_as_functions():
 
 def test_maintenance_loader_has_no_persistent_login_or_runtime_membership():
     sql = _sql()
+    opened = _function("open_module_guard")
 
     assert re.search(
         r"ALTER ROLE %I NOLOGIN NOSUPERUSER NOINHERIT.*CONNECTION LIMIT 1",
@@ -86,8 +87,14 @@ def test_maintenance_loader_has_no_persistent_login_or_runtime_membership():
     assert "WITH ADMIN TRUE, INHERIT FALSE, SET FALSE" in sql
     assert "WITH ADMIN FALSE, INHERIT TRUE, SET FALSE" in sql
     assert "pg_has_role(owner_oid, maintenance_oid, 'USAGE')" in sql
+    assert "pg_read_all_stats" not in sql
     assert "module guard maintenance role must be temporarily login-enabled" in sql
     assert "module guard maintenance role has concurrent sessions" in sql
+    assert re.search(
+        r"WHERE activity\.pid = pg_catalog\.pg_backend_pid\(\)\s+"
+        r"AND activity\.usename = session_user\s+AND EXISTS",
+        opened,
+    )
 
 
 def test_maintenance_authorization_is_finalizer_issued_single_use_and_expiring():

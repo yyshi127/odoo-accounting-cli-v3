@@ -2066,6 +2066,7 @@ BEGIN
     SELECT activity.backend_start INTO holder_start
     FROM pg_catalog.pg_stat_activity AS activity
     WHERE activity.pid = pg_catalog.pg_backend_pid()
+      AND activity.usename = session_user
       AND EXISTS (
           SELECT 1
           FROM pg_catalog.pg_locks AS held_lock

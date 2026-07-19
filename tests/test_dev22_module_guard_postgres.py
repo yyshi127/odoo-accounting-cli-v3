@@ -220,6 +220,31 @@ class PostgreSQLHarness:
             database,
         ]
 
+    def role_command(self, database: str, role: str) -> list[str]:
+        assert SAFE_IDENTIFIER.fullmatch(database)
+        assert SAFE_IDENTIFIER.fullmatch(role)
+        return [
+            self.stdbuf_path,
+            "-oL",
+            "-eL",
+            self.psql_path,
+            "-X",
+            "-q",
+            "-A",
+            "-t",
+            "-w",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            str(self.port),
+            "-U",
+            role,
+            "-d",
+            database,
+        ]
+
     def run(
         self,
         query: str,
@@ -275,6 +300,43 @@ class PostgreSQLHarness:
         return InteractivePsql(
             self.command(database),
             environment=self.environment(),
+        )
+
+    def run_as_role(
+        self,
+        query: str,
+        *,
+        database: str,
+        role: str,
+        password: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = self.environment()
+        environment["PGPASSWORD"] = password
+        environment["PGCONNECT_TIMEOUT"] = "5"
+        return subprocess.run(
+            [*self.role_command(database, role), "-c", query],
+            check=check,
+            capture_output=True,
+            cwd="/",
+            env=environment,
+            text=True,
+            timeout=10,
+        )
+
+    def session_as_role(
+        self,
+        database: str,
+        *,
+        role: str,
+        password: str,
+    ) -> InteractivePsql:
+        environment = self.environment()
+        environment["PGPASSWORD"] = password
+        environment["PGCONNECT_TIMEOUT"] = "5"
+        return InteractivePsql(
+            self.role_command(database, role),
+            environment=environment,
         )
 
     def create_role(self, purpose: str, attributes: str = "LOGIN") -> str:
@@ -1871,18 +1933,38 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
     )
     if authorize.returncode != 0:
         pytest.fail("module maintenance authorization failed:\n" + authorize.stderr)
+    maintenance_password = uuid.uuid4().hex + uuid.uuid4().hex
     postgres.run(
-        f"ALTER ROLE {maintenance_role} LOGIN VALID UNTIL "
+        f"ALTER ROLE {maintenance_role} LOGIN PASSWORD "
+        f"'{maintenance_password}' VALID UNTIL "
         f"'{maintenance_expiry.isoformat()}'"
     )
     key_a, key_b = ADVISORY_KEY_PARTS
-    with postgres.session(database) as holder:
+    proxy_holder = postgres.run(
+        f"SET SESSION AUTHORIZATION {maintenance_role};"
+        f"SELECT pg_catalog.pg_advisory_lock({key_a},{key_b});"
+        "SELECT odoo_accounting_cli_v3_guard.open_module_guard("
+        f"0,'{authorization_id}'::uuid)",
+        database=database,
+        check=False,
+    )
+    assert proxy_holder.returncode != 0
+    assert "requires the exclusive session lock" in proxy_holder.stderr
+    with postgres.session_as_role(
+        database,
+        role=maintenance_role,
+        password=maintenance_password,
+    ) as holder:
         lock_setup = holder.execute(
-            f"SET SESSION AUTHORIZATION {maintenance_role};"
             f"SELECT pg_catalog.pg_advisory_lock({key_a},{key_b});"
-            "SELECT pg_catalog.pg_backend_pid()::text;"
+            "SELECT pg_catalog.json_build_object("
+            "'pid',pg_catalog.pg_backend_pid(),"
+            "'session_user',session_user,'current_user',current_user)::text;"
         )
-        holder_pid = int(lock_setup[-1])
+        holder_identity = json.loads(lock_setup[-1])
+        assert holder_identity["session_user"] == maintenance_role
+        assert holder_identity["current_user"] == maintenance_role
+        holder_pid = holder_identity["pid"]
         holder_snapshot = json.loads(
             postgres.scalar(
                 f"SET SESSION AUTHORIZATION {GUARD_OWNER};"
@@ -1916,6 +1998,15 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
             "pid": holder_pid,
         }
         assert expected_lock in (holder_snapshot["locks"] or []), holder_snapshot
+        second_holder = postgres.run_as_role(
+            "SELECT 1",
+            database=database,
+            role=maintenance_role,
+            password=maintenance_password,
+            check=False,
+        )
+        assert second_holder.returncode != 0
+        assert "too many connections for role" in second_holder.stderr
         opened = holder.execute(
             "BEGIN; SELECT odoo_accounting_cli_v3_guard.open_module_guard("
             f"0,'{authorization_id}'::uuid)::text; COMMIT;"
@@ -1935,7 +2026,9 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
         )
         assert closed[-2] == "2"
         assert _postgres_boolean(closed[-1]) is True
-    postgres.run(f"ALTER ROLE {maintenance_role} NOLOGIN VALID UNTIL 'epoch'")
+    postgres.run(
+        f"ALTER ROLE {maintenance_role} NOLOGIN PASSWORD NULL VALID UNTIL 'epoch'"
+    )
     postgres.run("DROP TABLE public.dev22_guarded_ddl", database=database)
     closed_state = _guard_state(postgres, database)
     assert closed_state["module_guard_open"] is False
@@ -1958,13 +2051,18 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
         f"'{crash_expiry.isoformat()}'::timestamptz)",
         database=database,
     )
+    crash_password = uuid.uuid4().hex + uuid.uuid4().hex
     postgres.run(
-        f"ALTER ROLE {maintenance_role} LOGIN VALID UNTIL '{crash_expiry.isoformat()}'"
+        f"ALTER ROLE {maintenance_role} LOGIN PASSWORD '{crash_password}' "
+        f"VALID UNTIL '{crash_expiry.isoformat()}'"
     )
-    crashed_holder = postgres.session(database)
+    crashed_holder = postgres.session_as_role(
+        database,
+        role=maintenance_role,
+        password=crash_password,
+    )
     try:
         crash_rows = crashed_holder.execute(
-            f"SET SESSION AUTHORIZATION {maintenance_role};"
             f"SELECT pg_catalog.pg_advisory_lock({key_a},{key_b});"
             "BEGIN; SELECT odoo_accounting_cli_v3_guard.open_module_guard("
             f"2,'{crash_id}'::uuid)::text; COMMIT;"
@@ -1984,14 +2082,27 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
             == "0",
             description="crashed maintenance holder to disappear",
         )
-        ddl_after_crash = postgres.run(
-            f"SET SESSION AUTHORIZATION {runtime_role};"
+        ddl_after_crash = postgres.run_as_role(
+            "SET ROLE " + runtime_role + ";"
             "CREATE TABLE public.dev22_crash_escape(id bigint)",
             database=database,
+            role=maintenance_role,
+            password=crash_password,
             check=False,
         )
         assert ddl_after_crash.returncode != 0
         assert "module maintenance DDL is not authorized" in ddl_after_crash.stderr
+        stolen_close = postgres.run_as_role(
+            f"SELECT pg_catalog.pg_advisory_lock({key_a},{key_b});"
+            "SELECT odoo_accounting_cli_v3_guard.close_module_guard("
+            f"3,'{crash_id}'::uuid)",
+            database=database,
+            role=maintenance_role,
+            password=crash_password,
+            check=False,
+        )
+        assert stolen_close.returncode != 0
+        assert "cannot be closed at the requested epoch" in stolen_close.stderr
         rescued = postgres.run(
             f"SET SESSION AUTHORIZATION {finalizer_role};"
             "SELECT odoo_accounting_cli_v3_guard.rescue_module_guard("
@@ -2001,7 +2112,9 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
         assert rescued.returncode == 0
     finally:
         crashed_holder.close()
-    postgres.run(f"ALTER ROLE {maintenance_role} NOLOGIN VALID UNTIL 'epoch'")
+    postgres.run(
+        f"ALTER ROLE {maintenance_role} NOLOGIN PASSWORD NULL VALID UNTIL 'epoch'"
+    )
     rescued_state = _guard_state(postgres, database)
     assert rescued_state["module_guard_open"] is False
     assert _postgres_boolean(postgres.scalar(
