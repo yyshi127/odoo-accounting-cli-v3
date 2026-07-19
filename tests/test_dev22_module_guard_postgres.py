@@ -1840,8 +1840,10 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
         f"'{registry_digest}','{release_digest}','{'e' * 64}',"
         f"'{maintenance_expiry.isoformat()}'::timestamptz)",
         database=database,
+        check=False,
     )
-    assert authorize.returncode == 0
+    if authorize.returncode != 0:
+        pytest.fail("module maintenance authorization failed:\n" + authorize.stderr)
     postgres.run(
         f"ALTER ROLE {maintenance_role} LOGIN VALID UNTIL "
         f"'{maintenance_expiry.isoformat()}'"
