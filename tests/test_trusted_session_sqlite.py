@@ -15,6 +15,7 @@ from threading import Event, Lock, Thread
 import pytest
 
 from odoo_accounting_cli_v3 import sqlite_process_lifecycle
+import odoo_accounting_cli_v3.monotonic_deadline as monotonic_deadline
 import odoo_accounting_cli_v3.trusted_session_sqlite as trusted_session_sqlite
 from odoo_accounting_cli_v3.trusted_session_sqlite import (
     SQLiteTrustedSessionStore,
@@ -131,6 +132,28 @@ def _process_initialize(
         diagnostic = f"{type(exc).__name__}: {exc}"
         if exc.__cause__ is not None:
             diagnostic += f"; caused by {type(exc.__cause__).__name__}: {exc.__cause__}"
+        results.put(diagnostic)
+
+
+def _process_hold_read_connection(
+    path: str,
+    ready: multiprocessing.queues.Queue,
+    release: multiprocessing.synchronize.Event,
+    results: multiprocessing.queues.Queue,
+) -> None:
+    ready_sent = False
+    try:
+        store = SQLiteTrustedSessionStore(Path(path))
+        with store._read_connection():
+            ready.put(True)
+            ready_sent = True
+            if not release.wait(15):
+                raise TimeoutError("read connection release signal was not received")
+        results.put(True)
+    except BaseException as exc:  # pragma: no cover - child diagnostic
+        diagnostic = f"{type(exc).__name__}: {exc}"
+        if not ready_sent:
+            ready.put(diagnostic)
         results.put(diagnostic)
 
 
@@ -379,6 +402,42 @@ def test_single_use_resolution_is_atomic_across_processes(tmp_path: Path) -> Non
     ) == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX cross-process lock contract")
+def test_live_read_connection_holds_the_cross_process_lifecycle_lock(
+    tmp_path: Path,
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Queue()
+    release = context.Event()
+    results = context.Queue()
+    process = context.Process(
+        target=_process_hold_read_connection,
+        args=(str(path), ready, release, results),
+    )
+    process.start()
+    descriptor: int | None = None
+    try:
+        assert ready.get(timeout=30) is True
+        descriptor = os.open(
+            store._writer_lock_path,
+            os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+        with pytest.raises(BlockingIOError) as caught:
+            assert fcntl is not None
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert caught.value.errno in (errno.EACCES, errno.EAGAIN)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        release.set()
+        process.join(30)
+
+    assert process.exitcode == 0
+    assert results.get(timeout=30) is True
+
+
 def test_busy_writer_fails_within_configured_deadline_without_consuming_handle(
     tmp_path: Path,
 ) -> None:
@@ -532,6 +591,93 @@ def test_setup_cleanup_failure_rejects_retry_before_yield(
     assert store.resolve(issued.handle) == issued.session
 
 
+def test_upstream_deadline_is_not_rebuilt_after_caller_clock_advances(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteTrustedSessionStore(
+        (tmp_path / "sessions.sqlite3").resolve(), busy_timeout_ms=5_000
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(monotonic_deadline, "_monotonic", lambda: 100.0)
+    monkeypatch.setattr(trusted_session_sqlite.time, "monotonic", lambda: 102.0)
+    monkeypatch.setattr(
+        trusted_session_sqlite.time,
+        "sleep",
+        lambda delay: sleeps.append(delay),
+    )
+
+    with monotonic_deadline.monotonic_deadline_scope(101.0):
+        retry_deadline = store._sidecar_retry_deadline()
+
+    assert retry_deadline == 101.0
+    with pytest.raises(TrustedSessionStoreError, match="already expired"):
+        store._wait_for_sidecar_retry(
+            retry_deadline,
+            exhausted_message="trusted session deadline was already expired",
+        )
+    assert sleeps == []
+
+
+def test_read_setup_reuses_budget_remaining_after_writer_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteTrustedSessionStore(
+        (tmp_path / "sessions.sqlite3").resolve(), busy_timeout_ms=250
+    )
+    now = {"value": 100.0}
+    observed_connect_timeouts: list[float] = []
+    observed_configure_deadlines: list[float | None] = []
+    real_connect = sqlite3.connect
+    real_configure = store._configure
+
+    def consume_writer_lock_budget(
+        retry_deadline: float,
+        *,
+        owner_process_id: int,
+    ) -> tuple[int, tuple[int, int], int] | None:
+        assert retry_deadline == pytest.approx(100.25)
+        assert owner_process_id == os.getpid()
+        now["value"] += 0.1
+        return None
+
+    def recording_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        observed_connect_timeouts.append(float(kwargs["timeout"]))
+        return real_connect(*args, **kwargs)
+
+    def recording_configure(
+        connection: sqlite3.Connection,
+        *,
+        write: bool,
+        retry_deadline: float | None = None,
+    ) -> None:
+        observed_configure_deadlines.append(retry_deadline)
+        real_configure(
+            connection,
+            write=write,
+            retry_deadline=retry_deadline,
+        )
+
+    monkeypatch.setattr(
+        monotonic_deadline,
+        "_monotonic",
+        lambda: now["value"],
+    )
+    monkeypatch.setattr(
+        trusted_session_sqlite.time,
+        "monotonic",
+        lambda: now["value"],
+    )
+    monkeypatch.setattr(store, "_acquire_writer_lock", consume_writer_lock_budget)
+    monkeypatch.setattr(trusted_session_sqlite.sqlite3, "connect", recording_connect)
+    monkeypatch.setattr(store, "_configure", recording_configure)
+
+    with store._read_connection() as connection:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+
+    assert observed_connect_timeouts == [pytest.approx(0.15, abs=0.001)]
+    assert observed_configure_deadlines == [pytest.approx(100.25)]
+
+
 def test_setup_retry_uses_one_bounded_monotonic_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -576,6 +722,7 @@ def test_setup_retry_uses_one_bounded_monotonic_budget(
         )
         raise _operational_error("locking protocol", sqlite3.SQLITE_PROTOCOL)
 
+    monkeypatch.setattr(monotonic_deadline, "_monotonic", monotonic)
     monkeypatch.setattr(trusted_session_sqlite.time, "monotonic", monotonic)
     monkeypatch.setattr(trusted_session_sqlite.time, "sleep", sleep)
     monkeypatch.setattr(store, "_acquire_writer_lock", consume_writer_lock_budget)
@@ -627,6 +774,7 @@ def test_expired_budget_after_writer_lock_never_starts_sqlite_setup(
         setup_calls += 1
         raise AssertionError("expired budget started SQLite setup")
 
+    monkeypatch.setattr(monotonic_deadline, "_monotonic", monotonic)
     monkeypatch.setattr(trusted_session_sqlite.time, "monotonic", monotonic)
     monkeypatch.setattr(store, "_acquire_writer_lock", consume_entire_budget)
     monkeypatch.setattr(store, "_write_transaction_attempt", forbidden_attempt)
@@ -819,10 +967,16 @@ def test_post_commit_cleanup_failure_explicitly_requires_reconciliation(
         def fail_post_commit_database_verification(
             expected: tuple[int, int],
             lease: sqlite_process_lifecycle.SQLiteProcessLifecycleLease | None = None,
+            *,
+            retry_deadline: float | None = None,
         ) -> None:
             nonlocal verification_calls
             verification_calls += 1
-            real_verify_database(expected, lease)
+            real_verify_database(
+                expected,
+                lease,
+                retry_deadline=retry_deadline,
+            )
             if verification_calls == 1:
                 raise TrustedSessionStoreError(
                     "simulated post-commit database verification failure"
@@ -870,6 +1024,12 @@ def test_post_commit_cleanup_failure_explicitly_requires_reconciliation(
     assert caught.value.retryable is False
     assert caught.value.reconciliation_required is True
     assert "do not replay" in str(caught.value)
+    if cleanup_phase == "database_verification":
+        assert verification_calls == 1
+        assert isinstance(caught.value.__cause__, TrustedSessionStoreError)
+        assert str(caught.value.__cause__) == (
+            "simulated post-commit database verification failure"
+        )
     assert sqlite_process_lifecycle._PROCESS_SQLITE_LIFECYCLE.poisoned is (
         cleanup_phase == "close"
     )
@@ -1356,26 +1516,67 @@ def test_sqlite_sidecar_hardlink_is_rejected(tmp_path: Path) -> None:
         store._verify_sidecars()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar creation race contract")
-def test_transient_sqlite_sidecar_mode_is_rechecked_until_private(
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar unlink race contract")
+def test_transient_unlinked_sidecar_inode_is_rechecked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = (tmp_path / "sessions.sqlite3").resolve()
     store = SQLiteTrustedSessionStore(path)
     sidecar = Path(f"{path}-shm")
+    sidecar.write_bytes(b"SQLite sidecar being unlinked")
+    sidecar.chmod(0o600)
+    sidecar_identity = (sidecar.stat().st_dev, sidecar.stat().st_ino)
+    real_fstat = os.fstat
+    observations = 0
+
+    def transient_unlink(descriptor: int) -> os.stat_result:
+        nonlocal observations
+        metadata = real_fstat(descriptor)
+        if (metadata.st_dev, metadata.st_ino) != sidecar_identity:
+            return metadata
+        observations += 1
+        if observations != 1:
+            return metadata
+        values = list(metadata)
+        values[3] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(trusted_session_sqlite.os, "fstat", transient_unlink)
+
+    store._verify_sidecars()
+
+    assert observations == 2
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar creation race contract")
+def test_transient_sqlite_sidecar_mode_is_rechecked_until_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = (tmp_path / "sessions.sqlite3").resolve()
+    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=500)
+    sidecar = Path(f"{path}-shm")
     sidecar.write_bytes(b"sqlite sidecar being initialized")
     sidecar.chmod(0o400)
+    now = {"value": 100.0}
     sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return now["value"]
 
     def finish_sqlite_creation(delay: float) -> None:
         sleeps.append(delay)
-        sidecar.chmod(0o600)
+        now["value"] += delay
+        if now["value"] >= 100.2:
+            sidecar.chmod(0o600)
 
+    monkeypatch.setattr(monotonic_deadline, "_monotonic", monotonic)
+    monkeypatch.setattr(trusted_session_sqlite.time, "monotonic", monotonic)
     monkeypatch.setattr(trusted_session_sqlite.time, "sleep", finish_sqlite_creation)
 
     store._verify_sidecars()
 
-    assert sleeps == [trusted_session_sqlite._SQLITE_SIDECAR_MODE_RETRY_SECONDS]
+    assert sum(sleeps) > 0.064
+    assert sum(sleeps) == pytest.approx(0.2)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar mode contract")
@@ -1383,21 +1584,38 @@ def test_persistently_restricted_sqlite_sidecar_is_rejected_after_bounded_rechec
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = (tmp_path / "sessions.sqlite3").resolve()
-    store = SQLiteTrustedSessionStore(path)
+    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=10)
     sidecar = Path(f"{path}-shm")
     sidecar.write_bytes(b"persistently restricted trusted-session sidecar")
     sidecar.chmod(0o400)
+    now = {"value": 100.0}
     sleeps: list[float] = []
+
+    def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        now["value"] += delay
+
+    monkeypatch.setattr(
+        monotonic_deadline,
+        "_monotonic",
+        lambda: now["value"],
+    )
+    monkeypatch.setattr(
+        trusted_session_sqlite.time,
+        "monotonic",
+        lambda: now["value"],
+    )
     monkeypatch.setattr(
         trusted_session_sqlite.time,
         "sleep",
-        lambda delay: sleeps.append(delay),
+        sleep,
     )
 
     with pytest.raises(TrustedSessionStoreError, match="sidecar is not private"):
         store._verify_sidecars()
 
-    assert len(sleeps) == trusted_session_sqlite._SQLITE_SIDECAR_MODE_ATTEMPTS - 1
+    assert sum(sleeps) == pytest.approx(0.01)
+    assert now["value"] == pytest.approx(100.01)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar mode contract")
@@ -1460,11 +1678,15 @@ def test_continuously_replaced_sqlite_sidecar_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = (tmp_path / "sessions.sqlite3").resolve()
-    store = SQLiteTrustedSessionStore(path)
+    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=10)
     sidecar = Path(f"{path}-shm")
     sidecar.write_bytes(b"unstable trusted-session sidecar")
     sidecar.chmod(0o600)
     real_open = os.open
+    now = {"value": 100.0}
+
+    def sleep(delay: float) -> None:
+        now["value"] += delay
 
     def keep_replacing(
         candidate: str | bytes | os.PathLike[str], flags: int, *args: object
@@ -1477,9 +1699,22 @@ def test_continuously_replaced_sqlite_sidecar_is_rejected(
         return descriptor
 
     monkeypatch.setattr(trusted_session_sqlite.os, "open", keep_replacing)
+    monkeypatch.setattr(
+        monotonic_deadline,
+        "_monotonic",
+        lambda: now["value"],
+    )
+    monkeypatch.setattr(
+        trusted_session_sqlite.time,
+        "monotonic",
+        lambda: now["value"],
+    )
+    monkeypatch.setattr(trusted_session_sqlite.time, "sleep", sleep)
 
     with pytest.raises(TrustedSessionStoreError, match="changed while checked"):
         store._verify_sidecars()
+
+    assert now["value"] == pytest.approx(100.01)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX sidecar permission contract")

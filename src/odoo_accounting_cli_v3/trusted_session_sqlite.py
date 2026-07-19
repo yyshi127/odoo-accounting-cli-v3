@@ -39,6 +39,7 @@ else:  # pragma: no cover - exercised by the Windows test matrix
 from .monotonic_deadline import (
     bounded_sqlite_busy_timeout_ms,
     bounded_sqlite_connect_timeout_seconds,
+    bounded_sqlite_operation_deadline,
 )
 from .operations import canonical_json
 from .sqlite_process_lifecycle import (
@@ -60,9 +61,7 @@ _RETRYABLE_SQLITE_SETUP_BASE_CODES = frozenset(
 _SQLITE_SETUP_RETRY_INITIAL_SECONDS = 0.001
 _SQLITE_SETUP_RETRY_MAX_SECONDS = 0.025
 _SQLITE_SETUP_ATTEMPT_MAX_BUSY_MS = 100
-_SQLITE_SIDECAR_IDENTITY_ATTEMPTS = 3
-_SQLITE_SIDECAR_MODE_ATTEMPTS = 32
-_SQLITE_SIDECAR_MODE_RETRY_SECONDS = 0.002
+_SQLITE_SIDECAR_RETRY_SECONDS = 0.002
 _WRITER_LOCK_SUFFIX = ".writer.lock"
 
 
@@ -604,6 +603,20 @@ class SQLiteTrustedSessionStore:
             lease.poison(f"{label} descriptor close was not confirmed")
             raise
 
+    def _sidecar_retry_deadline(self) -> float:
+        return bounded_sqlite_operation_deadline(self.busy_timeout_ms)
+
+    @staticmethod
+    def _wait_for_sidecar_retry(
+        retry_deadline: float,
+        *,
+        exhausted_message: str,
+    ) -> None:
+        remaining_seconds = retry_deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            raise TrustedSessionStoreError(exhausted_message)
+        time.sleep(min(_SQLITE_SIDECAR_RETRY_SECONDS, remaining_seconds))
+
     def _secure_parent(self) -> None:
         try:
             parent = self.path.parent
@@ -633,11 +646,22 @@ class SQLiteTrustedSessionStore:
             ) from exc
 
     def _secure_database_file(
-        self, lease: SQLiteProcessLifecycleLease | None = None
+        self,
+        lease: SQLiteProcessLifecycleLease | None = None,
+        *,
+        retry_deadline: float | None = None,
     ) -> tuple[int, int]:
+        if retry_deadline is None:
+            retry_deadline = self._sidecar_retry_deadline()
         if lease is None:
-            with self._database_lifecycle() as acquired:
-                return self._secure_database_file(acquired)
+            with self._exclusive_database_lifecycle(retry_deadline) as (
+                acquired,
+                _lock,
+            ):
+                return self._secure_database_file(
+                    acquired,
+                    retry_deadline=retry_deadline,
+                )
         lease.require_file_phase()
         self._secure_parent()
         descriptor: int | None = None
@@ -707,7 +731,7 @@ class SQLiteTrustedSessionStore:
                 raise TrustedSessionStoreError(
                     "trusted session database file is not private"
                 )
-            self._verify_sidecars(lease)
+            self._verify_sidecars(lease, retry_deadline=retry_deadline)
             return opened.st_dev, opened.st_ino
         except TrustedSessionStoreError:
             raise
@@ -758,29 +782,49 @@ class SQLiteTrustedSessionStore:
         self,
         expected: tuple[int, int],
         lease: SQLiteProcessLifecycleLease | None = None,
+        *,
+        retry_deadline: float | None = None,
     ) -> None:
+        if retry_deadline is None:
+            retry_deadline = self._sidecar_retry_deadline()
         if lease is None:
-            with self._database_lifecycle() as acquired:
-                self._verify_database_file(expected, acquired)
+            with self._exclusive_database_lifecycle(retry_deadline) as (
+                acquired,
+                _lock,
+            ):
+                self._verify_database_file(
+                    expected,
+                    acquired,
+                    retry_deadline=retry_deadline,
+                )
                 return
         lease.require_file_phase()
         self._verify_database_path(expected)
-        self._verify_sidecars(lease)
+        self._verify_sidecars(lease, retry_deadline=retry_deadline)
 
     def _verify_sidecars(
-        self, lease: SQLiteProcessLifecycleLease | None = None
+        self,
+        lease: SQLiteProcessLifecycleLease | None = None,
+        *,
+        retry_deadline: float | None = None,
     ) -> None:
+        if retry_deadline is None:
+            retry_deadline = self._sidecar_retry_deadline()
         if lease is None:
-            with self._database_lifecycle() as acquired:
-                self._verify_sidecars(acquired)
+            with self._exclusive_database_lifecycle(retry_deadline) as (
+                acquired,
+                _lock,
+            ):
+                self._verify_sidecars(
+                    acquired,
+                    retry_deadline=retry_deadline,
+                )
                 return
         lease.require_file_phase()
         if os.name != "posix":
             return
         for suffix in ("-wal", "-shm"):
             sidecar = Path(f"{self.path}{suffix}")
-            identity_attempts = 0
-            mode_attempts = 0
             while True:
                 if not os.path.lexists(sidecar):
                     break
@@ -797,30 +841,27 @@ class SQLiteTrustedSessionStore:
                     if (
                         not stat.S_ISREG(opened.st_mode)
                         or not stat.S_ISREG(metadata.st_mode)
-                        or metadata.st_nlink != 1
                         or opened.st_uid != os.geteuid()
                         or metadata.st_uid != os.geteuid()
                     ):
                         raise TrustedSessionStoreError(
                             "trusted session SQLite sidecar is not private"
                         )
-                    if (opened.st_dev, opened.st_ino) != (
-                        metadata.st_dev,
-                        metadata.st_ino,
-                    ):
-                        identity_attempts += 1
-                        if (
-                            identity_attempts
-                            >= _SQLITE_SIDECAR_IDENTITY_ATTEMPTS
-                        ):
-                            raise TrustedSessionStoreError(
-                                "trusted session SQLite sidecar changed while checked"
-                            )
-                        continue
-                    if opened.st_nlink != 1:
+                    if opened.st_nlink > 1 or metadata.st_nlink > 1:
                         raise TrustedSessionStoreError(
                             "trusted session SQLite sidecar is not private"
                         )
+                    if (opened.st_dev, opened.st_ino) != (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                    ) or opened.st_nlink != 1 or metadata.st_nlink != 1:
+                        self._wait_for_sidecar_retry(
+                            retry_deadline,
+                            exhausted_message=(
+                                "trusted session SQLite sidecar changed while checked"
+                            ),
+                        )
+                        continue
                     opened_mode = stat.S_IMODE(opened.st_mode)
                     metadata_mode = stat.S_IMODE(metadata.st_mode)
                     if opened_mode & ~0o600 or metadata_mode & ~0o600:
@@ -828,22 +869,23 @@ class SQLiteTrustedSessionStore:
                             "trusted session SQLite sidecar is not private"
                         )
                     if opened_mode != 0o600 or metadata_mode != 0o600:
-                        mode_attempts += 1
-                        if mode_attempts >= _SQLITE_SIDECAR_MODE_ATTEMPTS:
-                            raise TrustedSessionStoreError(
+                        self._wait_for_sidecar_retry(
+                            retry_deadline,
+                            exhausted_message=(
                                 "trusted session SQLite sidecar is not private"
-                            )
-                        time.sleep(_SQLITE_SIDECAR_MODE_RETRY_SECONDS)
+                            ),
+                        )
                         continue
                     break
                 except FileNotFoundError:
                     if not os.path.lexists(sidecar):
                         break
-                    identity_attempts += 1
-                    if identity_attempts >= _SQLITE_SIDECAR_IDENTITY_ATTEMPTS:
-                        raise TrustedSessionStoreError(
+                    self._wait_for_sidecar_retry(
+                        retry_deadline,
+                        exhausted_message=(
                             "trusted session SQLite sidecar changed while checked"
-                        )
+                        ),
+                    )
                 except TrustedSessionStoreError:
                     raise
                 except OSError as exc:
@@ -1073,6 +1115,20 @@ class SQLiteTrustedSessionStore:
         else:
             self._release_writer_lock(lock)
 
+    @contextmanager
+    def _exclusive_database_lifecycle(
+        self,
+        retry_deadline: float,
+    ) -> Iterator[
+        tuple[
+            SQLiteProcessLifecycleLease,
+            tuple[int, tuple[int, int], int] | None,
+        ]
+    ]:
+        with self._database_lifecycle(retry_deadline=retry_deadline) as lease:
+            with self._writer_lock(retry_deadline) as lock:
+                yield lease, lock
+
     def _remaining_transaction_busy_timeout_ms(
         self, retry_deadline: float, *, maximum_ms: int
     ) -> int:
@@ -1287,13 +1343,15 @@ class SQLiteTrustedSessionStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
-        total_budget_ms = bounded_sqlite_busy_timeout_ms(self.busy_timeout_ms)
-        retry_deadline = time.monotonic() + total_budget_ms / 1000.0
+        retry_deadline = bounded_sqlite_operation_deadline(self.busy_timeout_ms)
         committed = False
         try:
             with self._database_lifecycle(retry_deadline=retry_deadline) as lease:
-                expected = self._secure_database_file(lease)
                 with self._writer_lock(retry_deadline) as writer_lock:
+                    expected = self._secure_database_file(
+                        lease,
+                        retry_deadline=retry_deadline,
+                    )
                     try:
                         with lease.connection_phase() as connection_phase:
                             try:
@@ -1400,14 +1458,22 @@ class SQLiteTrustedSessionStore:
                                         )
                     except BaseException as exc:
                         try:
-                            self._verify_database_file(expected, lease)
+                            self._verify_database_file(
+                                expected,
+                                lease,
+                                retry_deadline=retry_deadline,
+                            )
                         except BaseException as verification_error:
                             exc.add_note(
                                 "trusted session post-close verification also failed: "
                                 f"{verification_error}"
                             )
                         raise
-                    self._verify_database_file(expected, lease)
+                    self._verify_database_file(
+                        expected,
+                        lease,
+                        retry_deadline=retry_deadline,
+                    )
         except TrustedSessionReconciliationRequiredError:
             raise
         except BaseException as exc:
@@ -1420,17 +1486,26 @@ class SQLiteTrustedSessionStore:
 
     @contextmanager
     def _read_connection(self) -> Iterator[sqlite3.Connection]:
+        retry_deadline = self._sidecar_retry_deadline()
         try:
-            with self._database_lifecycle() as lease:
-                expected = self._secure_database_file(lease)
+            with self._exclusive_database_lifecycle(retry_deadline) as (
+                lease,
+                _lock,
+            ):
+                expected = self._secure_database_file(
+                    lease,
+                    retry_deadline=retry_deadline,
+                )
                 with lease.connection_phase() as connection_phase:
+                    connect_timeout_ms = self._remaining_transaction_busy_timeout_ms(
+                        retry_deadline,
+                        maximum_ms=self.busy_timeout_ms,
+                    )
                     connection_phase.connecting()
                     try:
                         connection = sqlite3.connect(
                             self.path,
-                            timeout=bounded_sqlite_connect_timeout_seconds(
-                                self.busy_timeout_ms
-                            ),
+                            timeout=connect_timeout_ms / 1000.0,
                             isolation_level=None,
                         )
                     except BaseException:
@@ -1440,7 +1515,11 @@ class SQLiteTrustedSessionStore:
                     connection.row_factory = sqlite3.Row
                     read_error: BaseException | None = None
                     try:
-                        self._configure(connection, write=False)
+                        self._configure(
+                            connection,
+                            write=False,
+                            retry_deadline=retry_deadline,
+                        )
                         connection.execute("PRAGMA query_only = ON")
                         connection.execute("BEGIN")
                         self._verify_database_path(expected)
@@ -1482,20 +1561,35 @@ class SQLiteTrustedSessionStore:
                                     "trusted session SQLite read lifecycle cleanup "
                                     f"also failed: {lifecycle_error}"
                                 )
-                self._verify_database_file(expected, lease)
+                self._verify_database_file(
+                    expected,
+                    lease,
+                    retry_deadline=retry_deadline,
+                )
         except sqlite3.Error as exc:
             raise TrustedSessionStoreError("trusted session SQLite read failed") from exc
 
     def _database_has_content(self) -> bool:
-        with self._database_lifecycle() as lease:
-            expected = self._secure_database_file(lease)
+        retry_deadline = self._sidecar_retry_deadline()
+        with self._exclusive_database_lifecycle(retry_deadline) as (
+            lease,
+            _lock,
+        ):
+            expected = self._secure_database_file(
+                lease,
+                retry_deadline=retry_deadline,
+            )
             try:
                 has_content = self.path.stat().st_size > 0
             except OSError as exc:
                 raise TrustedSessionStoreError(
                     "trusted session database path cannot be inspected"
                 ) from exc
-            self._verify_database_file(expected, lease)
+            self._verify_database_file(
+                expected,
+                lease,
+                retry_deadline=retry_deadline,
+            )
             return has_content
 
     def _initialize(self) -> None:

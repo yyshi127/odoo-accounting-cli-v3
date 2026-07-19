@@ -89,6 +89,24 @@ def bounded_sqlite_connect_timeout_seconds(configured_busy_timeout_ms: int) -> f
     return bounded_sqlite_busy_timeout_ms(configured_busy_timeout_ms) / 1000.0
 
 
+def bounded_sqlite_operation_deadline(configured_busy_timeout_ms: int) -> float:
+    """Return one absolute deadline without rebuilding an upstream deadline.
+
+    The clock is sampled exactly once so a scheduling pause cannot turn an
+    already-bounded relative timeout back into a later absolute deadline.
+    """
+
+    configured = _configured_busy_timeout_ms(configured_busy_timeout_ms)
+    now = _monotonic()
+    configured_deadline = now + configured / 1000.0
+    current = _CURRENT_DEADLINE.get()
+    if current is None:
+        return configured_deadline
+    if current <= now:
+        raise MonotonicDeadlineExceeded("monotonic deadline was exceeded")
+    return min(configured_deadline, current)
+
+
 def bounded_sqlite_busy_timeout_ms(configured_busy_timeout_ms: int) -> int:
     """Bound one SQLite PRAGMA busy timeout without rounding past the deadline."""
 
@@ -105,6 +123,7 @@ __all__ = [
     "MonotonicDeadlineExceeded",
     "bounded_sqlite_busy_timeout_ms",
     "bounded_sqlite_connect_timeout_seconds",
+    "bounded_sqlite_operation_deadline",
     "copy_monotonic_deadline_context",
     "current_monotonic_deadline",
     "monotonic_deadline_scope",

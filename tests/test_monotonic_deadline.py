@@ -70,6 +70,27 @@ def test_nested_deadline_scope_can_only_shorten_never_extend(
     assert deadline.current_monotonic_deadline() is None
 
 
+def test_bounded_operation_deadline_samples_once_and_preserves_outer_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock_calls = 0
+
+    def monotonic() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls > 1:
+            raise AssertionError("operation deadline sampled the clock more than once")
+        return 100.0
+
+    monkeypatch.setattr(deadline, "_monotonic", monotonic)
+
+    with deadline.monotonic_deadline_scope(101.0):
+        operation_deadline = deadline.bounded_sqlite_operation_deadline(5_000)
+
+    assert operation_deadline == 101.0
+    assert clock_calls == 1
+
+
 def test_thread_deadline_context_requires_an_explicit_copy() -> None:
     observed: queue.Queue[float | None] = queue.Queue()
 
