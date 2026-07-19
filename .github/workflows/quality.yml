@@ -498,7 +498,16 @@ jobs:
           first="$RUNNER_TEMP/finalizer-runtime-1.json"
           second="$RUNNER_TEMP/finalizer-runtime-2.json"
 
-          sudo install -d -m 0755 -o root -g root "$release_root/src"
+          # GitHub's hosted Ubuntu image deliberately makes /opt world-writable.
+          # Normalize the production release ancestor in this disposable runner so
+          # the gate is tested against the same root-owned boundary required on host.
+          sudo chown root:root /opt
+          sudo chmod 0755 /opt
+          sudo install -d -m 0755 -o root -g root \
+            /opt/odoo-accounting-cli-v3 \
+            /opt/odoo-accounting-cli-v3/releases \
+            "$release_root" \
+            "$release_root/src"
           sudo cp -a "$GITHUB_WORKSPACE/src/." "$release_root/src/"
           test -z "$(sudo find "$release_root/src" -type l -print -quit)"
           sudo find "$release_root/src" -exec chown root:root {} +
