@@ -1536,7 +1536,7 @@ BEGIN
         pg_catalog.transaction_timestamp(),
         requested_expires_at,
         session_user::name
-    ) ON CONFLICT (maintenance_id) DO NOTHING;
+    ) ON CONFLICT ON CONSTRAINT module_maintenance_authorization_pkey DO NOTHING;
     GET DIAGNOSTICS inserted = ROW_COUNT;
     SELECT maintenance_authorization.* INTO existing
     FROM odoo_accounting_cli_v3_guard.module_maintenance_authorization AS maintenance_authorization

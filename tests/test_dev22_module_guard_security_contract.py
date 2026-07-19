@@ -106,6 +106,10 @@ def test_maintenance_authorization_is_finalizer_issued_single_use_and_expiring()
         assert marker in sql
     authorize = _function("authorize_module_maintenance")
     assert "session_user::name <> configured_finalizer" in authorize
+    assert (
+        "ON CONFLICT ON CONSTRAINT module_maintenance_authorization_pkey "
+        "DO NOTHING"
+    ) in authorize
     opened = _function("open_module_guard")
     assert "candidate.expires_at > pg_catalog.clock_timestamp()" in opened
     assert "epoch = epoch + 1" in opened

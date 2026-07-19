@@ -139,7 +139,7 @@ _FUNCTION_SOURCE_DIGESTS = {
     "guard_module_change": "8bf64023840d0bcbb71ce0331afc22d707b69197cdf283becad4a3f8cd3a9273",
     "verify_module_change": "060ac6b1af665bebbf6ad3c7d14b0ed7beca392889396396a3657691c85e8a3c",
     "read_module_guard_state": "5ec7e9cb13cd258721b57a804e0c867445993b96e95e0571c6983422647ae03f",
-    "authorize_module_maintenance": "53e0f2ebc29dd11149c66b8157872d7bef8048571d679dc88117f6f017e62f89",
+    "authorize_module_maintenance": "16d5eeecf3163dc61a9a597bb8cc0c504ac7864be02b1ffd34490cec52bff745",
     "finalize_operation_effect": "56349ee88cb879ccdae51b7183909ca8dfd76499233f20063ea2771b1d1137e3",
     "open_module_guard": "411a3bcd4f59d767b14689bd86edeff0c1defa88e625e606b7fe09ca5b66ca89",
     "close_module_guard": "e4e435f84971a67edab3f6e345b823ea4867eb40bc32c6a6aa35c7234c2a711c",
