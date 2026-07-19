@@ -6,12 +6,18 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from odoo_accounting_cli_v3.effect_finalizer import EffectFinalizationIdentity
+from odoo_accounting_cli_v3.effect_finalizer_runtime import (
+    EffectFinalizerClientRuntime,
+)
 from odoo_accounting_cli_v3.trusted_broker_app import (
     TrustedBrokerRuntimeError,
+    _assert_finalizer_socket_membership,
     _assert_loaded_topology,
     load_trusted_broker_runtime_config,
 )
@@ -23,7 +29,11 @@ from odoo_accounting_cli_v3.odoo.runner import RuntimeConfig
 from odoo_accounting_cli_v3.trusted_authority_bootstrap import (
     TrustedAuthorityRuntimeConfig,
 )
-from odoo_accounting_cli_v3.write_runtime import WriteRoleConfig, WriteRuntimeConfig
+from odoo_accounting_cli_v3.write_runtime import (
+    WRITE_RUNTIME_SCHEMA_VERSION,
+    WriteRoleConfig,
+    WriteRuntimeConfig,
+)
 
 
 CURRENT_RELEASE = "a" * 64
@@ -36,6 +46,29 @@ EXAMPLE = (
     / "dev9"
     / "broker-runtime.example.json"
 )
+
+
+def _effect_finalizer_runtime() -> EffectFinalizerClientRuntime:
+    return EffectFinalizerClientRuntime(
+        socket_path="/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+        socket_owner_uid=0,
+        socket_group_gid=1301,
+        socket_mode=0o660,
+        finalizer_service_uid=3104,
+        finalizer_service_gid=3104,
+        finalizer_systemd_unit=(
+            "odoo-accounting-cli-v3-effect-finalizer.service"
+        ),
+        finalization_identity=EffectFinalizationIdentity(
+            attestation_key_id="effect-finalizer-v1",
+            guard_installation_id="22222222-2222-4222-8222-222222222222",
+            database_oid=16384,
+        ),
+        handoff_idle_timeout_seconds=115,
+        request_io_timeout_seconds=10,
+        max_request_bytes=16_384,
+        max_response_bytes=32_768,
+    )
 
 
 def test_production_composition_injects_durable_precheck_resolver() -> None:
@@ -74,6 +107,26 @@ def test_production_composition_injects_durable_precheck_resolver() -> None:
     assert "enforce_source_release" in build_source
     assert "current_release.assert_executing_broker_source(" in build_source
     assert "package_version=__version__" in build_source
+    assert "preconnect_effect_finalizer_socket(" in build_source
+
+    router_calls = [
+        node
+        for node in ast.walk(build)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "HistoricalReleaseRouter"
+    ]
+    assert len(router_calls) == 1
+    router_keywords = {item.arg for item in router_calls[0].keywords}
+    assert "effect_finalizer_preconnector" in router_keywords
+
+    write_app_source = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "odoo_accounting_cli_v3"
+        / "write_app.py"
+    ).read_text(encoding="utf-8")
+    assert "preconnect_effect_finalizer_socket" not in write_app_source
 
 
 def _document(tmp_path: Path) -> dict[str, Any]:
@@ -418,10 +471,11 @@ def _authority(
         )
     }
     write = WriteRuntimeConfig(
-        schema_version=1,
+        schema_version=WRITE_RUNTIME_SCHEMA_VERSION,
         write_execution_mode="sandbox_staged",
         base_runtime_config_path=base_runtime_path,
         write_state_path=shared_write_state,
+        effect_finalizer=_effect_finalizer_runtime(),
         base_runtime=base,
         config_fingerprint=("5" if name == "current" else "6") * 64,
         _require_root_owner=False,
@@ -492,6 +546,37 @@ def test_loaded_release_topology_accepts_one_tenant_shared_write_and_isolated_st
     _assert_loaded_topology(config, manifest, (current, old))
 
 
+def test_broker_service_must_join_dedicated_finalizer_socket_group(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, _manifest, current, _old = _loaded_topology(tmp_path)
+    supplementary_runtime = replace(
+        current.write_runtime,
+        effect_finalizer=replace(
+            current.write_runtime.effect_finalizer,
+            socket_group_gid=3204,
+        ),
+    )
+    topology = SimpleNamespace(
+        releases=(SimpleNamespace(write_runtime=supplementary_runtime),)
+    )
+    monkeypatch.setattr(
+        os, "getegid", lambda: config.broker_service_gid, raising=False
+    )
+    monkeypatch.setattr(
+        os,
+        "getgroups",
+        lambda: [supplementary_runtime.effect_finalizer.socket_group_gid],
+        raising=False,
+    )
+    _assert_finalizer_socket_membership(config, topology)
+
+    monkeypatch.setattr(os, "getgroups", lambda: [])
+    with pytest.raises(TrustedBrokerRuntimeError, match="not a member"):
+        _assert_finalizer_socket_membership(config, topology)
+
+
 @pytest.mark.parametrize(
     "drift",
     [
@@ -501,6 +586,14 @@ def test_loaded_release_topology_accepts_one_tenant_shared_write_and_isolated_st
         "route_set",
         "read_path",
         "busy_timeout",
+        "finalizer_cross_release",
+        "finalizer_socket_path",
+        "finalizer_socket_owner",
+        "finalizer_socket_group",
+        "finalizer_socket_mode",
+        "finalizer_service_uid",
+        "finalizer_service_gid",
+        "finalizer_idle_timeout",
     ],
 )
 def test_loaded_release_topology_rejects_every_cross_release_drift(
@@ -539,8 +632,58 @@ def test_loaded_release_topology_rejects_every_cross_release_drift(
                 base_runtime_config_path=(tmp_path / "wrong-read.json").resolve(),
             ),
         )
-    else:
+    elif drift == "busy_timeout":
         old = replace(old, sqlite_busy_timeout_ms=999)
+    elif drift == "finalizer_cross_release":
+        old = replace(
+            old,
+            write_runtime=replace(
+                old.write_runtime,
+                effect_finalizer=replace(
+                    old.write_runtime.effect_finalizer,
+                    max_response_bytes=16_384,
+                ),
+            ),
+        )
+    else:
+        field, value = {
+            "finalizer_socket_path": (
+                "socket_path",
+                config.pi_broker_uds.socket_path,
+            ),
+            "finalizer_socket_owner": ("socket_owner_uid", 3104),
+            "finalizer_socket_group": (
+                "socket_group_gid",
+                config.pi_broker_uds.socket_group_gid,
+            ),
+            "finalizer_socket_mode": ("socket_mode", 0o640),
+            "finalizer_service_uid": (
+                "finalizer_service_uid",
+                config.broker_service_uid,
+            ),
+            "finalizer_service_gid": (
+                "finalizer_service_gid",
+                config.broker_service_gid,
+            ),
+            "finalizer_idle_timeout": (
+                "handoff_idle_timeout_seconds",
+                104.0,
+            ),
+        }[drift]
+        changed = replace(
+            current.write_runtime.effect_finalizer,
+            **{field: value},
+        )
+        current = replace(
+            current,
+            write_runtime=replace(
+                current.write_runtime, effect_finalizer=changed
+            ),
+        )
+        old = replace(
+            old,
+            write_runtime=replace(old.write_runtime, effect_finalizer=changed),
+        )
 
     with pytest.raises(TrustedBrokerRuntimeError):
         _assert_loaded_topology(config, manifest, (current, old))

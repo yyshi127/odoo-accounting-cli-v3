@@ -16,6 +16,7 @@ import os
 import re
 import selectors
 import signal
+import socket
 import stat
 import subprocess
 import time
@@ -71,6 +72,10 @@ _DURABLE_IDEMPOTENT_CREATION_ACTIONS = frozenset(
 _RECOVERY_LIFECYCLE_ADVANCING_ACTIONS = frozenset(
     {"operation.preview", "operation.approve_execute"}
 )
+_EFFECT_FINALIZER_FD_ENV = "ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD"
+_TRUSTED_DEADLINE_ENV = (
+    "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC"
+)
 
 
 class HistoricalRouterError(ValueError):
@@ -83,14 +88,18 @@ class HistoricalRouterError(ValueError):
         code: str = "historical_route_rejected",
         odoo_effect: str = "none",
         retryable: bool = False,
+        child_started: bool = False,
     ) -> None:
         super().__init__(message)
         if odoo_effect not in {"none", "unknown"}:
             raise ValueError("historical route Odoo effect is invalid")
+        if type(child_started) is not bool:
+            raise ValueError("historical child-started marker is invalid")
         self.code = code
         self.message = message
         self.odoo_effect = odoo_effect
         self.retryable = retryable
+        self.child_started = child_started
 
 
 class HistoricalOperationStore(Protocol):
@@ -113,6 +122,12 @@ class HistoricalRoute:
     executable_sha256: str
     runtime_config_path: Path
     runtime_config_sha256: str
+
+
+class EffectFinalizerPreconnector(Protocol):
+    """Broker-main-only authority that opens one route's finalizer channel."""
+
+    def __call__(self, route: HistoricalRoute) -> socket.socket: ...
 
 
 @dataclass(frozen=True)
@@ -617,6 +632,23 @@ def _run_bounded_child(
         return subprocess.CompletedProcess(
             argv, returncode, stdout=bytes(stdout), stderr=bytes(stderr)
         )
+    except HistoricalRouterError as exc:
+        _kill_process_group(process)
+        raise HistoricalRouterError(
+            exc.message,
+            code=exc.code,
+            odoo_effect=exc.odoo_effect,
+            retryable=exc.retryable,
+            child_started=True,
+        ) from exc
+    except Exception as exc:
+        _kill_process_group(process)
+        raise HistoricalRouterError(
+            "historical child process failed without a verified response",
+            code="historical_child_failed",
+            retryable=True,
+            child_started=True,
+        ) from exc
     except BaseException:
         _kill_process_group(process)
         raise
@@ -648,6 +680,7 @@ class HistoricalReleaseRouter:
         manifest_path: str | os.PathLike[str],
         operation_store: HistoricalOperationStore,
         *,
+        effect_finalizer_preconnector: EffectFinalizerPreconnector,
         require_root_owner: bool = True,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_stdin_bytes: int = DEFAULT_MAX_STDIN_BYTES,
@@ -660,6 +693,10 @@ class HistoricalReleaseRouter:
             raise HistoricalRouterError("historical routing manifest path must be absolute")
         if operation_store is None:
             raise HistoricalRouterError("durable operation store is required")
+        if not callable(effect_finalizer_preconnector):
+            raise HistoricalRouterError(
+                "broker-main effect finalizer preconnector is required"
+            )
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, (int, float))
@@ -682,6 +719,7 @@ class HistoricalReleaseRouter:
                 )
         self._manifest_path = path
         self._store = operation_store
+        self._effect_finalizer_preconnector = effect_finalizer_preconnector
         self._require_root_owner = require_root_owner
         self._timeout_seconds = float(timeout_seconds)
         self._max_stdin_bytes = max_stdin_bytes
@@ -724,14 +762,20 @@ class HistoricalReleaseRouter:
             retryable=True,
         )
 
-    def _child_timeout(self, deadline_monotonic: float | None) -> float:
-        deadline = self._validated_deadline(deadline_monotonic)
-        if deadline is None:
-            return self._timeout_seconds
-        remaining = deadline - time.monotonic()
+    def _effective_child_deadline(
+        self, deadline_monotonic: float | None
+    ) -> float:
+        outer_deadline = self._validated_deadline(deadline_monotonic)
+        local_deadline = time.monotonic() + self._timeout_seconds
+        if outer_deadline is None:
+            return local_deadline
+        return min(outer_deadline, local_deadline)
+
+    def _child_timeout(self, effective_deadline: float) -> float:
+        remaining = effective_deadline - time.monotonic()
         if remaining <= 0:
             raise self._deadline_exceeded()
-        return min(self._timeout_seconds, remaining)
+        return remaining
 
     def _assert_deadline(self, deadline_monotonic: float | None) -> None:
         deadline = self._validated_deadline(deadline_monotonic)
@@ -1070,11 +1114,51 @@ class HistoricalReleaseRouter:
         )
         return route, origin, plan["plan_digest"]
 
+    def _effect_finalizer_connection(
+        self, route: HistoricalRoute
+    ) -> socket.socket:
+        connection: socket.socket | None = None
+        try:
+            candidate = self._effect_finalizer_preconnector(route)
+            if type(candidate) is not socket.socket:
+                raise HistoricalRouterError(
+                    "effect finalizer preconnector returned an invalid connection"
+                )
+            connection = candidate
+            descriptor = connection.fileno()
+            if (
+                descriptor <= 2
+                or connection.get_inheritable()
+                or connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE)
+                != socket.SOCK_STREAM
+                or (
+                    os.name == "posix"
+                    and connection.family != socket.AF_UNIX
+                )
+            ):
+                raise HistoricalRouterError(
+                    "effect finalizer preconnector returned an invalid connection"
+                )
+            connection.getpeername()
+            return connection
+        except Exception as exc:
+            if connection is not None:
+                connection.close()
+            raise HistoricalRouterError(
+                "effect finalizer connection could not be established",
+                code="historical_effect_finalizer_unavailable",
+                retryable=True,
+            ) from exc
+
     @staticmethod
     def _child_environment(
-        route: HistoricalRoute, runtime_config_descriptor: int
+        route: HistoricalRoute,
+        runtime_config_descriptor: int,
+        *,
+        deadline_monotonic: float | None,
+        effect_finalizer_descriptor: int | None,
     ) -> dict[str, str]:
-        return {
+        environment = {
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
@@ -1090,6 +1174,13 @@ class HistoricalReleaseRouter:
                 runtime_config_descriptor
             ),
         }
+        if deadline_monotonic is not None:
+            environment[_TRUSTED_DEADLINE_ENV] = repr(deadline_monotonic)
+        if effect_finalizer_descriptor is not None:
+            environment[_EFFECT_FINALIZER_FD_ENV] = str(
+                effect_finalizer_descriptor
+            )
+        return environment
 
     def _parse_child_response(
         self,
@@ -1352,20 +1443,52 @@ class HistoricalReleaseRouter:
             "operation",
             _ACTION_COMMANDS[action],
         ]
-        child_invoked = False
+        child_started = False
+        effect_finalizer_connection: socket.socket | None = None
         try:
-            child_timeout = self._child_timeout(deadline_monotonic)
-            child_invoked = True
+            effective_child_deadline = self._effective_child_deadline(
+                deadline_monotonic
+            )
+            if action == "operation.approve_execute":
+                effect_finalizer_connection = (
+                    self._effect_finalizer_connection(route)
+                )
+            effect_finalizer_descriptor = (
+                None
+                if effect_finalizer_connection is None
+                else effect_finalizer_connection.fileno()
+            )
+            if effect_finalizer_descriptor == runtime_config_descriptor:
+                raise HistoricalRouterError(
+                    "historical child authority descriptors must be distinct"
+                )
+            child_timeout = self._child_timeout(effective_child_deadline)
+            pass_fds = (
+                (runtime_config_descriptor,)
+                if effect_finalizer_descriptor is None
+                else (
+                    runtime_config_descriptor,
+                    effect_finalizer_descriptor,
+                )
+            )
             completed = _run_bounded_child(
                 argv,
                 stdin=request_bytes,
-                env=self._child_environment(route, runtime_config_descriptor),
+                env=self._child_environment(
+                    route,
+                    runtime_config_descriptor,
+                    deadline_monotonic=effective_child_deadline,
+                    effect_finalizer_descriptor=(
+                        effect_finalizer_descriptor
+                    ),
+                ),
                 timeout_seconds=child_timeout,
                 max_stdout_bytes=self._max_stdout_bytes,
                 max_stderr_bytes=self._max_stderr_bytes,
-                pass_fds=(runtime_config_descriptor,),
+                pass_fds=pass_fds,
             )
-            self._assert_deadline(deadline_monotonic)
+            child_started = True
+            self._assert_deadline(effective_child_deadline)
             response = self._parse_child_response(
                 completed,
                 action=action,
@@ -1396,7 +1519,7 @@ class HistoricalReleaseRouter:
                 "historical route runtime configuration",
                 require_root_owner=self._require_root_owner,
             )
-            self._assert_deadline(deadline_monotonic)
+            self._assert_deadline(effective_child_deadline)
             return response
         except HistoricalRouterError as exc:
             if action in _DURABLE_IDEMPOTENT_CREATION_ACTIONS:
@@ -1412,11 +1535,12 @@ class HistoricalReleaseRouter:
                     code=exc.code,
                     odoo_effect="none",
                     retryable=True,
+                    child_started=(child_started or exc.child_started),
                 ) from exc
             if (
                 action != "operation.approve_execute"
                 or exc.odoo_effect == "unknown"
-                or not child_invoked
+                or not (child_started or exc.child_started)
             ):
                 raise
             raise HistoricalRouterError(
@@ -1424,12 +1548,16 @@ class HistoricalReleaseRouter:
                 code=exc.code,
                 odoo_effect="unknown",
                 retryable=True,
+                child_started=True,
             ) from exc
         finally:
+            if effect_finalizer_connection is not None:
+                effect_finalizer_connection.close()
             os.close(runtime_config_descriptor)
 
 
 __all__ = [
+    "EffectFinalizerPreconnector",
     "HistoricalOperationStore",
     "HistoricalReleaseRouter",
     "HistoricalRoute",

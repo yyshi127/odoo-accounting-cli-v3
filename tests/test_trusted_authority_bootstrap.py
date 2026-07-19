@@ -12,6 +12,10 @@ from threading import Barrier
 
 import pytest
 
+from odoo_accounting_cli_v3.effect_finalizer import EffectFinalizationIdentity
+from odoo_accounting_cli_v3.effect_finalizer_runtime import (
+    EffectFinalizerClientRuntime,
+)
 from odoo_accounting_cli_v3.operations import Operation, State, record_precheck
 from odoo_accounting_cli_v3.trusted_authority import (
     ApprovalDecision,
@@ -25,7 +29,10 @@ from odoo_accounting_cli_v3.trusted_authority_bootstrap import (
     build_trusted_authority,
     load_trusted_authority_runtime_config,
 )
-from odoo_accounting_cli_v3.write_runtime import WriteRuntimeError
+from odoo_accounting_cli_v3.write_runtime import (
+    WRITE_RUNTIME_SCHEMA_VERSION,
+    WriteRuntimeError,
+)
 
 
 NOW = datetime(2026, 7, 15, 9, 0, tzinfo=timezone.utc)
@@ -38,6 +45,53 @@ WRITE_ROLES = (
     "recovery",
     "write_receipt",
 )
+
+
+def _effect_finalizer_runtime() -> EffectFinalizerClientRuntime:
+    return EffectFinalizerClientRuntime(
+        socket_path="/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+        socket_owner_uid=0,
+        socket_group_gid=3204,
+        socket_mode=0o660,
+        finalizer_service_uid=3104,
+        finalizer_service_gid=3104,
+        finalizer_systemd_unit=(
+            "odoo-accounting-cli-v3-effect-finalizer.service"
+        ),
+        finalization_identity=EffectFinalizationIdentity(
+            attestation_key_id="effect-finalizer-v1",
+            guard_installation_id="22222222-2222-4222-8222-222222222222",
+            database_oid=16384,
+        ),
+        handoff_idle_timeout_seconds=115,
+        request_io_timeout_seconds=10,
+        max_request_bytes=16_384,
+        max_response_bytes=32_768,
+    )
+
+
+def _effect_finalizer_document() -> dict[str, object]:
+    runtime = _effect_finalizer_runtime()
+    return {
+        "socket_path": runtime.socket_path,
+        "socket_owner_uid": runtime.socket_owner_uid,
+        "socket_group_gid": runtime.socket_group_gid,
+        "socket_mode": runtime.socket_mode,
+        "finalizer_service_uid": runtime.finalizer_service_uid,
+        "finalizer_service_gid": runtime.finalizer_service_gid,
+        "finalizer_systemd_unit": runtime.finalizer_systemd_unit,
+        "attestation_key_id": (
+            runtime.finalization_identity.attestation_key_id
+        ),
+        "guard_installation_id": (
+            runtime.finalization_identity.guard_installation_id
+        ),
+        "database_oid": runtime.finalization_identity.database_oid,
+        "handoff_idle_timeout_seconds": runtime.handoff_idle_timeout_seconds,
+        "request_io_timeout_seconds": runtime.request_io_timeout_seconds,
+        "max_request_bytes": runtime.max_request_bytes,
+        "max_response_bytes": runtime.max_response_bytes,
+    }
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
@@ -117,10 +171,11 @@ def _runtime_documents(
     roles["recovery"]["issuer"] = "odoo-write-recovery"
     write_path = tmp_path / "write-runtime.json"
     write_document: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": WRITE_RUNTIME_SCHEMA_VERSION,
         "write_execution_mode": "sandbox_staged",
         "base_runtime_config_path": str(base_path),
         "write_state_path": str(write_state_dir / "write.sqlite3"),
+        "effect_finalizer": _effect_finalizer_document(),
         **roles,
     }
     _write_json(write_path, write_document)

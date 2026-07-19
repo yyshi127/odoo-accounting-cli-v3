@@ -34,6 +34,7 @@ EXECUTABLE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3",
         "bin/odoo-accounting-cli-v3-broker",
+        "bin/odoo-accounting-cli-v3-effect-finalizer",
         "deployment/dev9/run-private-mount-gate.sh",
     }
 )
@@ -71,6 +72,9 @@ PUBLICATION_METADATA_BLOCKS_PER_OBJECT = 4
 MIN_FREE_BYTES_AFTER_INSTALL = 2 * 1024 * 1024 * 1024
 BROKER_HELP_STDOUT = (
     b"usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH\n"
+)
+EFFECT_FINALIZER_HELP_STDOUT = (
+    b"usage: odoo-accounting-cli-v3-effect-finalizer --config ABSOLUTE_PATH\n"
 )
 
 
@@ -1427,6 +1431,16 @@ def _verify_release_without_writes(
         layout=layout,
         expected_stdout=BROKER_HELP_STDOUT,
         label="frozen broker launcher",
+    )
+    _run_candidate_command(
+        [
+            str(root / "bin/odoo-accounting-cli-v3-effect-finalizer"),
+            "--help",
+        ],
+        root=root,
+        layout=layout,
+        expected_stdout=EFFECT_FINALIZER_HELP_STDOUT,
+        label="frozen effect-finalizer launcher",
     )
     after = _tree_inventory(root, layout)
     if after != before:

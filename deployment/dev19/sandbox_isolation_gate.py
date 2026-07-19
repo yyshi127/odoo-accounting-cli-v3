@@ -90,6 +90,7 @@ EXECUTABLE_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3",
         "bin/odoo-accounting-cli-v3-broker",
+        "bin/odoo-accounting-cli-v3-effect-finalizer",
         "deployment/dev9/run-private-mount-gate.sh",
     }
 )

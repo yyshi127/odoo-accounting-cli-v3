@@ -151,6 +151,81 @@ The standard lifecycle actions are `operation prepare`, `operation preview`,
 success additionally requires a terminal result, passing verification, signed
 Odoo evidence, and the durable final audit receipt.
 
+## Isolated effect-finalizer runtime configuration schema v1
+
+The dedicated finalizer accepts one fixed root-managed document at
+`/etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json`. The service gets
+that path only through its immutable `ExecStart`; the broker and Odoo write
+child receive neither this document nor the finalizer HMAC, pgpass, or database
+LOGIN. The document contains secret paths, never secret values.
+
+The following is a rendering template, deliberately not valid JSON until every
+angle-bracket token is replaced from independently verified host evidence.
+Numeric UID/GID tokens must become JSON integers, not quoted strings:
+
+```jsonc
+{
+  "schema_version": 1,
+  "service_uid": <FINALIZER_NUMERIC_UID>,
+  "service_gid": <FINALIZER_NUMERIC_GID>,
+  "database_name": "<SANDBOX_DATABASE_NAME>",
+  "database_uuid": "<CANONICAL_DATABASE_UUID>",
+  "database_user": "<DIRECT_FINALIZER_LOGIN>",
+  "database_host": "/var/run/postgresql",
+  "database_port": 5432,
+  "database_connect_timeout_seconds": 2,
+  "odoo_config_path": "<ABSOLUTE_PINNED_ODOO_CONFIG_PATH>",
+  "odoo_config_sha256": "<64_LOWERCASE_HEX>",
+  "pgpass_path": "/etc/odoo-accounting-cli-v3/effect-finalizer/finalizer.pgpass",
+  "attestation_key_id": "<FINALIZER_KEY_ID>",
+  "expected_guard_installation_id": "<CANONICAL_GUARD_INSTALLATION_UUID>",
+  "expected_database_oid": <POSITIVE_DATABASE_OID>,
+  "attestation_secret_path": "/etc/odoo-accounting-cli-v3/effect-finalizer/attestation.hmac",
+  "journal_path": "/var/lib/odoo-accounting-cli-v3-effect-finalizer/attempts.sqlite3",
+  "proof_ttl_seconds": 120,
+  "statement_timeout_ms": 5000,
+  "uds": {
+    "socket_path": "/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+    "socket_owner_uid": 0,
+    "socket_group_gid": <BROKER_GROUP_NUMERIC_GID>,
+    "socket_mode": 432,
+    "broker_service_uid": <BROKER_NUMERIC_UID>,
+    "broker_systemd_unit": "odoo-accounting-cli-v3-broker.service",
+    "finalizer_systemd_unit": "odoo-accounting-cli-v3-effect-finalizer.service",
+    "handoff_idle_timeout_seconds": 115,
+    "request_io_timeout_seconds": 10,
+    "max_request_bytes": 16384,
+    "max_response_bytes": 32768,
+    "max_inflight_requests": 4
+  }
+}
+```
+
+The object and nested `uds` object reject missing or extra fields. The service
+UID/GID must be the dedicated non-root finalizer identity and must differ from
+the broker. The socket is root-owned, group-owned by the broker client group,
+and mode decimal `432` (octal `0660`). The configured broker UID and systemd
+unit are both checked against the connecting peer; group membership alone is
+insufficient.
+
+Only `/run/postgresql` and `/var/run/postgresql` are accepted database hosts.
+Remote TCP is not a fallback. The pgpass must be a mode-`0400` or `0600`
+single regular file with exactly one non-wildcard row bound to the configured
+socket directory, port, database, and direct LOGIN. The finalizer securely
+reads that row once, passes only the in-process password to libpq, explicitly
+sets `connect_timeout`, and clears all inherited `PG*` selectors around
+connection establishment. The HMAC and pgpass paths/inodes must be distinct.
+
+The attempt budget is
+`database_connect_timeout_seconds * 1000 + statement_timeout_ms + 1000`; it
+must be strictly less than `request_io_timeout_seconds * 1000`, and the proof
+TTL must exceed the complete attempt budget. Equality fails closed. The
+journal parent is the finalizer-owned mode-`0700` systemd `StateDirectory`; the
+database and its WAL/SHM files are mode `0600`. Preserve it with the PostgreSQL
+effect ledger across restart, upgrade, rollback, and response-loss recovery.
+Deployment ownership, systemd activation, dependency, upgrade, and rollback
+gates are in `deployment/dev23/README.md`.
+
 ## Pi authenticated-session and broker boundary
 
 The Pi service does not derive accounting identity from a conversation ID or

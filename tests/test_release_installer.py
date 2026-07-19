@@ -39,6 +39,16 @@ def installer():
     return _load_installer()
 
 
+def test_installer_requires_effect_finalizer_launcher_and_exact_help(installer):
+    launcher = "bin/odoo-accounting-cli-v3-effect-finalizer"
+    assert launcher in installer.EXECUTABLE_MEMBERS
+    assert launcher in installer.REQUIRED_MEMBERS
+    assert installer.EFFECT_FINALIZER_HELP_STDOUT == (
+        b"usage: odoo-accounting-cli-v3-effect-finalizer "
+        b"--config ABSOLUTE_PATH\n"
+    )
+
+
 def _manifest(files: dict[str, bytes], version: str, commit: str) -> dict:
     document = {
         "schema_version": 1,
@@ -63,6 +73,7 @@ def _fixture_files(
     *,
     verifier_payload: bytes | None = None,
     broker_payload: bytes | None = None,
+    finalizer_payload: bytes | None = None,
 ) -> dict[str, bytes]:
     return {
         "VERSION": b"1.2.3.dev4\n",
@@ -72,6 +83,12 @@ def _fixture_files(
         else (
             b"#!/bin/sh\nprintf '%s\\n' "
             b"'usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH'\n"
+        ),
+        "bin/odoo-accounting-cli-v3-effect-finalizer": finalizer_payload
+        if finalizer_payload is not None
+        else (
+            b"#!/bin/sh\nprintf '%s\\n' "
+            b"'usage: odoo-accounting-cli-v3-effect-finalizer --config ABSOLUTE_PATH'\n"
         ),
         "deployment/install-release.py": INSTALLER_PATH.read_bytes(),
         "deployment/dev9/run-private-mount-gate.sh": b"#!/bin/sh\nexit 70\n",
@@ -94,6 +111,7 @@ def _build_archive(
     *,
     verifier_payload: bytes | None = None,
     broker_payload: bytes | None = None,
+    finalizer_payload: bytes | None = None,
     mutate_member=None,
     extra_members: tuple[tarfile.TarInfo, ...] = (),
 ):
@@ -103,6 +121,7 @@ def _build_archive(
     files = _fixture_files(
         verifier_payload=verifier_payload,
         broker_payload=broker_payload,
+        finalizer_payload=finalizer_payload,
     )
     manifest = _manifest(files, version, commit)
     manifest_payload = (
@@ -877,6 +896,26 @@ def test_broken_broker_launcher_is_rejected_before_publication(installer, tmp_pa
     )
 
     with pytest.raises(installer.InstallError, match="frozen broker launcher"):
+        installer.install(archive, expected, test_mode=True, root_prefix=tmp_path)
+
+    root = tmp_path / "opt/odoo-accounting-cli-v3"
+    assert not (root / "packages" / expected.package_name).exists()
+    assert not (root / "releases" / expected.release).exists()
+    assert not (root / "trusted-artifacts" / f"{expected.release}.json").exists()
+
+
+@pytest.mark.skipif(not _linux_non_root(), reason="real non-root Linux install contract")
+def test_broken_effect_finalizer_launcher_is_rejected_before_publication(
+    installer, tmp_path
+):
+    tmp_path.chmod(0o700)
+    archive, expected = _build_archive(
+        installer,
+        tmp_path,
+        finalizer_payload=b"#!/bin/sh\nexit 0\n",
+    )
+
+    with pytest.raises(installer.InstallError, match="frozen effect-finalizer launcher"):
         installer.install(archive, expected, test_mode=True, root_prefix=tmp_path)
 
     root = tmp_path / "opt/odoo-accounting-cli-v3"

@@ -16,6 +16,8 @@ pi_bridge/node_modules/
 *.p12
 *.pfx
 *.ppk
+*.hmac
+*.pgpass
 id_dsa
 id_ecdsa
 id_ecdsa_sk
@@ -33,6 +35,7 @@ id_rsa
 *-shm
 **/authority-runtime.json
 **/broker-runtime.json
+**/effect-finalizer-runtime.json
 **/historical-routes.json
 **/read-runtime.json
 **/write-runtime.json

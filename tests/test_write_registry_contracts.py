@@ -96,7 +96,7 @@ EXPECTED_INPUT_FIELDS = {
 
 EXPECTED_OUTPUT_FIELDS = {
     "operation_id", "operation_state", "odoo_records", "difference",
-    "verification", "audit_receipt", "recovery_plan",
+    "verification", "database_finalization", "audit_receipt", "recovery_plan",
 }
 EXPECTED_SNAPSHOT_FIELDS = {
     "model", "record_id", "exists", "record_state", "values_json",
@@ -334,6 +334,31 @@ def _snapshot(exists):
     }
 
 
+def _database_finalization():
+    return {
+        "attestation_digest": "0" * 64,
+        "attestation_id": "22222222-2222-4222-8222-222222222222",
+        "attestation_key_id": "effect-finalizer-v1",
+        "database_oid": 16384,
+        "database_uuid": "11111111-1111-4111-8111-111111111111",
+        "finalized_at": "2026-07-15T08:00:01Z",
+        "finalized_txid": "9123",
+        "guard_epoch": 0,
+        "guard_installation_id": "33333333-3333-4333-8333-333333333333",
+        "intent_digest": "1" * 64,
+        "operation_id": "op-1",
+        "proof_expires_at": "2026-07-15T08:05:00Z",
+        "proof_verified_at": "2026-07-15T08:00:00Z",
+        "protocol_version": 1,
+        "receipt_digest": "2" * 64,
+        "remaining_unresolved_count": 0,
+        "request_digest": "3" * 64,
+        "resolution_kind": "verified",
+        "resolution_operation_id": "op-1",
+        "resolved_anchor_count": 1,
+    }
+
+
 def _valid_output(capability_id):
     return {
         "operation_id": "op-1", "operation_state": "completed",
@@ -348,6 +373,7 @@ def _valid_output(capability_id):
             "checks": ["record_exists", "company_matches"],
             "evidence_digest": "f" * 64, "verified_at": "2026-07-15T08:00:00Z",
         },
+        "database_finalization": _database_finalization(),
         "audit_receipt": {
             "receipt_id": "receipt-1", "request_id": "request-1",
             "operation_id": "op-1", "capability_id": capability_id,
@@ -793,6 +819,7 @@ def test_schema_boundaries_allow_zero_unit_price_and_failed_verification_but_not
     failed_output["difference"]["after"] = []
     failed_output["difference"]["changed_fields"] = []
     failed_output["verification"]["passed"] = False
+    failed_output["database_finalization"] = None
     validate_value(failed_output, writes["acct.payment.register.v1"]["output_schema"])
 
 

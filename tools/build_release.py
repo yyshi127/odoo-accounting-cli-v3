@@ -24,6 +24,7 @@ LAUNCHERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3",
         "bin/odoo-accounting-cli-v3-broker",
+        "bin/odoo-accounting-cli-v3-effect-finalizer",
     }
 )
 EXECUTABLE_RELEASE_MEMBERS = LAUNCHERS | frozenset(
@@ -33,6 +34,7 @@ LOCAL_RUNTIME_FILENAMES = frozenset(
     {
         "authority-runtime.json",
         "broker-runtime.json",
+        "effect-finalizer-runtime.json",
         "historical-routes.json",
         "read-runtime.json",
         "write-runtime.json",
@@ -104,7 +106,9 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
         or name in LOCAL_RUNTIME_FILENAMES
         or (name.startswith("pi-attestation-keys") and name.endswith(".json"))
         or name in PRIVATE_KEY_FILENAMES
-        or name.endswith((".key", ".pem", ".p12", ".pfx", ".ppk"))
+        or name.endswith(
+            (".key", ".pem", ".p12", ".pfx", ".ppk", ".hmac", ".pgpass")
+        )
         or name.endswith(".db")
         or name.endswith((".sqlite", ".sqlite3", ".sqlite-wal", ".sqlite-shm"))
         or name.endswith((".sqlite3-wal", ".sqlite3-shm", "-wal", "-shm"))

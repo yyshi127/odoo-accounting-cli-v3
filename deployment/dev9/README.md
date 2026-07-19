@@ -110,7 +110,8 @@ The outer before/after check is required even when the inner test succeeds.
 
 1. Install the verified V3 release and configuration without changing V2.
    Freeze directories at mode `0555`, ordinary files at `0444`, both
-   `bin/odoo-accounting-cli-v3` and `bin/odoo-accounting-cli-v3-broker`, and
+   `bin/odoo-accounting-cli-v3`, `bin/odoo-accounting-cli-v3-broker`, and
+   `bin/odoo-accounting-cli-v3-effect-finalizer`, and
    `deployment/dev9/run-private-mount-gate.sh` at `0555`. Run the extracted
    broker launcher with `--help` and require exit
    zero, empty stderr, and its exact usage line before publishing the release.
@@ -122,7 +123,7 @@ The outer before/after check is required even when the inner test succeeds.
    new root-only temporary file, and install it as
    `/etc/systemd/system/odoo-accounting-cli-v3-broker.service` mode `0644`.
    Rendering verifies the release manifest and external deployment anchor and
-   rejects either canonical launcher unless it is a regular non-symlink file
+   rejects any canonical launcher unless it is a regular non-symlink file
    with exact mode `0555`. It replaces the single `@V3_RELEASE@` token; never
    install the unrendered template. Copy the three socket units beside the
    rendered service, all root-owned and not group/world writable. Install

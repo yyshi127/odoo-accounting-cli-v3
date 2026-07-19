@@ -7,6 +7,10 @@ from pathlib import Path
 import pytest
 
 import odoo_accounting_cli_v3.verified_release as verified
+from odoo_accounting_cli_v3.effect_finalizer import EffectFinalizationIdentity
+from odoo_accounting_cli_v3.effect_finalizer_runtime import (
+    EffectFinalizerClientRuntime,
+)
 from odoo_accounting_cli_v3.odoo.runner import RuntimeConfig
 from odoo_accounting_cli_v3.operations import Operation
 from odoo_accounting_cli_v3.registry import load_registry, registry_digest
@@ -14,6 +18,7 @@ from odoo_accounting_cli_v3.trusted_authority_bootstrap import (
     TrustedAuthorityRuntimeConfig,
 )
 from odoo_accounting_cli_v3.write_runtime import (
+    WRITE_RUNTIME_SCHEMA_VERSION,
     WriteRoleConfig,
     WriteRuntimeConfig,
     WriteRuntimeSecrets,
@@ -22,6 +27,27 @@ from odoo_accounting_cli_v3.write_runtime import (
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = "a" * 64
+
+
+def _effect_finalizer() -> EffectFinalizerClientRuntime:
+    return EffectFinalizerClientRuntime(
+        socket_path="/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+        socket_owner_uid=0,
+        socket_group_gid=991,
+        socket_mode=0o660,
+        finalizer_service_uid=992,
+        finalizer_service_gid=992,
+        finalizer_systemd_unit="odoo-accounting-cli-v3-effect-finalizer.service",
+        finalization_identity=EffectFinalizationIdentity(
+            attestation_key_id="effect-finalizer-v1",
+            guard_installation_id="22222222-2222-4222-8222-222222222222",
+            database_oid=16384,
+        ),
+        handoff_idle_timeout_seconds=100,
+        request_io_timeout_seconds=5,
+        max_request_bytes=16_384,
+        max_response_bytes=16_384,
+    )
 
 
 def _runtime(tmp_path: Path) -> TrustedAuthorityRuntimeConfig:
@@ -63,10 +89,11 @@ def _runtime(tmp_path: Path) -> TrustedAuthorityRuntimeConfig:
         )
     }
     write = WriteRuntimeConfig(
-        schema_version=1,
+        schema_version=WRITE_RUNTIME_SCHEMA_VERSION,
         write_execution_mode="sandbox_staged",
         base_runtime_config_path=(tmp_path / "read-runtime.json").resolve(),
         write_state_path=(tmp_path / "write.sqlite3").resolve(),
+        effect_finalizer=_effect_finalizer(),
         base_runtime=base,
         config_fingerprint="5" * 64,
         _require_root_owner=False,

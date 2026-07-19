@@ -10,6 +10,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from .effect_finalizer import (
+    EffectFinalizationError,
+    validate_effect_finalization_evidence_shape,
+)
 from .operations import canonical_json
 
 
@@ -86,6 +90,7 @@ VERIFICATION_FIELDS = {
     "verified_at",
 }
 RESULT_BODY_FIELDS = {
+    "database_finalization",
     "difference",
     "odoo_records",
     "operation_id",
@@ -664,6 +669,18 @@ def _validate_result_body(value: Any, operation_id: str) -> None:
     _sha(verification["evidence_digest"], "verification evidence_digest")
     _parse_datetime(verification["verified_at"], "verification verified_at")
     _validate_recovery_plan(value["recovery_plan"])
+    database_finalization = value["database_finalization"]
+    if state in {"completed", "recovered"}:
+        try:
+            validate_effect_finalization_evidence_shape(database_finalization)
+        except EffectFinalizationError as exc:
+            raise WriteReceiptError(
+                "successful write requires database effect finalization"
+            ) from exc
+    elif database_finalization is not None:
+        raise WriteReceiptError(
+            "failed write cannot contain database effect finalization"
+        )
     if state in {"completed", "recovered"} and (
         not verification["passed"] or not records
     ):

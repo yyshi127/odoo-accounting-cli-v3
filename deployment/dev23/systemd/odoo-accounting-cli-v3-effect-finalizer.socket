@@ -1,0 +1,17 @@
+[Unit]
+Description=Odoo Accounting CLI V3 isolated effect-finalizer socket
+Before=odoo-accounting-cli-v3-effect-finalizer.service
+
+[Socket]
+ListenStream=/run/odoo-accounting-cli-v3/effect-finalizer.sock
+Accept=no
+Service=odoo-accounting-cli-v3-effect-finalizer.service
+FileDescriptorName=odoo-v3-effect-finalizer
+SocketUser=root
+SocketGroup=odoo-v3-broker
+SocketMode=0660
+DirectoryMode=0750
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

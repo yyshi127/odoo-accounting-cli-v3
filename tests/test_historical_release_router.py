@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import socket
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -13,7 +14,8 @@ from typing import Any
 import pytest
 
 from odoo_accounting_cli_v3.historical_router import (
-    HistoricalReleaseRouter,
+    HistoricalReleaseRouter as _HistoricalReleaseRouter,
+    HistoricalRoute,
     HistoricalRouterError,
     _run_bounded_child,
     load_historical_routing_manifest,
@@ -30,6 +32,51 @@ CURRENT_RELEASE = "a" * 64
 CURRENT_REGISTRY = "b" * 64
 OLD_RELEASE = "c" * 64
 OLD_REGISTRY = "d" * 64
+
+
+def _test_effect_finalizer_preconnector(
+    _route: HistoricalRoute,
+) -> socket.socket:
+    connection, peer = socket.socketpair()
+    peer.close()
+    connection.set_inheritable(False)
+    return connection
+
+
+class RecordingFinalizerPreconnector:
+    def __init__(self) -> None:
+        self.routes: list[HistoricalRoute] = []
+        self.connections: list[socket.socket] = []
+        self.peers: list[socket.socket] = []
+
+    def __call__(self, route: HistoricalRoute) -> socket.socket:
+        connection, peer = socket.socketpair()
+        connection.set_inheritable(False)
+        self.routes.append(route)
+        self.connections.append(connection)
+        self.peers.append(peer)
+        return connection
+
+    def close(self) -> None:
+        for connection in (*self.connections, *self.peers):
+            connection.close()
+
+
+@pytest.fixture
+def finalizer_preconnector() -> Any:
+    connector = RecordingFinalizerPreconnector()
+    try:
+        yield connector
+    finally:
+        connector.close()
+
+
+def HistoricalReleaseRouter(*args: Any, **kwargs: Any) -> _HistoricalReleaseRouter:
+    kwargs.setdefault(
+        "effect_finalizer_preconnector",
+        _test_effect_finalizer_preconnector,
+    )
+    return _HistoricalReleaseRouter(*args, **kwargs)
 
 
 def _context() -> dict[str, Any]:
@@ -384,6 +431,10 @@ def test_prepare_always_uses_current_route_and_only_canonical_stdin(
     monkeypatch.setattr(
         "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
     )
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router.time.monotonic",
+        lambda: 100.0,
+    )
     router = HistoricalReleaseRouter(
         manifest, store, require_root_owner=False, timeout_seconds=9
     )
@@ -412,9 +463,204 @@ def test_prepare_always_uses_current_route_and_only_canonical_stdin(
         "ODOO_ACCOUNTING_CLI_V3_TRUSTED_WRITE_RUNTIME_CONFIG_FD": str(
             pass_fds[0]
         ),
+        "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC": "109.0",
     }
     with pytest.raises(OSError):
         os.fstat(pass_fds[0])
+
+
+def test_approve_execute_hands_one_connected_finalizer_fd_to_exact_child(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    finalizer_preconnector: RecordingFinalizerPreconnector,
+) -> None:
+    manifest, _current, old = router_files
+    store = FakeStore()
+    store.operations["op-old"] = FakeOperation(
+        "op-old", OLD_RELEASE, OLD_REGISTRY
+    )
+    request = _request("operation.approve_execute", operation_id="op-old")
+    observed: list[tuple[bytes, dict[str, str], tuple[int, ...], float]] = []
+
+    def run(
+        argv: list[str],
+        *,
+        stdin: bytes,
+        env: dict[str, str],
+        pass_fds: tuple[int, ...],
+        timeout_seconds: float,
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[bytes]:
+        assert argv == [
+            old["executable_path"],
+            "operation",
+            "approve-execute",
+        ]
+        assert stdin == canonical_json(request)
+        assert len(pass_fds) == 2
+        runtime_descriptor, finalizer_descriptor = pass_fds
+        assert runtime_descriptor > 2
+        assert finalizer_descriptor > 2
+        assert runtime_descriptor != finalizer_descriptor
+        connection = finalizer_preconnector.connections[0]
+        assert connection.fileno() == finalizer_descriptor
+        assert connection.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) == (
+            socket.SOCK_STREAM
+        )
+        assert connection.getpeername() is not None
+        assert connection.get_inheritable() is False
+        assert env["ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD"] == str(
+            finalizer_descriptor
+        )
+        observed.append((stdin, env, pass_fds, timeout_seconds))
+        return _completed(
+            argv,
+            _response(
+                "operation.approve_execute",
+                operation_id="op-old",
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router.time.monotonic",
+        lambda: 100.0,
+    )
+    router = HistoricalReleaseRouter(
+        manifest,
+        store,
+        require_root_owner=False,
+        timeout_seconds=9,
+        effect_finalizer_preconnector=finalizer_preconnector,
+    )
+
+    response = router.dispatch(
+        "operation.approve_execute",
+        request,
+        deadline_monotonic=103.25,
+    )
+
+    assert response["ok"] is True
+    assert len(observed) == 1
+    assert observed[0][1][
+        "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC"
+    ] == "103.25"
+    assert observed[0][3] == pytest.approx(3.25)
+    assert finalizer_preconnector.routes == [
+        HistoricalRoute(
+            release_digest=OLD_RELEASE,
+            registry_digest=OLD_REGISTRY,
+            executable_path=Path(old["executable_path"]),
+            executable_sha256=old["executable_sha256"],
+            runtime_config_path=Path(old["runtime_config_path"]),
+            runtime_config_sha256=old["runtime_config_sha256"],
+        )
+    ]
+    assert finalizer_preconnector.connections[0].fileno() == -1
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "operation.prepare",
+        "operation.preview",
+        "operation.status",
+        "operation.result",
+        "operation.recover",
+    ],
+)
+def test_non_execute_actions_never_receive_finalizer_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    action: str,
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    operation_id = "op-old"
+    release_digest = OLD_RELEASE
+    registry_digest = OLD_REGISTRY
+    recovery_plan_digest: str | None = None
+    if action == "operation.prepare":
+        operation_id = "op-new"
+        release_digest = CURRENT_RELEASE
+        registry_digest = CURRENT_REGISTRY
+    elif action == "operation.recover":
+        origin = FakeOperation("op-origin", OLD_RELEASE, OLD_REGISTRY)
+        store.operations[origin.operation_id] = origin
+        recovery_plan_digest = store.recovery_plan(
+            origin.operation_id
+        )["plan_digest"]
+        operation_id = "op-recovery"
+    else:
+        store.operations[operation_id] = FakeOperation(
+            operation_id, OLD_RELEASE, OLD_REGISTRY
+        )
+    calls: list[dict[str, Any]] = []
+
+    def forbidden_preconnector(_route: HistoricalRoute) -> socket.socket:
+        raise AssertionError(f"{action} requested finalizer authority")
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append(kwargs)
+        request = json.loads(kwargs["stdin"])
+        if action == "operation.prepare":
+            store.operations[operation_id] = _durable_operation(
+                operation_id=operation_id,
+                request_id=request["request_id"],
+                capability_id=request["capability_id"],
+                parameters=request["parameters"],
+                release_digest=release_digest,
+                registry_digest=registry_digest,
+            )
+        elif action == "operation.recover":
+            recovery = FakeOperation(
+                operation_id, OLD_RELEASE, OLD_REGISTRY, revision=0
+            )
+            store.operations[operation_id] = recovery
+            store.bindings[operation_id] = SimpleNamespace(
+                origin_operation_id="op-origin",
+                origin_operation_revision=6,
+                recovery_operation_id=operation_id,
+                plan_digest=recovery_plan_digest,
+                registry_digest=OLD_REGISTRY,
+                release_digest=OLD_RELEASE,
+            )
+        return _completed(
+            argv,
+            _response(
+                action,
+                operation_id=operation_id,
+                release_digest=release_digest,
+                registry_digest=registry_digest,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router.time.monotonic",
+        lambda: 100.0,
+    )
+    router = HistoricalReleaseRouter(
+        manifest,
+        store,
+        require_root_owner=False,
+        effect_finalizer_preconnector=forbidden_preconnector,
+    )
+    request = _request(action, operation_id=operation_id)
+
+    response = router.dispatch(action, request)
+
+    assert response["ok"] is True
+    assert len(calls) == 1
+    assert calls[0]["stdin"] == canonical_json(request)
+    assert len(calls[0]["pass_fds"]) == 1
+    assert "ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD" not in calls[0]["env"]
 
 
 def test_outer_absolute_deadline_shrinks_the_historical_child_budget(
@@ -426,10 +672,10 @@ def test_outer_absolute_deadline_shrinks_the_historical_child_budget(
     store.operations["op-old"] = FakeOperation(
         "op-old", OLD_RELEASE, OLD_REGISTRY
     )
-    observed_timeouts: list[float] = []
+    observed: list[tuple[float, dict[str, str]]] = []
 
-    def run(argv, *, timeout_seconds, **_kwargs):
-        observed_timeouts.append(timeout_seconds)
+    def run(argv, *, timeout_seconds, env, **_kwargs):
+        observed.append((timeout_seconds, env))
         return _completed(
             argv,
             _response(
@@ -457,7 +703,10 @@ def test_outer_absolute_deadline_shrinks_the_historical_child_budget(
     )
 
     assert response["ok"] is True
-    assert observed_timeouts == [pytest.approx(3.25)]
+    assert observed[0][0] == pytest.approx(3.25)
+    assert observed[0][1][
+        "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC"
+    ] == "103.25"
 
 
 def test_expired_outer_deadline_never_starts_the_historical_child(
@@ -533,6 +782,148 @@ def test_historical_result_is_rejected_if_outer_deadline_expires_after_child(
     assert raised.value.code == "historical_deadline_exceeded"
     assert raised.value.odoo_effect == "none"
     assert raised.value.retryable is True
+
+
+def test_finalizer_preconnect_failure_never_starts_child_or_claims_odoo_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    store.operations["op-old"] = FakeOperation(
+        "op-old", OLD_RELEASE, OLD_REGISTRY
+    )
+    routes: list[HistoricalRoute] = []
+    child_calls: list[object] = []
+
+    def unavailable(route: HistoricalRoute) -> socket.socket:
+        routes.append(route)
+        raise OSError("finalizer unavailable")
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child",
+        lambda *args, **kwargs: child_calls.append((args, kwargs)),
+    )
+    router = HistoricalReleaseRouter(
+        manifest,
+        store,
+        require_root_owner=False,
+        effect_finalizer_preconnector=unavailable,
+    )
+
+    with pytest.raises(HistoricalRouterError) as raised:
+        router.dispatch(
+            "operation.approve_execute",
+            _request("operation.approve_execute", operation_id="op-old"),
+        )
+
+    assert raised.value.code == "historical_effect_finalizer_unavailable"
+    assert raised.value.odoo_effect == "none"
+    assert raised.value.retryable is True
+    assert raised.value.child_started is False
+    assert len(routes) == 1
+    assert child_calls == []
+
+
+def test_spawn_failure_closes_broker_finalizer_socket_with_no_odoo_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    finalizer_preconnector: RecordingFinalizerPreconnector,
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    store.operations["op-old"] = FakeOperation(
+        "op-old", OLD_RELEASE, OLD_REGISTRY
+    )
+
+    def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+        raise HistoricalRouterError(
+            "historical child process could not be started",
+            code="historical_child_unavailable",
+            retryable=True,
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child",
+        unavailable,
+    )
+    router = HistoricalReleaseRouter(
+        manifest,
+        store,
+        require_root_owner=False,
+        effect_finalizer_preconnector=finalizer_preconnector,
+    )
+
+    with pytest.raises(HistoricalRouterError) as raised:
+        router.dispatch(
+            "operation.approve_execute",
+            _request("operation.approve_execute", operation_id="op-old"),
+        )
+
+    assert raised.value.code == "historical_child_unavailable"
+    assert raised.value.odoo_effect == "none"
+    assert raised.value.retryable is True
+    assert raised.value.child_started is False
+    assert len(finalizer_preconnector.connections) == 1
+    assert finalizer_preconnector.connections[0].fileno() == -1
+
+
+@pytest.mark.parametrize(
+    "injected",
+    [
+        {"deadline_monotonic": 999.0},
+        {"effect_finalizer_fd": 9},
+        {"ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD": "9"},
+    ],
+)
+def test_request_cannot_control_deadline_or_finalizer_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    injected: dict[str, Any],
+) -> None:
+    manifest, _current, _old = router_files
+    connector_calls: list[HistoricalRoute] = []
+    child_calls: list[object] = []
+
+    def connector(route: HistoricalRoute) -> socket.socket:
+        connector_calls.append(route)
+        return _test_effect_finalizer_preconnector(route)
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child",
+        lambda *args, **kwargs: child_calls.append((args, kwargs)),
+    )
+    router = HistoricalReleaseRouter(
+        manifest,
+        FakeStore(),
+        require_root_owner=False,
+        effect_finalizer_preconnector=connector,
+    )
+    request = {
+        **_request("operation.approve_execute", operation_id="op-old"),
+        **injected,
+    }
+
+    with pytest.raises(HistoricalRouterError, match="request contract"):
+        router.dispatch("operation.approve_execute", request)
+
+    assert connector_calls == []
+    assert child_calls == []
+
+
+def test_router_requires_a_callable_broker_main_preconnector(
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+
+    for invalid in (None, object(), 7):
+        with pytest.raises(HistoricalRouterError, match="preconnector"):
+            _HistoricalReleaseRouter(
+                manifest,
+                FakeStore(),
+                require_root_owner=False,
+                effect_finalizer_preconnector=invalid,  # type: ignore[arg-type]
+            )
 
 
 def test_prepare_lost_response_accepts_only_exact_durable_idempotent_operation(
@@ -1489,10 +1880,12 @@ def test_durable_creation_actions_are_retryable_after_post_spawn_failure(
 
     def run(argv, **_kwargs):
         if failure == "timeout":
-            raise HistoricalRouterError(
-                "historical child process timed out",
-                code="historical_child_timeout",
-            )
+                raise HistoricalRouterError(
+                    "historical child process timed out",
+                    code="historical_child_timeout",
+                    retryable=True,
+                    child_started=True,
+                )
         if failure == "invalid_json":
             return subprocess.CompletedProcess(
                 argv, 0, stdout=b"{not-json", stderr=b""
@@ -1538,6 +1931,8 @@ def test_approve_execute_keeps_unknown_effect_after_post_spawn_failure(
             raise HistoricalRouterError(
                 "historical child process timed out",
                 code="historical_child_timeout",
+                retryable=True,
+                child_started=True,
             )
         response = _response(
             "operation.approve_execute",
@@ -1561,6 +1956,38 @@ def test_approve_execute_keeps_unknown_effect_after_post_spawn_failure(
 
     assert raised.value.retryable is True
     assert raised.value.odoo_effect == "unknown"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="production child boundary is POSIX")
+def test_popen_failure_is_explicitly_marked_as_pre_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("exec unavailable")
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router.subprocess.Popen",
+        unavailable,
+    )
+
+    with pytest.raises(HistoricalRouterError) as raised:
+        _run_bounded_child(
+            ["/retained/odoo-accounting-cli-v3", "operation", "status"],
+            stdin=b"{}",
+            env={
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            },
+            timeout_seconds=1,
+            max_stdout_bytes=128,
+            max_stderr_bytes=128,
+        )
+
+    assert raised.value.code == "historical_child_unavailable"
+    assert raised.value.odoo_effect == "none"
+    assert raised.value.retryable is True
+    assert raised.value.child_started is False
 
 
 @pytest.mark.skipif(os.name != "posix", reason="production child boundary is POSIX")

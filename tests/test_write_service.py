@@ -14,6 +14,14 @@ from odoo_accounting_cli_v3.auth import (
     sign_write_action_context,
     verify_write_action_context,
 )
+from odoo_accounting_cli_v3.effect_finalizer import (
+    EffectFinalizationError,
+    EffectFinalizationIdentity,
+    EffectFinalizationIntent,
+    EffectFinalizationReceipt,
+    EffectFinalizationRequest,
+    create_effect_attestation,
+)
 from odoo_accounting_cli_v3.gateway import RequestContext
 from odoo_accounting_cli_v3.operations import (
     State,
@@ -51,6 +59,13 @@ APPROVAL_SECRET = b"approval-secret-material-at-least-32"
 EXECUTION_SECRET = b"execution-secret-material-at-least-32"
 VERIFICATION_SECRET = b"verification-secret-material-32-bytes"
 RECEIPT_SECRET = b"write-receipt-secret-material-32-bytes"
+EFFECT_FINALIZER_SECRET = b"effect-finalizer-secret-material-32-bytes"
+GUARD_INSTALLATION_ID = "22222222-2222-4222-8222-222222222222"
+FINALIZER_IDENTITY = EffectFinalizationIdentity(
+    attestation_key_id="effect-finalizer-v1",
+    guard_installation_id=GUARD_INSTALLATION_ID,
+    database_oid=16384,
+)
 TEST_MODULE_GRAPH = build_trusted_module_graph(
     [{"name": "account", "latest_version": "19.0.test"}]
 )
@@ -535,9 +550,71 @@ class Backend:
         )
 
 
+class Finalizer:
+    def __init__(self) -> None:
+        self.calls: list[EffectFinalizationIntent] = []
+        self.requests: dict[str, EffectFinalizationRequest] = {}
+        self.receipts: dict[str, EffectFinalizationReceipt] = {}
+        self.error: Exception | None = None
+        self.lose_first_response = False
+
+    def __call__(
+        self, intent: EffectFinalizationIntent
+    ) -> EffectFinalizationReceipt:
+        self.calls.append(intent)
+        if self.error is not None:
+            raise self.error
+        request = self.requests.setdefault(
+            intent.intent_digest,
+            EffectFinalizationRequest.from_intent(
+                intent,
+                verified_at=NOW,
+                expires_at=NOW + timedelta(minutes=5),
+            ),
+        )
+        attestation = create_effect_attestation(
+            request,
+            key_id="effect-finalizer-v1",
+            secret=EFFECT_FINALIZER_SECRET,
+        )
+        replayed = request.request_digest in self.receipts
+        receipt = EffectFinalizationReceipt.from_database_mapping(
+            {
+                "receipt_attestation_id": attestation.attestation_id,
+                "receipt_guard_installation_id": GUARD_INSTALLATION_ID,
+                "receipt_database_oid": 16384,
+                "receipt_database_uuid": request.database_uuid,
+                "resolved_operation_id": request.operation_id,
+                "receipt_resolution_operation_id": request.resolution_operation_id,
+                "applied_resolution_kind": request.resolution_kind,
+                "resolved_anchor_count": (
+                    1 if request.resolution_kind == "verified" else 2
+                ),
+                "remaining_unresolved_count": 0,
+                "guard_epoch": 0,
+                "receipt_attestation_digest": attestation.attestation_digest,
+                "finalized_at": "2026-07-18T15:00:01Z",
+                "finalized_txid": "9123",
+                "replayed": replayed,
+            },
+            request=request,
+            attestation=attestation,
+        )
+        if replayed:
+            assert receipt.evidence == self.receipts[request.request_digest].evidence
+        else:
+            self.receipts[request.request_digest] = receipt
+            if self.lose_first_response:
+                raise EffectFinalizationError(
+                    "simulated response loss after database finalization"
+                )
+        return receipt
+
+
 @pytest.fixture
 def service(tmp_path: Path):
     backend = Backend()
+    finalizer = Finalizer()
     store = SQLitePersistence((tmp_path / "operations.sqlite3").resolve())
     security = WriteServiceSecurity(
         approval_key_id="approval-v2",
@@ -567,8 +644,11 @@ def service(tmp_path: Path):
         verification_executor=backend.verify,
         availability_channel="staged",
         now=lambda: NOW,
+        effect_finalizer=finalizer,
+        effect_finalizer_identity=FINALIZER_IDENTITY,
         receipt_id_factory=lambda: "write-receipt-1",
     )
+    value._test_effect_finalizer = finalizer
     return value, backend, store
 
 
@@ -662,6 +742,8 @@ def _clone_service(
         verification_executor=backend.verify,
         availability_channel=availability_channel,
         now=lambda: NOW,
+        effect_finalizer=original._effect_finalizer,
+        effect_finalizer_identity=original._effect_finalizer_identity,
     )
 
 
@@ -840,7 +922,105 @@ def test_approve_execute_verifies_and_returns_schema_valid_signed_receipt(servic
         "execution",
         "verification",
     ]
+    finalizer = gateway._test_effect_finalizer
+    assert len(finalizer.calls) == 1
+    intent = finalizer.calls[0]
+    assert intent.operation_id == awaiting.operation_id
+    assert intent.database_uuid == DATABASE_UUID
+    assert intent.resolution_kind == "verified"
+    request = finalizer.requests[intent.intent_digest]
+    durable = store.get_final_write_receipts(awaiting.operation_id)[0]
+    assert durable.body["receipt_details"]["database_finalization"] == (
+        finalizer.receipts[request.request_digest].evidence
+    )
+    assert output["database_finalization"] == (
+        durable.body["receipt_details"]["database_finalization"]
+    )
     assert gateway.result(_context(), awaiting.operation_id) == output
+
+
+def test_success_order_is_hmac_validation_then_database_finalizer_then_sqlite_completion(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, _backend, store = service
+    awaiting = _prepare_and_preview(gateway)
+    order: list[str] = []
+    trusted = gateway._verify_terminal_trusted_results
+    complete = store.complete_operation
+    finalizer = gateway._test_effect_finalizer
+    finalize = gateway._effect_finalizer
+
+    def record_trusted(*args, **kwargs):
+        order.append("trusted_hmac")
+        return trusted(*args, **kwargs)
+
+    def record_finalize(request):
+        order.append("database_finalizer")
+        return finalize(request)
+
+    def record_complete(*args, **kwargs):
+        order.append("sqlite_complete")
+        return complete(*args, **kwargs)
+
+    monkeypatch.setattr(gateway, "_verify_terminal_trusted_results", record_trusted)
+    monkeypatch.setattr(gateway, "_effect_finalizer", record_finalize)
+    monkeypatch.setattr(store, "complete_operation", record_complete)
+
+    output = gateway.approve_execute(
+        _context(token_id="token-effect-order"),
+        _approval(awaiting, "approval-effect-order"),
+        reconciliation_only=False,
+    )
+
+    assert output["operation_state"] == "completed"
+    assert order == ["trusted_hmac", "database_finalizer", "sqlite_complete"]
+    assert len(finalizer.calls) == 1
+
+
+def test_finalizer_failure_leaves_verifying_without_success_or_final_receipt(service):
+    gateway, _backend, store = service
+    awaiting = _prepare_and_preview(gateway)
+    finalizer = gateway._test_effect_finalizer
+    finalizer.error = EffectFinalizationError("simulated finalizer failure")
+
+    with pytest.raises(WriteServiceError, match="database effect finalization"):
+        gateway.approve_execute(
+            _context(token_id="token-effect-failure"),
+            _approval(awaiting, "approval-effect-failure"),
+            reconciliation_only=False,
+        )
+
+    assert gateway.status(_context(), awaiting.operation_id).state == State.VERIFYING
+    assert store.get_final_write_receipts(awaiting.operation_id) == ()
+    assert len(finalizer.calls) == 1
+
+
+def test_response_loss_replays_same_database_proof_before_one_local_completion(service):
+    gateway, _backend, store = service
+    awaiting = _prepare_and_preview(gateway)
+    approval = _approval(awaiting, "approval-effect-replay")
+    finalizer = gateway._test_effect_finalizer
+    finalizer.lose_first_response = True
+
+    with pytest.raises(WriteServiceError, match="database effect finalization"):
+        gateway.approve_execute(
+            _context(token_id="token-effect-first"),
+            approval,
+            reconciliation_only=False,
+        )
+    assert gateway.status(_context(), awaiting.operation_id).state == State.VERIFYING
+    assert store.get_final_write_receipts(awaiting.operation_id) == ()
+
+    output = gateway.approve_execute(
+        _context(token_id="token-effect-reconcile"),
+        approval,
+        reconciliation_only=True,
+    )
+
+    assert output["operation_state"] == "completed"
+    assert len(finalizer.calls) == 2
+    assert finalizer.calls[0] == finalizer.calls[1]
+    assert len(store.get_final_write_receipts(awaiting.operation_id)) == 1
 
 
 def test_terminal_result_reverifies_stored_trusted_result_hmac(service, monkeypatch):
@@ -1745,6 +1925,7 @@ def test_wrong_verification_method_cannot_be_persisted_as_completed(service):
 
 def test_execution_failure_is_audited_and_never_reported_as_success(tmp_path: Path):
     backend = Backend(execution_succeeds=False)
+    finalizer = Finalizer()
     store = SQLitePersistence((tmp_path / "failure.sqlite3").resolve())
     security = WriteServiceSecurity(
         approval_key_id="approval-v2", approval_secret=APPROVAL_SECRET,
@@ -1761,7 +1942,9 @@ def test_execution_failure_is_audited_and_never_reported_as_success(tmp_path: Pa
         acl_check=lambda *_: True, approver_authorized=lambda *_: True,
         precheck_executor=backend.precheck, write_executor=backend.execute,
         verification_executor=backend.verify, availability_channel="staged",
-        now=lambda: NOW, receipt_id_factory=lambda: "failure-receipt",
+        now=lambda: NOW, effect_finalizer=finalizer,
+        effect_finalizer_identity=FINALIZER_IDENTITY,
+        receipt_id_factory=lambda: "failure-receipt",
     )
     awaiting = _prepare_and_preview(gateway)
     approval = sign_approval(
@@ -1777,5 +1960,7 @@ def test_execution_failure_is_audited_and_never_reported_as_success(tmp_path: Pa
     assert output["operation_state"] == "failed"
     assert output["verification"]["passed"] is False
     assert output["odoo_records"] == []
+    assert output["database_finalization"] is None
     assert backend.calls == ["precheck", "precheck", "execute"]
+    assert finalizer.calls == []
     assert gateway.status(_context(), awaiting.operation_id).state == State.FAILED

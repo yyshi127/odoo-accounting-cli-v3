@@ -11,6 +11,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .effect_finalizer import (
+    EffectFinalizationError,
+    EffectFinalizationIdentity,
+)
+from .effect_finalizer_runtime import (
+    EffectFinalizerClientRuntime,
+    EffectFinalizerRuntimeError,
+)
 from .odoo.runner import OdooRunnerError, RuntimeConfig, load_runtime_config
 from .operations import canonical_json
 
@@ -19,7 +27,7 @@ class WriteRuntimeError(ValueError):
     """Raised when write runtime configuration or key material is unsafe."""
 
 
-WRITE_RUNTIME_SCHEMA_VERSION = 1
+WRITE_RUNTIME_SCHEMA_VERSION = 2
 WRITE_EXECUTION_MODES = frozenset({"disabled", "sandbox_staged", "enabled"})
 WRITE_ROLE_NAMES = (
     "write_auth",
@@ -36,7 +44,26 @@ WRITE_CONFIG_FIELDS = frozenset(
         "write_execution_mode",
         "base_runtime_config_path",
         "write_state_path",
+        "effect_finalizer",
         *WRITE_ROLE_NAMES,
+    }
+)
+EFFECT_FINALIZER_FIELDS = frozenset(
+    {
+        "socket_path",
+        "socket_owner_uid",
+        "socket_group_gid",
+        "socket_mode",
+        "finalizer_service_uid",
+        "finalizer_service_gid",
+        "finalizer_systemd_unit",
+        "attestation_key_id",
+        "guard_installation_id",
+        "database_oid",
+        "handoff_idle_timeout_seconds",
+        "request_io_timeout_seconds",
+        "max_request_bytes",
+        "max_response_bytes",
     }
 )
 ROLE_FIELDS = frozenset({"key_id", "secret_path"})
@@ -76,6 +103,7 @@ class WriteRuntimeConfig:
     write_execution_mode: str
     base_runtime_config_path: Path
     write_state_path: Path
+    effect_finalizer: EffectFinalizerClientRuntime
     write_auth: WriteRoleConfig
     approval: WriteRoleConfig
     execution: WriteRoleConfig
@@ -107,6 +135,29 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_json_constant(value: str) -> Any:
     raise WriteRuntimeError(f"non-finite JSON number is forbidden: {value}")
+
+
+def _effect_finalizer_from_mapping(value: Any) -> EffectFinalizerClientRuntime:
+    if not isinstance(value, Mapping) or set(value) != EFFECT_FINALIZER_FIELDS:
+        raise WriteRuntimeError("effect finalizer configuration fields are invalid")
+    item = dict(value)
+    try:
+        identity = EffectFinalizationIdentity(
+            attestation_key_id=item.pop("attestation_key_id"),
+            guard_installation_id=item.pop("guard_installation_id"),
+            database_oid=item.pop("database_oid"),
+        )
+        return EffectFinalizerClientRuntime(
+            **item,
+            finalization_identity=identity,
+        )
+    except (
+        EffectFinalizationError,
+        EffectFinalizerRuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise WriteRuntimeError("effect finalizer configuration is invalid") from exc
 
 
 def _load_json_object(raw: bytes, label: str) -> dict[str, Any]:
@@ -495,7 +546,10 @@ def load_write_runtime_config(
     )
     if set(document) != WRITE_CONFIG_FIELDS:
         raise WriteRuntimeError("write runtime configuration fields are invalid")
-    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
+    if (
+        type(document["schema_version"]) is not int
+        or document["schema_version"] != WRITE_RUNTIME_SCHEMA_VERSION
+    ):
         raise WriteRuntimeError("write runtime schema_version is invalid")
     mode = document["write_execution_mode"]
     if type(mode) is not str or mode not in WRITE_EXECUTION_MODES:
@@ -504,6 +558,9 @@ def load_write_runtime_config(
         document["base_runtime_config_path"], "base_runtime_config_path"
     )
     state_path = _absolute_path(document["write_state_path"], "write_state_path")
+    effect_finalizer = _effect_finalizer_from_mapping(
+        document["effect_finalizer"]
+    )
     if _normalized_path(base_path) == _normalized_path(config_path):
         raise WriteRuntimeError("base and write runtime configuration paths must differ")
 
@@ -570,6 +627,7 @@ def load_write_runtime_config(
         write_execution_mode=mode,
         base_runtime_config_path=base_path,
         write_state_path=state_path,
+        effect_finalizer=effect_finalizer,
         base_runtime=base_runtime,
         config_fingerprint=fingerprint,
         _require_root_owner=require_root_owner,

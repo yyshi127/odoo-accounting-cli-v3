@@ -10,11 +10,72 @@ import pytest
 from click.testing import CliRunner
 
 from odoo_accounting_cli_v3.cli import main
+from odoo_accounting_cli_v3.effect_finalizer import (
+    EffectFinalizationIntent,
+    EffectFinalizationReceipt,
+    EffectFinalizationRequest,
+    create_effect_attestation,
+)
 from odoo_accounting_cli_v3.operations import Approval
 from odoo_accounting_cli_v3.write_protocol import approval_to_mapping
 
 
 NOW = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
+EFFECT_SECRET = b"cli-effect-finalizer-secret-material-32-bytes"
+
+
+def _completed_result(operation_id: str = "op-1") -> dict[str, Any]:
+    intent = EffectFinalizationIntent(
+        database_name="odoo_v3_sandbox",
+        database_uuid="11111111-1111-4111-8111-111111111111",
+        operation_id=operation_id,
+        operation_digest="1" * 64,
+        execution_result_digest="2" * 64,
+        resolution_operation_id=operation_id,
+        resolution_operation_digest="1" * 64,
+        resolution_execution_result_digest="2" * 64,
+        resolution_result_digest="3" * 64,
+        resolution_kind="verified",
+    )
+    request = EffectFinalizationRequest.from_intent(
+        intent,
+        verified_at=NOW,
+        expires_at=NOW + timedelta(minutes=5),
+    )
+    attestation = create_effect_attestation(
+        request,
+        key_id="effect-finalizer-v1",
+        secret=EFFECT_SECRET,
+    )
+    finalization = EffectFinalizationReceipt.from_database_mapping(
+        {
+            "receipt_attestation_id": attestation.attestation_id,
+            "receipt_guard_installation_id": (
+                "22222222-2222-4222-8222-222222222222"
+            ),
+            "receipt_database_oid": 16384,
+            "receipt_database_uuid": intent.database_uuid,
+            "resolved_operation_id": operation_id,
+            "receipt_resolution_operation_id": operation_id,
+            "applied_resolution_kind": "verified",
+            "resolved_anchor_count": 1,
+            "remaining_unresolved_count": 3,
+            "guard_epoch": 0,
+            "receipt_attestation_digest": attestation.attestation_digest,
+            "finalized_at": "2026-07-15T08:00:01Z",
+            "finalized_txid": "9123",
+            "replayed": False,
+        },
+        request=request,
+        attestation=attestation,
+    ).evidence
+    return {
+        "operation_id": operation_id,
+        "operation_state": "completed",
+        "verification": {"passed": True},
+        "database_finalization": finalization,
+        "audit_receipt": {"database_uuid": intent.database_uuid},
+    }
 
 
 def _context() -> dict[str, Any]:
@@ -135,11 +196,7 @@ def test_six_pi_actions_parse_exact_request_and_dispatch(
     def dispatch(received_action: str, parsed: Any) -> dict[str, Any]:
         observed.append((received_action, parsed))
         if received_action in {"operation.approve_execute", "operation.result"}:
-            return {
-                "operation_id": "op-1",
-                "operation_state": "completed",
-                "verification": {"passed": True},
-            }
+            return _completed_result()
         return {"accepted_action": received_action}
 
     _install_dispatcher(monkeypatch, dispatch)
@@ -168,11 +225,7 @@ def test_verify_is_read_only_result_alias_and_keeps_result_auth_action(
 
     def dispatch(action: str, parsed: Any) -> dict[str, Any]:
         observed.append((action, parsed.action))
-        return {
-            "operation_id": "op-1",
-            "operation_state": "completed",
-            "verification": {"passed": True},
-        }
+        return _completed_result()
 
     _install_dispatcher(monkeypatch, dispatch)
 
@@ -210,6 +263,32 @@ def test_failed_business_result_is_not_reported_as_business_success(
         },
         "ok": True,
     }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("missing", "wrong_operation", "wrong_database"),
+)
+def test_cli_never_reports_success_without_operation_bound_database_receipt(
+    monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    def dispatch(_action: str, _parsed: Any) -> dict[str, Any]:
+        result = _completed_result()
+        if mutation == "missing":
+            result.pop("database_finalization")
+        elif mutation == "wrong_operation":
+            result["database_finalization"]["operation_id"] = "op-other"
+        else:
+            result["audit_receipt"]["database_uuid"] = (
+                "33333333-3333-4333-8333-333333333333"
+            )
+        return result
+
+    _install_dispatcher(monkeypatch, dispatch)
+    response = _invoke("operation.result", _request("operation.result"))
+
+    assert response.exit_code == 0, response.output
+    assert json.loads(response.stdout)["business_succeeded"] is False
 
 
 @pytest.mark.parametrize(

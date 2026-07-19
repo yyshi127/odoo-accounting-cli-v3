@@ -21,6 +21,7 @@ LAUNCHERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3",
         "bin/odoo-accounting-cli-v3-broker",
+        "bin/odoo-accounting-cli-v3-effect-finalizer",
     }
 )
 EXECUTABLE_RELEASE_MEMBERS = LAUNCHERS | frozenset(
@@ -30,6 +31,8 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3",
         "bin/odoo-accounting-cli-v3-broker",
+        "bin/odoo-accounting-cli-v3-effect-finalizer",
+        "deployment/dev23/README.md",
         "deployment/dev9/README.md",
         "deployment/dev9/render-systemd-service.py",
         "deployment/dev9/run-private-mount-gate.sh",
@@ -159,11 +162,33 @@ DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS = frozenset(
         "tests/test_dev18_sandbox_capacity_gate.py",
     }
 )
+EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
+    {
+        "bin/odoo-accounting-cli-v3-effect-finalizer",
+        "deployment/dev23/README.md",
+        "deployment/dev23/systemd/odoo-accounting-cli-v3-effect-finalizer.service",
+        "deployment/dev23/systemd/odoo-accounting-cli-v3-effect-finalizer.socket",
+        "src/odoo_accounting_cli_v3/effect_finalizer.py",
+        "src/odoo_accounting_cli_v3/effect_finalizer_main.py",
+        "src/odoo_accounting_cli_v3/effect_finalizer_runtime.py",
+        "src/odoo_accounting_cli_v3/effect_finalizer_service.py",
+        "src/odoo_accounting_cli_v3/effect_finalizer_uds.py",
+        "src/odoo_accounting_cli_v3/odoo/effect_finalizer_db.py",
+        "tests/test_effect_finalizer.py",
+        "tests/test_effect_finalizer_db.py",
+        "tests/test_effect_finalizer_main.py",
+        "tests/test_effect_finalizer_runtime.py",
+        "tests/test_effect_finalizer_service.py",
+        "tests/test_effect_finalizer_systemd.py",
+        "tests/test_effect_finalizer_uds.py",
+    }
+)
 WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
     {
         "VERSION",
         "bin/odoo-accounting-cli-v3",
         "bin/odoo-accounting-cli-v3-broker",
+        "bin/odoo-accounting-cli-v3-effect-finalizer",
         "docs/DEPLOYMENT.md",
         "docs/RUNTIME_CONFIGURATION.md",
         "pyproject.toml",
@@ -273,6 +298,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
 REQUIRED_WRITE_RELEASE_MEMBERS = (
     DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS
     | DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS
+    | EFFECT_FINALIZER_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
     | WRITE_RUNTIME_RELEASE_MEMBERS
@@ -297,6 +323,7 @@ class ReleaseArchiveTest(unittest.TestCase):
         production_trees = (
             "deployment/dev15",
             "deployment/dev18",
+            "deployment/dev23",
             "deployment/dev9",
             "odoo_addons/odoo_accounting_cli_v3_control",
             "pi_bridge",
@@ -326,9 +353,11 @@ class ReleaseArchiveTest(unittest.TestCase):
             "src/odoo_accounting_cli_v3/odoo/write_*.py",
             "src/odoo_accounting_cli_v3/domain/write_semantics.py",
             "src/odoo_accounting_cli_v3/broker_audit.py",
+            "src/odoo_accounting_cli_v3/effect_finalizer*.py",
             "src/odoo_accounting_cli_v3/historical_router.py",
             "src/odoo_accounting_cli_v3/monotonic_deadline.py",
             "src/odoo_accounting_cli_v3/odoo_approver_authorizer.py",
+            "src/odoo_accounting_cli_v3/odoo/effect_finalizer_db.py",
             "src/odoo_accounting_cli_v3/systemd_activation.py",
             "src/odoo_accounting_cli_v3/verified_release.py",
         ):
@@ -342,6 +371,25 @@ class ReleaseArchiveTest(unittest.TestCase):
             undeclared,
             "production asset is not an explicit canonical release member: "
             f"{sorted(undeclared)}",
+        )
+
+    def test_effect_finalizer_runtime_and_deployment_are_explicit_release_members(
+        self,
+    ) -> None:
+        missing_sources = {
+            name
+            for name in EFFECT_FINALIZER_RELEASE_MEMBERS
+            if not (PROJECT_ROOT / name).is_file()
+        }
+        self.assertFalse(
+            missing_sources,
+            "declared effect-finalizer release member is absent from source: "
+            f"{sorted(missing_sources)}",
+        )
+        self.assertTrue(
+            EFFECT_FINALIZER_RELEASE_MEMBERS.issubset(
+                REQUIRED_WRITE_RELEASE_MEMBERS
+            )
         )
 
     def test_dev15_read_toolchain_is_an_exact_release_member_set(self) -> None:
@@ -396,6 +444,9 @@ class ReleaseArchiveTest(unittest.TestCase):
             (Path("local/private.pem"), b"private"),
             (Path("local/private.ppk"), b"private"),
             (Path("local/write-runtime.json"), b"{}"),
+            (Path("local/effect-finalizer-runtime.json"), b"{}"),
+            (Path("local/finalizer.hmac"), b"secret"),
+            (Path("local/finalizer.pgpass"), b"binding:secret\n"),
             (Path("local/pi-attestation-keys.json"), b"{}"),
             (Path("local/state.sqlite3"), b"SQLite format 3"),
             (Path("local/state.sqlite3-wal"), b"mutable"),
@@ -434,7 +485,9 @@ class ReleaseArchiveTest(unittest.TestCase):
                 ".env",
                 ".env.*",
                 "*.key",
+                "*.hmac",
                 "*.pem",
+                "*.pgpass",
                 "*.ppk",
                 "id_ecdsa_sk",
                 "id_ed25519_sk",
@@ -443,6 +496,7 @@ class ReleaseArchiveTest(unittest.TestCase):
                 "*.sqlite3-wal",
                 "**/authority-runtime.json",
                 "**/broker-runtime.json",
+                "**/effect-finalizer-runtime.json",
                 "**/read-runtime.json",
                 "**/write-runtime.json",
                 "**/pi-attestation-keys*.json",
@@ -457,6 +511,9 @@ class ReleaseArchiveTest(unittest.TestCase):
             "local/state.sqlite3-wal",
             "local/write-runtime.json",
             "local/broker-runtime.json",
+            "local/effect-finalizer-runtime.json",
+            "local/finalizer.hmac",
+            "local/finalizer.pgpass",
             "local/pi-attestation-keys.json",
             "local/pi-attestation-keys-v2.json",
         ):
@@ -579,35 +636,47 @@ class ReleaseArchiveTest(unittest.TestCase):
                     ):
                         path.chmod(0o555)
 
-                    broker = candidate / "bin" / "odoo-accounting-cli-v3-broker"
+                    help_contracts = {
+                        "odoo-accounting-cli-v3-broker": (
+                            "usage: odoo-accounting-cli-v3-broker "
+                            "--config ABSOLUTE_PATH"
+                        ),
+                        "odoo-accounting-cli-v3-effect-finalizer": (
+                            "usage: odoo-accounting-cli-v3-effect-finalizer "
+                            "--config ABSOLUTE_PATH"
+                        ),
+                    }
                     try:
-                        completed = subprocess.run(
-                            [str(broker), "--help"],
-                            cwd=Path(directory),
-                            env={
-                                "HOME": "/tmp",
-                                "LANG": "C.UTF-8",
-                                "LC_ALL": "C.UTF-8",
-                                "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                                "PYTHONDONTWRITEBYTECODE": "1",
-                                "PYTHONNOUSERSITE": "1",
-                                "TZ": "UTC",
-                            },
-                            capture_output=True,
-                            check=False,
-                            text=True,
-                            encoding="utf-8",
-                            timeout=10,
-                        )
+                        for launcher_name, expected_help in help_contracts.items():
+                            completed = subprocess.run(
+                                [str(candidate / "bin" / launcher_name), "--help"],
+                                cwd=Path(directory),
+                                env={
+                                    "HOME": "/tmp",
+                                    "LANG": "C.UTF-8",
+                                    "LC_ALL": "C.UTF-8",
+                                    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                                    "PYTHONDONTWRITEBYTECODE": "1",
+                                    "PYTHONNOUSERSITE": "1",
+                                    "TZ": "UTC",
+                                },
+                                capture_output=True,
+                                check=False,
+                                text=True,
+                                encoding="utf-8",
+                                timeout=10,
+                            )
+                            self.assertEqual(
+                                completed.returncode, 0, completed.stderr
+                            )
+                            self.assertEqual(completed.stderr, "")
+                            self.assertIn(
+                                expected_help,
+                                completed.stdout.splitlines(),
+                            )
                     finally:
                         for path in (item for item in paths if item.is_dir()):
                             path.chmod(0o755)
-                    self.assertEqual(completed.returncode, 0, completed.stderr)
-                    self.assertEqual(completed.stderr, "")
-                    self.assertIn(
-                        "usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH",
-                        completed.stdout.splitlines(),
-                    )
 
     def test_release_rejects_clean_filtered_bytes_that_differ_from_head(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

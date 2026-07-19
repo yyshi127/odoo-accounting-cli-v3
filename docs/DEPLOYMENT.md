@@ -32,6 +32,9 @@ archive.
   runtime-test.json
   runtime-sandbox.json
   write-runtime.json
+  effect-finalizer-runtime.json
+  effect-finalizer/attestation.hmac
+  effect-finalizer/finalizer.pgpass
   secrets/test/auth.hmac
   secrets/test/receipt.hmac
   secrets/sandbox/auth.hmac
@@ -53,6 +56,8 @@ archive.
   broker-audit.sqlite3
 /var/lib/odoo-accounting-cli-v3-broker/
   # systemd-managed private broker HOME only; no accounting state is implicit
+/var/lib/odoo-accounting-cli-v3-effect-finalizer/
+  attempts.sqlite3
 ```
 
 The V2 tree under `/mnt/odoo/odoo19/custom/tools/` and the Pi Bridge copy of V2
@@ -74,8 +79,9 @@ Build the same clean commit twice and retain both command results. The archive
 SHA-256 and manifest SHA-256 must be identical. Refuse a dirty worktree,
 untracked release input, version/commit mismatch, or non-deterministic output.
 The archive gate must explicitly find `write_app.py`, `write_service.py`, the
-Odoo write runner, and every file in the V3 control add-on; equality with an
-incomplete Git file list is not sufficient.
+Odoo write runner, all isolated effect-finalizer modules and deployment units,
+and every file in the V3 control add-on; equality with an incomplete Git file
+list is not sufficient.
 
 Before transfer, record the archive name, byte size, archive SHA-256, manifest
 SHA-256, registry digest, version, commit, builder, and UTC time. Transfer to a
@@ -122,13 +128,14 @@ final directories, and refuses links, unsafe tar paths/types, duplicate
 members, non-root archive ownership, unexpected build modes, incomplete
 manifests, or any identity mismatch. It publishes the package and external
 anchor with exclusive hard-link creation and the release with Linux
-`renameat2(RENAME_NOREPLACE)`. The three executable release members are frozen
+`renameat2(RENAME_NOREPLACE)`. The four executable release members are frozen
 mode `0555`; every other release file is `0444`, every release directory is
 `0555`, and all production objects are root-owned.
 
-The extracted `tools/verify_release.py` and the frozen broker launcher's exact
-`--help` probe run with bytecode disabled against the sealed tree. In
-production both run after dropping to the unprivileged `nobody` identity, with
+The extracted `tools/verify_release.py` and the frozen broker and
+effect-finalizer launchers' exact `--help` probes run with bytecode disabled
+against the sealed tree. In production all three run after dropping to the
+unprivileged `nobody` identity, with
 bounded memory, CPU time, output size, file descriptors, wall time, and a
 killable private process group. A before/after byte-and-metadata inventory must
 remain identical.
@@ -191,13 +198,14 @@ publication contract, not permission to replace it with ad hoc extraction.
 
    Verification must not create files in the candidate.
 5. Make the entire candidate root-owned: directories mode `0555`, ordinary
-   files mode `0444`, both canonical launchers
+   files mode `0444`, all three canonical launchers
    `bin/odoo-accounting-cli-v3` and
-   `bin/odoo-accounting-cli-v3-broker`, and the target-Linux mount guard
+   `bin/odoo-accounting-cli-v3-broker` and
+   `bin/odoo-accounting-cli-v3-effect-finalizer`, and the target-Linux mount guard
    `deployment/dev9/run-private-mount-gate.sh` mode `0555`. Refuse the candidate
-   if either launcher or the mount guard is missing, linked, writable, or not
-   executable. Exercise
-   the broker from the frozen extracted tree before publishing it. Here
+   if any launcher or the mount guard is missing, linked, writable, or not
+   executable. Exercise the broker and effect finalizer from the frozen
+   extracted tree before publishing it. Here
    `$temporary_evidence` is a new root-owned mode `0700` directory outside the
    candidate release:
 
@@ -210,6 +218,14 @@ publication contract, not permission to replace it with ad hoc extraction.
    grep -Fx \
      'usage: odoo-accounting-cli-v3-broker --config ABSOLUTE_PATH' \
      "$temporary_evidence/broker-help.stdout"
+   PYTHONDONTWRITEBYTECODE=1 PYTHONNOUSERSITE=1 \
+     "$candidate/bin/odoo-accounting-cli-v3-effect-finalizer" --help \
+     >"$temporary_evidence/effect-finalizer-help.stdout" \
+     2>"$temporary_evidence/effect-finalizer-help.stderr"
+   test ! -s "$temporary_evidence/effect-finalizer-help.stderr"
+   grep -Fx \
+     'usage: odoo-accounting-cli-v3-effect-finalizer --config ABSOLUTE_PATH' \
+     "$temporary_evidence/effect-finalizer-help.stdout"
    ```
 
    The final release directory must be immutable to the Odoo and broker
@@ -222,9 +238,13 @@ publication contract, not permission to replace it with ad hoc extraction.
 8. From that exact anchored release, run
    `deployment/dev9/render-systemd-service.py` as documented in
    `deployment/dev9/README.md`. The renderer independently rejects a release
-   unless both canonical launchers remain regular non-symlink files with mode
+   unless all three canonical launchers remain regular non-symlink files with mode
    `0555`; install only its verified service output.
-9. For the dedicated sandbox only, add the exact immutable release's
+9. Render and stage the isolated finalizer service/socket exactly as documented
+   in `deployment/dev23/README.md`; this does not enable a write capability.
+   Keep its config, pgpass, HMAC, database LOGIN, and journal inaccessible to
+   the broker and Odoo write child.
+10. For the dedicated sandbox only, add the exact immutable release's
    `odoo_addons/` directory to that sandbox process's add-ons path and install
    `odoo_accounting_cli_v3_control` from it. Do not copy the add-on into V2, Pi
    Bridge, a development directory, or a shared production add-ons tree. A
@@ -538,6 +558,15 @@ store or a new empty store until a release-specific schema-v4 and idempotency
 handoff has passed. If that handoff is unavailable, the write route cannot be
 upgraded.
 
+The isolated effect finalizer adds a second retained state pair: its private
+attempt journal and the PostgreSQL effect ledger. Before a finalizer upgrade,
+remove new V3 write routing, drain the broker, reconcile every recorded
+attempt, stop the finalizer socket/service, and retain both stores. Render the
+new service from the same externally anchored release as the broker. Do not
+give the new release a fresh journal or issue a fresh operation ID to bypass an
+ambiguous attempt. Follow `deployment/dev23/README.md`; V2 remains running and
+unchanged, and production writes remain disabled by default.
+
 ## Rollback
 
 Rollback changes only the explicitly controlled V3/Pi route to a previously
@@ -553,6 +582,14 @@ as part of a coordinated rollback with all traffic stopped and only with the
 exact release, configuration fingerprint, Key IDs, and verified snapshot that
 belong together. Preserve the rejected/newer state as evidence; never merge
 divergent state files or idempotency tables by hand.
+
+A rollback that includes the effect finalizer must also verify compatibility
+with its retained attempt journal, attestation identity, guard installation,
+database OID/UUID, and PostgreSQL effect ledger. Stop its socket/service before
+changing the rendered unit. If any binding or attempt cannot be reconciled,
+leave V3 writes disabled and preserve the newer release and evidence; never
+truncate the journal or ledger. The broker and Odoo child still receive no
+finalizer config, pgpass, HMAC, or database LOGIN after rollback.
 
 Retain the newer release and store until every operation and audit receipt is
 reconciled. If either release has a nonterminal operation, keep it routed to the

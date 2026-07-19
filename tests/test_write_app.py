@@ -13,6 +13,16 @@ import pytest
 
 from odoo_accounting_cli_v3 import write_app
 from odoo_accounting_cli_v3.auth import context_payload, sign_write_action_context
+from odoo_accounting_cli_v3.effect_finalizer import (
+    EffectFinalizationIdentity,
+    EffectFinalizationIntent,
+    EffectFinalizationReceipt,
+    EffectFinalizationRequest,
+    create_effect_attestation,
+)
+from odoo_accounting_cli_v3.effect_finalizer_runtime import (
+    EffectFinalizerClientRuntime,
+)
 from odoo_accounting_cli_v3.operations import (
     canonical_json,
     record_execution_result,
@@ -49,6 +59,31 @@ VERIFICATION_SECRET = b"write-app-verification-secret-material"
 RECOVERY_SECRET = b"write-app-recovery-secret-material-001"
 RECEIPT_SECRET = b"write-app-receipt-secret-material-0001"
 SECOND_RECEIPT_SECRET = b"write-app-second-receipt-secret-material"
+EFFECT_SECRET = b"write-app-effect-finalizer-secret-material"
+FINALIZER_IDENTITY = EffectFinalizationIdentity(
+    attestation_key_id="effect-finalizer-v1",
+    guard_installation_id="22222222-2222-4222-8222-222222222222",
+    database_oid=16384,
+)
+
+
+def _finalizer_client_runtime() -> EffectFinalizerClientRuntime:
+    return EffectFinalizerClientRuntime(
+        socket_path="/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+        socket_owner_uid=0,
+        socket_group_gid=991,
+        socket_mode=0o660,
+        finalizer_service_uid=992,
+        finalizer_service_gid=992,
+        finalizer_systemd_unit=(
+            "odoo-accounting-cli-v3-effect-finalizer.service"
+        ),
+        finalization_identity=FINALIZER_IDENTITY,
+        handoff_idle_timeout_seconds=100.0,
+        request_io_timeout_seconds=5.0,
+        max_request_bytes=16_384,
+        max_response_bytes=16_384,
+    )
 CAPABILITY_ID = "acct.bill.vendor_create.v1"
 CUSTOMER_INVOICE_CAPABILITY_ID = "acct.invoice.customer_create.v1"
 TEST_MODULE_GRAPH = build_trusted_module_graph(
@@ -559,6 +594,52 @@ class FakeOdoo:
         }
 
 
+class FakeFinalizer:
+    def __init__(self) -> None:
+        self.calls: list[EffectFinalizationIntent] = []
+
+    def finalize(
+        self, intent: EffectFinalizationIntent
+    ) -> EffectFinalizationReceipt:
+        self.calls.append(intent)
+        request = EffectFinalizationRequest.from_intent(
+            intent,
+            verified_at=NOW,
+            expires_at=NOW + timedelta(minutes=5),
+        )
+        attestation = create_effect_attestation(
+            request,
+            key_id=FINALIZER_IDENTITY.attestation_key_id,
+            secret=EFFECT_SECRET,
+        )
+        return EffectFinalizationReceipt.from_database_mapping(
+            {
+                "receipt_attestation_id": attestation.attestation_id,
+                "receipt_guard_installation_id": (
+                    FINALIZER_IDENTITY.guard_installation_id
+                ),
+                "receipt_database_oid": FINALIZER_IDENTITY.database_oid,
+                "receipt_database_uuid": intent.database_uuid,
+                "resolved_operation_id": intent.operation_id,
+                "receipt_resolution_operation_id": (
+                    intent.resolution_operation_id
+                ),
+                "applied_resolution_kind": intent.resolution_kind,
+                "resolved_anchor_count": (
+                    1 if intent.resolution_kind == "verified" else 2
+                ),
+                "remaining_unresolved_count": 0,
+                "guard_epoch": 0,
+                "receipt_attestation_digest": attestation.attestation_digest,
+                "finalized_at": "2026-07-15T05:30:01Z",
+                "finalized_txid": "9123",
+                "replayed": False,
+            },
+            request=request,
+            attestation=attestation,
+        )
+
+
 class Harness:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         self.capabilities = _capabilities()
@@ -578,6 +659,7 @@ class Harness:
             write_execution_mode="sandbox_staged",
             write_state_path=(tmp_path / "write-operations.sqlite3").resolve(),
             base_runtime=base_runtime,
+            effect_finalizer=_finalizer_client_runtime(),
             write_auth=role("write-auth-v2"),
             approval=role("approval-v3"),
             execution=role("execution-v1", "odoo-write-executor"),
@@ -598,6 +680,7 @@ class Harness:
             "registry_digest": self.registry_digest,
         }
         self.odoo = FakeOdoo(self)
+        self.finalizer = FakeFinalizer()
         self._token = 0
 
         monkeypatch.setattr(write_app, "_utcnow", lambda: NOW)
@@ -622,6 +705,15 @@ class Harness:
         monkeypatch.setattr(write_app, "run_odoo_write_precheck", self.odoo.precheck)
         monkeypatch.setattr(
             write_app, "run_odoo_approved_write", self.odoo.approved_write
+        )
+        monkeypatch.setattr(
+            write_app,
+            "_load_effect_finalizer_handoff",
+            lambda *_args, **_kwargs: (
+                self.finalizer.finalize,
+                FINALIZER_IDENTITY,
+                None,
+            ),
         )
 
     def parsed(
@@ -744,6 +836,7 @@ def _install_trusted_runtime_handoff(
     registry_digest_value: str,
     expected_config_digest: str | None = None,
     descriptor_path: Path | None = None,
+    deadline_monotonic: float | None = None,
 ) -> int:
     descriptor = os.open(descriptor_path or path, os.O_RDONLY)
     monkeypatch.setenv(
@@ -762,7 +855,110 @@ def _install_trusted_runtime_handoff(
     monkeypatch.setenv(
         "ODOO_ACCOUNTING_CLI_V3_EXPECTED_REGISTRY_DIGEST", registry_digest_value
     )
+    monkeypatch.setenv(
+        "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC",
+        repr(
+            write_app.time.monotonic() + 120.0
+            if deadline_monotonic is None
+            else deadline_monotonic
+        ),
+    )
     return descriptor
+
+
+def test_effect_finalizer_fd_is_required_only_for_trusted_approve_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(effect_finalizer=_finalizer_client_runtime())
+    monkeypatch.delenv(
+        "ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD", raising=False
+    )
+
+    callback, identity, client = write_app._load_effect_finalizer_handoff(
+        "operation.result",
+        config,
+        trusted_runtime_handoff=True,
+    )
+    assert callable(callback)
+    assert identity == FINALIZER_IDENTITY
+    assert client is None
+
+    with pytest.raises(WriteApplicationError) as missing:
+        write_app._load_effect_finalizer_handoff(
+            "operation.approve_execute",
+            config,
+            trusted_runtime_handoff=True,
+        )
+    assert missing.value.code == "effect_finalizer_handoff_rejected"
+
+    monkeypatch.setenv("ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD", "9")
+    with pytest.raises(WriteApplicationError) as extra:
+        write_app._load_effect_finalizer_handoff(
+            "operation.result",
+            config,
+            trusted_runtime_handoff=True,
+        )
+    assert extra.value.code == "effect_finalizer_handoff_rejected"
+
+
+def test_effect_finalizer_handoff_pins_sender_and_database_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _finalizer_client_runtime()
+    config = SimpleNamespace(effect_finalizer=runtime)
+    observed: dict[str, Any] = {}
+
+    class Client:
+        def finalize(self, intent):
+            return intent
+
+        def close(self):
+            return None
+
+    client = Client()
+
+    def adopt(_cls, descriptor, **kwargs):
+        observed.update({"descriptor": descriptor, **kwargs})
+        return client
+
+    monkeypatch.setattr(
+        write_app.EffectFinalizerConnectedClient,
+        "from_inherited_fd",
+        classmethod(adopt),
+    )
+    monkeypatch.setenv("ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD", "9")
+
+    callback, identity, adopted = write_app._load_effect_finalizer_handoff(
+        "operation.approve_execute",
+        config,
+        trusted_runtime_handoff=True,
+    )
+
+    assert callback.__self__ is client
+    assert identity == FINALIZER_IDENTITY
+    assert adopted is client
+    assert observed["descriptor"] == 9
+    assert observed["expected_identity"] == FINALIZER_IDENTITY
+    policy = observed["response_sender_policy"]
+    assert policy.expected_uid == runtime.finalizer_service_uid
+    assert policy.expected_gid == runtime.finalizer_service_gid
+    assert policy.systemd_unit == runtime.finalizer_systemd_unit
+    assert observed["request_io_timeout_seconds"] == 5.0
+
+
+def test_trusted_deadline_reserves_finalizer_and_local_commit_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(effect_finalizer=_finalizer_client_runtime())
+    monkeypatch.setattr(write_app.time, "monotonic", lambda: 100.0)
+
+    assert write_app._odoo_call_timeout(config, 140.0) == 30.0
+    assert write_app._odoo_call_timeout(config, 1000.0) == 90.0
+    with pytest.raises(WriteApplicationError) as exhausted:
+        write_app._odoo_call_timeout(config, 110.05)
+    assert exhausted.value.code == "trusted_deadline_exhausted"
+    assert exhausted.value.odoo_effect == "none"
+    assert exhausted.value.retryable is True
 
 
 def test_ordinary_cli_environment_cannot_override_runtime_config(
@@ -825,6 +1021,10 @@ def test_complete_environment_without_inherited_config_fd_is_rejected(
         "ODOO_ACCOUNTING_CLI_V3_EXPECTED_REGISTRY_DIGEST",
         harness.registry_digest,
     )
+    monkeypatch.setenv(
+        "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC",
+        repr(write_app.time.monotonic() + 120.0),
+    )
 
     with pytest.raises(WriteApplicationError) as rejected:
         harness.call(
@@ -836,6 +1036,40 @@ def test_complete_environment_without_inherited_config_fd_is_rejected(
                 "parameters": _parameters("no-inherited-fd"),
             },
         )
+
+    assert rejected.value.code == "trusted_runtime_handoff_rejected"
+    assert rejected.value.odoo_effect == "none"
+    assert harness.odoo.executor_requests == []
+
+
+def test_expired_trusted_deadline_is_rejected_before_runtime_or_odoo(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    historical_config = (tmp_path / "expired-deadline.json").resolve()
+    historical_config.write_bytes(b'{"release":"expired"}')
+    now = write_app.time.monotonic()
+    descriptor = _install_trusted_runtime_handoff(
+        monkeypatch,
+        historical_config,
+        release_digest=RELEASE_DIGEST,
+        registry_digest_value=harness.registry_digest,
+        deadline_monotonic=now - 1.0,
+    )
+    try:
+        with pytest.raises(WriteApplicationError) as rejected:
+            harness.call(
+                "operation.prepare",
+                {
+                    "operation_id": "op-expired-deadline",
+                    "request_id": "req-expired-deadline",
+                    "capability_id": CAPABILITY_ID,
+                    "parameters": _parameters("expired-deadline"),
+                },
+            )
+    finally:
+        os.close(descriptor)
 
     assert rejected.value.code == "trusted_runtime_handoff_rejected"
     assert rejected.value.odoo_effect == "none"
@@ -987,6 +1221,60 @@ def test_trusted_handoff_rejects_hash_drift_and_descriptor_path_substitution(
     assert harness.odoo.executor_requests == []
 
 
+def test_approved_write_budget_is_checked_before_odoo_attempt(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _parameters_value, prepared, _preview = harness.prepare_preview(
+        "deadline-before-write"
+    )
+    approval = harness.approval(
+        prepared["operation_id"], "approval-deadline-before-write"
+    )
+    historical_config = (tmp_path / "deadline-before-write.json").resolve()
+    historical_config.write_bytes(b'{"release":"deadline"}')
+    monotonic = [900.0]
+    monkeypatch.setattr(write_app.time, "monotonic", lambda: monotonic[0])
+    descriptor = _install_trusted_runtime_handoff(
+        monkeypatch,
+        historical_config,
+        release_digest=RELEASE_DIGEST,
+        registry_digest_value=harness.registry_digest,
+        deadline_monotonic=1020.0,
+    )
+    original_precheck = harness.odoo.precheck
+
+    def consume_remaining_budget(*args, **kwargs):
+        result = original_precheck(*args, **kwargs)
+        monotonic[0] = 1010.0
+        return result
+
+    monkeypatch.setattr(
+        write_app, "run_odoo_write_precheck", consume_remaining_budget
+    )
+    try:
+        with pytest.raises(WriteApplicationError) as rejected:
+            harness.call(
+                "operation.approve_execute",
+                {
+                    "operation_id": prepared["operation_id"],
+                    "approval": approval_to_mapping(approval),
+                    "reconciliation_only": False,
+                },
+            )
+    finally:
+        os.close(descriptor)
+
+    assert rejected.value.code == "trusted_deadline_exhausted"
+    assert rejected.value.odoo_effect == "none"
+    assert rejected.value.retryable is True
+    assert harness.odoo.approved_requests == []
+    assert harness.store().get_operation(prepared["operation_id"]).state.value == (
+        "executing"
+    )
+
+
 def test_full_lifecycle_preserves_parameters_and_returns_signed_evidence(harness: Harness):
     parameters, prepared, preview, _approval, _payload, executed, result = harness.complete()
 
@@ -999,6 +1287,11 @@ def test_full_lifecycle_preserves_parameters_and_returns_signed_evidence(harness
     assert status_before["operation_state"] == "completed"
     assert result["operation_state"] == "completed"
     assert result["verification"]["passed"] is True
+    assert result["database_finalization"]["operation_id"] == prepared["operation_id"]
+    assert result["database_finalization"]["resolution_kind"] == "verified"
+    assert result["database_finalization"]["guard_installation_id"] == (
+        FINALIZER_IDENTITY.guard_installation_id
+    )
     assert result["recovery_plan"]["status"] == "manual_escalation"
     assert result["audit_receipt"]["signature_purpose"] == "write_audit_receipt_v1"
     assert result["audit_receipt"]["signing_key_id"] == "write-receipt-v1"
@@ -1023,6 +1316,9 @@ def test_full_lifecycle_preserves_parameters_and_returns_signed_evidence(harness
     assert len(
         harness.store().get_final_write_receipts(prepared["operation_id"])
     ) == 1
+    assert [intent.operation_id for intent in harness.finalizer.calls] == [
+        prepared["operation_id"]
+    ]
 
 
 def test_retained_releases_share_write_state_with_distinct_receipt_keys(

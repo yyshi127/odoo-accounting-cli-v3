@@ -3,12 +3,18 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from odoo_accounting_cli_v3.contracts import validate_value
+from odoo_accounting_cli_v3.effect_finalizer import (
+    EffectFinalizationIntent,
+    EffectFinalizationReceipt,
+    EffectFinalizationRequest,
+    create_effect_attestation,
+)
 from odoo_accounting_cli_v3.operations import canonical_json
 from odoo_accounting_cli_v3.write_receipts import (
     WriteReceiptError,
@@ -92,6 +98,53 @@ def recovery_plan_v2(**overrides) -> dict:
     return create_recovery_plan_v2(**arguments)
 
 
+def database_finalization() -> dict:
+    intent = EffectFinalizationIntent(
+        database_name="odoo_v3_sandbox",
+        database_uuid="19b09656-d10f-11f0-9065-00163e54a5ad",
+        operation_id="op-1001",
+        operation_digest="1" * 64,
+        execution_result_digest="2" * 64,
+        resolution_operation_id="op-1001",
+        resolution_operation_digest="1" * 64,
+        resolution_execution_result_digest="2" * 64,
+        resolution_result_digest="3" * 64,
+        resolution_kind="verified",
+    )
+    request = EffectFinalizationRequest.from_intent(
+        intent,
+        verified_at=NOW,
+        expires_at=NOW + timedelta(minutes=2),
+    )
+    attestation = create_effect_attestation(
+        request,
+        key_id="effect-finalizer-v1",
+        secret=b"effect-finalizer-secret-material-32-bytes",
+    )
+    return EffectFinalizationReceipt.from_database_mapping(
+        {
+            "receipt_attestation_id": attestation.attestation_id,
+            "receipt_guard_installation_id": (
+                "22222222-2222-4222-8222-222222222222"
+            ),
+            "receipt_database_oid": 16384,
+            "receipt_database_uuid": intent.database_uuid,
+            "resolved_operation_id": intent.operation_id,
+            "receipt_resolution_operation_id": intent.resolution_operation_id,
+            "applied_resolution_kind": intent.resolution_kind,
+            "resolved_anchor_count": 1,
+            "remaining_unresolved_count": 0,
+            "guard_epoch": 0,
+            "receipt_attestation_digest": attestation.attestation_digest,
+            "finalized_at": "2026-07-15T03:00:01Z",
+            "finalized_txid": "9123",
+            "replayed": False,
+        },
+        request=request,
+        attestation=attestation,
+    ).evidence
+
+
 def result_body() -> dict:
     before = snapshot(state="draft")
     after = snapshot(state="posted")
@@ -135,6 +188,7 @@ def result_body() -> dict:
             "evidence_digest": "7" * 64,
             "verified_at": "2026-07-15T03:00:00Z",
         },
+        "database_finalization": database_finalization(),
         "recovery_plan": plan,
     }
 
@@ -501,6 +555,24 @@ def test_write_receipt_cannot_report_success_without_verified_odoo_effect():
     with pytest.raises(WriteReceiptError, match="Odoo record"):
         receipt(result)
 
+    result = result_body()
+    result["database_finalization"] = None
+    with pytest.raises(WriteReceiptError, match="database effect finalization"):
+        receipt(result)
+
+
+def test_failed_write_requires_null_database_finalization():
+    result = result_body()
+    result["operation_state"] = "failed"
+    result["odoo_records"] = []
+    result["verification"]["passed"] = False
+    result["database_finalization"] = None
+    receipt(result)
+
+    result["database_finalization"] = database_finalization()
+    with pytest.raises(WriteReceiptError, match="failed write"):
+        receipt(result)
+
 
 def test_write_receipt_rejects_self_approval_and_production_staged_channel():
     arguments = {
@@ -551,4 +623,12 @@ def test_result_body_tampering_breaks_result_digest_even_with_untouched_receipt(
     changed["odoo_records"][0]["record_id"] = 881
 
     with pytest.raises(WriteReceiptError, match="content digest"):
+        verify_write_audit_receipt(signed, **verification_arguments(changed))
+
+    changed = copy.deepcopy(result)
+    changed["database_finalization"]["finalized_txid"] = "9124"
+    with pytest.raises(
+        WriteReceiptError,
+        match="database effect finalization|content digest",
+    ):
         verify_write_audit_receipt(signed, **verification_arguments(changed))

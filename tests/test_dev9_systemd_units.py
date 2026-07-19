@@ -13,7 +13,9 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SYSTEMD_ROOT = PROJECT_ROOT / "deployment" / "dev9" / "systemd"
+FINALIZER_SYSTEMD_ROOT = PROJECT_ROOT / "deployment" / "dev23" / "systemd"
 SERVICE_NAME = "odoo-accounting-cli-v3-broker.service"
+FINALIZER_SERVICE_NAME = "odoo-accounting-cli-v3-effect-finalizer.service"
 SOCKETS = {
     "odoo-accounting-cli-v3-pi-broker.socket": {
         "path": "/run/odoo-accounting-cli-v3/pi-broker.sock",
@@ -83,6 +85,13 @@ def _write_anchored_release(
 ) -> tuple[Path, Path, tuple[Path, ...]]:
     release_root = install_root / "releases" / release_name
     service_path = release_root / "deployment" / "dev9" / "systemd" / SERVICE_NAME
+    finalizer_service_path = (
+        release_root
+        / "deployment"
+        / "dev23"
+        / "systemd"
+        / FINALIZER_SERVICE_NAME
+    )
     package = release_root / "src" / "odoo_accounting_cli_v3"
     package.mkdir(parents=True)
     service_path.parent.mkdir(parents=True)
@@ -98,6 +107,7 @@ def _write_anchored_release(
         for name in (
             "odoo-accounting-cli-v3",
             "odoo-accounting-cli-v3-broker",
+            "odoo-accounting-cli-v3-effect-finalizer",
         )
     )
     for launcher in launchers:
@@ -110,6 +120,14 @@ def _write_anchored_release(
         PRODUCTION_RELEASES_ROOT.as_posix(), exec_releases_root.as_posix()
     )
     service_path.write_text(service, encoding="utf-8")
+    finalizer_service_path.parent.mkdir(parents=True)
+    finalizer_service = (
+        FINALIZER_SYSTEMD_ROOT / FINALIZER_SERVICE_NAME
+    ).read_text(encoding="utf-8")
+    finalizer_service = finalizer_service.replace(
+        PRODUCTION_RELEASES_ROOT.as_posix(), exec_releases_root.as_posix()
+    )
+    finalizer_service_path.write_text(finalizer_service, encoding="utf-8")
     files = []
     for path in sorted(release_root.rglob("*")):
         if path.is_file():
@@ -354,6 +372,42 @@ def test_service_renderer_binds_production_execstart_to_the_verified_tree(
             mismatched_root,
             script_root=mismatched_root,
             require_root_owner=True,
+        )
+
+
+def test_service_renderer_binds_effect_finalizer_to_same_verified_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    renderer = _load_renderer()
+    release_name = "0.1.0.dev23-effect-finalizer"
+    install_root = tmp_path / "install"
+    release_root, _, _ = _write_anchored_release(
+        install_root,
+        release_name,
+        exec_releases_root=install_root / "releases",
+    )
+    monkeypatch.setattr(renderer, "_PRODUCTION_RELEASES_ROOT", release_root.parent)
+
+    rendered = renderer.render_service(
+        release_root,
+        script_root=release_root,
+        require_root_owner=False,
+        component="effect-finalizer",
+    )
+
+    assert "@V3_RELEASE@" not in rendered
+    assert (
+        "ExecStart="
+        f"{release_root.as_posix()}/bin/odoo-accounting-cli-v3-effect-finalizer "
+        "--config /etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json"
+    ) in rendered
+
+    with pytest.raises(renderer.RenderError, match="component"):
+        renderer.render_service(
+            release_root,
+            script_root=release_root,
+            require_root_owner=False,
+            component="unknown",
         )
 
 

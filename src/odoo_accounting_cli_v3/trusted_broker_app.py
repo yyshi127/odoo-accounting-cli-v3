@@ -15,6 +15,8 @@ from typing import Any, Callable, Mapping
 
 from . import __version__
 from .broker_audit import SQLiteBrokerAuditSink
+from .effect_finalizer_runtime import EffectFinalizerClientRuntime
+from .effect_finalizer_uds import preconnect_effect_finalizer_socket
 from .historical_router import (
     HistoricalReleaseRouter,
     HistoricalRoutingManifest,
@@ -54,7 +56,11 @@ from .trusted_response_verifier import (
 from .trusted_session_mint_uds import TrustedSessionMintUdsConfig
 from .trusted_session_sqlite import SQLiteTrustedSessionStore
 from .verified_release import VerifiedReleaseRoute, load_verified_release_route
-from .write_app import ODOO_WRITE_TIMEOUT_SECONDS
+from .write_app import (
+    MIN_ODOO_CALL_TIMEOUT_SECONDS,
+    ODOO_WRITE_TIMEOUT_SECONDS,
+    POST_ODOO_LOCAL_MARGIN_SECONDS,
+)
 from .write_runtime import WriteRuntimeError, _absolute_path, _read_config
 
 
@@ -724,9 +730,11 @@ def _assert_loaded_topology(
         "broker audit state": config.broker_audit_state_path,
     }
     release_roots: set[str] = set()
+    finalizer_runtimes: list[EffectFinalizerClientRuntime] = []
     for route_config, authority in zip(config.release_routes, authority_configs):
         write = authority.write_runtime
         base = write.base_runtime
+        finalizer = write.effect_finalizer
         manifest_route = manifest.routes[route_config.release_digest]
         if (
             not _same_path(authority.config_path, route_config.authority_runtime_config_path)
@@ -738,6 +746,11 @@ def _assert_loaded_topology(
             or authority.sqlite_busy_timeout_ms != config.sqlite_busy_timeout_ms
         ):
             raise TrustedBrokerRuntimeError("release runtime path topology is invalid")
+        if type(finalizer) is not EffectFinalizerClientRuntime:
+            raise TrustedBrokerRuntimeError(
+                "release finalizer client runtime is invalid"
+            )
+        finalizer_runtimes.append(finalizer)
         tenants.add(_tenant_identity(base))
         release_root = _normalized(base.release_root)
         if release_root in release_roots:
@@ -754,6 +767,51 @@ def _assert_loaded_topology(
         ] = base.receipt_state_path
     if len(tenants) != 1:
         raise TrustedBrokerRuntimeError("release tenant identities differ")
+    finalizer = finalizer_runtimes[0]
+    if any(item != finalizer for item in finalizer_runtimes[1:]):
+        raise TrustedBrokerRuntimeError(
+            "retained releases use different finalizer client runtimes"
+        )
+    transport_paths = {
+        _normalized(Path(config.pi_broker_uds.socket_path)),
+        _normalized(Path(config.session_mint_uds.socket_path)),
+        _normalized(Path(config.trusted_approval_uds.socket_path)),
+    }
+    if (
+        _normalized(Path(finalizer.socket_path)) in transport_paths
+        or finalizer.socket_owner_uid != 0
+        or finalizer.socket_mode != 0o660
+        or finalizer.socket_group_gid
+        in {
+            config.pi_broker_uds.socket_group_gid,
+            config.session_mint_uds.socket_group_gid,
+            config.trusted_approval_uds.socket_group_gid,
+        }
+        or finalizer.finalizer_service_uid
+        in {
+            0,
+            config.broker_service_uid,
+            config.pi_broker_uds.allowed_client_uid,
+            config.session_mint_uds.odoo_issuer_uid,
+        }
+        or finalizer.finalizer_service_gid
+        in {
+            0,
+            config.broker_service_gid,
+            finalizer.socket_group_gid,
+            config.pi_broker_uds.socket_group_gid,
+            config.session_mint_uds.socket_group_gid,
+        }
+        or finalizer.handoff_idle_timeout_seconds
+        < config.historical_timeout_seconds + POST_ODOO_LOCAL_MARGIN_SECONDS
+        or finalizer.request_io_timeout_seconds
+        + POST_ODOO_LOCAL_MARGIN_SECONDS
+        + MIN_ODOO_CALL_TIMEOUT_SECONDS
+        >= config.historical_timeout_seconds
+    ):
+        raise TrustedBrokerRuntimeError(
+            "independent finalizer service topology is invalid"
+        )
     current_index = next(
         index
         for index, route in enumerate(config.release_routes)
@@ -896,6 +954,26 @@ def _assert_service_identity(config: TrustedBrokerRuntimeConfig) -> None:
         )
 
 
+def _assert_finalizer_socket_membership(
+    config: TrustedBrokerRuntimeConfig,
+    topology: LoadedReleaseTopology,
+) -> None:
+    try:
+        socket_group_gid = (
+            topology.releases[0].write_runtime.effect_finalizer.socket_group_gid
+        )
+        groups = set(os.getgroups())
+        groups.add(os.getegid())
+    except Exception as exc:
+        raise TrustedBrokerRuntimeError(
+            "broker finalizer socket group could not be verified"
+        ) from exc
+    if socket_group_gid not in groups:
+        raise TrustedBrokerRuntimeError(
+            "broker is not a member of the finalizer client socket group"
+        )
+
+
 def build_trusted_broker_runtime(
     path: str | os.PathLike[str],
     *,
@@ -930,6 +1008,8 @@ def build_trusted_broker_runtime(
     if enforce_identity:
         _assert_service_identity(config)
     topology = load_release_topology(config)
+    if enforce_identity:
+        _assert_finalizer_socket_membership(config, topology)
     enforce_source = (
         require_root_owner
         if enforce_source_release is None
@@ -1067,6 +1147,29 @@ def build_trusted_broker_runtime(
         current = release_map[
             (config.current_release_digest, config.current_registry_digest)
         ]
+        finalizer_runtime = current.write_runtime.effect_finalizer
+
+        def preconnect_finalizer(route: Any):
+            release = release_map.get(
+                (route.release_digest, route.registry_digest)
+            )
+            expected_route = topology.manifest.routes.get(route.release_digest)
+            if (
+                release is None
+                or route != expected_route
+                or release.write_runtime.effect_finalizer != finalizer_runtime
+            ):
+                raise TrustedBrokerRuntimeError(
+                    "historical finalizer release binding is invalid"
+                )
+            return preconnect_effect_finalizer_socket(
+                finalizer_runtime.socket_path,
+                expected_owner_uid=finalizer_runtime.socket_owner_uid,
+                expected_group_gid=finalizer_runtime.socket_group_gid,
+                expected_mode=finalizer_runtime.socket_mode,
+                timeout_seconds=finalizer_runtime.request_io_timeout_seconds,
+            )
+
         read_adapter = TrustedReadAdapter(
             runtime_config_path=config.read_runtime_config_path,
             expected_release_digest=config.current_release_digest,
@@ -1079,6 +1182,7 @@ def build_trusted_broker_runtime(
         historical_router = HistoricalReleaseRouter(
             config.historical_routing_manifest_path,
             operation_store,
+            effect_finalizer_preconnector=preconnect_finalizer,
             require_root_owner=require_root_owner,
             timeout_seconds=config.historical_timeout_seconds,
             max_stdin_bytes=config.historical_max_stdin_bytes,

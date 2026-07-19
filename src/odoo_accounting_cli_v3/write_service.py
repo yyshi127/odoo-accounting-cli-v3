@@ -29,6 +29,14 @@ from .gateway import (
     CapabilityGateway,
     RequestContext,
 )
+from .effect_finalizer import (
+    EffectFinalizationError,
+    EffectFinalizationIdentity,
+    EffectFinalizationIntent,
+    EffectFinalizationReceipt,
+    trusted_result_envelope_digest,
+    validate_effect_finalization_evidence,
+)
 from .operations import (
     Approval,
     Operation,
@@ -231,6 +239,9 @@ CombinedWriteExecutor = Callable[
     [RequestContext, Capability, Operation, Approval, str, str],
     BackendWriteOutcome,
 ]
+EffectFinalizer = Callable[
+    [EffectFinalizationIntent], EffectFinalizationReceipt
+]
 
 
 def _digest(value: Any) -> str:
@@ -360,6 +371,8 @@ class DurableWriteService:
         verification_executor: VerificationExecutor,
         availability_channel: str,
         now: Callable[[], datetime],
+        effect_finalizer: EffectFinalizer,
+        effect_finalizer_identity: EffectFinalizationIdentity,
         receipt_id_factory: Callable[[], str] | None = None,
         execute_and_verify: CombinedWriteExecutor | None = None,
     ) -> None:
@@ -379,12 +392,15 @@ class DurableWriteService:
             precheck_executor,
             write_executor,
             verification_executor,
+            effect_finalizer,
             now,
         ):
             if not callable(function):
                 raise WriteServiceError("write service callbacks must be callable")
         if availability_channel not in {"staged", "enabled"}:
             raise WriteServiceError("write availability channel is invalid")
+        if not isinstance(effect_finalizer_identity, EffectFinalizationIdentity):
+            raise WriteServiceError("effect finalizer identity is required")
         self._capabilities = {item.id: item for item in capability_list}
         self._registry_digest = registry_digest(capability_list)
         self._release_digest = release_digest
@@ -395,6 +411,8 @@ class DurableWriteService:
         self._precheck_executor = precheck_executor
         self._write_executor = write_executor
         self._verification_executor = verification_executor
+        self._effect_finalizer = effect_finalizer
+        self._effect_finalizer_identity = effect_finalizer_identity
         self._availability_channel = availability_channel
         self._now = now
         if receipt_id_factory is not None and not callable(receipt_id_factory):
@@ -982,6 +1000,7 @@ class DurableWriteService:
         operation: Operation,
         execution: BackendEvidence,
         verification: BackendEvidence | None,
+        database_finalization: dict[str, Any] | None,
         operation_state: State | None = None,
     ) -> dict[str, Any]:
         state = operation.state if operation_state is None else operation_state
@@ -1010,6 +1029,7 @@ class DurableWriteService:
             "odoo_records": execution.evidence["odoo_records"],
             "difference": execution.evidence["difference"],
             "verification": verification_body,
+            "database_finalization": database_finalization,
             "recovery_plan": execution.evidence["recovery_plan"],
         }
 
@@ -1023,6 +1043,7 @@ class DurableWriteService:
         approval_digest: str,
         execution: BackendEvidence,
         verification: BackendEvidence | None,
+        database_finalization: dict[str, Any] | None,
         terminal_audit_event: Any,
     ) -> dict[str, Any]:
         if capability_channel not in {"staged", "enabled"}:
@@ -1031,6 +1052,7 @@ class DurableWriteService:
             operation=operation,
             execution=execution,
             verification=verification,
+            database_finalization=database_finalization,
         )
         if (
             terminal_audit_event.operation_id != operation.operation_id
@@ -1111,11 +1133,13 @@ class DurableWriteService:
         operation: Operation,
         execution: BackendEvidence,
         verification: BackendEvidence | None,
+        database_finalization: dict[str, Any] | None,
     ) -> dict[str, Any]:
         result_body = cls._compose_result_body(
             operation=operation,
             execution=execution,
             verification=verification,
+            database_finalization=database_finalization,
         )
         validate_write_result_body(result_body, operation_id=operation.operation_id)
         return json.loads(canonical_json(result_body))
@@ -1128,6 +1152,7 @@ class DurableWriteService:
         execution: BackendEvidence,
         verification: BackendEvidence | None,
         capability_channel: str,
+        database_finalization: dict[str, Any] | None,
     ) -> dict[str, Any]:
         if capability_channel not in {"staged", "enabled"}:
             raise WriteServiceError("durable capability channel is invalid")
@@ -1136,6 +1161,7 @@ class DurableWriteService:
                 operation=operation,
                 execution=execution,
                 verification=verification,
+                database_finalization=database_finalization,
             ),
             "capability_channel": capability_channel,
         }
@@ -1216,6 +1242,74 @@ class DurableWriteService:
         if not isinstance(details, dict) or canonical_json(details) != canonical_json(expected):
             raise WriteServiceError("durable final receipt differs from verified result")
         return pinned_channel
+
+    @staticmethod
+    def _verified_effect_finalization_intent(
+        operation: Operation,
+        execution: BackendEvidence,
+        verification: BackendEvidence,
+    ) -> EffectFinalizationIntent:
+        if operation.state != State.COMPLETED:
+            raise WriteServiceError(
+                "effect finalization requires a completed operation"
+            )
+        execution_digest = trusted_result_envelope_digest(
+            execution.result, operation
+        )
+        return EffectFinalizationIntent(
+            database_name=operation.database_name,
+            database_uuid=operation.database_uuid,
+            operation_id=operation.operation_id,
+            operation_digest=operation.digest,
+            execution_result_digest=execution_digest,
+            resolution_operation_id=operation.operation_id,
+            resolution_operation_digest=operation.digest,
+            resolution_execution_result_digest=execution_digest,
+            resolution_result_digest=trusted_result_envelope_digest(
+                verification.result, operation
+            ),
+            resolution_kind="verified",
+        )
+
+    def _validated_database_finalization(
+        self,
+        operation: Operation,
+        value: Any,
+        *,
+        execution: BackendEvidence,
+        verification: BackendEvidence | None,
+    ) -> dict[str, Any] | None:
+        if operation.state == State.FAILED:
+            if value is not None:
+                raise WriteServiceError(
+                    "failed operation cannot contain database effect finalization"
+                )
+            return None
+        if operation.state != State.COMPLETED:
+            raise WriteServiceError("operation has no database effect finalization")
+        if verification is None:
+            raise WriteServiceError(
+                "completed operation has no verification result"
+            )
+        try:
+            intent = self._verified_effect_finalization_intent(
+                operation, execution, verification
+            )
+            return validate_effect_finalization_evidence(
+                value,
+                intent=intent,
+                expected_attestation_key_id=(
+                    self._effect_finalizer_identity.attestation_key_id
+                ),
+                expected_guard_installation_id=(
+                    self._effect_finalizer_identity.guard_installation_id
+                ),
+                expected_database_oid=self._effect_finalizer_identity.database_oid,
+            )
+        except EffectFinalizationError as exc:
+            raise WriteServiceError(
+                "completed operation has no valid database effect finalization"
+            ) from exc
 
     @staticmethod
     def _stored_backend_evidence(record: Any) -> BackendEvidence:
@@ -1360,11 +1454,6 @@ class DurableWriteService:
         except KeyError as exc:
             raise WriteServiceError("terminal trusted result audit event is missing") from exc
         approval_record = self._store.get_approval_record(operation.operation_id)
-        result_details = self._receipt_details(
-            operation=operation,
-            execution=execution,
-            verification=verification,
-        )
         pinned_channel = self._pinned_capability_channel(operation)
         final_receipts = [
             receipt
@@ -1382,6 +1471,21 @@ class DurableWriteService:
             or stored.audit_event_id != terminal_event.event_id
         ):
             raise WriteServiceError("durable final receipt differs from verified result")
+        details = stored.body.get("receipt_details")
+        database_finalization = self._validated_database_finalization(
+            operation,
+            details.get("database_finalization")
+            if isinstance(details, dict)
+            else None,
+            execution=execution,
+            verification=verification,
+        )
+        result_details = self._receipt_details(
+            operation=operation,
+            execution=execution,
+            verification=verification,
+            database_finalization=database_finalization,
+        )
         self._receipt_channel(
             stored,
             result_body=result_details,
@@ -1395,6 +1499,7 @@ class DurableWriteService:
             approval_digest=approval_record.approval_signature,
             execution=execution,
             verification=verification,
+            database_finalization=database_finalization,
             terminal_audit_event=terminal_event,
         )
 
@@ -1797,15 +1902,23 @@ class DurableWriteService:
         approval: Approval,
         execution: BackendEvidence,
         verification: BackendEvidence | None,
+        database_finalization: dict[str, Any] | None,
         final_receipt: Any,
         terminal_audit_event: Any,
     ) -> dict[str, Any]:
         if final_receipt is None:
             raise WriteServiceError("terminal write has no durable final receipt")
+        database_finalization = self._validated_database_finalization(
+            operation,
+            database_finalization,
+            execution=execution,
+            verification=verification,
+        )
         result_body = self._receipt_details(
             operation=operation,
             execution=execution,
             verification=verification,
+            database_finalization=database_finalization,
         )
         if (
             final_receipt.audit_event_id != terminal_audit_event.event_id
@@ -1824,6 +1937,7 @@ class DurableWriteService:
             approval_digest=approval.signature,
             execution=execution,
             verification=verification,
+            database_finalization=database_finalization,
             terminal_audit_event=terminal_audit_event,
         )
 
@@ -1992,6 +2106,7 @@ class DurableWriteService:
                         execution=execution,
                         verification=None,
                         capability_channel=capability_channel,
+                        database_finalization=None,
                     )
                 ),
             )
@@ -2003,6 +2118,7 @@ class DurableWriteService:
                     approval=approval,
                     execution=execution,
                     verification=None,
+                    database_finalization=None,
                     final_receipt=execution_acceptance.final_receipt,
                     terminal_audit_event=execution_acceptance.audit_event,
                 )
@@ -2018,6 +2134,59 @@ class DurableWriteService:
         self._validate_verification_evidence(
             verification, verifying, capability, execution
         )
+        try:
+            terminal_candidate = validate_complete_operation(
+                verifying,
+                verification.result,
+                now=self._now(),
+                secret=self._security.verification_secret,
+                expected_key_id=self._security.verification_key_id,
+                allowed_issuers=self._security.verification_issuers,
+                expected_revision=verifying.revision,
+            )
+        except Exception as exc:
+            raise WriteServiceError(
+                "trusted verification result cannot enter a terminal state"
+            ) from exc
+        self._verify_terminal_trusted_results(
+            operation=terminal_candidate,
+            execution=execution,
+            verification=verification,
+        )
+        database_finalization = None
+        if terminal_candidate.state == State.COMPLETED:
+            try:
+                intent = self._verified_effect_finalization_intent(
+                    terminal_candidate,
+                    execution,
+                    verification,
+                )
+                finalization_receipt = self._effect_finalizer(intent)
+                if not isinstance(
+                    finalization_receipt, EffectFinalizationReceipt
+                ):
+                    raise EffectFinalizationError(
+                        "effect finalizer returned no typed database receipt"
+                    )
+                finalization_receipt.validate_for_intent(intent)
+                database_finalization = finalization_receipt.evidence
+                validate_effect_finalization_evidence(
+                    database_finalization,
+                    intent=intent,
+                    expected_attestation_key_id=(
+                        self._effect_finalizer_identity.attestation_key_id
+                    ),
+                    expected_guard_installation_id=(
+                        self._effect_finalizer_identity.guard_installation_id
+                    ),
+                    expected_database_oid=(
+                        self._effect_finalizer_identity.database_oid
+                    ),
+                )
+            except Exception as exc:
+                raise WriteServiceError(
+                    "database effect finalization failed; operation remains verifying"
+                ) from exc
         final_acceptance = self._store.complete_operation(
             verification.result,
             evidence=verification.evidence,
@@ -2031,6 +2200,7 @@ class DurableWriteService:
                 execution=execution,
                 verification=verification,
                 capability_channel=capability_channel,
+                database_finalization=database_finalization,
             ),
         )
         return self._terminal_output(
@@ -2040,6 +2210,7 @@ class DurableWriteService:
             approval=approval,
             execution=execution,
             verification=verification,
+            database_finalization=database_finalization,
             final_receipt=final_acceptance.final_receipt,
             terminal_audit_event=final_acceptance.audit_event,
         )

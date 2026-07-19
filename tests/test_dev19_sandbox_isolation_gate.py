@@ -73,6 +73,7 @@ def installer_executable_rows() -> list[dict[str, object]]:
         for path, digest, size in (
             ("bin/odoo-accounting-cli-v3", "2", 20),
             ("bin/odoo-accounting-cli-v3-broker", "3", 30),
+            ("bin/odoo-accounting-cli-v3-effect-finalizer", "5", 35),
             ("deployment/dev9/run-private-mount-gate.sh", "4", 40),
         )
     ]

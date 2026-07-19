@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,8 +13,16 @@ from unittest.mock import Mock
 import pytest
 
 from odoo_accounting_cli_v3.auth import authentication_request_digest
+from odoo_accounting_cli_v3.effect_finalizer import EffectFinalizationIdentity
+from odoo_accounting_cli_v3.effect_finalizer_runtime import (
+    EffectFinalizerClientRuntime,
+)
+from odoo_accounting_cli_v3.effect_finalizer_uds import (
+    EffectFinalizerConnectedClient,
+)
 from odoo_accounting_cli_v3.registry import Capability
 from odoo_accounting_cli_v3.write_runtime import (
+    WRITE_RUNTIME_SCHEMA_VERSION,
     WriteRoleConfig,
     WriteRuntimeConfig,
     WriteRuntimeSecrets,
@@ -32,6 +42,32 @@ SECRET_VALUES = {
     "recovery": b"recovery-secret-material-000000000002",
     "write_receipt": b"write-receipt-secret-material-000001",
 }
+LINUX_FD_EVIDENCE = (
+    sys.platform == "linux"
+    and hasattr(os, "memfd_create")
+    and Path("/proc/self/fd").is_dir()
+)
+
+
+def _effect_finalizer() -> EffectFinalizerClientRuntime:
+    return EffectFinalizerClientRuntime(
+        socket_path="/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+        socket_owner_uid=0,
+        socket_group_gid=991,
+        socket_mode=0o660,
+        finalizer_service_uid=992,
+        finalizer_service_gid=992,
+        finalizer_systemd_unit="odoo-accounting-cli-v3-effect-finalizer.service",
+        finalization_identity=EffectFinalizationIdentity(
+            attestation_key_id="effect-finalizer-v1",
+            guard_installation_id="22222222-2222-4222-8222-222222222222",
+            database_oid=16384,
+        ),
+        handoff_idle_timeout_seconds=100,
+        request_io_timeout_seconds=5,
+        max_request_bytes=16_384,
+        max_response_bytes=16_384,
+    )
 
 
 def _runtime(tmp_path: Path) -> tuple[WriteRuntimeConfig, WriteRuntimeSecrets]:
@@ -66,10 +102,11 @@ def _runtime(tmp_path: Path) -> tuple[WriteRuntimeConfig, WriteRuntimeSecrets]:
         for name in SECRET_VALUES
     }
     config = WriteRuntimeConfig(
-        schema_version=1,
+        schema_version=WRITE_RUNTIME_SCHEMA_VERSION,
         write_execution_mode="sandbox_staged",
         base_runtime_config_path=tmp_path / "read-runtime.json",
         write_state_path=tmp_path / "write.sqlite3",
+        effect_finalizer=_effect_finalizer(),
         base_runtime=base,
         config_fingerprint="f" * 64,
         _require_root_owner=False,
@@ -220,6 +257,175 @@ def _mock_parent_boundary(monkeypatch, config, result, captured):
     monkeypatch.setattr(
         runner, "acquire_module_guard", acquire_guard, raising=False
     )
+
+
+@pytest.mark.skipif(
+    not LINUX_FD_EVIDENCE,
+    reason="requires Linux /proc file-descriptor evidence and memfd_create",
+)
+@pytest.mark.parametrize("force_inheritable", [False, True])
+def test_real_odoo_child_receives_guard_payload_but_not_finalizer_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_inheritable: bool,
+) -> None:
+    """Prove the exact runner allowlist across both Linux exec boundaries."""
+
+    config, secrets = _runtime(tmp_path)
+    finalizer_runtime = config.effect_finalizer
+    handoff_socket, finalizer_peer = socket.socketpair()
+    handoff_descriptor = handoff_socket.detach()
+    finalizer_client = EffectFinalizerConnectedClient.from_inherited_fd(
+        handoff_descriptor,
+        expected_identity=finalizer_runtime.finalization_identity,
+        response_sender_policy=lambda _peer: True,
+        request_io_timeout_seconds=(
+            finalizer_runtime.request_io_timeout_seconds
+        ),
+        max_request_bytes=finalizer_runtime.max_request_bytes,
+        max_response_bytes=finalizer_runtime.max_response_bytes,
+    )
+    try:
+        finalizer_descriptor = finalizer_client.fileno()
+        assert finalizer_descriptor > 2
+        assert finalizer_client.is_inheritable() is False
+        os.set_inheritable(finalizer_descriptor, force_inheritable)
+        finalizer_metadata = os.fstat(finalizer_descriptor)
+        module_guard = _module_guard_evidence(config)
+        payload = runner.canonical_json(
+            {
+                "protocol": runner.WRITE_CHILD_PROTOCOL_VERSION,
+                "action": runner.ACTION_APPROVED_WRITE,
+                "runtime": config.runtime_identity,
+                "request_json": runner._normalize_request_json(
+                    {
+                        "context": {"signed": "fd-isolation-test"},
+                        "capability_id": "acct.invoice.customer.create.v1",
+                        "parameters": {"company_id": 7},
+                    }
+                ),
+                "credentials": runner._credentials(
+                    config, secrets, runner.ACTION_APPROVED_WRITE
+                ),
+                "release_digest": RELEASE_DIGEST,
+                "canonical_package_path": str(
+                    config.base_runtime.canonical_package_path
+                ),
+                "canonical_package_sha256": (
+                    config.base_runtime.canonical_package_sha256
+                ),
+                "release_root": str(config.base_runtime.release_root),
+                "module_guard": module_guard,
+            }
+        )
+        child_code = (
+            "import json,os,sys,time\n"
+            "payload_fd=int(sys.argv[1])\n"
+            "payload_identity=(int(sys.argv[2]),int(sys.argv[3]))\n"
+            "finalizer_identity=(int(sys.argv[4]),int(sys.argv[5]))\n"
+            "def identities():\n"
+            "    root='/proc/self/fd'\n"
+            "    result=[]\n"
+            "    for name in os.listdir(root):\n"
+            "        try:\n"
+            "            metadata=os.stat(f'{root}/{name}')\n"
+            "        except OSError:\n"
+            "            continue\n"
+            "        result.append((metadata.st_dev,metadata.st_ino))\n"
+            "    return result\n"
+            "self_fds=identities()\n"
+            "payload_metadata=os.fstat(payload_fd)\n"
+            "payload=json.loads(os.read(payload_fd,1048577))\n"
+            "print(json.dumps({\n"
+            "    'self_finalizer_count':self_fds.count(finalizer_identity),\n"
+            "    'self_payload_count':self_fds.count(payload_identity),\n"
+            "    'payload_fd_identity':[payload_metadata.st_dev,payload_metadata.st_ino],\n"
+            "    'action':payload['action'],\n"
+            "    'runtime_schema':payload['runtime']['write_runtime_schema_version'],\n"
+            "    'guard_digest':payload['module_guard']['module_graph']['digest'],\n"
+            "},sort_keys=True))\n"
+            "time.sleep(0.5)\n"
+        )
+        environment = runner._safe_environment()
+        environment_validator = Mock()
+        monkeypatch.setattr(
+            runner, "_validate_child_environment", environment_validator
+        )
+        with runner._private_payload_fd(payload) as payload_descriptor:
+            payload_metadata = os.fstat(payload_descriptor)
+            real_popen = runner.subprocess.Popen
+            supervisor_evidence: dict[str, int] = {}
+
+            def observed_supervisor_spawn(*args, **kwargs):
+                process = real_popen(*args, **kwargs)
+                identities: list[tuple[int, int]] = []
+                root = Path(f"/proc/{process.pid}/fd")
+                for entry in root.iterdir():
+                    try:
+                        metadata = entry.stat()
+                    except OSError:
+                        continue
+                    identities.append((metadata.st_dev, metadata.st_ino))
+                supervisor_evidence.update(
+                    {
+                        "finalizer_count": identities.count(
+                            (
+                                finalizer_metadata.st_dev,
+                                finalizer_metadata.st_ino,
+                            )
+                        ),
+                        "payload_count": identities.count(
+                            (
+                                payload_metadata.st_dev,
+                                payload_metadata.st_ino,
+                            )
+                        ),
+                    }
+                )
+                return process
+
+            monkeypatch.setattr(
+                runner.subprocess, "Popen", observed_supervisor_spawn
+            )
+            completed = runner._run_child_process(
+                [
+                    sys.executable,
+                    "-c",
+                    child_code,
+                    str(payload_descriptor),
+                    str(payload_metadata.st_dev),
+                    str(payload_metadata.st_ino),
+                    str(finalizer_metadata.st_dev),
+                    str(finalizer_metadata.st_ino),
+                ],
+                source="# fixed Odoo write bootstrap\n",
+                payload_fd=payload_descriptor,
+                timeout_seconds=10,
+                cwd=str(tmp_path),
+                env=environment,
+            )
+        environment_validator.assert_called_once_with(environment)
+        assert supervisor_evidence == {
+            "finalizer_count": 0,
+            "payload_count": 1,
+        }
+        assert completed.returncode == 0, completed.stderr
+        observed = json.loads(completed.stdout)
+        assert observed == {
+            "action": runner.ACTION_APPROVED_WRITE,
+            "guard_digest": module_guard["module_graph"]["digest"],
+            "payload_fd_identity": [
+                payload_metadata.st_dev,
+                payload_metadata.st_ino,
+            ],
+            "runtime_schema": WRITE_RUNTIME_SCHEMA_VERSION,
+            "self_finalizer_count": 0,
+            "self_payload_count": 1,
+        }
+        assert os.fstat(finalizer_descriptor) == finalizer_metadata
+    finally:
+        finalizer_client.close()
+        finalizer_peer.close()
 
 
 def test_precheck_preserves_all_parameters_and_only_transports_write_auth(
@@ -550,7 +756,7 @@ def _identity() -> dict[str, object]:
         "database_name": "odoo_v3_sandbox",
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "write_execution_mode": "sandbox_staged",
-        "write_runtime_schema_version": 1,
+        "write_runtime_schema_version": WRITE_RUNTIME_SCHEMA_VERSION,
         "write_runtime_config_sha256": "f" * 64,
     }
 

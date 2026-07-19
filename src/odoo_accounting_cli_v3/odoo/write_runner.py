@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ..auth import authentication_request_digest, verify_request_context
+from ..effect_finalizer_runtime import EffectFinalizerClientRuntime
 from ..operations import canonical_json
 from ..registry import Capability, registry_digest
 from ..write_runtime import (
@@ -212,6 +213,8 @@ def _validate_parent_inputs(
         raise OdooRunnerError("validated write runtime secrets are required")
     if config.schema_version != WRITE_RUNTIME_SCHEMA_VERSION:
         raise OdooRunnerError("write runtime schema version is invalid")
+    if not isinstance(config.effect_finalizer, EffectFinalizerClientRuntime):
+        raise OdooRunnerError("effect finalizer runtime is invalid")
     if not isinstance(config.base_runtime, RuntimeConfig):
         raise OdooRunnerError("validated base runtime configuration is required")
     if (

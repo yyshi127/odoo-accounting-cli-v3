@@ -15,6 +15,10 @@ import click
 from . import __version__
 from .auth import authentication_request_digest
 from .contracts import ContractError, validate_value
+from .effect_finalizer import (
+    EffectFinalizationError,
+    validate_effect_finalization_evidence_shape,
+)
 from .odoo.runner import (
     OdooRunnerError,
     RuntimeConfig,
@@ -362,10 +366,35 @@ def _operation_id_from_request(action: str, payload: dict[str, Any]) -> str | No
 
 def _business_succeeded(data: dict[str, Any]) -> bool:
     verification = data.get("verification")
+    operation_id = data.get("operation_id")
+    if (
+        data.get("operation_state") not in {"completed", "recovered"}
+        or not isinstance(operation_id, str)
+        or not operation_id
+        or not isinstance(verification, dict)
+        or verification.get("passed") is not True
+    ):
+        return False
+    try:
+        finalization = validate_effect_finalization_evidence_shape(
+            data.get("database_finalization")
+        )
+    except EffectFinalizationError:
+        return False
+    audit_receipt = data.get("audit_receipt")
+    if (
+        not isinstance(audit_receipt, dict)
+        or finalization["database_uuid"] != audit_receipt.get("database_uuid")
+    ):
+        return False
+    if finalization["resolution_kind"] == "verified":
+        return (
+            finalization["operation_id"] == operation_id
+            and finalization["resolution_operation_id"] == operation_id
+        )
     return (
-        data.get("operation_state") in {"completed", "recovered"}
-        and isinstance(verification, dict)
-        and verification.get("passed") is True
+        finalization["operation_id"] != operation_id
+        and finalization["resolution_operation_id"] == operation_id
     )
 
 

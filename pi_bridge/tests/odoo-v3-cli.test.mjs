@@ -71,6 +71,28 @@ const evidence = {
     evidence_digest: "1".repeat(64),
     verified_at: "2026-07-15T08:01:00Z",
   },
+  database_finalization: {
+    attestation_digest: "a".repeat(64),
+    attestation_id: "22222222-2222-5222-8222-222222222222",
+    attestation_key_id: "effect-finalizer-v1",
+    database_oid: 16384,
+    database_uuid: request.context?.database_uuid ?? "11111111-1111-4111-8111-111111111111",
+    finalized_at: "2026-07-15T08:01:00Z",
+    finalized_txid: "9123",
+    guard_epoch: 0,
+    guard_installation_id: "33333333-3333-4333-8333-333333333333",
+    intent_digest: "b".repeat(64),
+    operation_id: request.operation_id ?? "op-1",
+    proof_expires_at: "2026-07-15T08:05:00Z",
+    proof_verified_at: "2026-07-15T08:00:00Z",
+    protocol_version: 1,
+    receipt_digest: "c".repeat(64),
+    remaining_unresolved_count: 0,
+    request_digest: "d".repeat(64),
+    resolution_kind: "verified",
+    resolution_operation_id: request.operation_id ?? "op-1",
+    resolved_anchor_count: 1,
+  },
   audit_receipt: {
     receipt_id: "receipt-1",
     request_id: "req-1",
@@ -155,6 +177,9 @@ if (command === "registry.list") {
 if (mutation === "__test_bad_signature") delete data.audit_receipt.signature;
 if (mutation === "__test_failed_verification") data.verification.passed = false;
 if (mutation === "__test_non_terminal") data.operation_state = "executing";
+if (mutation === "__test_missing_finalization") delete data.database_finalization;
+if (mutation === "__test_wrong_finalization_operation") data.database_finalization.operation_id = "op-other";
+if (mutation === "__test_invalid_remaining_count") data.database_finalization.remaining_unresolved_count = -1;
 const payload = { command, data, ok: true };
 if (["operation.approve_execute", "operation.result"].includes(command)) {
   payload.business_succeeded = true;
@@ -730,6 +755,9 @@ test("write success fails closed on unsigned, unverified, or non-terminal eviden
 		"__test_bad_signature",
 		"__test_failed_verification",
 		"__test_non_terminal",
+		"__test_missing_finalization",
+		"__test_wrong_finalization_operation",
+		"__test_invalid_remaining_count",
 	]) {
 		await t.test(mutation, async () => {
 			const run = createBoundRunner({

@@ -1,4 +1,4 @@
-"""Render the broker unit only from its externally anchored release tree."""
+"""Render a V3 service only from its externally anchored release tree."""
 
 from __future__ import annotations
 
@@ -14,13 +14,23 @@ from typing import Any
 
 _TOKEN = "@V3_RELEASE@"
 _SERVICE = Path("deployment/dev9/systemd/odoo-accounting-cli-v3-broker.service")
+_EFFECT_FINALIZER_SERVICE = Path(
+    "deployment/dev23/systemd/odoo-accounting-cli-v3-effect-finalizer.service"
+)
 _LAUNCHERS = (
     Path("bin/odoo-accounting-cli-v3"),
     Path("bin/odoo-accounting-cli-v3-broker"),
+    Path("bin/odoo-accounting-cli-v3-effect-finalizer"),
 )
 _BROKER_LAUNCHER = Path("bin/odoo-accounting-cli-v3-broker")
+_EFFECT_FINALIZER_LAUNCHER = Path(
+    "bin/odoo-accounting-cli-v3-effect-finalizer"
+)
 _PRODUCTION_RELEASES_ROOT = Path("/opt/odoo-accounting-cli-v3/releases")
 _BROKER_RUNTIME_CONFIG = "/etc/odoo-accounting-cli-v3/broker-runtime.json"
+_EFFECT_FINALIZER_RUNTIME_CONFIG = (
+    "/etc/odoo-accounting-cli-v3/effect-finalizer-runtime.json"
+)
 _RELEASE_NAME = re.compile(r"[0-9A-Za-z][0-9A-Za-z._-]{0,255}\Z")
 _ANCHOR_FIELDS = {"commit", "manifest_sha256", "package_sha256", "release"}
 
@@ -113,11 +123,14 @@ def render_service(
     *,
     script_root: Path,
     require_root_owner: bool = True,
+    component: str = "broker",
 ) -> str:
     if type(require_root_owner) is not bool:
         raise RenderError("root ownership policy is invalid")
     if not release_root.is_absolute() or not script_root.is_absolute():
         raise RenderError("release paths must be absolute")
+    if component not in {"broker", "effect-finalizer"}:
+        raise RenderError("service component is invalid")
     if release_root.parent != _PRODUCTION_RELEASES_ROOT:
         raise RenderError("release is outside the production releases root")
     if (
@@ -132,7 +145,9 @@ def render_service(
         / "trusted-artifacts"
         / f"{release_root.name}.json"
     )
-    template_path = release_root / _SERVICE
+    template_path = release_root / (
+        _SERVICE if component == "broker" else _EFFECT_FINALIZER_SERVICE
+    )
     if require_root_owner:
         _secure_root_path(release_root, regular_file=False)
         for trusted_file in (manifest_path, anchor_path, template_path):
@@ -182,10 +197,20 @@ def render_service(
     rendered = template.replace(_TOKEN, release_name)
     if _TOKEN in rendered or not rendered.endswith("\n"):
         raise RenderError("rendered service is invalid")
+    launcher = (
+        _BROKER_LAUNCHER
+        if component == "broker"
+        else _EFFECT_FINALIZER_LAUNCHER
+    )
+    runtime_config = (
+        _BROKER_RUNTIME_CONFIG
+        if component == "broker"
+        else _EFFECT_FINALIZER_RUNTIME_CONFIG
+    )
     expected_exec_start = (
         "ExecStart="
-        f"{(release_root / _BROKER_LAUNCHER).as_posix()} "
-        f"--config {_BROKER_RUNTIME_CONFIG}"
+        f"{(release_root / launcher).as_posix()} "
+        f"--config {runtime_config}"
     )
     exec_starts = [
         line for line in rendered.splitlines() if line.startswith("ExecStart=")
@@ -198,13 +223,24 @@ def render_service(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--release-root", required=True)
+    parser.add_argument(
+        "--component",
+        choices=("broker", "effect-finalizer"),
+        default="broker",
+    )
     arguments = parser.parse_args(argv)
     release_root = Path(arguments.release_root)
     script = Path(__file__)
     if script.is_symlink():
         raise RenderError("service renderer must not be a symlink")
     script_root = script.resolve(strict=True).parents[2]
-    sys.stdout.write(render_service(release_root, script_root=script_root))
+    sys.stdout.write(
+        render_service(
+            release_root,
+            script_root=script_root,
+            component=arguments.component,
+        )
+    )
     return 0
 
 
@@ -212,5 +248,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except RenderError:
-        print("trusted broker service rendering failed", file=sys.stderr)
+        print("trusted V3 service rendering failed", file=sys.stderr)
         raise SystemExit(1)

@@ -53,6 +53,37 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const CAPABILITY_ID = /^acct\.[a-z0-9_]+\.[a-z0-9_]+\.v[1-9][0-9]*$/;
 const UTC_TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$/;
 const DATABASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
+
+const DATABASE_FINALIZATION_KEYS = Object.freeze([
+	"attestation_digest",
+	"attestation_id",
+	"attestation_key_id",
+	"database_oid",
+	"database_uuid",
+	"finalized_at",
+	"finalized_txid",
+	"guard_epoch",
+	"guard_installation_id",
+	"intent_digest",
+	"operation_id",
+	"proof_expires_at",
+	"proof_verified_at",
+	"protocol_version",
+	"receipt_digest",
+	"remaining_unresolved_count",
+	"request_digest",
+	"resolution_kind",
+	"resolution_operation_id",
+	"resolved_anchor_count",
+].sort());
+
+const DATABASE_FINALIZATION_DIGEST_KEYS = Object.freeze([
+	"attestation_digest",
+	"intent_digest",
+	"receipt_digest",
+	"request_digest",
+]);
 
 const WRITE_RECEIPT_KEYS = Object.freeze([
 	"approval_digest",
@@ -218,6 +249,60 @@ function validWriteAuditReceipt(
 		&& nonEmptyString(receipt.signing_key_id);
 }
 
+function validDatabaseFinalization(value, data, receipt) {
+	if (!exactKeys(value, DATABASE_FINALIZATION_KEYS)
+		|| value.protocol_version !== 1
+		|| !DATABASE_FINALIZATION_DIGEST_KEYS.every(
+			(key) => typeof value[key] === "string" && SHA256.test(value[key]),
+		)
+		|| typeof value.attestation_id !== "string"
+		|| !DATABASE_UUID.test(value.attestation_id)
+		|| typeof value.guard_installation_id !== "string"
+		|| !DATABASE_UUID.test(value.guard_installation_id)
+		|| !nonEmptyString(value.attestation_key_id)
+		|| !positiveIntegerValue(value.database_oid)
+		|| typeof value.database_uuid !== "string"
+		|| !DATABASE_UUID.test(value.database_uuid)
+		|| value.database_uuid !== receipt?.database_uuid
+		|| !nonEmptyString(value.operation_id)
+		|| !nonEmptyString(value.resolution_operation_id)
+		|| !["verified", "recovered"].includes(value.resolution_kind)
+		|| !Number.isSafeInteger(value.resolved_anchor_count)
+		|| !Number.isSafeInteger(value.remaining_unresolved_count)
+		|| value.remaining_unresolved_count < 0
+		|| !Number.isSafeInteger(value.guard_epoch)
+		|| value.guard_epoch < 0
+		|| typeof value.finalized_txid !== "string"
+		|| !POSITIVE_DECIMAL.test(value.finalized_txid)) {
+		return false;
+	}
+	for (const key of ["proof_verified_at", "proof_expires_at", "finalized_at"]) {
+		if (typeof value[key] !== "string" || !UTC_TIMESTAMP.test(value[key])) {
+			return false;
+		}
+	}
+	const verifiedAt = Date.parse(value.proof_verified_at);
+	const expiresAt = Date.parse(value.proof_expires_at);
+	const finalizedAt = Date.parse(value.finalized_at);
+	if (!Number.isFinite(verifiedAt)
+		|| !Number.isFinite(expiresAt)
+		|| !Number.isFinite(finalizedAt)
+		|| expiresAt <= verifiedAt
+		|| expiresAt - verifiedAt > 300000
+		|| finalizedAt < verifiedAt - 60000
+		|| finalizedAt > expiresAt) {
+		return false;
+	}
+	if (value.resolution_kind === "verified") {
+		return value.operation_id === data.operation_id
+			&& value.resolution_operation_id === data.operation_id
+			&& value.resolved_anchor_count === 1;
+	}
+	return value.operation_id !== value.resolution_operation_id
+		&& value.resolution_operation_id === data.operation_id
+		&& value.resolved_anchor_count === 2;
+}
+
 function validVerifiedWriteSuccess(
 	payload,
 	request,
@@ -241,6 +326,11 @@ function validVerifiedWriteSuccess(
 		&& SHA256.test(verification.evidence_digest)
 		&& typeof verification.verified_at === "string"
 		&& UTC_TIMESTAMP.test(verification.verified_at)
+		&& validDatabaseFinalization(
+			data.database_finalization,
+			data,
+			data.audit_receipt,
+		)
 		&& validWriteAuditReceipt(
 			data.audit_receipt,
 			verification,

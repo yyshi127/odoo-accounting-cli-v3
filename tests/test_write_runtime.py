@@ -97,10 +97,30 @@ def _make_runtime(tmp_path: Path) -> tuple[Path, dict[str, object], dict[str, ob
     role_documents["recovery"]["issuer"] = "odoo-write-recovery"
 
     write_document: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "write_execution_mode": "sandbox_staged",
         "base_runtime_config_path": str(base_config_path),
         "write_state_path": str(state_dir / "write.sqlite3"),
+        "effect_finalizer": {
+            "socket_path": "/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+            "socket_owner_uid": 0,
+            "socket_group_gid": 991,
+            "socket_mode": 0o660,
+            "finalizer_service_uid": 992,
+            "finalizer_service_gid": 992,
+            "finalizer_systemd_unit": (
+                "odoo-accounting-cli-v3-effect-finalizer.service"
+            ),
+            "attestation_key_id": "effect-finalizer-v1",
+            "guard_installation_id": (
+                "22222222-2222-4222-8222-222222222222"
+            ),
+            "database_oid": 16384,
+            "handoff_idle_timeout_seconds": 100.0,
+            "request_io_timeout_seconds": 5.0,
+            "max_request_bytes": 16_384,
+            "max_response_bytes": 16_384,
+        },
         **role_documents,
     }
     write_config_path = tmp_path / "write-runtime.json"
@@ -119,7 +139,7 @@ def test_valid_runtime_is_exact_fixed_and_does_not_leak_secrets(tmp_path: Path) 
     secrets = load_write_runtime_secrets(runtime)
 
     assert WRITE_CONFIG_FIELDS == frozenset(document)
-    assert runtime.schema_version == 1
+    assert runtime.schema_version == 2
     assert runtime.write_execution_mode == "sandbox_staged"
     assert runtime.base_runtime_config_path == Path(document["base_runtime_config_path"])
     assert runtime.write_state_path == Path(document["write_state_path"])
@@ -136,6 +156,10 @@ def test_valid_runtime_is_exact_fixed_and_does_not_leak_secrets(tmp_path: Path) 
     assert runtime.write_auth.issuer is None
     assert runtime.approval.issuer is None
     assert runtime.write_receipt.issuer is None
+    assert runtime.effect_finalizer.finalization_identity.guard_installation_id == (
+        "22222222-2222-4222-8222-222222222222"
+    )
+    assert runtime.effect_finalizer.finalization_identity.database_oid == 16384
     assert secrets.write_auth == Path(
         document["write_auth"]["secret_path"]  # type: ignore[index]
     ).read_bytes()
@@ -180,8 +204,8 @@ def test_extra_and_duplicate_json_keys_are_rejected(tmp_path: Path) -> None:
     raw = json.dumps(document, sort_keys=True)
     path.write_text(
         raw.replace(
-            '"schema_version": 1',
-            '"schema_version": 1, "schema_version": 1',
+            '"schema_version": 2',
+            '"schema_version": 2, "schema_version": 2',
             1,
         ),
         encoding="utf-8",
@@ -189,6 +213,57 @@ def test_extra_and_duplicate_json_keys_are_rejected(tmp_path: Path) -> None:
     if os.name == "posix":
         path.chmod(0o640)
     with pytest.raises(WriteRuntimeError, match="duplicate JSON key"):
+        load_write_runtime_config(path, require_root_owner=False)
+
+
+def test_effect_finalizer_client_configuration_is_exact_and_identity_pinned(
+    tmp_path: Path,
+) -> None:
+    path, document, _ = _make_runtime(tmp_path)
+    finalizer = document["effect_finalizer"]
+    assert isinstance(finalizer, dict)
+    finalizer.pop("database_oid")
+    _reload(path, document)
+    with pytest.raises(WriteRuntimeError, match="finalizer configuration fields"):
+        load_write_runtime_config(path, require_root_owner=False)
+
+    path, document, _ = _make_runtime(tmp_path / "extra")
+    finalizer = document["effect_finalizer"]
+    assert isinstance(finalizer, dict)
+    finalizer["secret_path"] = "/forbidden/finalizer.hmac"
+    _reload(path, document)
+    with pytest.raises(WriteRuntimeError, match="finalizer configuration fields"):
+        load_write_runtime_config(path, require_root_owner=False)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("guard_installation_id", "not-a-uuid"),
+        ("database_oid", True),
+        ("database_oid", 0),
+        ("finalizer_service_uid", 0),
+        ("finalizer_service_gid", 0),
+        ("socket_mode", 0o666),
+        ("finalizer_systemd_unit", "not-a-service"),
+        ("handoff_idle_timeout_seconds", 89.0),
+        ("request_io_timeout_seconds", float("nan")),
+        ("max_response_bytes", True),
+    ),
+)
+def test_effect_finalizer_client_configuration_rejects_unsafe_values(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    path, document, _ = _make_runtime(tmp_path)
+    finalizer = document["effect_finalizer"]
+    assert isinstance(finalizer, dict)
+    finalizer[field] = value
+    _reload(path, document)
+
+    with pytest.raises(
+        WriteRuntimeError,
+        match="effect finalizer configuration|non-finite JSON",
+    ):
         load_write_runtime_config(path, require_root_owner=False)
 
 

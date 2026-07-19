@@ -12,6 +12,12 @@ from odoo_accounting_cli_v3.auth import (
     context_payload,
     write_action_request_digest,
 )
+from odoo_accounting_cli_v3.effect_finalizer import (
+    EffectFinalizationIntent,
+    EffectFinalizationReceipt,
+    EffectFinalizationRequest,
+    create_effect_attestation,
+)
 from odoo_accounting_cli_v3.gateway import (
     AUTH_SIGNATURE_PURPOSE,
     AUTH_SIGNATURE_VERSION,
@@ -54,6 +60,7 @@ READ_SECRET = b"read-receipt-verifier-secret-32-bytes"
 WRITE_SECRET = b"write-receipt-verifier-secret-32-bytes"
 APPROVAL_SECRET = b"approval-verifier-secret-material-32"
 DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
+EFFECT_SECRET = b"effect-finalizer-verifier-secret-32-bytes"
 
 
 def config(
@@ -338,8 +345,56 @@ def result_body(operation: Operation) -> dict:
             "evidence_digest": "7" * 64,
             "verified_at": "2026-07-15T04:00:00Z",
         },
+        "database_finalization": database_finalization(operation),
         "recovery_plan": plan,
     }
+
+
+def database_finalization(operation: Operation) -> dict:
+    intent = EffectFinalizationIntent(
+        database_name=operation.database_name,
+        database_uuid=operation.database_uuid,
+        operation_id=operation.operation_id,
+        operation_digest=operation.digest,
+        execution_result_digest="5" * 64,
+        resolution_operation_id=operation.operation_id,
+        resolution_operation_digest=operation.digest,
+        resolution_execution_result_digest="5" * 64,
+        resolution_result_digest="7" * 64,
+        resolution_kind="verified",
+    )
+    request = EffectFinalizationRequest.from_intent(
+        intent,
+        verified_at=NOW - timedelta(seconds=2),
+        expires_at=NOW + timedelta(minutes=3),
+    )
+    attestation = create_effect_attestation(
+        request,
+        key_id="effect-finalizer-v1",
+        secret=EFFECT_SECRET,
+    )
+    return EffectFinalizationReceipt.from_database_mapping(
+        {
+            "receipt_attestation_id": attestation.attestation_id,
+            "receipt_guard_installation_id": (
+                "22222222-2222-4222-8222-222222222222"
+            ),
+            "receipt_database_oid": 16384,
+            "receipt_database_uuid": operation.database_uuid,
+            "resolved_operation_id": operation.operation_id,
+            "receipt_resolution_operation_id": operation.operation_id,
+            "applied_resolution_kind": "verified",
+            "resolved_anchor_count": 1,
+            "remaining_unresolved_count": 0,
+            "guard_epoch": 0,
+            "receipt_attestation_digest": attestation.attestation_digest,
+            "finalized_at": "2026-07-15T04:00:00Z",
+            "finalized_txid": "9123",
+            "replayed": False,
+        },
+        request=request,
+        attestation=attestation,
+    ).evidence
 
 
 def terminal_exchange(

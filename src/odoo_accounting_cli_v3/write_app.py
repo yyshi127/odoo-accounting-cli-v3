@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import stat
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,13 @@ from .auth import (
     context_payload,
     sign_request_context,
     verify_write_action_context,
+)
+from .effect_finalizer import EffectFinalizationError
+from .effect_finalizer_runtime import EffectFinalizerClientRuntime
+from .effect_finalizer_uds import (
+    EffectFinalizerConnectedClient,
+    EffectFinalizerUdsError,
+    SystemdMainProcessPeerPolicy,
 )
 from .gateway import RequestContext
 from .operations import Operation, State, canonical_json
@@ -66,12 +75,19 @@ _EXPECTED_RELEASE_DIGEST_ENV = (
 _EXPECTED_REGISTRY_DIGEST_ENV = (
     "ODOO_ACCOUNTING_CLI_V3_EXPECTED_REGISTRY_DIGEST"
 )
+_EFFECT_FINALIZER_FD_ENV = (
+    "ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD"
+)
+_TRUSTED_DEADLINE_MONOTONIC_ENV = (
+    "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC"
+)
 _TRUSTED_RUNTIME_ENVIRONMENT = (
     _TRUSTED_RUNTIME_CONFIG_ENV,
     _TRUSTED_RUNTIME_CONFIG_SHA256_ENV,
     _TRUSTED_RUNTIME_CONFIG_FD_ENV,
     _EXPECTED_RELEASE_DIGEST_ENV,
     _EXPECTED_REGISTRY_DIGEST_ENV,
+    _TRUSTED_DEADLINE_MONOTONIC_ENV,
 )
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_TRUSTED_RUNTIME_CONFIG_BYTES = 65_536
@@ -80,6 +96,11 @@ _MAX_TRUSTED_RUNTIME_CONFIG_BYTES = 65_536
 # serialization so an ordinary write cannot systematically finish after its
 # caller has already reported an unknown outcome.
 ODOO_WRITE_TIMEOUT_SECONDS = 90.0
+# A successful approved write still has to cross the independent PostgreSQL
+# finalizer, commit the local terminal receipt, and return through the
+# historical router.  Never lend this tail budget to an Odoo subprocess.
+POST_ODOO_LOCAL_MARGIN_SECONDS = 5.0
+MIN_ODOO_CALL_TIMEOUT_SECONDS = 0.05
 _MUTATING_ACTIONS = frozenset(
     {
         "operation.prepare",
@@ -123,6 +144,77 @@ def _trusted_runtime_error() -> WriteApplicationError:
         odoo_effect="none",
         exit_code=5,
     )
+
+
+def _trusted_deadline_error() -> WriteApplicationError:
+    return WriteApplicationError(
+        code="trusted_deadline_exhausted",
+        message="The trusted write request has no safe Odoo execution budget remaining.",
+        odoo_effect="none",
+        retryable=True,
+    )
+
+
+def _effect_finalizer_handoff_error() -> WriteApplicationError:
+    return WriteApplicationError(
+        code="effect_finalizer_handoff_rejected",
+        message="The independent database finalizer handoff is invalid.",
+        odoo_effect="none",
+        exit_code=5,
+    )
+
+
+def _unavailable_effect_finalizer(_intent: Any) -> Any:
+    raise EffectFinalizationError(
+        "this write action has no independent finalizer channel"
+    )
+
+
+def _load_effect_finalizer_handoff(
+    action: str,
+    config: WriteRuntimeConfig,
+    *,
+    trusted_runtime_handoff: bool,
+) -> tuple[Any, Any, EffectFinalizerConnectedClient | None]:
+    runtime = getattr(config, "effect_finalizer", None)
+    descriptor_value = os.environ.get(_EFFECT_FINALIZER_FD_ENV)
+    if not isinstance(runtime, EffectFinalizerClientRuntime):
+        raise _effect_finalizer_handoff_error()
+    if action != "operation.approve_execute":
+        if descriptor_value is not None:
+            raise _effect_finalizer_handoff_error()
+        return (
+            _unavailable_effect_finalizer,
+            runtime.finalization_identity,
+            None,
+        )
+    if (
+        not trusted_runtime_handoff
+        or not isinstance(descriptor_value, str)
+        or not descriptor_value.isascii()
+        or not descriptor_value.isdecimal()
+        or descriptor_value.startswith("0")
+    ):
+        raise _effect_finalizer_handoff_error()
+    descriptor = int(descriptor_value)
+    if descriptor < 3 or descriptor > 1_048_576:
+        raise _effect_finalizer_handoff_error()
+    try:
+        client = EffectFinalizerConnectedClient.from_inherited_fd(
+            descriptor,
+            expected_identity=runtime.finalization_identity,
+            response_sender_policy=SystemdMainProcessPeerPolicy(
+                expected_uid=runtime.finalizer_service_uid,
+                expected_gid=runtime.finalizer_service_gid,
+                systemd_unit=runtime.finalizer_systemd_unit,
+            ),
+            request_io_timeout_seconds=runtime.request_io_timeout_seconds,
+            max_request_bytes=runtime.max_request_bytes,
+            max_response_bytes=runtime.max_response_bytes,
+        )
+    except (EffectFinalizerUdsError, OSError, ValueError) as exc:
+        raise _effect_finalizer_handoff_error() from exc
+    return client.finalize, runtime.finalization_identity, client
 
 
 def _same_path(first: Path, second: Path) -> bool:
@@ -221,11 +313,18 @@ def _read_inherited_runtime_config(
 
 
 def _select_write_runtime_config(
-) -> tuple[Path, str | None, str | None, int | None, str | None]:
+) -> tuple[
+    Path,
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    float | None,
+]:
     values = {name: os.environ.get(name) for name in _TRUSTED_RUNTIME_ENVIRONMENT}
     present = {name for name, value in values.items() if value is not None}
     if not present:
-        return WRITE_RUNTIME_CONFIG_PATH, None, None, None, None
+        return WRITE_RUNTIME_CONFIG_PATH, None, None, None, None, None
     if present != set(_TRUSTED_RUNTIME_ENVIRONMENT):
         raise _trusted_runtime_error()
 
@@ -234,6 +333,7 @@ def _select_write_runtime_config(
     descriptor_value = values[_TRUSTED_RUNTIME_CONFIG_FD_ENV]
     release_digest = values[_EXPECTED_RELEASE_DIGEST_ENV]
     registry_digest_value = values[_EXPECTED_REGISTRY_DIGEST_ENV]
+    deadline_value = values[_TRUSTED_DEADLINE_MONOTONIC_ENV]
     if (
         not isinstance(path_value, str)
         or not path_value
@@ -249,6 +349,20 @@ def _select_write_runtime_config(
         or not descriptor_value.isascii()
         or not descriptor_value.isdecimal()
         or descriptor_value.startswith("0")
+        or not isinstance(deadline_value, str)
+        or not deadline_value
+        or not deadline_value.isascii()
+        or deadline_value != deadline_value.strip()
+        or len(deadline_value) > 64
+    ):
+        raise _trusted_runtime_error()
+    try:
+        deadline_monotonic = float(deadline_value)
+    except ValueError as exc:
+        raise _trusted_runtime_error() from exc
+    if (
+        not math.isfinite(deadline_monotonic)
+        or deadline_monotonic <= time.monotonic()
     ):
         raise _trusted_runtime_error()
     path = Path(path_value)
@@ -264,7 +378,28 @@ def _select_write_runtime_config(
         registry_digest_value,
         descriptor,
         config_digest,
+        deadline_monotonic,
     )
+
+
+def _odoo_call_timeout(
+    config: WriteRuntimeConfig,
+    trusted_deadline_monotonic: float | None,
+) -> float:
+    if trusted_deadline_monotonic is None:
+        return ODOO_WRITE_TIMEOUT_SECONDS
+    runtime = getattr(config, "effect_finalizer", None)
+    if not isinstance(runtime, EffectFinalizerClientRuntime):
+        raise _effect_finalizer_handoff_error()
+    remaining = (
+        trusted_deadline_monotonic
+        - time.monotonic()
+        - runtime.request_io_timeout_seconds
+        - POST_ODOO_LOCAL_MARGIN_SECONDS
+    )
+    if remaining <= MIN_ODOO_CALL_TIMEOUT_SECONDS:
+        raise _trusted_deadline_error()
+    return min(ODOO_WRITE_TIMEOUT_SECONDS, remaining)
 
 
 def _utcnow() -> datetime:
@@ -486,6 +621,7 @@ def execute_write_action(
     operation_id = _operation_id(parsed)
     store: SQLitePersistence | None = None
     odoo_write_attempted = False
+    finalizer_client: EffectFinalizerConnectedClient | None = None
 
     try:
         (
@@ -494,6 +630,7 @@ def execute_write_action(
             expected_registry_digest,
             trusted_runtime_descriptor,
             trusted_runtime_digest,
+            trusted_deadline_monotonic,
         ) = _select_write_runtime_config()
         config = load_write_runtime_config(runtime_config_path)
         if (
@@ -535,6 +672,15 @@ def execute_write_action(
                 exit_code=5,
             )
         _assert_external_runtime(parsed.context, config)
+        (
+            effect_finalizer,
+            effect_finalizer_identity,
+            finalizer_client,
+        ) = _load_effect_finalizer_handoff(
+            action,
+            config,
+            trusted_runtime_handoff=trusted_runtime_descriptor is not None,
+        )
 
         def authenticate(context: RequestContext) -> bool:
             try:
@@ -608,7 +754,9 @@ def execute_write_action(
                             "parameters": parameters,
                         },
                         release_digest=release_digest,
-                        timeout_seconds=ODOO_WRITE_TIMEOUT_SECONDS,
+                        timeout_seconds=_odoo_call_timeout(
+                            config, trusted_deadline_monotonic
+                        ),
                     )
                 except Exception as exc:
                     raise WriteApplicationError(
@@ -659,7 +807,9 @@ def execute_write_action(
                             "parameters": parameters,
                         },
                         release_digest=release_digest,
-                        timeout_seconds=ODOO_WRITE_TIMEOUT_SECONDS,
+                        timeout_seconds=_odoo_call_timeout(
+                            config, trusted_deadline_monotonic
+                        ),
                     )
                 except Exception as exc:
                     raise WriteApplicationError(
@@ -709,7 +859,9 @@ def execute_write_action(
                         "trusted_recovery_plan": trusted_plan,
                     },
                     release_digest=expected_release_digest,
-                    timeout_seconds=ODOO_WRITE_TIMEOUT_SECONDS,
+                    timeout_seconds=_odoo_call_timeout(
+                        config, trusted_deadline_monotonic
+                    ),
                 )
             except Exception as exc:
                 raise WriteApplicationError(
@@ -766,6 +918,9 @@ def execute_write_action(
                 config=config,
                 secrets=secrets,
             )
+            timeout_seconds = _odoo_call_timeout(
+                config, trusted_deadline_monotonic
+            )
             odoo_write_attempted = True
             try:
                 response = run_odoo_approved_write(
@@ -779,7 +934,7 @@ def execute_write_action(
                         "reconciliation_only": reconciliation_only,
                     },
                     release_digest=expected_release_digest,
-                    timeout_seconds=ODOO_WRITE_TIMEOUT_SECONDS,
+                    timeout_seconds=timeout_seconds,
                 )
             except Exception as exc:
                 raise WriteApplicationError(
@@ -850,6 +1005,8 @@ def execute_write_action(
             verification_executor=unavailable_backend,
             availability_channel=availability_channel,
             now=_utcnow,
+            effect_finalizer=effect_finalizer,
+            effect_finalizer_identity=effect_finalizer_identity,
             execute_and_verify=combined_write,
         )
         service_holder.append(service)
@@ -942,6 +1099,12 @@ def execute_write_action(
             state=_safe_state(store, operation_id),
             retryable=odoo_write_attempted,
         ) from exc
+    finally:
+        if finalizer_client is not None:
+            try:
+                finalizer_client.close()
+            except Exception:
+                pass
 
 
 __all__ = [
