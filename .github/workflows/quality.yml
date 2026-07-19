@@ -559,6 +559,56 @@ jobs:
               ),
               "probe_stdout_bytes": len(probe.stdout),
           }
+          if probe.returncode == 0 and not probe.stderr and probe.stdout:
+              payload = json.loads(probe.stdout.decode("utf-8"))
+              path_failures = []
+
+              def check_path(label, value, checker):
+                  try:
+                      checker(value, require_root_owner=True)
+                  except BaseException as error:
+                      path_failures.append(
+                          {
+                              "label": label,
+                              "path": value,
+                              "type": type(error).__name__,
+                              "message": str(error)[:1024],
+                          }
+                      )
+
+              check_path(
+                  "interpreter", payload["executable"], gate_module._file_record
+              )
+              check_path(
+                  "source_root", source_root, gate_module._directory_record
+              )
+              check_path(
+                  "finalizer_module_file",
+                  payload["finalizer_module_file"],
+                  gate_module._file_record,
+              )
+              for field in (
+                  "python_module_files",
+                  "psycopg2_files",
+                  "sys_path_files",
+                  "pth_files",
+                  "mapped_files",
+              ):
+                  for value in payload[field]:
+                      check_path(field, value, gate_module._file_record)
+              for value in payload["sys_path_directories"]:
+                  check_path(
+                      "sys_path_directories",
+                      value,
+                      gate_module._directory_record,
+                  )
+              for value in payload["sys_path_missing"]:
+                  check_path(
+                      "sys_path_missing",
+                      value,
+                      gate_module._missing_path_record,
+                  )
+              diagnostic["path_failures"] = path_failures[:32]
           try:
               gate_module.collect_manifest("/usr/bin/python3")
           except BaseException as error:
