@@ -1877,9 +1877,46 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
     )
     key_a, key_b = ADVISORY_KEY_PARTS
     with postgres.session(database) as holder:
-        opened = holder.execute(
+        lock_setup = holder.execute(
             f"SET SESSION AUTHORIZATION {maintenance_role};"
             f"SELECT pg_catalog.pg_advisory_lock({key_a},{key_b});"
+            "SELECT pg_catalog.pg_backend_pid()::text;"
+        )
+        holder_pid = int(lock_setup[-1])
+        holder_snapshot = json.loads(
+            postgres.scalar(
+                f"SET SESSION AUTHORIZATION {GUARD_OWNER};"
+                "SELECT pg_catalog.json_build_object("
+                "'activity',(SELECT pg_catalog.json_build_object("
+                "'pid',activity.pid,'usename',activity.usename,"
+                "'backend_start',activity.backend_start::text) "
+                "FROM pg_catalog.pg_stat_activity activity "
+                f"WHERE activity.pid={holder_pid}),"
+                "'locks',(SELECT pg_catalog.json_agg(lock_row) FROM (SELECT "
+                "lock.database::bigint,lock.classid::bigint,lock.objid::bigint,"
+                "lock.objsubid,lock.mode,lock.granted,lock.pid "
+                "FROM pg_catalog.pg_locks lock WHERE lock.locktype='advisory' "
+                f"AND lock.pid={holder_pid}) lock_row))::text",
+                database=database,
+            )
+        )
+        assert holder_snapshot["activity"] == {
+            "pid": holder_pid,
+            "usename": maintenance_role,
+            "backend_start": holder_snapshot["activity"]["backend_start"],
+        }
+        assert holder_snapshot["activity"]["backend_start"] is not None
+        expected_lock = {
+            "database": state["database_oid"],
+            "classid": key_a,
+            "objid": key_b,
+            "objsubid": 2,
+            "mode": "ExclusiveLock",
+            "granted": True,
+            "pid": holder_pid,
+        }
+        assert expected_lock in (holder_snapshot["locks"] or []), holder_snapshot
+        opened = holder.execute(
             "BEGIN; SELECT odoo_accounting_cli_v3_guard.open_module_guard("
             f"0,'{authorization_id}'::uuid)::text; COMMIT;"
             "SET ROLE " + runtime_role + ";"
