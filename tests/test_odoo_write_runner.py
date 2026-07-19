@@ -354,7 +354,7 @@ def test_real_odoo_child_receives_guard_payload_but_not_finalizer_socket(
         )
         with runner._private_payload_fd(payload) as payload_descriptor:
             payload_metadata = os.fstat(payload_descriptor)
-            real_popen = runner.subprocess.Popen
+            real_popen = base_runner.subprocess.Popen
             supervisor_evidence: dict[str, int] = {}
 
             def observed_supervisor_spawn(*args, **kwargs):
@@ -386,7 +386,7 @@ def test_real_odoo_child_receives_guard_payload_but_not_finalizer_socket(
                 return process
 
             monkeypatch.setattr(
-                runner.subprocess, "Popen", observed_supervisor_spawn
+                base_runner.subprocess, "Popen", observed_supervisor_spawn
             )
             completed = runner._run_child_process(
                 [
