@@ -1748,7 +1748,19 @@ def test_privileged_v2_contract_finalizer_maintenance_and_crash_rescue(
     start.wait(timeout=5)
     for thread in threads:
         thread.join(timeout=10)
-    assert not failures
+    if failures:
+        details = []
+        for failure in failures:
+            if isinstance(failure, subprocess.CalledProcessError):
+                details.append(
+                    f"{failure}\nstdout:\n{failure.stdout}\n"
+                    f"stderr:\n{failure.stderr}"
+                )
+            else:
+                details.append(repr(failure))
+        pytest.fail(
+            "concurrent finalization failed:\n" + "\n---\n".join(details)
+        )
     assert len(results) == 2
     assert {result.pop("replayed") for result in results} == {False, True}
     assert results[0] == results[1]
