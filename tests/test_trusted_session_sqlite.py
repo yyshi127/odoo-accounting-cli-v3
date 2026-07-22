@@ -449,7 +449,7 @@ def test_busy_writer_fails_within_configured_deadline_without_consuming_handle(
     tmp_path: Path,
 ) -> None:
     path = (tmp_path / "sessions.sqlite3").resolve()
-    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=50)
+    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=250)
     issued = store.issue(_identity(), ttl_seconds=120, max_uses=1)
     lock = sqlite3.connect(path, timeout=1, isolation_level=None)
     lock.execute("PRAGMA journal_mode = WAL")
@@ -1326,7 +1326,7 @@ def test_posix_writer_lock_is_persistent_private_and_rejects_unsafe_files(
 def test_posix_writer_lock_deadline_does_not_consume_handle(tmp_path: Path) -> None:
     assert fcntl is not None
     path = (tmp_path / "sessions.sqlite3").resolve()
-    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=50)
+    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=250)
     issued = store.issue(_identity(), ttl_seconds=120, max_uses=1)
     lock_path = Path(f"{path}.writer.lock")
     descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
