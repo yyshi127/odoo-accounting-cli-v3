@@ -41,7 +41,10 @@ def test_target_program_contract_uses_direct_postgresql_16_psql() -> None:
     assert closure.PSQL == Path("/usr/lib/postgresql/16/bin/psql")
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are required")
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="production program ownership checks require POSIX root",
+)
 def test_verified_program_accepts_only_the_explicit_mode(tmp_path: Path) -> None:
     program = tmp_path / "program"
     write(program, b"#!/bin/sh\n", 0o4755)
