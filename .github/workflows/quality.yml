@@ -1163,6 +1163,9 @@ jobs:
           install -m 0755 \
             "$ldconfig_source" \
             "$RUNNER_TEMP/ldconfig.real"
+          sudo chown root:root /opt
+          sudo chmod 0755 /opt
+          test "$(stat -c '%U:%G:%a' /opt)" = root:root:755
           sudo install -d -m 0755 -o root -g root \
             /opt/odoo-accounting-cli-v3/releases \
             /opt/odoo-accounting-cli-v3/runtime-open-manifests
