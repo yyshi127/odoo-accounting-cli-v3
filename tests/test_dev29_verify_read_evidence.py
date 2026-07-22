@@ -1387,6 +1387,31 @@ def test_loader_cache_rejects_wrong_hash_and_path_replacement(
     assert observed["process"].returncode is not None
 
 
+def test_loader_executed_bytes_are_bound_by_proc_exe_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"verified loader bytes\n"
+    executable = tmp_path / "ldconfig.real"
+    executable.write_bytes(payload)
+    digest = hashlib.sha256(payload).hexdigest()
+    real_open = os.open
+
+    def open_proc_exe(path, flags, *args, **kwargs):
+        if str(path) == "/proc/321/exe":
+            return real_open(executable, flags, *args, **kwargs)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(verifier.os, "open", open_proc_exe)
+    verifier._verify_executed_loader_bytes(321, digest)
+
+    executable.write_bytes(b"different executed bytes\n")
+    with pytest.raises(
+        verifier.EvidenceVerificationError,
+        match="executed unpinned bytes",
+    ):
+        verifier._verify_executed_loader_bytes(321, digest)
+
+
 @pytest.mark.skipif(
     sys.platform != "linux"
     or not hasattr(os, "geteuid")

@@ -2316,6 +2316,42 @@ def _hash_loader_descriptor(
         raise EvidenceVerificationError("fixed loader-cache reader cannot be hashed") from exc
 
 
+def _verify_executed_loader_bytes(pid: int, expected_sha256: str) -> None:
+    # /proc/<pid>/exe is a kernel magic link, so O_NOFOLLOW cannot be used here.
+    # The child is ptrace-stopped before its first instruction; hashing this fd
+    # proves the actual executable bytes even when overlayfs reports a different
+    # device/inode than the path fd opened by the parent.
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(f"/proc/{pid}/exe", flags)
+    except OSError as exc:
+        raise EvidenceVerificationError(
+            "fixed loader-cache executed bytes cannot be opened"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_size <= 0
+            or metadata.st_size > MAX_JSON_BYTES
+        ):
+            raise EvidenceVerificationError(
+                "fixed loader-cache reader executed unpinned bytes"
+            )
+        try:
+            _hash_loader_descriptor(
+                descriptor,
+                identity=_loader_stat_identity(metadata),
+                expected_sha256=expected_sha256,
+            )
+        except EvidenceVerificationError as exc:
+            raise EvidenceVerificationError(
+                "fixed loader-cache reader executed unpinned bytes"
+            ) from exc
+    finally:
+        os.close(descriptor)
+
+
 def _independent_loader_cache(
     expected_ldconfig_sha256: str,
 ) -> dict[str, list[Path]]:
@@ -2373,9 +2409,7 @@ def _independent_loader_cache(
                 traced = False
             raise EvidenceVerificationError("fixed loader-cache reader exec trace is invalid")
         _ptrace_set_exitkill(process.pid)
-        executed = Path(f"/proc/{process.pid}/exe").stat()
-        if (executed.st_dev, executed.st_ino) != identity[:2]:
-            raise EvidenceVerificationError("fixed loader-cache reader executed unpinned bytes")
+        _verify_executed_loader_bytes(process.pid, expected_ldconfig_sha256)
         traced = False
         try:
             _ptrace_detach(process.pid)
