@@ -50,6 +50,9 @@ Database graph discovery invokes the audited PostgreSQL 16 client directly at
 `/usr/lib/postgresql/16/bin/psql`; the distribution-managed `/usr/bin/psql`
 wrapper symlink is not part of this trust boundary. The direct client and
 `/usr/sbin/runuser` must be root-owned, mode `0755`, single-link regular files.
+Module names and dependency pairs are aggregated using PostgreSQL's explicit
+`C` collation so their order matches the bytewise canonical manifest order and
+does not depend on the database locale.
 The target host's `/usr/bin/mount` and `/usr/bin/umount` are accepted only with
 their audited root-owned, single-link mode `04755` identity.
 

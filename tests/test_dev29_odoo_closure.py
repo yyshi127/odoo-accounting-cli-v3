@@ -238,6 +238,8 @@ def test_database_graph_query_is_fixed_repeatable_read_and_strict(tmp_path: Path
     sql = command[command.index("--command") + 1]
     assert "REPEATABLE READ READ ONLY" in sql
     assert "SET LOCAL search_path = pg_catalog" in sql
+    assert 'ORDER BY name COLLATE "C"' in sql
+    assert 'module.name COLLATE "C", dependency.name COLLATE "C"' in sql
     assert command[command.index("--dbname") + 1] == DB_NAME
 
 

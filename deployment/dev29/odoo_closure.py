@@ -890,7 +890,7 @@ SELECT jsonb_build_object(
         'name', name,
         'latest_version', latest_version,
         'application', application
-      ) ORDER BY name
+      ) ORDER BY name COLLATE "C"
     )
     FROM public.ir_module_module
     WHERE state = 'installed'
@@ -902,7 +902,7 @@ SELECT jsonb_build_object(
         'dependency', dependency.name,
         'auto_install_required', dependency.auto_install_required,
         'dependency_state', dependency_module.state
-      ) ORDER BY module.name, dependency.name
+      ) ORDER BY module.name COLLATE "C", dependency.name COLLATE "C"
     )
     FROM public.ir_module_module_dependency AS dependency
     JOIN public.ir_module_module AS module ON module.id = dependency.module_id
