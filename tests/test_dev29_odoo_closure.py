@@ -37,6 +37,25 @@ def expected() -> closure.ExpectedIdentity:
     return closure.ExpectedIdentity(RELEASE, VERSION, COMMIT, HEX_A, HEX_B)
 
 
+def test_target_program_contract_uses_direct_postgresql_16_psql() -> None:
+    assert closure.PSQL == Path("/usr/lib/postgresql/16/bin/psql")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits are required")
+def test_verified_program_accepts_only_the_explicit_mode(tmp_path: Path) -> None:
+    program = tmp_path / "program"
+    write(program, b"#!/bin/sh\n", 0o4755)
+
+    closure._verified_program(
+        program,
+        label="setuid program",
+        test_mode=False,
+        expected_mode=0o4755,
+    )
+    with pytest.raises(closure.ClosureError, match="metadata mismatch"):
+        closure._verified_program(program, label="ordinary program", test_mode=False)
+
+
 def test_numeric_schema_version_guard_rejects_bool_and_non_integers() -> None:
     assert closure._schema_version_is_one(1) is True
     for value in (True, 1.0, "1", None):

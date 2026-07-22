@@ -105,11 +105,12 @@ BUILD_BASE = PurePosixPath("/var/lib/odoo-accounting-cli-v3/dependency-build")
 LOCK_BASE = PurePosixPath("/run/lock/odoo-accounting-cli-v3")
 RELEASES_BASE = PurePosixPath("/opt/odoo-accounting-cli-v3/releases")
 PACKAGES_BASE = PurePosixPath("/opt/odoo-accounting-cli-v3/packages")
-PSQL = Path("/usr/bin/psql")
+PSQL = Path("/usr/lib/postgresql/16/bin/psql")
 RUNUSER = Path("/usr/sbin/runuser")
 MKSQUASHFS = Path("/usr/bin/mksquashfs")
 MOUNT = Path("/usr/bin/mount")
 UMOUNT = Path("/usr/bin/umount")
+MOUNT_UTILITY_MODE = 0o4755
 LDCONFIG = Path("/usr/sbin/ldconfig.real")
 SYSTEM_PYTHON = PurePosixPath("/usr/bin/python3.12")
 LD_SO_PRELOAD = PurePosixPath("/etc/ld.so.preload")
@@ -914,12 +915,25 @@ COMMIT;
 """
 
 
-def _verified_program(path: Path, *, label: str, test_mode: bool) -> None:
+def _verified_program(
+    path: Path,
+    *,
+    label: str,
+    test_mode: bool,
+    expected_mode: int = 0o755,
+) -> None:
     if test_mode:
         if not path.is_file():
             raise ClosureError(f"{label} is unavailable")
         return
-    metadata = _mode_owner(path, uid=0, gid=0, mode=0o755, directory=False, label=label)
+    metadata = _mode_owner(
+        path,
+        uid=0,
+        gid=0,
+        mode=expected_mode,
+        directory=False,
+        label=label,
+    )
     if metadata.st_nlink != 1:
         raise ClosureError(f"{label} has unsafe link count")
 
@@ -3597,7 +3611,12 @@ def _activate_bindings(
     *,
     runner: Callable[..., subprocess.CompletedProcess[bytes]],
 ) -> list[dict[str, Any]]:
-    _verified_program(MOUNT, label="mount", test_mode=False)
+    _verified_program(
+        MOUNT,
+        label="mount",
+        test_mode=False,
+        expected_mode=MOUNT_UTILITY_MODE,
+    )
     if _affected_mount_rows(layout, process="1"):
         raise ClosureError("host PID 1 already exposes a closure lifecycle mount")
     for binding in _binds(layout):
@@ -3650,7 +3669,12 @@ def _unmount_exact(
     *,
     runner: Callable[..., subprocess.CompletedProcess[bytes]],
 ) -> None:
-    _verified_program(UMOUNT, label="umount", test_mode=False)
+    _verified_program(
+        UMOUNT,
+        label="umount",
+        test_mode=False,
+        expected_mode=MOUNT_UTILITY_MODE,
+    )
     _run_mount_utility(
         [str(UMOUNT), str(target)],
         runner=runner,
@@ -4735,7 +4759,12 @@ def mount(
             else:
                 layout.mount_point.mkdir(mode=0o750)
                 os.chown(layout.mount_point, 0, service_gid)
-            _verified_program(MOUNT, label="mount", test_mode=False)
+            _verified_program(
+                MOUNT,
+                label="mount",
+                test_mode=False,
+                expected_mode=MOUNT_UTILITY_MODE,
+            )
             process = command_runner(
                 [
                     str(MOUNT),
@@ -4776,7 +4805,12 @@ def mount(
     except Exception as original:
         if mounted_here:
             try:
-                _verified_program(UMOUNT, label="umount", test_mode=False)
+                _verified_program(
+                    UMOUNT,
+                    label="umount",
+                    test_mode=False,
+                    expected_mode=MOUNT_UTILITY_MODE,
+                )
                 cleanup = command_runner(
                     [str(UMOUNT), str(layout.mount_point)],
                     stdin=subprocess.DEVNULL,

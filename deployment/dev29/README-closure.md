@@ -46,6 +46,13 @@ This loader injection occurs before Python can run any guard. It is therefore
 residual host trust that cannot be eliminated by the release itself. A changed
 preload file or library is a hard rejection.
 
+Database graph discovery invokes the audited PostgreSQL 16 client directly at
+`/usr/lib/postgresql/16/bin/psql`; the distribution-managed `/usr/bin/psql`
+wrapper symlink is not part of this trust boundary. The direct client and
+`/usr/sbin/runuser` must be root-owned, mode `0755`, single-link regular files.
+The target host's `/usr/bin/mount` and `/usr/bin/umount` are accepted only with
+their audited root-owned, single-link mode `04755` identity.
+
 ## Build
 
 Identity values come from the independently retained release/install record
