@@ -285,6 +285,127 @@ def test_module_manifest_uses_the_odoo_default_version_when_omitted(
         closure._module_manifest(module)
 
 
+def _inotify_event(watch: int, mask: int, name: str = "") -> bytes:
+    encoded = name.encode() + (b"\0" if name else b"")
+    padded = encoded.ljust((len(encoded) + 3) & ~3, b"\0")
+    return closure.InotifyGuard._EVENT.pack(watch, mask, 0, len(padded)) + padded
+
+
+def test_inotify_scope_ignores_only_unrelated_file_parent_siblings() -> None:
+    guard = closure.InotifyGuard([])
+    guard._watch_all = {7}
+    guard._watch_names = {1: {"ld.so.cache", "ld.so.preload"}}
+    sibling = b"".join(
+        _inotify_event(1, mask, "WTEST.TMP")
+        for mask in (0x00000100, 0x00000002, 0x00000008, 0x00000200)
+    )
+
+    assert guard._payload_mutates_scope(sibling) is False
+    assert (
+        guard._payload_mutates_scope(
+            _inotify_event(1, 0x00000002, "ld.so.cache")
+        )
+        is True
+    )
+    assert guard._payload_mutates_scope(_inotify_event(7, 0x00000100, "x")) is True
+    assert guard._payload_mutates_scope(_inotify_event(-1, 0x00004000)) is True
+    assert guard._payload_mutates_scope(_inotify_event(1, 0x00008000)) is True
+    assert guard._payload_mutates_scope(_inotify_event(99, 0x00000100, "x")) is True
+
+
+def test_inotify_watch_policy_merges_exact_names_and_directory_scope(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "parent" / "ld.so.cache"
+    second = first.with_name("ld.so.preload")
+    directory = tmp_path / "tree"
+    write(first, b"cache")
+    write(second, b"preload")
+    write(directory / "child", b"child")
+    descriptors = {first.parent: 11, directory: 12}
+    guard = closure.InotifyGuard([])
+    guard.fd = 1
+    guard._add_watch = lambda _fd, raw, _mask: descriptors[Path(os.fsdecode(raw))]
+
+    guard.add_roots([first, second])
+
+    assert guard.watches == 1
+    assert guard._watch_names == {11: {"ld.so.cache", "ld.so.preload"}}
+    assert guard._payload_mutates_scope(_inotify_event(11, 0x00000002, "sibling")) is False
+
+    guard.add_roots([directory])
+
+    assert guard.watches == 2
+    assert guard._watch_all == {12}
+    assert guard._payload_mutates_scope(_inotify_event(12, 0x00000002, "child")) is True
+
+
+def test_inotify_directory_scope_dominates_an_aliased_file_parent(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "tree"
+    watched_file = tmp_path / "other" / "protected"
+    write(directory / "child", b"child")
+    write(watched_file, b"protected")
+    guard = closure.InotifyGuard([])
+    guard.fd = 1
+    guard._add_watch = lambda _fd, _raw, _mask: 13
+
+    guard.add_roots([watched_file, directory])
+
+    assert guard.watches == 1
+    assert guard._watch_all == {13}
+    assert guard._watch_names == {}
+    assert guard._payload_mutates_scope(_inotify_event(13, 0x00000002, "sibling")) is True
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"short",
+        closure.InotifyGuard._EVENT.pack(1, 0x00000002, 0, 4) + b"abc",
+        closure.InotifyGuard._EVENT.pack(1, 0x00000002, 0, 3) + b"x\0\0",
+        closure.InotifyGuard._EVENT.pack(1, 0x00000002, 0, 4) + b"xxxx",
+        closure.InotifyGuard._EVENT.pack(1, 0x00000002, 0, 4) + b"x\0y\0",
+    ],
+)
+def test_inotify_scope_rejects_malformed_event_streams(payload: bytes) -> None:
+    guard = closure.InotifyGuard([])
+    guard._watch_names = {1: {"protected"}}
+
+    with pytest.raises(closure.ClosureError, match="inotify event"):
+        guard._payload_mutates_scope(payload)
+
+
+def test_inotify_assert_quiet_drains_siblings_before_a_protected_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = closure.InotifyGuard([])
+    guard.fd = 99
+    guard._watch_names = {1: {"protected"}}
+    reads = iter(
+        [
+            _inotify_event(1, 0x00000002, "sibling"),
+            _inotify_event(1, 0x00000002, "protected"),
+        ]
+    )
+    monkeypatch.setattr(os, "read", lambda _fd, _size: next(reads))
+
+    with pytest.raises(closure.ClosureError, match="source changed"):
+        guard.assert_quiet()
+
+
+def test_inotify_assert_quiet_rejects_an_empty_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guard = closure.InotifyGuard([])
+    guard.fd = 99
+    monkeypatch.setattr(os, "read", lambda _fd, _size: b"")
+
+    with pytest.raises(closure.ClosureError, match="empty read"):
+        guard.assert_quiet()
+
+
 def test_python_audit_removes_editable_cache_metadata_and_normalizes_pyvenv(tmp_path: Path) -> None:
     venv = make_venv(tmp_path)
     site = venv / "lib/python3.12/site-packages"

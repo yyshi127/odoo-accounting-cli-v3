@@ -98,6 +98,13 @@ A recursive inotify guard starts before discovery. Database graph, module
 mapping, source manifest, Python audit, loader preload identity, native union,
 external runtime, and config are recomputed before copy, after copy, and after
 image construction. Any event or semantic difference rejects publication.
+Directory roots treat every child mutation as fatal. A protected regular file
+uses its parent watch only to detect events bearing that exact basename, so an
+unrelated sibling such as the target loader's ephemeral `/etc/WTEST.TMP` does
+not masquerade as `ld.so.cache` or `ld.so.preload` drift. Queue overflow,
+unmount, self-delete/move, ignored watches, unknown descriptors, malformed
+events, and target-name changes remain fatal; every event batch is drained
+before construction continues.
 
 No Odoo-writable ELF is executed during static discovery. A bounded parser
 reads `PT_INTERP`, `DT_NEEDED`, and `RPATH/RUNPATH`; resolution is tied to the

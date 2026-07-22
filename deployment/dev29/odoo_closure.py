@@ -1304,6 +1304,14 @@ class InotifyGuard:
         | 0x00004000  # IN_Q_OVERFLOW
         | 0x00008000  # IN_IGNORED
     )
+    _COVERAGE_LOSS_MASK = (
+        0x00000400  # IN_DELETE_SELF
+        | 0x00000800  # IN_MOVE_SELF
+        | 0x00002000  # IN_UNMOUNT
+        | 0x00004000  # IN_Q_OVERFLOW
+        | 0x00008000  # IN_IGNORED
+    )
+    _MAX_EVENT_BYTES = 16 * 1024 * 1024
 
     def __init__(self, roots: Iterable[Path], *, test_mode: bool = False) -> None:
         self.roots = tuple(dict.fromkeys(Path(path).absolute() for path in roots))
@@ -1312,6 +1320,9 @@ class InotifyGuard:
         self.watches = 0
         self._add_watch: Any = None
         self._watched_directories: set[Path] = set()
+        self._watch_by_directory: dict[Path, int] = {}
+        self._watch_all: set[int] = set()
+        self._watch_names: dict[int, set[str]] = {}
 
     def __enter__(self) -> "InotifyGuard":
         if self.test_mode and sys.platform != "linux":
@@ -1344,45 +1355,112 @@ class InotifyGuard:
             return
         if self.fd < 0 or self._add_watch is None:
             raise ClosureError("recursive inotify guard is not active")
-        directories: set[Path] = set()
+        requests: dict[Path, set[str] | None] = {}
+
+        def request(directory: Path, names: set[str] | None) -> None:
+            current = requests.get(directory)
+            if directory not in requests:
+                requests[directory] = None if names is None else set(names)
+            elif current is not None:
+                if names is None:
+                    requests[directory] = None
+                else:
+                    current.update(names)
+
         for root in roots:
             root = Path(root).absolute()
             if root.is_dir() and not root.is_symlink():
-                directories.add(root)
+                request(root, None)
                 for directory, names, _files in os.walk(root, followlinks=False):
-                    directories.add(Path(directory))
+                    request(Path(directory), None)
                     names[:] = [
                         name
                         for name in names
                         if not (Path(directory) / name).is_symlink()
                     ]
             else:
-                directories.add(root.parent)
-        for directory in sorted(directories - self._watched_directories, key=str):
-            result = self._add_watch(self.fd, os.fsencode(directory), self._MASK)
-            if result < 0:
-                raise ClosureError(f"recursive inotify watch failed: {directory}")
-            self._watched_directories.add(directory)
-            self.watches += 1
+                request(root.parent, {root.name})
+        for directory in sorted(requests, key=str):
+            descriptor = self._watch_by_directory.get(directory)
+            if descriptor is None:
+                descriptor = self._add_watch(
+                    self.fd, os.fsencode(directory), self._MASK
+                )
+                if descriptor < 0:
+                    raise ClosureError(f"recursive inotify watch failed: {directory}")
+                self._watch_by_directory[directory] = descriptor
+                self._watched_directories.add(directory)
+            names = requests[directory]
+            if names is None:
+                self._watch_all.add(descriptor)
+                self._watch_names.pop(descriptor, None)
+            elif descriptor not in self._watch_all:
+                self._watch_names.setdefault(descriptor, set()).update(names)
+        self.watches = len(self._watch_all | set(self._watch_names))
+
+    def _payload_mutates_scope(self, payload: bytes) -> bool:
+        offset = 0
+        while offset < len(payload):
+            if len(payload) - offset < self._EVENT.size:
+                raise ClosureError("recursive inotify event stream is malformed")
+            watch, mask, _cookie, length = self._EVENT.unpack_from(payload, offset)
+            offset += self._EVENT.size
+            end = offset + length
+            if length > 4096 or length % 4 or end > len(payload):
+                raise ClosureError("recursive inotify event stream is malformed")
+            raw_name = payload[offset:end]
+            offset = end
+            if raw_name:
+                name, separator, padding = raw_name.partition(b"\0")
+                if not separator or any(padding):
+                    raise ClosureError("recursive inotify event name is malformed")
+                try:
+                    decoded_name = os.fsdecode(name)
+                except UnicodeError as exc:
+                    raise ClosureError("recursive inotify event name is invalid") from exc
+            else:
+                decoded_name = ""
+            if mask & self._COVERAGE_LOSS_MASK:
+                return True
+            if watch in self._watch_all:
+                return True
+            names = self._watch_names.get(watch)
+            if names is None:
+                return True
+            if decoded_name in names:
+                return True
+        return False
 
     def assert_quiet(self) -> None:
         if self.fd < 0:
             if self.test_mode and sys.platform != "linux":
                 return
             raise ClosureError("recursive inotify guard is not active")
-        try:
-            payload = os.read(self.fd, 1024 * 1024)
-        except BlockingIOError:
-            return
-        except OSError as exc:
-            raise ClosureError("recursive inotify guard cannot be read") from exc
-        if payload:
-            raise ClosureError("Odoo dependency source changed during closure build")
+        observed = 0
+        while True:
+            try:
+                payload = os.read(self.fd, 1024 * 1024)
+            except BlockingIOError:
+                return
+            except OSError as exc:
+                raise ClosureError("recursive inotify guard cannot be read") from exc
+            if not payload:
+                raise ClosureError("recursive inotify guard returned an empty read")
+            observed += len(payload)
+            if observed > self._MAX_EVENT_BYTES:
+                raise ClosureError("recursive inotify event volume exceeds limit")
+            if self._payload_mutates_scope(payload):
+                raise ClosureError("Odoo dependency source changed during closure build")
 
     def __exit__(self, _type: object, _value: object, _traceback: object) -> None:
         if self.fd >= 0:
             os.close(self.fd)
             self.fd = -1
+        self._watch_by_directory.clear()
+        self._watch_all.clear()
+        self._watch_names.clear()
+        self._watched_directories.clear()
+        self.watches = 0
 
 
 def _normalized_pyvenv(path: Path) -> tuple[bytes, dict[str, str]]:
