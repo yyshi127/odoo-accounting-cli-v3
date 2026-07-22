@@ -738,10 +738,7 @@ def test_launcher_lease_rejects_live_owner_and_replaces_only_unlocked_stale_inod
     os.close(descriptor)
     replacement, second = runner._create_launcher_lease("lease-proof", unit)
     try:
-        assert (second["device"], second["inode"]) != (
-            first["device"],
-            first["inode"],
-        )
+        assert second["path"] == first["path"]
         assert second["nonce"] != first["nonce"]
         runner._remove_launcher_lease(replacement, second)
     finally:

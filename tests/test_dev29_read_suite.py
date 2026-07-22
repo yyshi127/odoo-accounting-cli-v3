@@ -646,10 +646,23 @@ def test_closure_document_requires_exact_ordered_four_bind_plan_and_security_sch
 ):
     document = closure_document()
     real_path = suite.Path
-    metadata = {
-        document["closure_identity"]["image_path"]: (4, 5),
-        "/proc/self/ns/mnt": (1, 2),
-        "/proc/1/ns/mnt": (1, 3),
+    configuration = runtime()
+    mount = f"/opt/odoo-accounting-cli-v3/dependencies/{RELEASE}"
+    observed = {
+        document["closure_identity"]["image_path"]: SimpleNamespace(
+            st_dev=4, st_ino=5
+        ),
+        "/proc/self/ns/mnt": SimpleNamespace(st_dev=1, st_ino=2),
+        "/proc/1/ns/mnt": SimpleNamespace(st_dev=1, st_ino=3),
+        f"{mount}/odoo-server": SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=0),
+        f"{mount}/odoo19-venv": SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=0),
+        f"{mount}/custom-addons": SimpleNamespace(st_mode=stat.S_IFDIR, st_uid=0),
+        document["closure_identity"]["sealed_config_path"]: SimpleNamespace(
+            st_mode=stat.S_IFREG, st_uid=0, st_nlink=1
+        ),
+        f"{mount}/custom-addons/{Path(configuration['odoo_config']).name}": SimpleNamespace(
+            st_mode=stat.S_IFREG, st_uid=0, st_nlink=1
+        ),
     }
 
     class ObservedPath:
@@ -657,16 +670,28 @@ def test_closure_document_requires_exact_ordered_four_bind_plan_and_security_sch
             self.value = str(value)
 
         def lstat(self) -> SimpleNamespace:
-            device, inode = metadata[self.value]
-            return SimpleNamespace(st_dev=device, st_ino=inode)
+            return observed[self.value]
 
         def stat(self) -> SimpleNamespace:
             return self.lstat()
 
+        def is_symlink(self) -> bool:
+            return False
+
+        @property
+        def parents(self):
+            return real_path(self.value).parents
+
     monkeypatch.setattr(
         suite,
         "Path",
-        lambda value: ObservedPath(value) if str(value) in metadata else real_path(value),
+        lambda value: ObservedPath(value) if str(value) in observed else real_path(value),
+    )
+    monkeypatch.setattr(
+        suite.os,
+        "statvfs",
+        lambda _path: SimpleNamespace(f_flag=getattr(suite.os, "ST_RDONLY", 1)),
+        raising=False,
     )
     assert (
         suite.validate_closure_document(

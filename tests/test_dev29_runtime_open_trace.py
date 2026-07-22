@@ -1224,7 +1224,10 @@ def test_preseal_validator_explicitly_binds_mode_0600_and_reverify(
     path = tmp_path / "trace.log"
     path.write_bytes(raw_trace())
     path.chmod(0o600)
-    with pytest.raises(trace.RuntimeOpenTraceError, match="mode mismatch"):
+    with pytest.raises(
+        trace.RuntimeOpenTraceError,
+        match="ownership/mode/link identity",
+    ):
         trace.validate_trace_file(path, manifest(), expected_leader_pid=410)
     result = trace.validate_trace_file(
         path,

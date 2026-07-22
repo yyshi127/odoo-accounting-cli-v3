@@ -334,10 +334,15 @@ def test_copy_excludes_bytecode_from_venv_core_and_addons(tmp_path: Path) -> Non
     assert not (stage / "odoo-server/odoo/__pycache__").exists()
     assert not (stage / "odoo-server/odoo/sourceless.pyc").exists()
     placeholder = stage / "custom-addons/odoo-server19.conf"
-    assert placeholder.read_bytes() == closure.PLACEHOLDER
     if os.name == "posix":
         assert stat.S_IMODE(placeholder.stat().st_mode) == 0
         assert stat.S_IMODE(placeholder.parent.stat().st_mode) == 0o555
+        placeholder.chmod(0o400)
+    try:
+        assert placeholder.read_bytes() == closure.PLACEHOLDER
+    finally:
+        if os.name == "posix":
+            placeholder.chmod(0o000)
     normalized = (stage / "odoo19-venv/pyvenv.cfg").read_bytes()
     assert b"/tmp/old" not in normalized
     assert sha(normalized) == audit["pyvenv"]["normalized_sha256"]

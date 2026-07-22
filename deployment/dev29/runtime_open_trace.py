@@ -2405,7 +2405,7 @@ class PrivateTraceStaging:
         parent = STAGING_PARENT.lstat()
         if stat.S_IMODE(parent.st_mode) != 0o700:
             raise RuntimeOpenTraceError("private trace staging parent is not mode 0700")
-        recover_stale_private_staging()
+        recover_stale_private_staging(parent=STAGING_PARENT)
         try:
             os.mkdir(self.directory, 0o700)
             directory_fd = os.open(

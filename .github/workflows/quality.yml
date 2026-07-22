@@ -1144,7 +1144,7 @@ jobs:
           sudo install -d -m 0755 -o root -g root \
             /opt/odoo-accounting-cli-v3/releases \
             /opt/odoo-accounting-cli-v3/runtime-open-manifests
-          sudo install -m 0555 -o root -g root \
+          sudo install -m 0755 -o root -g root \
             "$ldconfig_source" \
             /usr/sbin/ldconfig.real
           sudo install -m 0644 -o root -g root \
