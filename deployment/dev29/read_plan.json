@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "target": {
+    "host": "43.165.173.80",
+    "instance_id": "odoo19@43.165.173.80",
+    "environment": "test",
+    "capability_channel": "staged",
+    "services": ["odoo19.service", "sudo-pi-agent-bridge.service"],
+    "v3_unit_names": [
+      "odoo-accounting-cli-v3-broker.service",
+      "odoo-accounting-cli-v3-pi-broker.socket",
+      "odoo-accounting-cli-v3-session-mint.socket",
+      "odoo-accounting-cli-v3-trusted-approval.socket",
+      "odoo-accounting-cli-v3-pi-bridge.service",
+      "odoo-accounting-cli-v3-pi-bridge.socket",
+      "odoo-accounting-cli-v3-effect-finalizer.service",
+      "odoo-accounting-cli-v3-effect-finalizer.socket"
+    ],
+    "v2_roots": [
+      "/mnt/odoo/odoo19/custom/tools/odoo_accounting_agent_cli_v2",
+      "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/odoo_accounting_agent_cli_v2/src/odoo_acc_cli"
+    ],
+    "pi_control_files": [
+      "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/extensions/odoo-tools.ts",
+      "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/package-lock.json",
+      "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/package.json",
+      "/mnt/odoo/odoo19/custom/services/pi-agent-bridge/server.mjs",
+      "/etc/systemd/system/sudo-pi-agent-bridge.service"
+    ]
+  },
+  "database": {
+    "name": "odoo_test",
+    "uuid": "19b09656-d10f-11f0-9065-00163e54a5ad",
+    "current_user": "postgres",
+    "unix_socket_directory": "/var/run/postgresql",
+    "unix_socket_path": "/var/run/postgresql/.s.PGSQL.5432",
+    "port": 5432,
+    "server_version_num": 160014,
+    "system_identifier": "7616327373742442245"
+  },
+  "runtime": {
+    "odoo_python": "/opt/odoo/odoo19/odoo19-venv/bin/python",
+    "odoo_python_sha256": "1643dacd9feaedc58f3cc581e4d22577dfe25c09b10282936186ccf0f2e61118",
+    "odoo_bin": "/opt/odoo/odoo19/odoo-server/odoo-bin",
+    "odoo_bin_sha256": "e0fb7977c59f73e652805d169bcd1bffe41df7bbf0c39ce47e8ad32126529003",
+    "odoo_config": "/mnt/odoo/odoo19/custom/addons/odoo-server19.conf",
+    "odoo_config_sha256": "98a90d839e3ad16c32335057b27e33bc689cbccbb367350e31fbf41778ed70c3"
+  },
+  "cases": [
+    {
+      "name": "registry",
+      "capability_id": "acct.registry.list.v1",
+      "principal": "pi:test-user-2",
+      "user_id": 2,
+      "company_id": 1,
+      "allowed_company_ids": [1],
+      "parameters": {
+        "company_id": 1
+      },
+      "expected": {
+        "historical_source": "dev8 frozen target evidence, advanced to the five Dev28 staged read capabilities",
+        "capabilities": [
+          {"id": "acct.ap.open_items.v1", "contract_digest": "dcfc39b9e850c6dbd2064a951ea2d017153f5376e5d3f8b22ecf41fe26a9973c", "domain": "accounts_payable", "access": "read", "risk_level": "low", "company_scope": "explicit_single_company", "odoo_permissions": ["account.group_account_readonly"]},
+          {"id": "acct.ar.open_items.v1", "contract_digest": "b1c648d292135f46ac6474195c67713b927e943c22650042c4f19cf50acea082", "domain": "accounts_receivable", "access": "read", "risk_level": "low", "company_scope": "explicit_single_company", "odoo_permissions": ["account.group_account_readonly"]},
+          {"id": "acct.gl.trial_balance.v1", "contract_digest": "728b1487fae87472daef75bbcbeeedc280788c76781698f18d4d577a8e7b460a", "domain": "general_ledger", "access": "read", "risk_level": "low", "company_scope": "explicit_single_company", "odoo_permissions": ["account.group_account_readonly"]},
+          {"id": "acct.multicurrency.balance_read.v1", "contract_digest": "1fdfb15e0a867975eb03dfcecf69c365c9da15298047341f2fe577c49fa02e60", "domain": "multi_currency", "access": "read", "risk_level": "low", "company_scope": "explicit_single_company", "odoo_permissions": ["account.group_account_readonly"]},
+          {"id": "acct.registry.list.v1", "contract_digest": "61c85bfdea5b9ff08a9e85373c87387c6c807520646c7e67ff0073a8daec7453", "domain": "gateway", "access": "read", "risk_level": "low", "company_scope": "bound_company", "odoo_permissions": ["base.group_user"]}
+        ]
+      }
+    },
+    {
+      "name": "trial_balance",
+      "capability_id": "acct.gl.trial_balance.v1",
+      "principal": "pi:test-user-2",
+      "user_id": 2,
+      "company_id": 1,
+      "allowed_company_ids": [1],
+      "parameters": {
+        "account_id": null,
+        "company_id": 1,
+        "currency_id": null,
+        "date_from": "2026-01-01",
+        "date_to": "2026-12-31",
+        "include_off_balance": false,
+        "include_zero": false,
+        "limit": 500,
+        "offset": 0,
+        "opening_basis": "ledger_cumulative"
+      },
+      "expected": {
+        "historical_source": "dev8 frozen target PostgreSQL trial-balance oracle",
+        "account_count": 15,
+        "move_line_count": 2376,
+        "ledger_summary": {
+          "opening_balance": "0.00",
+          "period_debit": "136193.63",
+          "period_credit": "136193.63",
+          "period_balance": "0.00",
+          "closing_balance": "0.00",
+          "debit_credit_difference": "0.00",
+          "is_balanced": true
+        }
+      }
+    },
+    {
+      "name": "ar_open_items",
+      "capability_id": "acct.ar.open_items.v1",
+      "principal": "pi:test-user-2",
+      "user_id": 2,
+      "company_id": 1,
+      "allowed_company_ids": [1],
+      "parameters": {
+        "as_of_date": "2026-07-14",
+        "company_id": 1,
+        "currency_id": null,
+        "limit": 500,
+        "offset": 0,
+        "partner_id": null
+      },
+      "expected": {
+        "historical_source": "dev8 frozen target PostgreSQL AR oracle",
+        "source_line_count": 720,
+        "open_item_count": 338,
+        "current_reconciled_count": 0,
+        "partial_as_of_count": 0,
+        "historical_projection_sha256": "b050b66e17ca40a13dcbd0bec2f1bc4567394c76674bcc44664f2e3e30adead3",
+        "ledger_summary": {"item_count": 338, "debit_residual": "36256.39", "credit_residual": "10000.00", "net_residual": "26256.39"},
+        "currency_summaries": [
+          {"currency_id": 6, "currency_name": "CNY", "item_count": 338, "debit_residual": "36256.39", "credit_residual": "10000.00", "net_residual": "26256.39"}
+        ]
+      }
+    },
+    {
+      "name": "ap_open_items",
+      "capability_id": "acct.ap.open_items.v1",
+      "principal": "pi:test-user-2",
+      "user_id": 2,
+      "company_id": 1,
+      "allowed_company_ids": [1],
+      "parameters": {
+        "as_of_date": "2026-07-14",
+        "company_id": 1,
+        "currency_id": null,
+        "limit": 500,
+        "offset": 0,
+        "partner_id": null
+      },
+      "expected": {
+        "historical_source": "dev8 frozen target PostgreSQL AP oracle",
+        "source_line_count": 149,
+        "open_item_count": 83,
+        "current_reconciled_count": 0,
+        "partial_as_of_count": 0,
+        "payment_item_count": 0,
+        "foreign_currency_count": 0,
+        "historical_projection_sha256": "1f598dcf23eba7bdd874baec6dd78b140b334050ca5a7533f16d1e7308f0155b",
+        "ledger_summary": {"item_count": 83, "debit_residual": "11300.00", "credit_residual": "7550.15", "net_residual": "3749.85"},
+        "currency_summaries": [
+          {"currency_id": 6, "currency_name": "CNY", "item_count": 83, "debit_residual": "11300.00", "credit_residual": "7550.15", "net_residual": "3749.85"}
+        ],
+        "move_type_counts": {"entry": 2, "in_invoice": 81},
+        "side_counts": {"credit": 82, "debit": 1}
+      }
+    },
+    {
+      "name": "multicurrency",
+      "capability_id": "acct.multicurrency.balance_read.v1",
+      "principal": "pi:test-user-2",
+      "user_id": 2,
+      "company_id": 9,
+      "allowed_company_ids": [9],
+      "parameters": {
+        "as_of_date": "2026-07-13",
+        "balance_basis": "posted_ledger_cumulative",
+        "company_id": 9,
+        "currency_ids": [6, 1],
+        "limit": 500,
+        "off_balance_policy": "exclude",
+        "offset": 0
+      },
+      "expected": {
+        "historical_source": "dev15 read plan f15442df9d707ed77dc9c79ce0aa67fb022b4e5c1c94889ca4ab5ff0d1b2f161",
+        "balances": [
+          {"account_code": "112200", "account_id": 3855, "account_type": "asset_receivable", "company_currency_id": 6, "company_currency_name": "CNY", "currency_id": 1, "currency_name": "USD", "ledger_company_balance": "1950.00", "ledger_transaction_amount": "300.00", "move_line_count": 8},
+          {"account_code": "222100", "account_id": 3881, "account_type": "liability_current", "company_currency_id": 6, "company_currency_name": "CNY", "currency_id": 6, "currency_name": "CNY", "ledger_company_balance": "253.50", "ledger_transaction_amount": "253.50", "move_line_count": 8},
+          {"account_code": "600100", "account_id": 4002, "account_type": "income", "company_currency_id": 6, "company_currency_name": "CNY", "currency_id": 6, "currency_name": "CNY", "ledger_company_balance": "-2203.50", "ledger_transaction_amount": "-2203.50", "move_line_count": 8}
+        ],
+        "company_currency": {"id": 6, "name": "CNY"},
+        "currency_summaries": [
+          {"account_count": 2, "currency_id": 6, "currency_name": "CNY", "ledger_company_balance": "-1950.00", "ledger_transaction_amount": "-1950.00", "move_line_count": 16},
+          {"account_count": 1, "currency_id": 1, "currency_name": "USD", "ledger_company_balance": "1950.00", "ledger_transaction_amount": "300.00", "move_line_count": 8}
+        ],
+        "ledger_summary": {"account_count": 3, "balance_group_count": 3, "ledger_company_balance": "0.00", "move_line_count": 24},
+        "rates": [
+          {"company_to_transaction_rate": "1", "currency_id": 6, "currency_name": "CNY", "source_company_id": null, "source_record_id": null, "source_scope": "no_rate_identity", "technical_rate": "1", "transaction_to_company_rate": "1"},
+          {"company_to_transaction_rate": "0.1538461538461538461538461538", "currency_id": 1, "currency_name": "USD", "effective_date": "2025-12-15", "source_company_id": 9, "source_record_id": 1, "source_scope": "company_specific", "technical_rate": "0.15384615384615385", "transaction_to_company_rate": "6.5"}
+        ]
+      }
+    }
+  ],
+  "negative_cases": [
+    {"name": "acl_deny", "base_case": "trial_balance", "principal": "pi:test-user-5", "user_id": 5, "company_id": 1, "allowed_company_ids": [1], "mutation": {"kind": "identity_override", "fields": {}}, "expected_error": "odoo_acl_denied"},
+    {"name": "cross_company", "base_case": "trial_balance", "principal": "pi:test-user-5", "user_id": 5, "company_id": 2, "allowed_company_ids": [2], "mutation": {"kind": "identity_override", "fields": {"parameters.company_id": 2}}, "expected_error": "company_binding_rejected"},
+    {"name": "mixed_company", "base_case": "trial_balance", "principal": "pi:test-user-5", "user_id": 5, "company_id": 1, "allowed_company_ids": [1, 2], "mutation": {"kind": "identity_override", "fields": {}}, "expected_error": "company_binding_rejected"},
+    {"name": "wrong_database_uuid", "base_case": "trial_balance", "principal": "pi:test-user-2", "user_id": 2, "company_id": 1, "allowed_company_ids": [1], "mutation": {"kind": "context_override", "fields": {"context.database_uuid": "00000000-0000-0000-0000-000000000000"}}, "expected_error": "database_binding_rejected"},
+    {"name": "expired", "base_case": "trial_balance", "principal": "pi:test-user-2", "user_id": 2, "company_id": 1, "allowed_company_ids": [1], "mutation": {"kind": "expire_after_sign", "fields": {}}, "expected_error": "authentication_expired"},
+    {"name": "tamper_parameters", "base_case": "trial_balance", "principal": "pi:test-user-2", "user_id": 2, "company_id": 1, "allowed_company_ids": [1], "mutation": {"kind": "parameters_after_sign", "fields": {"parameters.date_to": "2026-12-30"}}, "expected_error": "authentication_tampered"},
+    {"name": "replay", "base_case": "trial_balance", "principal": "pi:test-user-2", "user_id": 2, "company_id": 1, "allowed_company_ids": [1], "mutation": {"kind": "replay_exact_request", "fields": {}}, "expected_error": "authentication_replayed"}
+  ],
+  "witness": {
+    "relations": [
+      {"name": "account_account", "oid": 53432, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "account_type", "type": "character varying"}, {"name": "code_store", "type": "jsonb"}, {"name": "name", "type": "jsonb"}], "witness_projection": ["id", "account_type", "code_store", "name"], "witness_scope": "all", "baseline_count": null},
+      {"name": "account_journal", "oid": 53641, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "code", "type": "character varying"}], "witness_projection": ["id", "code"], "witness_scope": "all", "baseline_count": null},
+      {"name": "account_move", "oid": 53681, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "name", "type": "character varying"}, {"name": "move_type", "type": "character varying"}], "witness_projection": ["id", "name", "move_type"], "witness_scope": "all", "baseline_count": 1844},
+      {"name": "account_move_line", "oid": 53705, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "move_id", "type": "integer"}, {"name": "payment_id", "type": "integer"}, {"name": "date", "type": "date"}, {"name": "date_maturity", "type": "date"}, {"name": "partner_id", "type": "integer"}, {"name": "account_id", "type": "integer"}, {"name": "journal_id", "type": "integer"}, {"name": "currency_id", "type": "integer"}, {"name": "company_id", "type": "integer"}, {"name": "parent_state", "type": "character varying"}, {"name": "balance", "type": "numeric"}, {"name": "debit", "type": "numeric"}, {"name": "credit", "type": "numeric"}, {"name": "amount_currency", "type": "numeric"}, {"name": "reconciled", "type": "boolean"}], "witness_projection": ["id", "move_id", "payment_id", "date", "date_maturity", "partner_id", "account_id", "journal_id", "currency_id", "company_id", "parent_state", "balance", "debit", "credit", "amount_currency", "reconciled"], "witness_scope": "all", "baseline_count": 3807},
+      {"name": "account_partial_reconcile", "oid": 53759, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "company_id", "type": "integer"}, {"name": "max_date", "type": "date"}, {"name": "debit_move_id", "type": "integer"}, {"name": "credit_move_id", "type": "integer"}, {"name": "amount", "type": "numeric"}, {"name": "debit_amount_currency", "type": "numeric"}, {"name": "credit_amount_currency", "type": "numeric"}], "witness_projection": ["id", "company_id", "max_date", "debit_move_id", "credit_move_id", "amount", "debit_amount_currency", "credit_amount_currency"], "witness_scope": "all", "baseline_count": 225},
+      {"name": "ir_config_parameter", "oid": 54844, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "key", "type": "character varying"}, {"name": "value", "type": "text"}], "witness_projection": ["id", "key", "value"], "witness_scope": "database_uuid_only", "baseline_count": 1},
+      {"name": "ir_model_data", "oid": 54949, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "module", "type": "character varying"}, {"name": "name", "type": "character varying"}, {"name": "model", "type": "character varying"}, {"name": "res_id", "type": "integer"}, {"name": "noupdate", "type": "boolean"}], "witness_projection": ["id", "module", "name", "model", "res_id", "noupdate"], "witness_scope": "required_group_xmlids_only", "baseline_count": 2},
+      {"name": "res_company", "oid": 56012, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "currency_id", "type": "integer"}, {"name": "parent_path", "type": "character varying"}], "witness_projection": ["id", "currency_id", "parent_path"], "witness_scope": "all", "baseline_count": null},
+      {"name": "res_company_users_rel", "oid": 56022, "owner": "odoo", "relkind": "r", "primary_key": ["cid", "user_id"], "required_columns": [{"name": "cid", "type": "integer"}, {"name": "user_id", "type": "integer"}], "witness_projection": ["cid", "user_id"], "witness_scope": "all", "baseline_count": null},
+      {"name": "res_currency", "oid": 56062, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "name", "type": "character varying"}, {"name": "symbol", "type": "character varying"}, {"name": "rounding", "type": "numeric"}], "witness_projection": ["id", "name", "symbol", "rounding"], "witness_scope": "all", "baseline_count": null},
+      {"name": "res_currency_rate", "oid": 56069, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "name", "type": "date"}, {"name": "company_id", "type": "integer"}, {"name": "currency_id", "type": "integer"}, {"name": "rate", "type": "numeric"}], "witness_projection": ["id", "name", "company_id", "currency_id", "rate"], "witness_scope": "all", "baseline_count": 2},
+      {"name": "res_groups_users_rel", "oid": 56109, "owner": "odoo", "relkind": "r", "primary_key": ["gid", "uid"], "required_columns": [{"name": "gid", "type": "integer"}, {"name": "uid", "type": "integer"}], "witness_projection": ["gid", "uid"], "witness_scope": "all", "baseline_count": null},
+      {"name": "res_partner", "oid": 56121, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "name", "type": "character varying"}, {"name": "commercial_partner_id", "type": "integer"}, {"name": "company_id", "type": "integer"}, {"name": "active", "type": "boolean"}], "witness_projection": ["id", "name", "commercial_partner_id", "company_id", "active"], "witness_scope": "all", "baseline_count": 23},
+      {"name": "res_users", "oid": 56161, "owner": "odoo", "relkind": "r", "primary_key": ["id"], "required_columns": [{"name": "id", "type": "integer"}, {"name": "company_id", "type": "integer"}, {"name": "login", "type": "character varying"}, {"name": "active", "type": "boolean"}, {"name": "share", "type": "boolean"}, {"name": "write_date", "type": "timestamp without time zone"}], "witness_projection": ["id", "company_id", "login", "active", "share", "write_date"], "witness_scope": "all", "baseline_count": null}
+    ]
+  }
+}

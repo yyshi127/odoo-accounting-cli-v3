@@ -30,6 +30,11 @@ LAUNCHERS = frozenset(
 EXECUTABLE_RELEASE_MEMBERS = LAUNCHERS | frozenset(
     {"deployment/dev9/run-private-mount-gate.sh"}
 )
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_RELEASE_FILE_BYTES = 64 * 1024 * 1024
+MAX_RELEASE_BYTES = 512 * 1024 * 1024
+MAX_MANIFEST_BYTES = 16 * 1024 * 1024
+MAX_RELEASE_NAME_CHARACTERS = 128
 LOCAL_RUNTIME_FILENAMES = frozenset(
     {
         "authority-runtime.json",
@@ -41,6 +46,34 @@ LOCAL_RUNTIME_FILENAMES = frozenset(
         "write-runtime.json",
         "pi-attestation-keys.json",
     }
+)
+HOST_LOCAL_EVIDENCE_FILENAMES = frozenset(
+    {
+        "bundle-manifest.json",
+        "cleanup-receipt.json",
+        "lease.json",
+        "odoo-server19.conf",
+        "prepublication-guard.json",
+        "release-manifest.json",
+        "runtime-open-trace.json",
+        "seal.json",
+        "supervisor-bootstrap.json",
+        "trace.log",
+        "validation-report.json",
+        "verifier-child.json",
+        "verifier-process-control.json",
+        "verifier-runtime-trace.json",
+    }
+)
+HOST_LOCAL_JSON_SCOPES = frozenset(
+    {
+        "direct-child-bootstrap-through-final-exec-v1",
+        "odoo-accounting-cli-v3.dev29.runtime-open-index.v1",
+        "odoo-accounting-cli-v3.dev29.runtime-open-policy-source.v1",
+    }
+)
+HOST_LOCAL_JSON_KINDS = frozenset(
+    {"odoo_dependency_closure", "odoo_dependency_closure_anchor"}
 )
 PRIVATE_KEY_FILENAMES = frozenset(
     {
@@ -110,6 +143,10 @@ def tracked_sources(revision: str | None = None) -> list[Path]:
 def validate_release_member(relative: Path, payload: bytes) -> None:
     """Reject credentials and host-local mutable state from the release."""
 
+    if not relative.as_posix().isascii():
+        raise ReleaseError(
+            f"refusing non-ASCII release path: {relative.as_posix()}"
+        )
     name = relative.name.lower()
     parts = relative.parts
     if parts and parts[0].lower() == "src":
@@ -135,12 +172,15 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
         name == ".env"
         or name.startswith(".env.")
         or name in LOCAL_RUNTIME_FILENAMES
+        or name in HOST_LOCAL_EVIDENCE_FILENAMES
+        or (name.startswith("runtime-test-") and name.endswith(".json"))
         or (name.startswith("pi-attestation-keys") and name.endswith(".json"))
         or name in PRIVATE_KEY_FILENAMES
         or name.endswith(
             (".key", ".pem", ".p12", ".pfx", ".ppk", ".hmac", ".pgpass")
         )
         or name.endswith(".db")
+        or name.endswith((".seal.json", ".squashfs", ".strace"))
         or name.endswith((".sqlite", ".sqlite3", ".sqlite-wal", ".sqlite-shm"))
         or name.endswith((".sqlite3-wal", ".sqlite3-shm", "-wal", "-shm"))
     )
@@ -155,6 +195,34 @@ def validate_release_member(relative: Path, payload: bytes) -> None:
             document = None
         if isinstance(document, dict):
             schema_version = document.get("schema_version")
+            if (
+                document.get("scope") in HOST_LOCAL_JSON_SCOPES
+                or document.get("kind") in HOST_LOCAL_JSON_KINDS
+                or document.get("bundle_type")
+                == "odoo-accounting-cli-v3.dev29.read-suite-evidence"
+                or document.get("anchor_type")
+                == "odoo-accounting-cli-v3.dev29.read-suite-verification"
+            ):
+                raise ReleaseError(
+                    "refusing host-local evidence document in release: "
+                    f"{relative.as_posix()}"
+                )
+            if (
+                set(document)
+                == {"commit", "manifest_sha256", "package_sha256", "release"}
+                and isinstance(document.get("commit"), str)
+                and re.fullmatch(r"[0-9a-f]{40}", document["commit"])
+                and isinstance(document.get("manifest_sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", document["manifest_sha256"])
+                and isinstance(document.get("package_sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", document["package_sha256"])
+                and isinstance(document.get("release"), str)
+                and document["release"]
+            ):
+                raise ReleaseError(
+                    "refusing external trusted-artifact anchor in release: "
+                    f"{relative.as_posix()}"
+                )
             if (
                 schema_version
                 == "odoo-accounting-cli-v3.pi-attestation-keys.v1"
@@ -212,8 +280,37 @@ def committed_source_payloads(
 
 
 def validate_release_payloads(payloads: dict[str, bytes]) -> None:
+    if len(payloads) + 1 > MAX_ARCHIVE_MEMBERS:
+        raise ReleaseError(
+            "release archive member count exceeds the installer limit"
+        )
+    total_bytes = 0
     for name, payload in payloads.items():
+        if len(payload) > MAX_RELEASE_FILE_BYTES:
+            raise ReleaseError(
+                f"release member exceeds the installer file limit: {name}"
+            )
+        total_bytes += len(payload)
+        if total_bytes > MAX_RELEASE_BYTES:
+            raise ReleaseError(
+                "release payload exceeds the installer total size limit"
+            )
         validate_release_member(Path(name), payload)
+
+
+def validate_release_identity(identity: ReleaseIdentity) -> None:
+    release = f"{identity.version}-{identity.commit[:12]}"
+    if len(release) > MAX_RELEASE_NAME_CHARACTERS:
+        raise ReleaseError(
+            "canonical release name exceeds the 128-character runtime limit"
+        )
+
+
+def validate_release_manifest_payload(payload: bytes) -> None:
+    if len(payload) > MAX_MANIFEST_BYTES:
+        raise ReleaseError(
+            "release manifest exceeds the installer size limit"
+        )
 
 
 def payload_manifest(
@@ -250,9 +347,17 @@ def build() -> Path:
     except (KeyError, UnicodeDecodeError) as exc:
         raise ReleaseError("committed VERSION is missing or not UTF-8") from exc
     identity = ReleaseIdentity(version=version, commit=commit)
+    validate_release_identity(identity)
     validate_release_payloads(payloads)
     manifest = payload_manifest(payloads, identity)
-    manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+    manifest_bytes = (
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True).encode(
+            "utf-8"
+        )
+        + b"\n"
+    )
+    validate_release_manifest_payload(manifest_bytes)
+    manifest_file_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)
     output = dist / identity.package_name
@@ -279,6 +384,7 @@ def build() -> Path:
     print(
         json.dumps(
             {
+                "manifest_file_sha256": manifest_file_sha256,
                 "manifest_sha256": manifest["manifest_sha256"],
                 "package": str(output),
                 "package_sha256": sha256_file(output),

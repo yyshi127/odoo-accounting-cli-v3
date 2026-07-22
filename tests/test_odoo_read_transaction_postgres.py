@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from odoo_accounting_cli_v3.odoo import read_transaction
+from odoo_accounting_cli_v3.odoo.read_boundary_evidence import (
+    collect_read_boundary_evidence,
+    validate_read_boundary_evidence,
+)
 from odoo_accounting_cli_v3.odoo.read_transaction import (
     OdooReadTransactionError,
     run_readonly_odoo_transaction,
@@ -14,6 +18,7 @@ from odoo_accounting_cli_v3.odoo.read_transaction import (
 
 
 RUN_INTEGRATION = os.environ.get("READ_TRANSACTION_POSTGRES_INTEGRATION") == "1"
+DATABASE_UUID = "19b09656-d10f-11f0-9065-00163e54a5ad"
 pytestmark = pytest.mark.skipif(
     not RUN_INTEGRATION,
     reason="set READ_TRANSACTION_POSTGRES_INTEGRATION=1 for the isolated PostgreSQL gate",
@@ -80,6 +85,16 @@ def probe_database():
                 cursor.execute(
                     "INSERT INTO public.read_transaction_probe(id, value) "
                     "VALUES (1, 'unchanged')"
+                )
+                cursor.execute(
+                    "CREATE TABLE public.ir_config_parameter "
+                    "(id integer PRIMARY KEY, key text NOT NULL UNIQUE, "
+                    "value text NOT NULL)"
+                )
+                cursor.execute(
+                    "INSERT INTO public.ir_config_parameter(id, key, value) "
+                    "VALUES (1, 'database.uuid', %s)",
+                    (DATABASE_UUID,),
                 )
             setup.commit()
         finally:
@@ -215,3 +230,33 @@ def test_real_postgresql_rollback_hook_must_leave_connection_idle(probe_database
         connection.rollback()
         cursor.close()
         connection.close()
+
+
+def test_real_postgresql_collector_proves_complete_boundary(
+    probe_database, live_cursor
+):
+    evidence = collect_read_boundary_evidence(SimpleNamespace(cr=live_cursor))
+
+    assert validate_read_boundary_evidence(
+        evidence,
+        expected_database_name=probe_database,
+        expected_database_uuid=DATABASE_UUID,
+    ) == evidence
+    assert evidence["write_probe"]["sqlstate"] == "25006"
+    assert all(
+        probe["result_released"] is False
+        for probe in evidence["drift_probes"].values()
+    )
+    assert live_cursor.connection.get_transaction_status() == (
+        extensions.TRANSACTION_STATUS_IDLE
+    )
+    witness = _connect(probe_database)
+    try:
+        with witness.cursor() as cursor:
+            cursor.execute(
+                "SELECT id, key, value FROM public.ir_config_parameter ORDER BY id"
+            )
+            assert cursor.fetchall() == [(1, "database.uuid", DATABASE_UUID)]
+        witness.rollback()
+    finally:
+        witness.close()

@@ -1001,6 +1001,397 @@ jobs:
             bash -n "$path"
           done
 
+  dev29-read-evidence-lifecycle-linux:
+    name: Dev29 read-evidence lifecycle gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[test]"
+      - name: Install the fixed SquashFS and trace runtimes
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes squashfs-tools strace util-linux
+      - name: Prove four closure lifecycle gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-odoo-closure.xml"
+          python_bin="$(command -v python)"
+          sudo unshare --mount --propagation private -- \
+            env ODOO_CLOSURE_REAL_MOUNT_TEST=1 \
+            "$python_bin" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_dev29_odoo_closure.py::test_pinned_ldconfig_rejects_invalid_and_wrong_external_hash \
+              tests/test_dev29_odoo_closure.py::test_pinned_ldconfig_executes_hashed_inode_and_lists_real_cache \
+              tests/test_dev29_odoo_closure.py::test_pinned_ldconfig_rejects_path_replacement_after_open \
+              tests/test_dev29_odoo_closure.py::test_real_squashfs_loop_mount_read_only_inode_binding
+          sudo "$python_bin" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 4 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 closure lifecycle gate did not execute exactly four tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_closure_lifecycle_tests=4")
+          PY
+      - name: Prove four runtime-open lifecycle gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-runtime-open-trace.xml"
+          DEV29_REAL_RUNTIME_TRACE_TEST=1 \
+            python -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_dev29_runtime_open_trace.py::test_replacing_strace_path_after_fd_validation_is_detected \
+              tests/test_dev29_runtime_open_trace.py::test_same_inode_strace_content_drift_is_rejected_on_post_hash \
+              tests/test_dev29_runtime_open_trace.py::test_capture_rejects_live_cwd_but_excludes_supervisor_environment \
+              tests/test_dev29_runtime_open_trace.py::test_real_linux_fixed_harmless_runtime_trace_and_proc_exe
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 4 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 runtime-open lifecycle gate did not execute exactly four tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_runtime_open_lifecycle_tests=4")
+          PY
+      - name: Prove fifty-five runtime-trace digest and policy binding controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-runtime-trace-bindings.xml"
+          python -m pytest -q -p no:cacheprovider \
+            --junitxml="$report" \
+            tests/test_dev29_read_suite.py::test_runtime_trace_receipt_set_binds_policy_and_release_members \
+            tests/test_dev29_read_suite.py::test_runtime_trace_gate_rejects_callback_child_environment_drift \
+            tests/test_dev29_read_suite.py::test_runtime_trace_release_binding_rejects_wrong_module_digest \
+            tests/test_dev29_read_suite.py::test_runtime_trace_release_binding_rejects_wrong_manifest_digest \
+            tests/test_dev29_read_suite.py::test_runtime_trace_release_binding_rejects_wrong_manifest_member \
+            tests/test_dev29_read_suite.py::test_runtime_open_module_executes_only_digest_bound_bytes \
+            tests/test_dev29_read_suite.py::test_runtime_trace_gate_validates_index_before_loading_module \
+            tests/test_dev29_read_suite.py::test_runtime_trace_gate_uses_bound_bytes_after_path_replacement \
+            tests/test_dev29_read_suite.py::test_all_dev29_numeric_schema_versions_have_explicit_integer_guards \
+            tests/test_dev29_read_suite.py::test_release_member_mode_policy_matches_the_builder_whitelist \
+            tests/test_dev29_read_suite.py::test_fixed_plan_rejects_boolean_schema_version \
+            tests/test_dev29_run_read_evidence.py::test_verifier_private_sidecar_is_a_sibling_of_the_suite_sidecar \
+            tests/test_dev29_run_read_evidence.py::test_supervisor_numeric_schema_version_guard_rejects_bool \
+            tests/test_dev29_runtime_open_policy_source.py::test_full_32_target_candidate_uses_real_validator_and_fresh_index \
+            tests/test_dev29_runtime_open_manifest_builder.py::test_release_manifest_rejects_invalid_identity_or_semantic_digest \
+            tests/test_dev29_runtime_open_manifest_builder.py::test_release_manifest_binds_runtime_member_to_stable_read_payload \
+            tests/test_dev29_runtime_open_manifest_builder.py::test_release_manifest_requires_exact_build_release_serialization \
+            tests/test_dev29_runtime_open_manifest_builder.py::test_policy_source_schema_version_rejects_bool \
+            tests/test_dev29_odoo_closure.py::test_numeric_schema_version_guard_rejects_bool_and_non_integers \
+            tests/test_dev29_read_oracles.py::test_plan_mutations_and_duplicate_json_keys_fail_closed \
+            tests/test_dev29_runtime_open_trace.py::test_private_runtime_documents_reject_boolean_schema_versions \
+            tests/test_dev29_sign_read.py::test_plan_drift_is_rejected \
+            tests/test_dev29_verify_read_evidence.py::test_runtime_open_index_binds_policy_environment_and_exact_release_members \
+            tests/test_dev29_verify_read_evidence.py::test_runtime_module_executes_index_verified_bytes_after_path_replacement \
+            tests/test_dev29_verify_read_evidence.py::test_runtime_open_module_executes_only_the_digest_bound_bytes \
+            tests/test_dev29_verify_read_evidence.py::test_runtime_open_schema_versions_reject_booleans_after_digest_rebinding \
+            tests/test_dev29_verify_read_evidence.py::test_release_member_mode_policy_matches_the_builder_whitelist \
+            tests/test_dev29_verify_read_evidence.py::test_bootstrap_release_manifest_rejects_boolean_schema_after_digest_rebinding \
+            tests/test_dev29_verify_read_evidence.py::test_external_envelopes_reject_boolean_schema_versions \
+            tests/test_dev29_verify_read_evidence.py::test_private_runtime_sidecar_rejects_residual_seal_journal \
+            tests/test_dev29_publish_read_evidence.py::test_release_member_mode_policy_matches_the_builder_whitelist \
+            tests/test_dev29_publish_read_evidence.py::test_publisher_script_execution_rejects_non_integer_schema_version \
+            tests/test_dev29_publish_read_evidence.py::test_stable_read_rejects_security_metadata_drift_during_read \
+            tests/test_dev29_publish_read_evidence.py::test_sealed_policy_directory_rechecks_root_0555_and_exact_file_set \
+            tests/test_dev29_publish_read_evidence.py::test_sealed_release_tree_identity_covers_nested_exact_files_and_metadata \
+            tests/test_dev29_publish_read_evidence.py::test_release_manifest_parser_accepts_build_format_but_rejects_unsafe_json \
+            tests/test_dev29_publish_read_evidence.py::test_publisher_reverifies_full_verifier_trace_and_rejects_sidecar_journal
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 55 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 runtime-trace binding gate did not execute exactly fifty-five tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_runtime_trace_binding_tests=55")
+          PY
+      - name: Install fixed root-only test prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldconfig_source="$(readlink -f "$(command -v ldconfig)")"
+          sudo install -d -m 0755 -o root -g root \
+            /opt/odoo-accounting-cli-v3/releases \
+            /opt/odoo-accounting-cli-v3/runtime-open-manifests
+          sudo install -m 0555 -o root -g root \
+            "$ldconfig_source" \
+            /usr/sbin/ldconfig.real
+          sudo install -m 0644 -o root -g root \
+            deployment/dev29/systemd/odoo-accounting-cli-v3-dev29-tmpfiles.conf \
+            /etc/tmpfiles.d/odoo-accounting-cli-v3-dev29.conf
+          sudo systemd-tmpfiles --create \
+            /etc/tmpfiles.d/odoo-accounting-cli-v3-dev29.conf
+          test "$(stat -c '%U:%G:%a' /var/lib/odoo-accounting-cli-v3/evidence)" = root:root:755
+          test "$(stat -c '%U:%G:%a' /var/lib/odoo-accounting-cli-v3/evidence-anchors)" = root:root:755
+          test "$(stat -c '%U:%G:%a' /run/odoo-accounting-cli-v3-dev29)" = root:root:700
+          test "$(stat -c '%U:%G:%a' /run/odoo-accounting-cli-v3-dev29-leases)" = root:root:700
+          test -x /usr/bin/python3.12
+          test -d /run/systemd/system
+          command -v systemd-run
+          command -v systemctl
+          systemd_state=
+          systemd_previous=
+          systemd_attempts=0
+          systemd_started=$SECONDS
+          for _attempt in $(seq 1 90); do
+            systemd_attempts=$_attempt
+            systemd_state="$(
+              sudo systemctl is-system-running 2>&1 || true
+            )"
+            if [[ "$systemd_state" != "$systemd_previous" ]]; then
+              printf 'systemd readiness state=%q attempt=%s elapsed_seconds=%s\n' \
+                "$systemd_state" "$systemd_attempts" \
+                "$((SECONDS - systemd_started))"
+              systemd_previous=$systemd_state
+            fi
+            case "$systemd_state" in
+              running|degraded) break ;;
+              initializing|starting)
+                if (( _attempt < 90 )); then
+                  sleep 1
+                fi
+                ;;
+              *) break ;;
+            esac
+          done
+          case "$systemd_state" in
+            running|degraded) ;;
+            *)
+              printf 'systemd readiness failed: final_state=%q attempts=%s elapsed_seconds=%s\n' \
+                "$systemd_state" "$systemd_attempts" \
+                "$((SECONDS - systemd_started))" >&2
+              sudo systemctl list-jobs --no-pager || true
+              sudo systemctl --failed --no-pager || true
+              sudo journalctl -b --no-pager -n 200 || true
+              exit 1
+              ;;
+          esac
+      - name: Prove twenty root-only lifecycle gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-root-runtime-gates.xml"
+          python_bin="$(command -v python)"
+          sudo env \
+            DEV29_REAL_LDCONFIG_TEST=1 \
+            DEV29_REAL_ROOT_SHIM_TEST=1 \
+            "$python_bin" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_dev29_run_read_evidence.py::test_launcher_lease_rejects_live_owner_and_replaces_only_unlocked_stale_inode \
+              tests/test_dev29_run_read_evidence.py::test_pinned_program_executes_the_hashed_inode_via_proc_fd \
+              tests/test_dev29_run_read_evidence.py::test_exitkill_removes_tracee_when_pinned_program_supervisor_is_killed \
+              tests/test_dev29_run_read_evidence.py::test_pdeathsig_removes_detached_pinned_child_when_supervisor_is_killed \
+              tests/test_dev29_run_read_evidence.py::test_path_replacement_cannot_change_executed_fd_and_is_rejected_afterward \
+              tests/test_dev29_run_read_evidence.py::test_publisher_exec_pins_python_and_script_fds_across_last_moment_replacement \
+              tests/test_dev29_run_read_evidence.py::test_publisher_exec_rejects_path_replacement_before_final_revalidation \
+              tests/test_dev29_runtime_open_trace.py::test_independent_verifier_reopens_and_reparses_same_private_trace \
+              tests/test_dev29_runtime_open_trace.py::test_private_trace_seal_preserves_inode_and_raw_bytes \
+              tests/test_dev29_runtime_open_trace.py::test_private_trace_seal_rejects_exdev_without_leaving_destination \
+              tests/test_dev29_runtime_open_trace.py::test_preseal_validator_explicitly_binds_mode_0600_and_reverify \
+              tests/test_dev29_runtime_open_trace.py::test_real_root_shim_stops_then_drops_credentials_and_rearms_pdeathsig \
+              tests/test_dev29_read_suite.py::test_release_member_mode_policy_rejects_execution_bit_drift \
+              tests/test_dev29_verify_read_evidence.py::test_release_member_mode_policy_rejects_execution_bit_drift \
+              tests/test_dev29_publish_read_evidence.py::test_sealed_release_tree_rejects_mode_drift_in_both_directions \
+              tests/test_dev29_verify_read_evidence.py::test_loader_cache_rejects_wrong_hash_and_path_replacement \
+              tests/test_dev29_verify_read_evidence.py::test_loader_cache_real_linux_pinned_execution \
+              tests/test_dev29_publish_read_evidence.py::test_publisher_validates_and_closes_inherited_script_fd_before_children
+          sudo "$python_bin" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 20 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 root lifecycle gate did not execute exactly twenty tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_root_lifecycle_tests=20")
+          PY
+      - name: Prove twelve private trace atomic-seal SIGKILL windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-private-trace-seal-sigkill.xml"
+          python_bin="$(command -v python)"
+          sudo "$python_bin" -m pytest -q -p no:cacheprovider \
+            --junitxml="$report" \
+            tests/test_dev29_runtime_open_trace.py::test_private_trace_seal_recovers_every_real_sigkill_window \
+            tests/test_dev29_read_suite.py::test_private_runtime_trace_manifest_recovers_every_sigkill_window
+          sudo "$python_bin" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 12 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 private trace atomic-seal gate did not execute exactly "
+                  "twelve tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_private_trace_atomic_seal_tests=12")
+          PY
+      - name: Prove real multi-role trace and canonical policy install
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-multirole-policy.xml"
+          python_bin="$(command -v python)"
+          sudo env \
+            DEV29_REAL_MULTIROLE_TRACE_TEST=1 \
+            DEV29_REAL_POLICY_INSTALL_TEST=1 \
+            "$python_bin" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_dev29_runtime_open_trace.py::test_real_runtime_trace_gate_binds_odoo_and_postgres_child_homes \
+              tests/test_dev29_runtime_open_policy_source.py::test_real_root_full_policy_cli_installs_canonical_fresh_release
+          sudo "$python_bin" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 2 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 multi-role/policy gate did not execute exactly two tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_multirole_policy_tests=2")
+          PY
+      - name: Prove eight real systemd unit-lease lifecycle gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-systemd-unit-lease.xml"
+          python_bin="$(command -v python)"
+          sudo env \
+            DEV29_REAL_UNIT_LEASE_TEST=1 \
+            "$python_bin" -m pytest -q -p no:cacheprovider \
+              --junitxml="$report" \
+              tests/test_dev29_unit_lease_systemd.py
+          sudo "$python_bin" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 8 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 systemd unit-lease gate did not execute exactly eight tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_systemd_unit_lease_tests=8")
+          PY
+      - name: Prove the publisher SIGKILL recovery windows
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-publisher-sigkill.xml"
+          python -m pytest -q -p no:cacheprovider \
+            --junitxml="$report" \
+            tests/test_dev29_publish_read_evidence.py::test_sigkill_before_commit_leaves_recoverable_fixed_pending \
+            tests/test_dev29_publish_read_evidence.py::test_sigkill_at_pending_file_fsync_recovers_by_fsyncing_same_inode_before_rename
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 2 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 publisher SIGKILL gate did not execute exactly two tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_publisher_sigkill_tests=2")
+          PY
+      - name: Prove ten independent recovery lifecycle controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev29-recovery-controls.xml"
+          python -m pytest -q -p no:cacheprovider \
+            --junitxml="$report" \
+            tests/test_dev29_run_read_evidence.py::test_supervisor_release_anchor_matches_canonical_installer_four_field_contract \
+            tests/test_dev29_run_read_evidence.py::test_launch_and_worker_require_external_registry_digest_and_lease_contract \
+            tests/test_dev29_run_read_evidence.py::test_publisher_argv_forwards_external_ldconfig_digest_exactly \
+            tests/test_dev29_run_read_evidence.py::test_recovery_and_status_require_external_bundle_digest \
+            'tests/test_dev29_run_read_evidence.py::test_status_forwards_external_ldconfig_digest_to_anchor_validation[final]' \
+            'tests/test_dev29_run_read_evidence.py::test_status_forwards_external_ldconfig_digest_to_anchor_validation[pending]' \
+            tests/test_dev29_run_read_evidence.py::test_orchestration_recognizes_complete_stage_and_durable_pending_as_recoverable \
+            tests/test_dev29_run_read_evidence.py::test_systemctl_query_uses_fixed_binary_environment_and_no_stdin \
+            tests/test_dev29_run_read_evidence.py::test_supervisor_source_has_single_unit_hardening_and_final_exec_contract \
+            tests/test_dev29_run_read_evidence.py::test_systemd_run_communicate_timeout_exceeds_unit_shutdown_budget
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 10 or failures or errors or skipped:
+              raise SystemExit(
+                  "Dev29 recovery lifecycle gate did not execute exactly ten tests: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("dev29_recovery_lifecycle_tests=10")
+          PY
+
   dev18-postgresql-integration:
     name: Dev18 + Dev28 real PostgreSQL gates
     runs-on: ubuntu-24.04
@@ -1089,6 +1480,7 @@ jobs:
             pyproject.toml
             src/odoo_accounting_cli_v3/__init__.py
             src/odoo_accounting_cli_v3/odoo/__init__.py
+            src/odoo_accounting_cli_v3/odoo/read_boundary_evidence.py
             src/odoo_accounting_cli_v3/odoo/read_transaction.py
             tests/test_odoo_read_transaction_postgres.py
           )
@@ -1146,13 +1538,13 @@ jobs:
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
           skipped = root.findall(".//skipped")
-          if len(tests) != 5 or failures or errors or skipped:
+          if len(tests) != 6 or failures or errors or skipped:
               raise SystemExit(
-                  "read transaction PostgreSQL gate did not execute exactly five tests: "
+                  "read transaction PostgreSQL gate did not execute exactly six tests: "
                   f"tests={len(tests)} failures={len(failures)} "
                   f"errors={len(errors)} skipped={len(skipped)}"
               )
-          print("read_transaction_real_postgresql_tests=5")
+          print("read_transaction_real_postgresql_tests=6")
           PY
       - name: Execute the Dev18 SQL and configuration gates against real PostgreSQL
         shell: bash

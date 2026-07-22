@@ -20,7 +20,7 @@ Baseline date: 2026-07-13 (Asia/Shanghai)
 | V2 copy equality | Active source-tree aggregate hashes differ; `commands/backend.py` also differs while both packages report `0.1.0` | Confirmed version collision |
 | Odoo module | Active `sudo_ai_bot` manifest reports `1.2.0`; manifest SHA-256 is `640ddb271cf04067bc5be68de7d7fb8620e9c19a308417295650b3811279d96b` | Confirmed |
 | Production writes | No authorization was provided | Prohibited |
-| Sandbox database | No dedicated sandbox identity or connection evidence is available | Not verified |
+| Sandbox database | No qualified dedicated sandbox exists; the latest `/tmp` development candidate fails Dev18/Dev19 isolation and capacity gates | Rejected 2026-07-22 |
 | Odoo test database identity | `odoo_test`, UUID `19b09656-d10f-11f0-9065-00163e54a5ad` | Confirmed read-only |
 | Read test principal | Odoo user 2, active non-superuser runtime, company 1 allowed, accounting read/user/manager groups present | Confirmed read-only |
 
@@ -51,6 +51,27 @@ full hash manifest must be generated after read-only SSH access is restored.
 - `account` version `19.0.1.4` and `account_accountant` version `19.0.1.1` are installed in all five observed Odoo databases.
 - `sudo_ai_bot` version `19.0.1.2.0` is installed in `codex_sgf_test_20260713_01`, `odoo_2601`, `odoo_sg`, and `odoo_test`; it is uninstalled in `odoo`.
 - `codex_sgf_test_20260713_01` contains companies `YourCompany`, `My US Company`, and `SG Company`. Its sandbox role is not yet proven by configuration or user confirmation, so no write is authorized.
+
+### 2026-07-22 sandbox-candidate recheck
+
+A strictly read-only recheck rejected `codex_cn_m31_demo_01` as a V3 write
+sandbox.  Its Odoo process ran from a mutable `/tmp` development tree under the
+shared `odoo:odoo` identity, shared every PID 1 namespace with production,
+loaded the mutable production add-ons path, and changed process identity during
+the observation.  Its database resides in the production PostgreSQL cluster,
+is owned by the shared `odoo` role, and uses a database UUID already observed
+on protected databases.  That role owns 205 databases and can connect to all
+nine protected databases reviewed by the gate.
+
+The candidate also had five companies, five active internal users, 38 enabled
+scheduled jobs, no trusted V3 executor/independent-approver binding, no paired
+database/filestore backup and reset evidence, and no isolated service or
+namespace.  Although its loopback port and filestore path were distinct, that
+does not overcome the shared authority and runtime boundary.  Ordinary free
+space was 4,038,778,880 bytes, leaving a 19,583,541,248-byte shortfall against
+the Dev18 22 GiB sandbox allocation gate.  No Odoo endpoint, write, restart,
+route, deletion, or configuration change was performed.  Unknown provenance
+remains a rejection, so every real write capability stays closed.
 
 The server V2 directory contains many in-place backup trees and generated
 artifacts. These are evidence inputs only and must not be copied wholesale into

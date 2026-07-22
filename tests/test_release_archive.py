@@ -35,6 +35,24 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
         "deployment/dev23/README.md",
         "deployment/dev27/README.md",
         "deployment/dev27/finalizer_runtime_gate.py",
+        "deployment/dev29/README-closure.md",
+        "deployment/dev29/README-oracles.md",
+        "deployment/dev29/README-read-evidence.md",
+        "deployment/dev29/README-runtime.md",
+        "deployment/dev29/direct_child.py",
+        "deployment/dev29/odoo_closure.py",
+        "deployment/dev29/publish_read_evidence.py",
+        "deployment/dev29/read_oracles.py",
+        "deployment/dev29/read_plan.json",
+        "deployment/dev29/run_read_evidence.py",
+        "deployment/dev29/run_read_suite.py",
+        "deployment/dev29/runtime_open_manifest_builder.py",
+        "deployment/dev29/runtime_open_policy_source.py",
+        "deployment/dev29/runtime_open_policy_source.template.json",
+        "deployment/dev29/runtime_open_trace.py",
+        "deployment/dev29/runtime_setup.py",
+        "deployment/dev29/systemd/odoo-accounting-cli-v3-dev29-tmpfiles.conf",
+        "deployment/dev29/verify_read_evidence.py",
         "deployment/dev9/README.md",
         "deployment/dev9/render-systemd-service.py",
         "deployment/dev9/run-private-mount-gate.sh",
@@ -44,6 +62,7 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
         "docs/TARGET_HOST_CAPACITY_AUDIT_2026-07-17.md",
         "docs/TARGET_HOST_DEV18_SQL_PROBE_2026-07-17.md",
         "docs/TARGET_HOST_FINALIZER_RUNTIME_AUDIT_2026-07-19.md",
+        "docs/TARGET_HOST_DEV29_CLOSURE_BASELINE_2026-07-20.md",
         "tools/build_release.py",
         "tools/check_source_boundary.py",
         "tools/verify_release.py",
@@ -173,6 +192,58 @@ DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS = frozenset(
         "tests/test_dev27_finalizer_runtime_gate.py",
     }
 )
+DEV29_READ_EVIDENCE_RELEASE_MEMBERS = frozenset(
+    {
+        ".github/workflows/quality.yml",
+        "README.md",
+        "VERSION",
+        "deployment/dev29/README-closure.md",
+        "deployment/dev29/README-oracles.md",
+        "deployment/dev29/README-read-evidence.md",
+        "deployment/dev29/README-runtime.md",
+        "deployment/dev29/direct_child.py",
+        "deployment/dev29/odoo_closure.py",
+        "deployment/dev29/publish_read_evidence.py",
+        "deployment/dev29/read_oracles.py",
+        "deployment/dev29/read_plan.json",
+        "deployment/dev29/run_read_evidence.py",
+        "deployment/dev29/run_read_suite.py",
+        "deployment/dev29/runtime_open_manifest_builder.py",
+        "deployment/dev29/runtime_open_policy_source.py",
+        "deployment/dev29/runtime_open_policy_source.template.json",
+        "deployment/dev29/runtime_open_trace.py",
+        "deployment/dev29/runtime_setup.py",
+        "deployment/dev29/sign_read.py",
+        "deployment/dev29/systemd/odoo-accounting-cli-v3-dev29-tmpfiles.conf",
+        "deployment/dev29/verify_read_evidence.py",
+        "docs/DEPLOYMENT.md",
+        "docs/RUNTIME_CONFIGURATION.md",
+        "docs/TARGET_HOST_DEV29_CLOSURE_BASELINE_2026-07-20.md",
+        "src/odoo_accounting_cli_v3/cli.py",
+        "src/odoo_accounting_cli_v3/odoo/read_boundary_evidence.py",
+        "src/odoo_accounting_cli_v3/odoo/runner.py",
+        "tests/test_cli_evidence.py",
+        "tests/test_cli_read.py",
+        "tests/test_dev29_odoo_closure.py",
+        "tests/test_dev29_publish_read_evidence.py",
+        "tests/test_dev29_read_oracles.py",
+        "tests/test_dev29_read_suite.py",
+        "tests/test_dev29_run_read_evidence.py",
+        "tests/test_dev29_runtime_open_manifest_builder.py",
+        "tests/test_dev29_runtime_open_policy_source.py",
+        "tests/test_dev29_runtime_open_trace.py",
+        "tests/test_dev29_runtime_setup.py",
+        "tests/test_dev29_sign_read.py",
+        "tests/test_dev29_unit_lease_systemd.py",
+        "tests/test_dev29_verify_read_evidence.py",
+        "tests/test_odoo_read_boundary_evidence_runner.py",
+        "tests/test_odoo_read_transaction_postgres.py",
+        "tests/test_odoo_runner.py",
+        "tests/test_read_boundary_evidence.py",
+        "tests/test_release_archive.py",
+        "tests/TEST.md",
+    }
+)
 EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3-effect-finalizer",
@@ -225,6 +296,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/odoo/module_guard.py",
         "src/odoo_accounting_cli_v3/odoo/module_graph.py",
         "src/odoo_accounting_cli_v3/odoo/multicurrency_balance.py",
+        "src/odoo_accounting_cli_v3/odoo/read_boundary_evidence.py",
         "src/odoo_accounting_cli_v3/odoo/read_transaction.py",
         "src/odoo_accounting_cli_v3/odoo/runner.py",
         "src/odoo_accounting_cli_v3/odoo/trial_balance.py",
@@ -246,6 +318,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "tests/test_auth.py",
         "tests/test_accounting_metadata_guard.py",
         "tests/test_cli_write.py",
+        "tests/test_cli_evidence.py",
         "tests/test_gateway.py",
         "tests/test_multicurrency_balance.py",
         "tests/test_odoo_approval_client.py",
@@ -253,6 +326,8 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "tests/test_odoo_bootstrap.py",
         "tests/test_odoo_read_transaction.py",
         "tests/test_odoo_read_transaction_postgres.py",
+        "tests/test_odoo_read_boundary_evidence_runner.py",
+        "tests/test_read_boundary_evidence.py",
         "tests/test_read_handler_static_safety.py",
         "tests/test_odoo_control_addon.py",
         "tests/test_odoo_multicurrency_balance_backend.py",
@@ -314,6 +389,7 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
     DEV15_READ_TOOLCHAIN_RELEASE_MEMBERS
     | DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS
     | DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS
+    | DEV29_READ_EVIDENCE_RELEASE_MEMBERS
     | EFFECT_FINALIZER_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
@@ -322,6 +398,98 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
 
 
 class ReleaseArchiveTest(unittest.TestCase):
+    def test_release_capacity_constants_match_installer_contract(self) -> None:
+        self.assertEqual(release_builder.MAX_ARCHIVE_MEMBERS, 10_000)
+        self.assertEqual(
+            release_builder.MAX_RELEASE_FILE_BYTES,
+            64 * 1024 * 1024,
+        )
+        self.assertEqual(release_builder.MAX_RELEASE_BYTES, 512 * 1024 * 1024)
+        self.assertEqual(release_builder.MAX_MANIFEST_BYTES, 16 * 1024 * 1024)
+        self.assertEqual(release_builder.MAX_RELEASE_NAME_CHARACTERS, 128)
+
+    def test_release_member_count_accepts_boundary_and_rejects_overflow(
+        self,
+    ) -> None:
+        with mock.patch.object(release_builder, "MAX_ARCHIVE_MEMBERS", 3):
+            release_builder.validate_release_payloads(
+                {"one.txt": b"", "two.txt": b""}
+            )
+            with self.assertRaisesRegex(
+                release_builder.ReleaseError,
+                "archive member count exceeds",
+            ):
+                release_builder.validate_release_payloads(
+                    {"one.txt": b"", "two.txt": b"", "three.txt": b""}
+                )
+
+    def test_release_payload_sizes_accept_boundaries_and_reject_overflow(
+        self,
+    ) -> None:
+        with (
+            mock.patch.object(release_builder, "MAX_RELEASE_FILE_BYTES", 3),
+            mock.patch.object(release_builder, "MAX_RELEASE_BYTES", 5),
+        ):
+            release_builder.validate_release_payloads(
+                {"one.txt": b"123", "two.txt": b"45"}
+            )
+            with self.assertRaisesRegex(
+                release_builder.ReleaseError,
+                "member exceeds the installer file limit",
+            ):
+                release_builder.validate_release_payloads(
+                    {"oversized.txt": b"1234"}
+                )
+            with self.assertRaisesRegex(
+                release_builder.ReleaseError,
+                "payload exceeds the installer total size limit",
+            ):
+                release_builder.validate_release_payloads(
+                    {"one.txt": b"123", "two.txt": b"123"}
+                )
+
+    def test_release_manifest_size_accepts_boundary_and_rejects_overflow(
+        self,
+    ) -> None:
+        with mock.patch.object(release_builder, "MAX_MANIFEST_BYTES", 3):
+            release_builder.validate_release_manifest_payload(b"123")
+            with self.assertRaisesRegex(
+                release_builder.ReleaseError,
+                "manifest exceeds the installer size limit",
+            ):
+                release_builder.validate_release_manifest_payload(b"1234")
+
+    def test_release_rejects_non_ascii_member_paths(self) -> None:
+        release_builder.validate_release_member(Path("docs/accounting.md"), b"safe")
+        with self.assertRaisesRegex(
+            release_builder.ReleaseError,
+            "non-ASCII release path",
+        ):
+            release_builder.validate_release_member(Path("docs/会计.md"), b"safe")
+
+    def test_release_name_accepts_runtime_boundary_and_rejects_overflow(
+        self,
+    ) -> None:
+        commit = "a" * 40
+        boundary_version = "1.2.3-" + "a" * (115 - len("1.2.3-"))
+        release_builder.validate_release_identity(
+            release_builder.ReleaseIdentity(
+                version=boundary_version,
+                commit=commit,
+            )
+        )
+        oversized_version = boundary_version + "a"
+        with self.assertRaisesRegex(
+            release_builder.ReleaseError,
+            "release name exceeds the 128-character runtime limit",
+        ):
+            release_builder.validate_release_identity(
+                release_builder.ReleaseIdentity(
+                    version=oversized_version,
+                    commit=commit,
+                )
+            )
+
     def test_dev9_security_runtime_and_evidence_are_explicit_release_members(
         self,
     ) -> None:
@@ -341,6 +509,7 @@ class ReleaseArchiveTest(unittest.TestCase):
             "deployment/dev18",
             "deployment/dev23",
             "deployment/dev27",
+            "deployment/dev29",
             "deployment/dev9",
             "odoo_addons/odoo_accounting_cli_v3_control",
             "pi_bridge",
@@ -461,6 +630,25 @@ class ReleaseArchiveTest(unittest.TestCase):
             )
         )
 
+    def test_dev29_read_evidence_is_an_exact_release_member_set(self) -> None:
+        directory = PROJECT_ROOT / "deployment" / "dev29"
+        discovered = {
+            path.relative_to(PROJECT_ROOT).as_posix()
+            for path in directory.rglob("*")
+            if path.is_file() and not path.name.endswith((".pyc", ".pyo"))
+        }
+        expected = {
+            name
+            for name in DEV29_READ_EVIDENCE_RELEASE_MEMBERS
+            if name.startswith("deployment/dev29/")
+        }
+        self.assertEqual(discovered, expected)
+        self.assertTrue(
+            DEV29_READ_EVIDENCE_RELEASE_MEMBERS.issubset(
+                REQUIRED_WRITE_RELEASE_MEMBERS
+            )
+        )
+
     def test_deployment_document_references_only_declared_release_dependencies(
         self,
     ) -> None:
@@ -485,6 +673,18 @@ class ReleaseArchiveTest(unittest.TestCase):
             (Path("local/finalizer.hmac"), b"secret"),
             (Path("local/finalizer.pgpass"), b"binding:secret\n"),
             (Path("local/pi-attestation-keys.json"), b"{}"),
+            (Path("local/RELEASE-MANIFEST.json"), b"{}"),
+            (Path("local/BUNDLE-MANIFEST.json"), b"{}"),
+            (Path("local/runtime-open-trace.json"), b"{}"),
+            (Path("local/runtime-test-release.json"), b"{}"),
+            (Path("local/target.strace"), b"trace"),
+            (Path("local/.target.seal.json"), b"{}"),
+            (Path("local/seal.json"), b"{}"),
+            (Path("local/trace.log"), b"trace"),
+            (Path("local/lease.json"), b"{}"),
+            (Path("local/dependency.squashfs"), b"image"),
+            (Path("local/odoo-server19.conf"), b"db_password = secret\n"),
+            (Path("local/validation-report.json"), b"{}"),
             (Path("local/state.sqlite3"), b"SQLite format 3"),
             (Path("local/state.sqlite3-wal"), b"mutable"),
             (Path("local/state.db"), b"SQLite format 3\x00mutable"),
@@ -522,6 +722,45 @@ class ReleaseArchiveTest(unittest.TestCase):
                     }
                 ).encode("utf-8"),
             )
+
+        host_documents = (
+            {"scope": "odoo-accounting-cli-v3.dev29.runtime-open-policy-source.v1"},
+            {"scope": "odoo-accounting-cli-v3.dev29.runtime-open-index.v1"},
+            {"scope": "direct-child-bootstrap-through-final-exec-v1"},
+            {"kind": "odoo_dependency_closure"},
+            {"kind": "odoo_dependency_closure_anchor"},
+            {"bundle_type": "odoo-accounting-cli-v3.dev29.read-suite-evidence"},
+            {
+                "anchor_type": (
+                    "odoo-accounting-cli-v3.dev29.read-suite-verification"
+                )
+            },
+            {
+                "commit": "a" * 40,
+                "manifest_sha256": "b" * 64,
+                "package_sha256": "c" * 64,
+                "release": "0.1.0.dev29-a1234567890b",
+            },
+        )
+        for position, document in enumerate(host_documents):
+            with self.subTest(host_document=position):
+                with self.assertRaises(release_builder.ReleaseError):
+                    release_builder.validate_release_member(
+                        Path(f"local/renamed-host-document-{position}.json"),
+                        json.dumps(document).encode("utf-8"),
+                    )
+
+        release_builder.validate_release_member(
+            Path("deployment/dev29/runtime_open_policy_source.template.json"),
+            json.dumps(
+                {
+                    "scope": (
+                        "odoo-accounting-cli-v3.dev29."
+                        "runtime-open-policy-template.v1"
+                    )
+                }
+            ).encode("utf-8"),
+        )
 
         release_builder.validate_release_member(
             Path("deployment/dev9/broker-runtime.example.json"),
@@ -644,6 +883,15 @@ class ReleaseArchiveTest(unittest.TestCase):
                     encoding="utf-8",
                 )
                 identity = json.loads(completed.stdout)
+                self.assertEqual(
+                    set(identity),
+                    {
+                        "manifest_file_sha256",
+                        "manifest_sha256",
+                        "package",
+                        "package_sha256",
+                    },
+                )
                 payload = Path(identity["package"]).read_bytes()
                 self.assertEqual(
                     identity["package_sha256"], hashlib.sha256(payload).hexdigest()
@@ -689,6 +937,34 @@ class ReleaseArchiveTest(unittest.TestCase):
                             if member.name in EXECUTABLE_RELEASE_MEMBERS
                             else 0o644,
                         )
+                manifest_stream = archive.extractfile("RELEASE-MANIFEST.json")
+                self.assertIsNotNone(manifest_stream)
+                manifest_bytes = manifest_stream.read()
+                self.assertTrue(manifest_bytes.endswith(b"\n"))
+                self.assertEqual(
+                    first_identity["manifest_file_sha256"],
+                    hashlib.sha256(manifest_bytes).hexdigest(),
+                )
+                manifest = json.loads(manifest_bytes)
+                self.assertEqual(
+                    first_identity["manifest_sha256"],
+                    manifest["manifest_sha256"],
+                )
+                unsigned = {
+                    key: value
+                    for key, value in manifest.items()
+                    if key != "manifest_sha256"
+                }
+                self.assertEqual(
+                    manifest["manifest_sha256"],
+                    hashlib.sha256(
+                        json.dumps(
+                            unsigned,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                )
                 for launcher_name in LAUNCHERS:
                     launcher = archive.extractfile(launcher_name)
                     self.assertIsNotNone(launcher)

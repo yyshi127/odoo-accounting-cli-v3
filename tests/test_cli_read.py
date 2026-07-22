@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -593,6 +594,83 @@ class CliReadTest(unittest.TestCase):
         payload = json.loads(result.stderr)
         self.assertEqual(payload["error"]["code"], "runtime_configuration_rejected")
         self.assertNotIn("sensitive detail", result.output)
+
+    @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
+    @patch("odoo_accounting_cli_v3.cli._load_release_identity", return_value=identity())
+    @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    def test_staged_test_read_exposes_only_allowlisted_rejection_code(
+        self, load_config, _load_identity, run_shell
+    ) -> None:
+        load_config.return_value = self.config
+        run_shell.side_effect = OdooRunnerError(
+            "private Odoo detail",
+            rejection_code="authentication_replayed",
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "read",
+                "--runtime-config",
+                str(self.runtime_path),
+                "--request-json",
+                json.dumps(request_document()),
+            ],
+        )
+        self.assertEqual(result.exit_code, 6, result.output)
+        error = json.loads(result.stderr)["error"]
+        self.assertEqual(
+            set(error),
+            {
+                "code",
+                "message",
+                "odoo_action_performed",
+                "rejection_code",
+                "retryable",
+            },
+        )
+        self.assertEqual(error["code"], "odoo_read_failed")
+        self.assertEqual(error["rejection_code"], "authentication_replayed")
+        self.assertNotIn("private Odoo detail", result.output)
+
+    @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
+    @patch("odoo_accounting_cli_v3.cli._load_release_identity", return_value=identity())
+    @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    def test_production_read_failure_keeps_original_exact_envelope(
+        self, load_config, _load_identity, run_shell
+    ) -> None:
+        load_config.return_value = replace(
+            self.config, environment="production", capability_channel="enabled"
+        )
+        run_shell.side_effect = OdooRunnerError(
+            "private Odoo detail",
+            rejection_code="odoo_acl_denied",
+        )
+        result = CliRunner().invoke(
+            main,
+            [
+                "read",
+                "--runtime-config",
+                str(self.runtime_path),
+                "--request-json",
+                json.dumps(request_document()),
+            ],
+        )
+        self.assertEqual(result.exit_code, 6, result.output)
+        self.assertEqual(
+            json.loads(result.stderr),
+            {
+                "command": "read",
+                "error": {
+                    "code": "odoo_read_failed",
+                    "message": (
+                        "The authenticated Odoo read did not produce a verified result."
+                    ),
+                    "odoo_action_performed": False,
+                    "retryable": False,
+                },
+                "ok": False,
+            },
+        )
 
 
 if __name__ == "__main__":

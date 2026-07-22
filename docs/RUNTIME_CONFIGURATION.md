@@ -449,13 +449,17 @@ The `/opt` release hierarchy is used because every ancestor is root-managed;
 the earlier `/mnt/.../odoo_accounting_agent_cli_v3` candidates remain retained
 deployment evidence and are not a runtime source.
 
-The dev8 staged launcher still relies on the root-managed system Python and its
-installed Click distribution. Those external dependency bytes are not yet
-covered by the canonical tar identity. Target evidence must record their
-resolved paths, versions, ownership, modes, and SHA-256 values. Production
-promotion remains blocked until a release-scoped dependency runtime, vendored
-dependency set, or an equivalent pre-import cryptographic binding removes this
-identity gap.
+The historical dev8 staged launcher relied on mutable Odoo/Python dependencies
+outside the canonical tar. Dev29 supplies a release-specific dependency image,
+a separately sealed Odoo configuration, and an external manifest for the fixed
+system interpreter, standard library, loader cache, and recursively derived
+native dependencies. The exact image and loop inode must be mounted read-only
+inside a private namespace before the runner imports Odoo, while mutable read
+state remains on separate writable paths. This contract does not close the gap
+until the target builds the deterministic image twice, the independent verifier
+rederives the complete live dependency set, and the exact release retains a
+passing composite Odoo receipt. The current target capacity and service-
+continuity gates have not passed, so production promotion remains blocked.
 
 Runtime configuration never enables a capability by itself. The registry must
 contain the same environment in the selected channel. All 14 registered write

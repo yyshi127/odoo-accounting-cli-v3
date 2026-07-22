@@ -22,6 +22,7 @@ from odoo_accounting_cli_v3.odoo.module_graph import (
 )
 from odoo_accounting_cli_v3.odoo.write_bootstrap import _execution_evidence
 from odoo_accounting_cli_v3.operations import canonical_json
+from odoo_accounting_cli_v3.registry import load_registry
 from odoo_accounting_cli_v3.write_receipts import (
     create_record_snapshot,
     create_recovery_plan_v2,
@@ -560,23 +561,15 @@ def test_source_has_no_privilege_or_transaction_escape_and_no_private_orm_calls(
     assert "._post(" not in source
 
 
-def test_all_thirteen_capabilities_have_three_real_dispatch_phases():
-    identifiers = (
-        "acct.invoice.customer_create.v1",
-        "acct.bill.vendor_create.v1",
-        "acct.refund.create.v1",
-        "acct.payment.register.v1",
-        "acct.bank.statement_import.v1",
-        "acct.reconciliation.apply.v1",
-        "acct.asset.create.v1",
-        "acct.depreciation.post.v1",
-        "acct.accrual.create.v1",
-        "acct.deferred.create.v1",
-        "acct.period.adjustment_create.v1",
-        "acct.move.reverse.v1",
-        "acct.recovery.execute.v1",
-    )
-    for identifier in identifiers:
+def test_all_fourteen_registered_write_capabilities_have_three_real_dispatch_phases():
+    identifiers = {
+        capability.id
+        for capability in load_registry(ROOT / "registry" / "capabilities.json")
+        if capability.data["access"] == "write"
+    }
+    assert len(identifiers) == 14
+    assert "acct.move.draft_cancel.v1" in identifiers
+    for identifier in sorted(identifiers):
         for phase in ("precheck", "execute", "verify"):
             assert callable(getattr(OdooWriteHandlers, OdooWriteHandlers.dispatch_name(identifier, phase)))
 

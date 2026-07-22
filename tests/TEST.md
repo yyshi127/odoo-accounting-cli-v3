@@ -516,10 +516,45 @@ At the current local development checkpoint:
   The static policy is defense in depth and does not prove absence of a second
   connection or external effect. This is not yet an exact-release Odoo 19 target
   receipt;
+- dev29 adds a release-specific SquashFS Odoo/Python dependency closure with a
+  separate sealed configuration, external root-owned image/manifest anchor,
+  installed-module graph binding, executable `.pth` and import-escape rejection,
+  deterministic double-build comparison, pre-mount artifact verification, and
+  loop-device/inode plus private-mount-namespace checks. Its composite staged
+  read plan fixes five positive requests, seven exact policy rejections, a D11
+  rollback boundary probe, independent PostgreSQL financial recomputation,
+  pre/post privacy-limited witnesses, service/database continuity, durable
+  replay/audit state deltas, and a separately implemented offline evidence
+  verifier. The operational design uses one private-namespace supervisor,
+  direct demoted children, mandatory cleanup before external anchoring, and a
+  digest-pinned runtime-open inventory; static ELF discovery alone is explicitly
+  non-promotable. The suite, independent verifier, and publisher now each
+  reconstruct the approved policy-source digest from the exact index and all 32
+  canonical target manifests, independently bind the raw release manifest and
+  validator member bytes, reject boolean schema counters, and preserve the
+  verifier trace in a separate root-only sibling sidecar. Linux CI explicitly
+  gates the root lifecycle, atomic-seal crash windows, real systemd unit leases,
+  tmpfiles recreation, policy installation, recovery, and publication paths. A
+  generic process or infrastructure failure cannot satisfy a negative case.
+  The target read-only baseline found a capacity shortfall and an Odoo restart
+  count that had climbed from 484 to 1,172 by 2026-07-22. A later point-in-time
+  recheck that day found 4,255,105,024 free bytes, above the conservative floor,
+  and no additional restart in that one snapshot, but did not prove sustained
+  service continuity or reserve that headroom for V3. Therefore no Dev29 target
+  closure, exact-release Odoo receipt, or promotion evidence exists yet;
 - every current registry `evidence.receipts` array is empty: zero capabilities
   are enabled and zero write capabilities are staged. E00b, a real sandbox
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox
   or production write is authorized.
+
+The 2026-07-22 Dev29 pre-release worktree validation executed 4,289 tests:
+4,017 passed, 272 platform/external-environment cases skipped, and none failed
+or errored. The Dev29 subset executed 357 tests: 293 passed and 64 Windows/Linux
+root-specific cases skipped. The non-root digest, policy, exact-mode mapping,
+and strict-schema binding gate executed its exact 55 cases with zero skips.
+These are local development results, not clean-commit GitHub Actions evidence,
+an exact-release target receipt, or a sandbox-write authorization. The Linux
+root-only gates must still execute in CI before this release is publishable.
 
 The normal local unit command is:
 

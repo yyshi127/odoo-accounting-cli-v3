@@ -20,10 +20,13 @@ from .effect_finalizer import (
     validate_effect_finalization_evidence_shape,
 )
 from .odoo.runner import (
+    READ_REJECTION_CODES,
     OdooRunnerError,
     RuntimeConfig,
     load_runtime_config,
     load_runtime_secrets,
+    require_staged_test_evidence_runtime,
+    run_read_boundary_evidence,
     run_odoo_shell,
 )
 from .receipts import ReceiptError, verify_read_receipt
@@ -68,10 +71,13 @@ class CliFailure(click.ClickException):
         odoo_effect: str | None = None,
         operation_id: str | None = None,
         state: str | None = None,
+        rejection_code: str | None = None,
     ) -> None:
         super().__init__(message)
         if odoo_effect not in {None, "none", "unknown"}:
             raise ValueError("odoo_effect must be none or unknown")
+        if rejection_code is not None and rejection_code not in READ_REJECTION_CODES:
+            raise ValueError("read rejection code is not allowlisted")
         self.command = command
         self.code = code
         self.exit_code = exit_code
@@ -79,6 +85,7 @@ class CliFailure(click.ClickException):
         self.odoo_effect = odoo_effect
         self.operation_id = operation_id
         self.state = state
+        self.rejection_code = rejection_code
 
     def show(self, file: Any | None = None) -> None:
         stream = file if file is not None else click.get_text_stream("stderr")
@@ -89,6 +96,8 @@ class CliFailure(click.ClickException):
                 "odoo_action_performed": False,
                 "retryable": self.retryable,
             }
+            if self.rejection_code is not None:
+                error["rejection_code"] = self.rejection_code
         else:
             error = {
                 "code": self.code,
@@ -190,7 +199,12 @@ def _load_release_identity(
     }
 
 
-def _assert_runtime_release(config: RuntimeConfig, identity: dict[str, Any]) -> None:
+def _assert_runtime_release(
+    config: RuntimeConfig,
+    identity: dict[str, Any],
+    *,
+    command: str = "read",
+) -> None:
     source_release = Path(__file__).resolve().parents[2]
     expected_package_path = (
         config.release_root.parent.parent
@@ -199,7 +213,7 @@ def _assert_runtime_release(config: RuntimeConfig, identity: dict[str, Any]) -> 
     )
     if source_release != config.release_root.resolve():
         raise CliFailure(
-            command="read",
+            command=command,
             code="runtime_release_mismatch",
             message="The CLI process and configured Odoo runner are not from the same release.",
             exit_code=5,
@@ -210,7 +224,7 @@ def _assert_runtime_release(config: RuntimeConfig, identity: dict[str, Any]) -> 
         or config.canonical_package_path != expected_package_path
     ):
         raise CliFailure(
-            command="read",
+            command=command,
             code="runtime_release_mismatch",
             message="The CLI or canonical package does not match the configured verified release.",
             exit_code=5,
@@ -518,6 +532,71 @@ def release_identity() -> None:
     _success("release.identity", _load_release_identity())
 
 
+@main.group("evidence")
+def evidence_group() -> None:
+    """Run exact-release internal safety evidence probes."""
+
+
+@evidence_group.command("read-boundary")
+@click.option(
+    "--runtime-config",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Absolute path to the root-managed Odoo runtime configuration.",
+)
+@click.option(
+    "--timeout-seconds",
+    type=click.FloatRange(min=0, min_open=True),
+    default=30.0,
+    show_default=True,
+)
+def evidence_read_boundary(runtime_config: Path, timeout_seconds: float) -> None:
+    """Prove the Odoo shell PostgreSQL rollback-only boundary."""
+
+    command = "evidence.read-boundary"
+    try:
+        config = load_runtime_config(runtime_config)
+    except OdooRunnerError as exc:
+        raise CliFailure(
+            command=command,
+            code="runtime_configuration_rejected",
+            message="The root-managed Odoo runtime configuration was rejected.",
+            exit_code=5,
+        ) from exc
+    try:
+        require_staged_test_evidence_runtime(config)
+    except OdooRunnerError as exc:
+        raise CliFailure(
+            command=command,
+            code="evidence_scope_rejected",
+            message="DML read-boundary evidence requires a staged test runtime.",
+            exit_code=5,
+        ) from exc
+    identity = _load_release_identity(config.release_root, command=command)
+    _assert_runtime_release(config, identity, command=command)
+    try:
+        evidence = run_read_boundary_evidence(
+            config,
+            release_digest=identity["manifest_sha256"],
+            timeout_seconds=timeout_seconds,
+        )
+    except OdooRunnerError as exc:
+        raise CliFailure(
+            command=command,
+            code="odoo_read_boundary_evidence_failed",
+            message="Odoo did not return verified read-boundary evidence.",
+            exit_code=6,
+        ) from exc
+    _success(
+        command,
+        {
+            "evidence": evidence,
+            "release_identity": identity,
+            "runtime": config.runtime_identity,
+        },
+    )
+
+
 @registry_group.command("list")
 def registry_list() -> None:
     """Return every registered capability without executing Odoo."""
@@ -601,11 +680,18 @@ def read_capability(
             timeout_seconds=timeout_seconds,
         )
     except OdooRunnerError as exc:
+        rejection_code = (
+            exc.rejection_code
+            if config.environment == "test"
+            and config.capability_channel == "staged"
+            else None
+        )
         raise CliFailure(
             command="read",
             code="odoo_read_failed",
             message="The authenticated Odoo read did not produce a verified result.",
             exit_code=6,
+            rejection_code=rejection_code,
         ) from exc
     _assert_verified_read_result(request, result, config, identity)
     _success(

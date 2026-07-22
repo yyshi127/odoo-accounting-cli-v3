@@ -41,3 +41,15 @@ id_rsa
 **/read-runtime.json
 **/write-runtime.json
 **/pi-attestation-keys*.json
+
+# Dev29 host-generated policy, closure, trace, and evidence artifacts.
+**/RELEASE-MANIFEST.json
+**/BUNDLE-MANIFEST.json
+**/runtime-open-trace.json
+**/runtime-test-*.json
+**/seal.json
+**/trace.log
+**/lease.json
+*.seal.json
+*.squashfs
+*.strace

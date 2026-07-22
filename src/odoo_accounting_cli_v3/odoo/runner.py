@@ -28,8 +28,26 @@ from ..operations import canonical_json
 from ..release import ReleaseError, ReleaseIdentity, verify_manifest
 
 
+READ_REJECTION_CODES = frozenset(
+    {
+        "authentication_expired",
+        "authentication_replayed",
+        "authentication_tampered",
+        "company_binding_rejected",
+        "database_binding_rejected",
+        "odoo_acl_denied",
+    }
+)
+
+
 class OdooRunnerError(ValueError):
     """Raised when runtime configuration or child execution is not trustworthy."""
+
+    def __init__(self, message: str, *, rejection_code: str | None = None) -> None:
+        if rejection_code is not None and rejection_code not in READ_REJECTION_CODES:
+            raise ValueError("read rejection code is not allowlisted")
+        super().__init__(message)
+        self.rejection_code = rejection_code
 
 
 ENVIRONMENTS = frozenset({"test", "sandbox", "production"})
@@ -84,12 +102,24 @@ CHILD_FIELDS = frozenset(
         "receipt_state_path",
     }
 )
+EVIDENCE_CHILD_FIELDS = frozenset(
+    {
+        "protocol",
+        "runtime",
+        "release_digest",
+        "canonical_package_path",
+        "canonical_package_sha256",
+        "release_root",
+    }
+)
 RESPONSE_FIELDS = frozenset({"ok", "runtime", "result"})
+REJECTION_RESPONSE_FIELDS = frozenset({"ok", "runtime", "rejection_code"})
 FIXED_CHILD_ENVIRONMENT = {
     "HOME": "/var/lib/odoo-accounting-cli-v3-broker",
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "PYTHONDONTWRITEBYTECODE": "1",
     "TZ": "UTC",
 }
 DATABASE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
@@ -326,7 +356,58 @@ def load_runtime_config(
     return _config_from_mapping(document)
 
 
-def _validate_runtime_paths(config: RuntimeConfig) -> None:
+def require_staged_test_evidence_runtime(config: RuntimeConfig) -> None:
+    """Keep the DML rejection probe out of every production-capable runtime."""
+
+    if not isinstance(config, RuntimeConfig):
+        raise OdooRunnerError("a validated runtime configuration is required")
+    if config.environment != "test" or config.capability_channel != "staged":
+        raise OdooRunnerError(
+            "read-boundary DML evidence is restricted to a staged test runtime"
+        )
+
+
+def _require_immutable_dependency_mounts(config: RuntimeConfig) -> None:
+    """Require a read-only execution namespace with only state and HOME writable."""
+
+    if os.name != "posix":
+        return
+    readonly_flag = getattr(os, "ST_RDONLY", None)
+    if not isinstance(readonly_flag, int) or readonly_flag <= 0:
+        raise OdooRunnerError("immutable dependency mount attestation is unavailable")
+    readonly_paths = (
+        (config.release_root, "release_root"),
+        (config.canonical_package_path, "canonical_package_path"),
+        (config.odoo_python.parent.parent, "odoo_python_environment"),
+        (config.odoo_bin.parent, "odoo_server_root"),
+        (config.odoo_config.parent, "odoo_addons_root"),
+        (config.odoo_config, "odoo_config"),
+        (config.auth_secret_path, "auth_secret_path"),
+        (config.receipt_secret_path, "receipt_secret_path"),
+    )
+    writable_paths = (
+        (config.auth_state_path.parent, "auth_state_parent"),
+        (config.receipt_state_path.parent, "receipt_state_parent"),
+        (Path(FIXED_CHILD_ENVIRONMENT["HOME"]), "child_home"),
+    )
+    try:
+        for path, label in readonly_paths:
+            if not os.statvfs(path).f_flag & readonly_flag:
+                raise OdooRunnerError(
+                    f"{label} is not on an immutable read-only mount"
+                )
+        for path, label in writable_paths:
+            if os.statvfs(path).f_flag & readonly_flag:
+                raise OdooRunnerError(
+                    f"{label} is not on the explicit writable mount"
+                )
+    except OdooRunnerError:
+        raise
+    except OSError as exc:
+        raise OdooRunnerError("dependency mount attestation failed") from exc
+
+
+def _validate_runtime_execution_paths(config: RuntimeConfig) -> None:
     for path, expected_digest, label in (
         (config.odoo_python, config.odoo_python_sha256, "odoo_python"),
         (config.odoo_bin, config.odoo_bin_sha256, "odoo_bin"),
@@ -346,6 +427,11 @@ def _validate_runtime_paths(config: RuntimeConfig) -> None:
     )
     if not runner_source.is_file():
         raise OdooRunnerError("release_root does not contain the Odoo runner")
+    _require_immutable_dependency_mounts(config)
+
+
+def _validate_runtime_paths(config: RuntimeConfig) -> None:
+    _validate_runtime_execution_paths(config)
     for path, label in (
         (config.auth_state_path, "auth_state_path"),
         (config.receipt_state_path, "receipt_state_path"),
@@ -792,6 +878,18 @@ def _child_source(config: RuntimeConfig, payload_fd: int, marker: str) -> str:
     )
 
 
+def _evidence_child_source(
+    config: RuntimeConfig, payload_fd: int, marker: str
+) -> str:
+    source_root = str(config.release_root / "src")
+    return (
+        "import sys\n"
+        f"sys.path.insert(0, {source_root!r})\n"
+        "from odoo_accounting_cli_v3.odoo.runner import _evidence_child_main\n"
+        f"_evidence_child_main(env, {payload_fd!r}, {marker!r})\n"
+    )
+
+
 def _kill_child_process_group(process: subprocess.Popen) -> None:
     try:
         if os.name == "posix":
@@ -1222,7 +1320,13 @@ def _parse_response(stdout: Any, marker: str, config: RuntimeConfig) -> dict[str
     if len(marked_lines) != 1:
         raise OdooRunnerError("Odoo shell result marker is not on a dedicated line")
     response = _load_json_object(marked_lines[0][len(marker) :], "Odoo shell response")
-    if set(response) != RESPONSE_FIELDS or response.get("ok") is not True:
+    is_success = set(response) == RESPONSE_FIELDS and response.get("ok") is True
+    is_rejection = (
+        set(response) == REJECTION_RESPONSE_FIELDS
+        and response.get("ok") is False
+        and response.get("rejection_code") in READ_REJECTION_CODES
+    )
+    if not is_success and not is_rejection:
         raise OdooRunnerError("Odoo shell response fields are invalid")
     runtime = response.get("runtime")
     if not isinstance(runtime, dict) or set(runtime) != RUNTIME_FIELDS:
@@ -1234,6 +1338,11 @@ def _parse_response(stdout: Any, marker: str, config: RuntimeConfig) -> dict[str
     observed = {**runtime, "database_uuid": observed_uuid}
     if observed != config.runtime_identity:
         raise OdooRunnerError("Odoo shell runtime identity does not match configuration")
+    if is_rejection:
+        raise OdooRunnerError(
+            "Odoo read request was rejected",
+            rejection_code=response["rejection_code"],
+        )
     result = response.get("result")
     if not isinstance(result, dict):
         raise OdooRunnerError("Odoo shell result must be an object")
@@ -1305,6 +1414,7 @@ def run_odoo_shell(
         "-d",
         config.database_name,
         "--no-http",
+        "--logfile=/dev/null",
     ]
     with _private_payload_fd(payload) as payload_fd:
         completed = _run_child_process(
@@ -1318,6 +1428,88 @@ def run_odoo_shell(
     if completed.returncode != 0:
         raise OdooRunnerError(f"Odoo shell exited with status {completed.returncode}")
     return _parse_response(completed.stdout, marker, config)
+
+
+def run_read_boundary_evidence(
+    config: RuntimeConfig,
+    *,
+    release_digest: str,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Collect rollback-only evidence without loading auth or receipt state."""
+
+    if not isinstance(config, RuntimeConfig):
+        raise OdooRunnerError("a validated runtime configuration is required")
+    require_staged_test_evidence_runtime(config)
+    if not isinstance(release_digest, str) or SHA256.fullmatch(release_digest) is None:
+        raise OdooRunnerError("release_digest must be a lowercase SHA-256 digest")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+        or timeout_seconds > MAX_TIMEOUT_SECONDS
+    ):
+        raise OdooRunnerError(
+            f"timeout_seconds must be positive and no greater than {MAX_TIMEOUT_SECONDS:g}"
+        )
+    _validate_canonical_package_binding(config)
+    _verify_child_release(
+        config.release_root,
+        release_digest,
+        config.canonical_package_path,
+        config.canonical_package_sha256,
+    )
+    _validate_runtime_execution_paths(config)
+    payload = canonical_json(
+        {
+            "protocol": 1,
+            "runtime": config.runtime_identity,
+            "release_digest": release_digest,
+            "canonical_package_path": str(config.canonical_package_path),
+            "canonical_package_sha256": config.canonical_package_sha256,
+            "release_root": str(config.release_root),
+        }
+    )
+    marker = f"__ODOO_ACCOUNTING_CLI_V3_RESULT_{secrets.token_hex(24)}__:"
+    if MARKER.fullmatch(marker) is None:
+        raise OdooRunnerError("result marker generation failed")
+    argv = [
+        str(config.odoo_python),
+        str(config.odoo_bin),
+        "shell",
+        "-c",
+        str(config.odoo_config),
+        "-d",
+        config.database_name,
+        "--no-http",
+        "--logfile=/dev/null",
+    ]
+    with _private_payload_fd(payload) as payload_fd:
+        completed = _run_child_process(
+            argv,
+            source=_evidence_child_source(config, payload_fd, marker),
+            payload_fd=payload_fd,
+            timeout_seconds=float(timeout_seconds),
+            cwd=str(config.release_root),
+            env=_safe_environment(),
+        )
+    if completed.returncode != 0:
+        raise OdooRunnerError(f"Odoo shell exited with status {completed.returncode}")
+    result = _parse_response(completed.stdout, marker, config)
+    from .read_boundary_evidence import (
+        ReadBoundaryEvidenceError,
+        validate_read_boundary_evidence,
+    )
+
+    try:
+        return validate_read_boundary_evidence(
+            result,
+            expected_database_name=config.database_name,
+            expected_database_uuid=config.database_uuid,
+        )
+    except ReadBoundaryEvidenceError as exc:
+        raise OdooRunnerError("Odoo read-boundary evidence is invalid") from exc
 
 
 def _decode_secret(value: Any, field: str) -> bytes:
@@ -1490,6 +1682,8 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
     finally:
         os.umask(previous_umask)
 
+    replay_rejected = False
+
     def consume_auth_token(
         token_id: str,
         request_digest: str,
@@ -1504,26 +1698,42 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
                 now=verified_at,
             )
         except ReplayRejected:
+            nonlocal replay_rejected
+            replay_rejected = True
             return False
         return True
 
-    result_json = execute_read_json(
-        root_env,
-        request_json,
-        capabilities=capabilities,
-        auth_secret=_decode_secret(payload.get("auth_secret"), "auth_secret"),
-        auth_key_id=runtime_config.auth_key_id,
-        consume_auth_token=consume_auth_token,
-        receipt_secret=receipt_secret,
-        receipt_key_id=runtime_config.receipt_key_id,
-        # The executor verifies the signed receipt in memory. Durable replay
-        # consumption is combined with the audit append immediately below.
-        consume_receipt=lambda *_: True,
-        release_digest=release_digest,
-        odoo_instance_id=runtime_config.instance_id,
-        environment=runtime_config.environment,
-        capability_channel=runtime_config.capability_channel,
-    )
+    try:
+        result_json = execute_read_json(
+            root_env,
+            request_json,
+            capabilities=capabilities,
+            auth_secret=_decode_secret(payload.get("auth_secret"), "auth_secret"),
+            auth_key_id=runtime_config.auth_key_id,
+            consume_auth_token=consume_auth_token,
+            receipt_secret=receipt_secret,
+            receipt_key_id=runtime_config.receipt_key_id,
+            # The executor verifies the signed receipt in memory. Durable replay
+            # consumption is combined with the audit append immediately below.
+            consume_receipt=lambda *_: True,
+            release_digest=release_digest,
+            odoo_instance_id=runtime_config.instance_id,
+            environment=runtime_config.environment,
+            capability_channel=runtime_config.capability_channel,
+        )
+    except Exception as exc:
+        rejection_code = _classify_trusted_read_rejection(
+            exc, replay_rejected=replay_rejected
+        )
+        if rejection_code is None:
+            raise
+        response = {
+            "ok": False,
+            "runtime": runtime_config.runtime_identity,
+            "rejection_code": rejection_code,
+        }
+        print(marker + canonical_json(response).decode("utf-8"), flush=True)
+        return
     result = _load_json_object(result_json, "Odoo result")
     _record_verified_read_audit(
         receipt_store,
@@ -1536,4 +1746,132 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
         now=datetime.now(timezone.utc),
     )
     response = {"ok": True, "runtime": runtime_config.runtime_identity, "result": result}
+    print(marker + canonical_json(response).decode("utf-8"), flush=True)
+
+
+def _classify_trusted_read_rejection(
+    exc: BaseException, *, replay_rejected: bool
+) -> str | None:
+    """Classify only explicit policy failures from the same Odoo execution."""
+
+    from ..auth import AuthenticationError
+    from ..gateway import GatewayError
+    from .bootstrap import OdooBootstrapError
+
+    message = str(exc)
+    if type(exc) is AuthenticationError:
+        if message == "authentication context is not currently valid":
+            return "authentication_expired"
+        if message == "authentication signature mismatch":
+            return "authentication_tampered"
+        return None
+    if type(exc) is OdooBootstrapError:
+        if message == "signed request does not match the Odoo runtime":
+            return "database_binding_rejected"
+        if message == "signed request content digest mismatch":
+            return "authentication_tampered"
+        if message in {
+            "signed allowed companies exceed the Odoo user companies",
+            "signed company is not assigned to the Odoo user",
+        }:
+            return "company_binding_rejected"
+        return None
+    if type(exc) is GatewayError:
+        if message == "request context authentication failed" and replay_rejected:
+            return "authentication_replayed"
+        if message == "Odoo ACL rejected capability":
+            return "odoo_acl_denied"
+        if message in {
+            "request company does not match bound company",
+            "request includes an unauthorized company",
+        }:
+            return "company_binding_rejected"
+        return None
+    return None
+
+
+def _evidence_child_main(root_env: Any, payload_fd: int, marker: str) -> None:
+    """Exact-release Odoo-shell entrypoint for read-boundary evidence."""
+
+    if not isinstance(marker, str) or MARKER.fullmatch(marker) is None:
+        raise OdooRunnerError("child result marker is invalid")
+    if isinstance(payload_fd, bool) or not isinstance(payload_fd, int) or payload_fd <= 2:
+        raise OdooRunnerError("child payload is invalid")
+    try:
+        with os.fdopen(payload_fd, "rb", closefd=True) as stream:
+            payload_bytes = stream.read(MAX_PRIVATE_PAYLOAD_BYTES + 1)
+        if not payload_bytes or len(payload_bytes) > MAX_PRIVATE_PAYLOAD_BYTES:
+            raise OdooRunnerError("child payload is invalid")
+        payload_text = payload_bytes.decode("utf-8")
+    except OdooRunnerError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise OdooRunnerError("child payload is invalid") from exc
+    payload = _load_json_object(payload_text, "child payload")
+    if set(payload) != EVIDENCE_CHILD_FIELDS or payload.get("protocol") != 1:
+        raise OdooRunnerError("child payload fields are invalid")
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, dict) or set(runtime) != RUNTIME_FIELDS:
+        raise OdooRunnerError("child runtime identity is invalid")
+    child_release_root = _absolute_path(payload["release_root"], "release_root")
+    runtime_config = RuntimeConfig(
+        instance_id=runtime["instance_id"],
+        environment=runtime["environment"],
+        capability_channel=runtime["capability_channel"],
+        database_name=runtime["database_name"],
+        database_uuid=runtime["database_uuid"],
+        odoo_python=Path("/unused/odoo-python"),
+        odoo_python_sha256="0" * 64,
+        odoo_bin=Path("/unused/odoo-bin"),
+        odoo_bin_sha256="0" * 64,
+        odoo_config=Path("/unused/odoo.conf"),
+        odoo_config_sha256="0" * 64,
+        release_root=child_release_root,
+        canonical_package_path=_absolute_path(
+            payload["canonical_package_path"], "canonical_package_path"
+        ),
+        canonical_package_sha256=payload["canonical_package_sha256"],
+        auth_state_path=child_release_root / ".unused-evidence-auth-state",
+        receipt_state_path=child_release_root / ".unused-evidence-receipt-state",
+        auth_key_id="unused-evidence-auth-key",
+        receipt_key_id="unused-evidence-receipt-key",
+        auth_secret_path=child_release_root / ".unused-evidence-auth-secret",
+        receipt_secret_path=child_release_root / ".unused-evidence-receipt-secret",
+    )
+    require_staged_test_evidence_runtime(runtime_config)
+    release_root = runtime_config.release_root.resolve()
+    if Path(__file__).resolve().parents[3] != release_root:
+        raise OdooRunnerError("child code is not loaded from the configured release")
+    release_digest = payload.get("release_digest")
+    if not isinstance(release_digest, str) or SHA256.fullmatch(release_digest) is None:
+        raise OdooRunnerError("child release digest is invalid")
+    _validate_canonical_package_binding(runtime_config)
+    _verify_child_release(
+        release_root,
+        release_digest,
+        runtime_config.canonical_package_path,
+        runtime_config.canonical_package_sha256,
+    )
+
+    from .read_boundary_evidence import (
+        collect_read_boundary_evidence,
+        validate_read_boundary_evidence,
+    )
+
+    try:
+        result = collect_read_boundary_evidence(root_env)
+        validate_read_boundary_evidence(
+            result,
+            expected_database_name=runtime_config.database_name,
+            expected_database_uuid=runtime_config.database_uuid,
+        )
+    except Exception:
+        raise OdooRunnerError(
+            "Odoo read-boundary evidence collection failed"
+        ) from None
+    response = {
+        "ok": True,
+        "runtime": runtime_config.runtime_identity,
+        "result": result,
+    }
     print(marker + canonical_json(response).decode("utf-8"), flush=True)

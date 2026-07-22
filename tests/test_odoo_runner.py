@@ -23,10 +23,12 @@ from odoo_accounting_cli_v3.odoo.runner import (
     OdooRunnerError,
     RuntimeConfig,
     _child_main,
+    _classify_trusted_read_rejection,
     _force_kill_linux_supervisor_tree,
     _install_linux_parent_death_guard,
     _kill_adopted_linux_descendants,
     _record_verified_read_audit,
+    _require_immutable_dependency_mounts,
     _run_child_process,
     _validate_child_environment,
     _validate_child_home,
@@ -34,6 +36,9 @@ from odoo_accounting_cli_v3.odoo.runner import (
     load_runtime_config,
     run_odoo_shell,
 )
+from odoo_accounting_cli_v3.auth import AuthenticationError
+from odoo_accounting_cli_v3.gateway import GatewayError
+from odoo_accounting_cli_v3.odoo.bootstrap import OdooBootstrapError
 from odoo_accounting_cli_v3.persistence import SQLitePersistence
 from odoo_accounting_cli_v3.receipts import create_read_receipt
 from odoo_accounting_cli_v3.release import ReleaseIdentity, source_manifest
@@ -114,6 +119,62 @@ def test_child_environment_rejects_mutation_before_spawn(
                 env=mutated,
             )
     spawn.assert_not_called()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mount flags required")
+def test_dependency_mount_attestation_requires_exact_readonly_and_writable_sets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    dependency_paths = {
+        "release_root": tmp_path / "release",
+        "canonical_package_path": tmp_path / "package.tar.gz",
+        "odoo_python": tmp_path / "venv" / "bin" / "python",
+        "odoo_bin": tmp_path / "server" / "odoo-bin",
+        "odoo_config": tmp_path / "addons" / "odoo.conf",
+        "auth_secret_path": tmp_path / "secrets" / "auth.hmac",
+        "receipt_secret_path": tmp_path / "secrets" / "receipt.hmac",
+        "auth_state_path": tmp_path / "state" / "auth" / "state.sqlite3",
+        "receipt_state_path": tmp_path / "state" / "receipt" / "state.sqlite3",
+    }
+    config = SimpleNamespace(**dependency_paths)
+    readonly = os.ST_RDONLY
+    writable = {
+        dependency_paths["auth_state_path"].parent,
+        dependency_paths["receipt_state_path"].parent,
+        Path(FIXED_CHILD_ENVIRONMENT["HOME"]),
+    }
+
+    def flags(path: os.PathLike[str] | str) -> SimpleNamespace:
+        return SimpleNamespace(f_flag=0 if Path(path) in writable else readonly)
+
+    monkeypatch.setattr(os, "statvfs", flags)
+    _require_immutable_dependency_mounts(config)
+
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda path: SimpleNamespace(
+            f_flag=0
+            if Path(path) == dependency_paths["odoo_bin"].parent
+            or Path(path) in writable
+            else readonly
+        ),
+    )
+    with pytest.raises(OdooRunnerError, match="odoo_server_root.*read-only"):
+        _require_immutable_dependency_mounts(config)
+
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda path: SimpleNamespace(
+            f_flag=readonly
+            if Path(path) == dependency_paths["auth_state_path"].parent
+            or Path(path) not in writable
+            else 0
+        ),
+    )
+    with pytest.raises(OdooRunnerError, match="auth_state_parent.*writable"):
+        _require_immutable_dependency_mounts(config)
 
 
 def request_document():
@@ -296,6 +357,72 @@ def response(runtime, result=None):
     )
 
 
+@pytest.mark.parametrize(
+    ("error", "replay_rejected", "expected"),
+    (
+        (
+            AuthenticationError("authentication context is not currently valid"),
+            False,
+            "authentication_expired",
+        ),
+        (
+            AuthenticationError("authentication signature mismatch"),
+            False,
+            "authentication_tampered",
+        ),
+        (
+            OdooBootstrapError("signed request does not match the Odoo runtime"),
+            False,
+            "database_binding_rejected",
+        ),
+        (
+            OdooBootstrapError(
+                "signed allowed companies exceed the Odoo user companies"
+            ),
+            False,
+            "company_binding_rejected",
+        ),
+        (
+            GatewayError("Odoo ACL rejected capability"),
+            False,
+            "odoo_acl_denied",
+        ),
+        (
+            GatewayError("request context authentication failed"),
+            True,
+            "authentication_replayed",
+        ),
+    ),
+)
+def test_trusted_read_rejection_classifier_maps_only_fixed_plan_failures(
+    error: BaseException, replay_rejected: bool, expected: str
+) -> None:
+    assert (
+        _classify_trusted_read_rejection(error, replay_rejected=replay_rejected)
+        == expected
+    )
+
+
+def test_trusted_read_rejection_classifier_rejects_near_matches_and_subclasses() -> None:
+    class DerivedAuthenticationError(AuthenticationError):
+        pass
+
+    failures = (
+        (AuthenticationError("authentication signature mismatch "), False),
+        (DerivedAuthenticationError("authentication signature mismatch"), False),
+        (GatewayError("request context authentication failed"), False),
+        (RuntimeError("Odoo ACL rejected capability"), False),
+        (OdooRunnerError("Odoo shell timed out"), False),
+    )
+    for error, replay_rejected in failures:
+        assert (
+            _classify_trusted_read_rejection(
+                error, replay_rejected=replay_rejected
+            )
+            is None
+        )
+
+
 class OdooRunnerTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -306,6 +433,11 @@ class OdooRunnerTest(unittest.TestCase):
         )
         self.verify_parent_release = release_verification.start()
         self.addCleanup(release_verification.stop)
+        mount_attestation = patch(
+            "odoo_accounting_cli_v3.odoo.runner._require_immutable_dependency_mounts"
+        )
+        mount_attestation.start()
+        self.addCleanup(mount_attestation.stop)
         root = Path(self.temp.name)
         self.odoo_python = root / "python"
         self.odoo_bin = root / "odoo-bin"
@@ -483,6 +615,7 @@ class OdooRunnerTest(unittest.TestCase):
                 "-d",
                 "odoo_test",
                 "--no-http",
+                "--logfile=/dev/null",
             ],
         )
         self.assertEqual(options["timeout_seconds"], 17.0)
@@ -524,8 +657,9 @@ class OdooRunnerTest(unittest.TestCase):
     @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")
     def test_nonzero_timeout_and_start_failure_are_fail_closed(self, run, _token_hex):
         run.return_value = self.completed(returncode=2)
-        with self.assertRaisesRegex(OdooRunnerError, "status 2"):
+        with self.assertRaisesRegex(OdooRunnerError, "status 2") as failure:
             self.execute()
+        self.assertIsNone(failure.exception.rejection_code)
 
         run.side_effect = OdooRunnerError("Odoo shell timed out")
         with self.assertRaisesRegex(OdooRunnerError, "timed out"):
@@ -534,6 +668,31 @@ class OdooRunnerTest(unittest.TestCase):
         run.side_effect = OdooRunnerError("Odoo shell could not be started")
         with self.assertRaisesRegex(OdooRunnerError, "could not be started"):
             self.execute()
+
+    @patch("odoo_accounting_cli_v3.odoo.runner.secrets.token_hex", return_value=MARKER_TOKEN)
+    @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")
+    def test_allowlisted_child_rejection_is_transported_from_same_execution(
+        self, run, _token_hex
+    ):
+        response = {
+            "ok": False,
+            "runtime": self.config.runtime_identity,
+            "rejection_code": "authentication_replayed",
+        }
+        run.return_value = self.completed(
+            stdout=MARKER + json.dumps(response, separators=(",", ":"))
+        )
+        with self.assertRaisesRegex(OdooRunnerError, "request was rejected") as failure:
+            self.execute()
+        self.assertEqual(failure.exception.rejection_code, "authentication_replayed")
+
+        response["rejection_code"] = "infrastructure_failed"
+        run.return_value = self.completed(
+            stdout=MARKER + json.dumps(response, separators=(",", ":"))
+        )
+        with self.assertRaisesRegex(OdooRunnerError, "response fields") as failure:
+            self.execute()
+        self.assertIsNone(failure.exception.rejection_code)
 
     @patch("odoo_accounting_cli_v3.odoo.runner.secrets.token_hex", return_value=MARKER_TOKEN)
     @patch("odoo_accounting_cli_v3.odoo.runner._run_child_process")

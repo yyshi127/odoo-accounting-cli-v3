@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+from click.testing import CliRunner
+
+from odoo_accounting_cli_v3.cli import main
+from odoo_accounting_cli_v3.odoo.runner import OdooRunnerError
+
+from test_odoo_read_boundary_evidence_runner import (
+    RELEASE_DIGEST,
+    runtime_config,
+    valid_evidence,
+)
+
+
+def identity(config) -> dict:
+    return {
+        "commit": "1" * 40,
+        "manifest_sha256": RELEASE_DIGEST,
+        "package_sha256": config.canonical_package_sha256,
+        "registry_digest": "5" * 64,
+        "release": config.release_root.name,
+        "verified": True,
+        "version": "0.1.0.dev29",
+    }
+
+
+def test_evidence_read_boundary_returns_exact_release_runtime_and_evidence(
+    tmp_path: Path,
+):
+    config = runtime_config(tmp_path)
+    expected_identity = identity(config)
+    runner = CliRunner()
+
+    with patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_config", return_value=config
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._assert_runtime_release"
+    ) as release_binding, patch(
+        "odoo_accounting_cli_v3.cli.run_read_boundary_evidence",
+        return_value=valid_evidence(),
+    ) as collector:
+        result = runner.invoke(
+            main,
+            [
+                "evidence",
+                "read-boundary",
+                "--runtime-config",
+                str(tmp_path / "runtime.json"),
+                "--timeout-seconds",
+                "12",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload == {
+        "command": "evidence.read-boundary",
+        "data": {
+            "evidence": valid_evidence(),
+            "release_identity": expected_identity,
+            "runtime": config.runtime_identity,
+        },
+        "ok": True,
+    }
+    release_binding.assert_called_once_with(
+        config, expected_identity, command="evidence.read-boundary"
+    )
+    collector.assert_called_once_with(
+        config,
+        release_digest=RELEASE_DIGEST,
+        timeout_seconds=12.0,
+    )
+
+
+def test_evidence_read_boundary_hides_runner_failure_detail(tmp_path: Path):
+    config = runtime_config(tmp_path)
+    runner = CliRunner()
+    with patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_config", return_value=config
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=identity(config),
+    ), patch(
+        "odoo_accounting_cli_v3.cli._assert_runtime_release"
+    ), patch(
+        "odoo_accounting_cli_v3.cli.run_read_boundary_evidence",
+        side_effect=OdooRunnerError("private database failure and canary"),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "evidence",
+                "read-boundary",
+                "--runtime-config",
+                str(tmp_path / "runtime.json"),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert "rejection_code" not in __import__("json").loads(result.stderr)["error"]
+    assert "private database failure" not in result.output
+    assert "canary" not in result.output
+    assert '"code":"odoo_read_boundary_evidence_failed"' in result.output
+
+
+@pytest.mark.parametrize(
+    ("environment", "channel"),
+    (("production", "enabled"), ("test", "enabled")),
+)
+def test_evidence_read_boundary_rejects_non_staged_test_runtime_before_release_or_child(
+    tmp_path: Path, environment: str, channel: str
+):
+    config = replace(
+        runtime_config(tmp_path),
+        environment=environment,
+        capability_channel=channel,
+    )
+    runner = CliRunner()
+    with patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_config", return_value=config
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity"
+    ) as identity_loader, patch(
+        "odoo_accounting_cli_v3.cli.run_read_boundary_evidence"
+    ) as collector:
+        result = runner.invoke(
+            main,
+            [
+                "evidence",
+                "read-boundary",
+                "--runtime-config",
+                str(tmp_path / "runtime.json"),
+            ],
+        )
+
+    assert result.exit_code == 5
+    assert '"code":"evidence_scope_rejected"' in result.output
+    identity_loader.assert_not_called()
+    collector.assert_not_called()

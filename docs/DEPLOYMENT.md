@@ -13,7 +13,9 @@ identified by all of the following:
 - semantic version from `VERSION`;
 - full Git commit and its 12-character release suffix;
 - archive SHA-256;
-- `RELEASE-MANIFEST.json` SHA-256;
+- the semantic `manifest_sha256` stored inside `RELEASE-MANIFEST.json`;
+- the raw `manifest_file_sha256` of the exact pretty JSON plus LF manifest
+  bytes when a runtime policy independently pins the manifest file;
 - capability-registry SHA-256; and
 - external root-managed anchor containing the same release identity.
 
@@ -28,6 +30,9 @@ archive.
   packages/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz
   releases/<version>-<commit12>/
   trusted-artifacts/<version>-<commit12>.json
+  dependency-images/<version>-<commit12>.squashfs
+  dependency-anchors/<version>-<commit12>.json
+  dependencies/<version>-<commit12>/
 /etc/odoo-accounting-cli-v3/
   runtime-test.json
   runtime-sandbox.json
@@ -36,6 +41,7 @@ archive.
   effect-finalizer-runtime-manifest.json
   effect-finalizer/attestation.hmac
   effect-finalizer/finalizer.pgpass
+  dependencies/<version>-<commit12>/odoo-server19.conf
   secrets/test/auth.hmac
   secrets/test/receipt.hmac
   secrets/sandbox/auth.hmac
@@ -77,8 +83,10 @@ python tools/build_release.py
 ```
 
 Build the same clean commit twice and retain both command results. The archive
-SHA-256 and manifest SHA-256 must be identical. Refuse a dirty worktree,
-untracked release input, version/commit mismatch, or non-deterministic output.
+SHA-256, semantic `manifest_sha256`, and raw `manifest_file_sha256` must all be
+identical. Refuse a dirty worktree, untracked release input, version/commit
+mismatch, non-ASCII release path, installer-incompatible size/member limit, or
+non-deterministic output.
 The build must also reject every tracked importable source outside
 `src/odoo_accounting_cli_v3` and every tracked `.pyc`, `.pyo`, `.pyw`, native
 extension, or `__pycache__` member below `src`; otherwise an approved import
@@ -291,6 +299,81 @@ zero-state-change diagnostic: it intentionally consumes replay state and
 appends verified audit state in SQLite. No staged read may become enabled from
 CI evidence alone; it also needs an exact-release signed Odoo receipt and its
 capability-specific financial oracle.
+
+Dev29 additionally seals the exact Odoo/Python dependency closure used by that
+candidate. Follow `deployment/dev29/README-closure.md` and build only with the
+exact release member `deployment/dev29/odoo_closure.py`. The image, its external
+root-owned anchor, the release/package identities, installed-module graph, and
+the separately sealed Odoo configuration must all agree before a kernel mount.
+The configuration is never placed in the generally readable image. A staged
+read runs only inside a private transient mount namespace and binds the sealed
+configuration read-only over its regular placeholder after the closure mount.
+The executing namespace must differ from PID 1's mount namespace, and the
+observed read-only loop device must identify the preverified image inode.
+
+Create the release-specific read runtime with
+`deployment/dev29/runtime_setup.py` as documented in
+`deployment/dev29/README-runtime.md`. The only operational evidence entry point
+is `deployment/dev29/run_read_evidence.py`, launched by its documented hardened
+transient service with the fixed root-owned system Python in isolated/no-site
+mode. In that one private mount namespace it activates the closure, executes
+the fixed suite through `deployment/dev29/run_read_suite.py`, invokes the
+independently implemented `deployment/dev29/verify_read_evidence.py`, and then
+unmounts every bind and loop image even on failure. Validation produces no
+external success anchor. Only after the supervisor independently proves the
+cleanup receipt, absence of host mounts and loop backing, and absence of child
+processes may the supervisor replace itself with the fixed
+`deployment/dev29/publish_read_evidence.py` publisher and create the external
+success anchor. Neither a separate mount command nor a nested transient service
+can preserve or inherit that namespace. Every role passes through
+`deployment/dev29/direct_child.py`, which attests the exact UID, GID,
+supplementary groups, capability sets, no-new-privileges flag, environment,
+argv, mount namespace, and five bind identities before `execve`. The suite's
+Odoo process executes the exact launcher with the sealed virtual-environment
+Python, never with an unbound system Click installation.
+
+`deployment/dev29/runtime_open_trace.py` must execute the fixed, digest-pinned
+`/usr/bin/strace` inventory for the same fixed cases. Raw traces remain
+root-only and must be retained long enough for the independent verifier to
+parse the same bytes; the public anchor exposes only their bound digests and
+canonical access-set summary. Any runtime access outside the independently
+fixed immutable/mutable policy, an unapproved access mode, a malformed or
+truncated trace, or tracing-tool identity drift closes the promotion gate.
+Install the externally reviewed, release-specific policy and index only with
+`deployment/dev29/runtime_open_policy_source.py` using the canonical
+`deployment/dev29/runtime_open_policy_source.template.json`, then build the
+index only with `deployment/dev29/runtime_open_manifest_builder.py`; pass the
+externally recorded policy-source, index, `strace`, and raw
+`manifest_file_sha256` digests into the evidence launcher. Do not pass the
+semantic `manifest_sha256` in the runtime policy's
+`--expected-release-manifest-sha256` argument. The suite, independent verifier,
+and publisher must each reconstruct
+that policy-source digest from the installed index and all 32 canonical target
+manifests; none may trust the digest as a self-asserted string. They also bind
+the exact runtime validator bytes to the raw release manifest and its unique
+member entry before execution or publication.
+Install the exact release member
+`deployment/dev29/systemd/odoo-accounting-cli-v3-dev29-tmpfiles.conf` under
+`/etc/tmpfiles.d/` and run `systemd-tmpfiles --create` before the runtime setup;
+this is the reboot-persistent contract for the root-only supervisor staging and
+lease parents. Runtime setup independently creates or verifies those paths and
+the public evidence/anchor parents before publishing a candidate config.
+Static ELF discovery alone is never reported as a complete runtime closure.
+The exact procedure and retained private bundle are defined in
+`deployment/dev29/README-read-evidence.md`. Financial expected values and the
+independent PostgreSQL witness are defined by `deployment/dev29/read_plan.json`
+and `deployment/dev29/read_oracles.py`, documented in
+`deployment/dev29/README-oracles.md`. Generic command failure is not acceptable
+negative evidence: the same execution must return the plan's exact staged-test
+rejection code, while production keeps the generic failure envelope.
+
+The read-only target findings in
+`docs/TARGET_HOST_DEV29_CLOSURE_BASELINE_2026-07-20.md` record the original
+capacity shortfall, the 2026-07-22 point-in-time recovery above the conservative
+floor, and the still-unproven Odoo service-continuity gate. They are not a
+capability pass. Do not lower the free-space floor, delete unrelated data,
+build a closure, or claim a real Odoo result until a fresh pre-install capacity
+probe and the sustained service-continuity gate both pass.
 
 The write runtime configuration schema is version 1. Its
 `write_execution_mode` starts as `disabled`. A sandbox candidate may use

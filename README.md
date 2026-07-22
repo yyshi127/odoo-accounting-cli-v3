@@ -99,6 +99,29 @@ connections, files, or network effects are absent. Authentication replay and
 receipt audit SQLite state still persist by design, and no Dev28 exact-release
 target Odoo receipt exists yet. Reads remain staged and none is enabled.
 
+Dev29 packages the target Odoo server, installed module graph, virtual
+environment, and Python/native dependency boundary into a release-specific,
+externally anchored trust closure. The Odoo configuration remains separately
+sealed because it may contain credentials. A composite test-only suite fixes
+five positive reads, seven exact policy rejections, the rollback-boundary
+probe, independent PostgreSQL financial oracles, state/audit deltas, and an
+independently implemented evidence verifier. It runs only in a private read-only mount namespace
+and refuses an image, loop-device inode, service identity, database identity,
+module graph, or dependency that drifts. A single supervisor owns activation,
+direct demoted children, independent validation, and mandatory cleanup; an
+external success anchor is impossible until cleanup and absence of leaked
+mounts, loop devices, or child processes are proven. Static dependency
+discovery is supplemented by a digest-pinned, externally anchored runtime-open
+policy. The suite, independent verifier, and publisher each reconstruct the
+approved policy source from the exact installed index plus all 32 canonical
+target manifests; the validator executes only release-manifest-bound bytes.
+Raw traces are retained root-only and independently reopened and reparsed
+before publication. The target's capacity recovered above the
+conservative floor in the latest point-in-time probe, but the exact Linux
+lifecycle gates, sustained service-continuity check, and target run are still
+outstanding. No Dev29 target receipt exists and nothing has been promoted or
+routed.
+
 All machine-facing output is JSON. Real accounting success additionally
 requires an Odoo-bound signed receipt. CLI-Anything v0.4.0 supplies the CLI and
 test-harness conventions only; Odoo 19 remains the backend and accounting
