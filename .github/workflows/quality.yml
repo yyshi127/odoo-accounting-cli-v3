@@ -1140,13 +1140,37 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ldconfig_source="$(readlink -f "$(command -v ldconfig)")"
+          mapfile -t ldconfig_candidates < <(
+            {
+              printf '%s\n' \
+                /usr/sbin/ldconfig.real \
+                /sbin/ldconfig.real \
+                "$(command -v ldconfig)"
+              dpkg-query -L libc-bin 2>/dev/null \
+                | grep -E '/ldconfig(\.real)?$' || true
+            } | awk 'NF && !seen[$0]++'
+          )
+          ldconfig_source=
+          for candidate in "${ldconfig_candidates[@]}"; do
+            candidate="$(readlink -f "$candidate" 2>/dev/null || true)"
+            if [[ -f "$candidate" ]] \
+              && [[ "$(LC_ALL=C head -c 4 "$candidate")" == $'\177ELF' ]]; then
+              ldconfig_source="$candidate"
+              break
+            fi
+          done
+          test -n "$ldconfig_source"
+          install -m 0755 \
+            "$ldconfig_source" \
+            "$RUNNER_TEMP/ldconfig.real"
           sudo install -d -m 0755 -o root -g root \
             /opt/odoo-accounting-cli-v3/releases \
             /opt/odoo-accounting-cli-v3/runtime-open-manifests
           sudo install -m 0755 -o root -g root \
-            "$ldconfig_source" \
+            "$RUNNER_TEMP/ldconfig.real" \
             /usr/sbin/ldconfig.real
+          test "$(stat -c '%U:%G:%a' /usr/sbin/ldconfig.real)" = root:root:755
+          test "$(LC_ALL=C head -c 4 /usr/sbin/ldconfig.real)" = $'\177ELF'
           sudo install -m 0644 -o root -g root \
             deployment/dev29/systemd/odoo-accounting-cli-v3-dev29-tmpfiles.conf \
             /etc/tmpfiles.d/odoo-accounting-cli-v3-dev29.conf
