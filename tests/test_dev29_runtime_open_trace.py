@@ -1492,6 +1492,8 @@ def test_real_runtime_trace_gate_binds_odoo_and_postgres_child_homes(
             "expected_strace_sha256": digest,
             "expected_static_closure_sha256": next(iter(manifests.values())).expected_static_closure_sha256,
             "policy_source_sha256": "d" * 64,
+            "runtime_module_sha256": hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            "release_manifest_sha256": "e" * 64,
         }
         gate.targets = {}
         gate.receipts = []

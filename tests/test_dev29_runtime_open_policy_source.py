@@ -191,7 +191,7 @@ def _full_manifests(parent: Path, release: str) -> None:
         )
 
 
-def _release_artifacts(release_root: Path) -> tuple[str, str]:
+def _release_artifacts(release_root: Path, *, commit: str) -> tuple[str, str]:
     version_payload = b"0.1.0.dev29\n"
     (release_root / "VERSION").parent.mkdir(parents=True, exist_ok=True)
     (release_root / "VERSION").write_bytes(version_payload)
@@ -206,7 +206,7 @@ def _release_artifacts(release_root: Path) -> tuple[str, str]:
         },
         release_builder.ReleaseIdentity(
             version="0.1.0.dev29",
-            commit="a1234567890b" + "c" * 28,
+            commit=commit,
         ),
     )
     manifest_path = release_root / "RELEASE-MANIFEST.json"
@@ -307,7 +307,10 @@ def test_full_32_target_candidate_uses_real_validator_and_fresh_index(
 ) -> None:
     release = "0.1.0.dev29-a1234567890b"
     release_root = tmp_path / "release"
-    runtime_sha256, release_manifest_sha256 = _release_artifacts(release_root)
+    runtime_sha256, release_manifest_sha256 = _release_artifacts(
+        release_root,
+        commit="a1234567890b" + "c" * 28,
+    )
     manifests = tmp_path / "full-manifests"
     _full_manifests(manifests, release)
     candidate_path = tmp_path / "candidate.json"
@@ -476,7 +479,10 @@ def test_real_root_full_policy_cli_installs_canonical_fresh_release(
     assert not release_root.exists()
     assert not destination.exists()
     try:
-        runtime_sha256, release_manifest_sha256 = _release_artifacts(release_root)
+        runtime_sha256, release_manifest_sha256 = _release_artifacts(
+            release_root,
+            commit=commit,
+        )
         for member in (
             release_root / "deployment/dev29/runtime_open_trace.py",
             release_root / "RELEASE-MANIFEST.json",
