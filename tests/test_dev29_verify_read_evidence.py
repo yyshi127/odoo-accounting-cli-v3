@@ -1381,7 +1381,10 @@ def test_loader_cache_rejects_wrong_hash_and_path_replacement(
     monkeypatch.setattr(verifier.subprocess, "Popen", replace_path_then_execute)
     with pytest.raises(
         verifier.EvidenceVerificationError,
-        match="executed unpinned bytes|changed across pinned execution",
+        match=(
+            "executed unpinned bytes|identity drifted|"
+            "changed across pinned execution"
+        ),
     ):
         verifier._independent_loader_cache(digest)
     assert observed["process"].returncode is not None
