@@ -128,9 +128,12 @@ EXECUTABLE_RELEASE_MEMBERS = frozenset(
 # A .pth execution line runs before application imports.  Only the standard
 # setuptools compatibility hook is accepted, and only when its imported module
 # is physically present in this exact venv closure.
-ALLOWED_PTH_EXECUTION = frozenset(
-    {"import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = os.environ.get(var, 'local') == 'local'; enabled and __import__('_distutils_hack').add_shim();"}
+DISTUTILS_PTH_LINE = (
+    "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = "
+    "os.environ.get(var, 'local') == 'local'; enabled and "
+    "__import__('_distutils_hack').add_shim();"
 )
+ALLOWED_PTH_EXECUTION = frozenset({DISTUTILS_PTH_LINE, DISTUTILS_PTH_LINE + " "})
 FORBIDDEN_EDITABLE_PREFIXES = (
     "__editable__.",
     "__editable___",
@@ -1445,7 +1448,7 @@ def audit_python_paths(venv: Path) -> dict[str, Any]:
             if not line or line.startswith("#"):
                 continue
             if line.startswith("import ") or line.startswith("import\t"):
-                if raw != line or line not in ALLOWED_PTH_EXECUTION:
+                if raw not in ALLOWED_PTH_EXECUTION:
                     raise ClosureError(f"unapproved executable .pth line: {path.name}")
                 required = site / "_distutils_hack"
                 if not required.is_dir() or required.is_symlink():

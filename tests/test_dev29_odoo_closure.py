@@ -312,6 +312,25 @@ def test_python_audit_removes_editable_cache_metadata_and_normalizes_pyvenv(tmp_
     assert audit["python_path_escape_absent"] is True
 
 
+def test_python_audit_accepts_only_the_target_distutils_trailing_space(
+    tmp_path: Path,
+) -> None:
+    venv = make_venv(tmp_path, allowed_pth=False)
+    pth = venv / "lib/python3.12/site-packages/distutils-precedence.pth"
+    line = (
+        "import os; var = 'SETUPTOOLS_USE_DISTUTILS'; enabled = "
+        "os.environ.get(var, 'local') == 'local'; enabled and "
+        "__import__('_distutils_hack').add_shim();"
+    )
+    write(pth, (line + " \n").encode())
+
+    closure.audit_python_paths(venv)
+
+    write(pth, (line + "  \n").encode())
+    with pytest.raises(closure.ClosureError, match="unapproved executable .pth"):
+        closure.audit_python_paths(venv)
+
+
 @pytest.mark.parametrize(
     "name,is_directory",
     [

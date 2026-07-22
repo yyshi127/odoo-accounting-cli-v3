@@ -109,6 +109,10 @@ native libraries, must be root-owned and not group/other writable.
 The venv audit removes CLI-Anything editable `.pth`/finder/metadata,
 `.egg-link`, and all bytecode caches. It rejects path-bearing `.pth` entries,
 unapproved executable hooks, and `sitecustomize`/`usercustomize` forms.
+The only retained executable `.pth` line is the exact setuptools
+`_distutils_hack` hook, either without trailing whitespace or with the target
+setuptools file's single trailing ASCII space; every other whitespace or code
+variant is rejected.
 `pyvenv.cfg` is normalized to Python 3.12 with system site-packages disabled;
 remaining image symlinks are relative and stay inside their component.
 
