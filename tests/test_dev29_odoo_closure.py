@@ -526,6 +526,62 @@ def test_native_derivation_never_calls_ldd_or_executes_target(
     assert libc.resolve() in roots
 
 
+def test_native_derivation_accepts_only_absent_fixed_cwd_pillow_rpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_cwd = tmp_path / "release"
+    runtime_cwd.mkdir()
+    elf = tmp_path / "selected/site-packages/pillow.libs/libjpeg.so"
+    libc = tmp_path / "libc.so.6"
+    write(elf, synthetic_elf())
+    write(libc, synthetic_elf(needed_offset=None))
+    monkeypatch.setattr(
+        closure,
+        "_ld_cache_mapping",
+        lambda **_kwargs: {"libc.so.6": [libc]},
+    )
+    monkeypatch.setattr(
+        closure,
+        "_elf_dynamic",
+        lambda path: (
+            (None, ["libc.so.6"], ["pillow.libs"])
+            if path.resolve() == elf.resolve()
+            else (None, [], [])
+        ),
+    )
+
+    roots = closure._native_dependency_roots(
+        [
+            closure.SourceItem(
+                elf,
+                closure.PurePosixPath("odoo19-venv/site-packages/pillow.libs/libjpeg.so"),
+                "venv",
+            )
+        ],
+        expected_ldconfig_sha256=HEX_A,
+        runtime_working_directory=runtime_cwd,
+        test_mode=True,
+    )
+    assert libc.resolve() in roots
+
+    (runtime_cwd / "pillow.libs").mkdir()
+    with pytest.raises(closure.ClosureError, match="relative ELF search path"):
+        closure._native_dependency_roots(
+            [
+                closure.SourceItem(
+                    elf,
+                    closure.PurePosixPath(
+                        "odoo19-venv/site-packages/pillow.libs/libjpeg.so"
+                    ),
+                    "venv",
+                )
+            ],
+            expected_ldconfig_sha256=HEX_A,
+            runtime_working_directory=runtime_cwd,
+            test_mode=True,
+        )
+
+
 def test_loader_preload_lib_token_and_injected_elf_are_sealed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -138,6 +138,7 @@ FORBIDDEN_EDITABLE_PREFIXES = (
     "__editable__.",
     "__editable___",
 )
+ALLOWED_RELATIVE_ELF_SEARCH_PATHS = frozenset({"pillow.libs"})
 FORBIDDEN_AUTOSTART_NAMES = frozenset(
     {
         "sitecustomize.py",
@@ -1979,6 +1980,7 @@ def _native_dependency_roots(
     *,
     expected_ldconfig_sha256: str,
     injected_elfs: Sequence[Path] = (),
+    runtime_working_directory: Path | None = None,
     test_mode: bool = False,
 ) -> list[Path]:
     files = list(_all_selected_regular_files(selections))
@@ -2046,7 +2048,40 @@ def _native_dependency_roots(
                 raise ClosureError(f"ELF search path is unsafe: {elf}")
             candidate = Path(expanded)
             if not candidate.is_absolute():
-                raise ClosureError(f"ELF search path is relative: {elf}")
+                if (
+                    raw not in ALLOWED_RELATIVE_ELF_SEARCH_PATHS
+                    or origin.name != raw
+                    or runtime_working_directory is None
+                ):
+                    raise ClosureError(f"relative ELF search path is unsafe: {elf}")
+                working_directory = Path(runtime_working_directory)
+                if test_mode:
+                    try:
+                        working_metadata = working_directory.lstat()
+                    except OSError as exc:
+                        raise ClosureError(
+                            "relative ELF search working directory cannot be inspected"
+                        ) from exc
+                    if working_directory.is_symlink() or not stat.S_ISDIR(
+                        working_metadata.st_mode
+                    ):
+                        raise ClosureError(
+                            "relative ELF search working directory is unsafe"
+                        )
+                else:
+                    _mode_owner(
+                        working_directory,
+                        uid=0,
+                        gid=0,
+                        mode=0o555,
+                        directory=True,
+                        label="relative ELF search working directory",
+                    )
+                candidate = working_directory / raw
+                if os.path.lexists(candidate):
+                    raise ClosureError(
+                        f"relative ELF search path is present in fixed working directory: {elf}"
+                    )
             search.append(candidate)
         for dependency in needed:
             candidates: list[Path] = []
@@ -3039,6 +3074,7 @@ def build(
                         selected,
                         expected_ldconfig_sha256=expected_ldconfig_sha256,
                         injected_elfs=injected,
+                        runtime_working_directory=layout.release_root,
                         test_mode=test_mode,
                     )
 
@@ -4186,6 +4222,7 @@ def _derive_external_runtime(
             selections,
             expected_ldconfig_sha256=expected_ldconfig_sha256,
             injected_elfs=injected,
+            runtime_working_directory=layout.release_root,
             test_mode=test_mode,
         )
     else:

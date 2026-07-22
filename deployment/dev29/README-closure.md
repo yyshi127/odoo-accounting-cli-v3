@@ -105,6 +105,13 @@ root-owned `/etc/ld.so.cache` listing emitted by the independently hashed,
 pinned `/usr/sbin/ldconfig.real`. External entries, including Python 3.12,
 stdlib, loader cache/preload, preload libraries, and recursively resolved
 native libraries, must be root-owned and not group/other writable.
+The sole relative ELF search path accepted from the audited target is the
+Pillow wheel's literal `pillow.libs`, and only for an ELF already inside a
+`pillow.libs` directory when `<exact immutable release>/pillow.libs` is absent.
+All other relative paths, an existing fixed-CWD candidate, variables other
+than `$ORIGIN`, and every selected-closure escape are rejected. The runtime
+suite independently attests the exact immutable release as its working
+directory and traces runtime opens.
 
 The venv audit removes CLI-Anything editable `.pth`/finder/metadata,
 `.egg-link`, and all bytecode caches. It rejects path-bearing `.pth` entries,
