@@ -337,6 +337,7 @@ def test_copy_excludes_bytecode_from_venv_core_and_addons(tmp_path: Path) -> Non
     assert placeholder.read_bytes() == closure.PLACEHOLDER
     if os.name == "posix":
         assert stat.S_IMODE(placeholder.stat().st_mode) == 0
+        assert stat.S_IMODE(placeholder.parent.stat().st_mode) == 0o555
     normalized = (stage / "odoo19-venv/pyvenv.cfg").read_bytes()
     assert b"/tmp/old" not in normalized
     assert sha(normalized) == audit["pyvenv"]["normalized_sha256"]
@@ -1032,8 +1033,7 @@ def test_failed_post_mount_verification_unmounts_and_closes_retained_fd(
         "getpwnam",
         lambda _name: SimpleNamespace(pw_gid=os.getgid() if hasattr(os, "getgid") else 0),
     )
-    if not hasattr(closure.os, "chown"):
-        monkeypatch.setattr(closure.os, "chown", lambda *_args: None, raising=False)
+    monkeypatch.setattr(closure.os, "chown", lambda *_args: None, raising=False)
     monkeypatch.setattr(
         closure,
         "verify",

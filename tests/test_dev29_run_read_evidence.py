@@ -325,6 +325,10 @@ def test_status_forwards_external_ldconfig_digest_to_anchor_validation(
     assert result["durable_pending_verified"] is (artifact == "pending")
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="requires Linux root-owned recovery artifacts",
+)
 def test_orchestration_recognizes_complete_stage_and_durable_pending_as_recoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -286,6 +286,10 @@ def test_stable_read_rejects_security_metadata_drift_during_read(
     assert calls == 2
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="requires root-owned POSIX policy metadata",
+)
 def test_sealed_policy_directory_rechecks_root_0555_and_exact_file_set(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -325,6 +329,10 @@ def test_sealed_policy_directory_rechecks_root_0555_and_exact_file_set(
         )
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="requires root-owned POSIX release metadata",
+)
 def test_sealed_release_tree_identity_covers_nested_exact_files_and_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -619,6 +627,10 @@ def test_sigkill_at_pending_file_fsync_recovers_by_fsyncing_same_inode_before_re
     assert not pending.exists()
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="requires root-owned POSIX publisher staging metadata",
+)
 @pytest.mark.parametrize("remaining", [6, 5, 2, 0])
 def test_durable_anchor_authorizes_idempotent_partial_stage_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, remaining: int

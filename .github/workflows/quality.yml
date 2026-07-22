@@ -1077,7 +1077,7 @@ jobs:
               )
           print("dev29_runtime_open_lifecycle_tests=4")
           PY
-      - name: Prove fifty-five runtime-trace digest and policy binding controls
+      - name: Prove fifty-three runtime-trace digest and policy binding controls
         shell: bash
         run: |
           set -euo pipefail
@@ -1117,8 +1117,6 @@ jobs:
             tests/test_dev29_publish_read_evidence.py::test_release_member_mode_policy_matches_the_builder_whitelist \
             tests/test_dev29_publish_read_evidence.py::test_publisher_script_execution_rejects_non_integer_schema_version \
             tests/test_dev29_publish_read_evidence.py::test_stable_read_rejects_security_metadata_drift_during_read \
-            tests/test_dev29_publish_read_evidence.py::test_sealed_policy_directory_rechecks_root_0555_and_exact_file_set \
-            tests/test_dev29_publish_read_evidence.py::test_sealed_release_tree_identity_covers_nested_exact_files_and_metadata \
             tests/test_dev29_publish_read_evidence.py::test_release_manifest_parser_accepts_build_format_but_rejects_unsafe_json \
             tests/test_dev29_publish_read_evidence.py::test_publisher_reverifies_full_verifier_trace_and_rejects_sidecar_journal
           python - "$report" <<'PY'
@@ -1130,13 +1128,13 @@ jobs:
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
           skipped = root.findall(".//skipped")
-          if len(tests) != 55 or failures or errors or skipped:
+          if len(tests) != 53 or failures or errors or skipped:
               raise SystemExit(
-                  "Dev29 runtime-trace binding gate did not execute exactly fifty-five tests: "
+                  "Dev29 runtime-trace binding gate did not execute exactly fifty-three tests: "
                   f"tests={len(tests)} failures={len(failures)} "
                   f"errors={len(errors)} skipped={len(skipped)}"
               )
-          print("dev29_runtime_trace_binding_tests=55")
+          print("dev29_runtime_trace_binding_tests=53")
           PY
       - name: Install fixed root-only test prerequisites
         shell: bash
@@ -1199,7 +1197,7 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Prove twenty root-only lifecycle gates
+      - name: Prove twenty-seven root-only lifecycle gates
         shell: bash
         run: |
           set -euo pipefail
@@ -1227,7 +1225,11 @@ jobs:
               tests/test_dev29_publish_read_evidence.py::test_sealed_release_tree_rejects_mode_drift_in_both_directions \
               tests/test_dev29_verify_read_evidence.py::test_loader_cache_rejects_wrong_hash_and_path_replacement \
               tests/test_dev29_verify_read_evidence.py::test_loader_cache_real_linux_pinned_execution \
-              tests/test_dev29_publish_read_evidence.py::test_publisher_validates_and_closes_inherited_script_fd_before_children
+              tests/test_dev29_publish_read_evidence.py::test_publisher_validates_and_closes_inherited_script_fd_before_children \
+              tests/test_dev29_publish_read_evidence.py::test_sealed_policy_directory_rechecks_root_0555_and_exact_file_set \
+              tests/test_dev29_publish_read_evidence.py::test_sealed_release_tree_identity_covers_nested_exact_files_and_metadata \
+              tests/test_dev29_publish_read_evidence.py::test_durable_anchor_authorizes_idempotent_partial_stage_cleanup \
+              tests/test_dev29_run_read_evidence.py::test_orchestration_recognizes_complete_stage_and_durable_pending_as_recoverable
           sudo "$python_bin" - "$report" <<'PY'
           import sys
           import xml.etree.ElementTree as ET
@@ -1237,13 +1239,13 @@ jobs:
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
           skipped = root.findall(".//skipped")
-          if len(tests) != 20 or failures or errors or skipped:
+          if len(tests) != 27 or failures or errors or skipped:
               raise SystemExit(
-                  "Dev29 root lifecycle gate did not execute exactly twenty tests: "
+                  "Dev29 root lifecycle gate did not execute exactly twenty-seven tests: "
                   f"tests={len(tests)} failures={len(failures)} "
                   f"errors={len(errors)} skipped={len(skipped)}"
               )
-          print("dev29_root_lifecycle_tests=20")
+          print("dev29_root_lifecycle_tests=27")
           PY
       - name: Prove twelve private trace atomic-seal SIGKILL windows
         shell: bash
@@ -1357,7 +1359,7 @@ jobs:
               )
           print("dev29_publisher_sigkill_tests=2")
           PY
-      - name: Prove ten independent recovery lifecycle controls
+      - name: Prove nine independent recovery lifecycle controls
         shell: bash
         run: |
           set -euo pipefail
@@ -1370,7 +1372,6 @@ jobs:
             tests/test_dev29_run_read_evidence.py::test_recovery_and_status_require_external_bundle_digest \
             'tests/test_dev29_run_read_evidence.py::test_status_forwards_external_ldconfig_digest_to_anchor_validation[final]' \
             'tests/test_dev29_run_read_evidence.py::test_status_forwards_external_ldconfig_digest_to_anchor_validation[pending]' \
-            tests/test_dev29_run_read_evidence.py::test_orchestration_recognizes_complete_stage_and_durable_pending_as_recoverable \
             tests/test_dev29_run_read_evidence.py::test_systemctl_query_uses_fixed_binary_environment_and_no_stdin \
             tests/test_dev29_run_read_evidence.py::test_supervisor_source_has_single_unit_hardening_and_final_exec_contract \
             tests/test_dev29_run_read_evidence.py::test_systemd_run_communicate_timeout_exceeds_unit_shutdown_budget
@@ -1383,13 +1384,13 @@ jobs:
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
           skipped = root.findall(".//skipped")
-          if len(tests) != 10 or failures or errors or skipped:
+          if len(tests) != 9 or failures or errors or skipped:
               raise SystemExit(
-                  "Dev29 recovery lifecycle gate did not execute exactly ten tests: "
+                  "Dev29 recovery lifecycle gate did not execute exactly nine tests: "
                   f"tests={len(tests)} failures={len(failures)} "
                   f"errors={len(errors)} skipped={len(skipped)}"
               )
-          print("dev29_recovery_lifecycle_tests=10")
+          print("dev29_recovery_lifecycle_tests=9")
           PY
 
   dev18-postgresql-integration:

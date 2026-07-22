@@ -480,7 +480,13 @@ def test_script_must_be_the_manifested_release_copy(prepared: Prepared) -> None:
 
 def test_release_script_hard_link_is_rejected(prepared: Prepared) -> None:
     alias = prepared.layout.release_script.with_suffix(".alias")
-    os.link(prepared.layout.release_script, alias)
+    if os.name == "posix":
+        alias.parent.chmod(0o755)
+    try:
+        os.link(prepared.layout.release_script, alias)
+    finally:
+        if os.name == "posix":
+            alias.parent.chmod(0o555)
     with pytest.raises(runtime_setup.RuntimeSetupError, match="sealed release member"):
         _setup(prepared)
 

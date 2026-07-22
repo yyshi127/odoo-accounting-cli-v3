@@ -1662,9 +1662,13 @@ def test_independent_auth_and_receipt_match_production_vectors_and_resist_monkey
 
 def test_independent_registry_digest_matches_production_and_rejects_contract_drift(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     from odoo_accounting_cli_v3.registry import load_registry, registry_digest
 
+    monkeypatch.setattr(
+        verifier, "stable_read", lambda path, **_kwargs: Path(path).read_bytes()
+    )
     registry_path = ROOT / "registry" / "capabilities.json"
     assert verifier.independent_registry_digest(registry_path) == registry_digest(
         load_registry(registry_path)

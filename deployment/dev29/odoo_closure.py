@@ -2262,9 +2262,10 @@ def copy_selections(
     placeholder = stage / "custom-addons" / "odoo-server19.conf"
     if os.path.lexists(placeholder):
         raise ClosureError("real Odoo configuration would enter the public image")
-    placeholder.parent.mkdir(parents=True, exist_ok=True, mode=0o555)
+    placeholder.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     placeholder.write_bytes(PLACEHOLDER)
     os.chmod(placeholder, 0o000)
+    os.chmod(placeholder.parent, 0o555)
 
 
 def _assert_image_symlinks(stage: Path) -> None:

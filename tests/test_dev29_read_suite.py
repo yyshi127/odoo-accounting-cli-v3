@@ -641,8 +641,33 @@ def test_fixed_plan_rejects_boolean_schema_version(tmp_path: Path) -> None:
         suite.load_plan({"plan": plan_path}, enforce_root=False)
 
 
-def test_closure_document_requires_exact_ordered_four_bind_plan_and_security_schema():
+def test_closure_document_requires_exact_ordered_four_bind_plan_and_security_schema(
+    monkeypatch: pytest.MonkeyPatch,
+):
     document = closure_document()
+    real_path = suite.Path
+    metadata = {
+        document["closure_identity"]["image_path"]: (4, 5),
+        "/proc/self/ns/mnt": (1, 2),
+        "/proc/1/ns/mnt": (1, 3),
+    }
+
+    class ObservedPath:
+        def __init__(self, value: object) -> None:
+            self.value = str(value)
+
+        def lstat(self) -> SimpleNamespace:
+            device, inode = metadata[self.value]
+            return SimpleNamespace(st_dev=device, st_ino=inode)
+
+        def stat(self) -> SimpleNamespace:
+            return self.lstat()
+
+    monkeypatch.setattr(
+        suite,
+        "Path",
+        lambda value: ObservedPath(value) if str(value) in metadata else real_path(value),
+    )
     assert (
         suite.validate_closure_document(
             document,
