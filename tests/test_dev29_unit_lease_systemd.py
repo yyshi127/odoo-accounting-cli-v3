@@ -128,8 +128,10 @@ def worker(arguments) -> int:
 def wrapper(arguments) -> int:
     directory = Path(arguments.directory)
     payload = json.loads(arguments.payload)
+    expected_top_argv = payload.pop("test_expected_top_argv")
     namespace = SimpleNamespace(**payload)
     runner = arguments.runner
+    runner._top_level_argv = lambda _arguments, **_kwargs: list(expected_top_argv)
     write_identity(directory, "wrapper", os.getpid(), runner)
     if arguments.delay:
         time.sleep(arguments.delay)
@@ -208,6 +210,9 @@ def guardian(arguments, launcher_pid: int, launcher_starttime: int) -> int:
     runner = arguments.runner
     directory = Path(arguments.directory)
     write_identity(directory, "guardian", os.getpid(), runner)
+    expected_top_argv = runner._read_proc_argv(launcher_pid)
+    if runner._read_proc_argv(os.getpid()) != expected_top_argv:
+        return 123
     unit = arguments.unit
     lease_fd, lease = runner._create_launcher_lease(
         arguments.evidence_name,
@@ -228,6 +233,7 @@ def guardian(arguments, launcher_pid: int, launcher_starttime: int) -> int:
         "expected_lease_launcher_starttime": str(lease["launcher_starttime"]),
         "expected_lease_guardian_pid": str(lease["guardian_pid"]),
         "expected_lease_guardian_starttime": str(lease["guardian_starttime"]),
+        "test_expected_top_argv": expected_top_argv,
     }
     command = [
         "/usr/bin/systemd-run",

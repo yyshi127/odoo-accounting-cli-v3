@@ -1295,7 +1295,7 @@ def test_parent_death_signal_remains_effective_after_ptrace_detach() -> None:
             return True
         try:
             return (proc / "stat").read_text("ascii").split()[2] == "Z"
-        except (FileNotFoundError, IndexError):
+        except (FileNotFoundError, ProcessLookupError, IndexError):
             return True
 
     while not dead() and time.monotonic() < deadline:
