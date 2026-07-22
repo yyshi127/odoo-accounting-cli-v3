@@ -132,6 +132,48 @@ def wrapper(arguments) -> int:
     namespace = SimpleNamespace(**payload)
     runner = arguments.runner
     runner._top_level_argv = lambda _arguments, **_kwargs: list(expected_top_argv)
+
+    def validate_test_systemd_run(value, *, arguments, unit, lease):
+        del arguments, unit
+        fields = {
+            "schema_version",
+            "method",
+            "pid",
+            "starttime",
+            "parent_pid",
+            "parent_starttime",
+            "parent_death_signal_setup",
+            "parent_death_signal_set_get_verified_before_exec",
+            "parent_identity_checked_before_exec",
+            "all_checks_passed",
+        }
+        pid = value.get("pid") if type(value) is dict else None
+        if (
+            type(value) is not dict
+            or set(value) != fields
+            or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 1
+            or value.get("method") != "test-live-systemd-run-v1"
+            or type(pid) is not int
+            or pid <= 1
+            or value.get("starttime") != runner._proc_starttime(pid)
+            or value.get("parent_pid") != lease.get("guardian_pid")
+            or value.get("parent_starttime") != lease.get("guardian_starttime")
+            or runner._single_process_child(
+                int(lease["guardian_pid"]), label="test launcher guardian"
+            )
+            != pid
+            or runner._process_fd_matches(
+                pid, device=int(lease["device"]), inode=int(lease["inode"])
+            )
+            or value.get("parent_death_signal_setup") != "SIGKILL"
+            or value.get("parent_death_signal_set_get_verified_before_exec") is not True
+            or value.get("parent_identity_checked_before_exec") is not True
+            or value.get("all_checks_passed") is not True
+        ):
+            raise runner.SupervisorError("test systemd-run execution proof drifted")
+
+    runner._validate_live_systemd_run_execution = validate_test_systemd_run
     write_identity(directory, "wrapper", os.getpid(), runner)
     if arguments.delay:
         time.sleep(arguments.delay)
@@ -270,6 +312,22 @@ def guardian(arguments, launcher_pid: int, launcher_starttime: int) -> int:
         command,
         close_fds=True,
         preexec_fn=lambda: arm_parent_death(parent_pid),
+    )
+    runner._finalize_launcher_lease_execution(
+        lease_fd,
+        lease,
+        {
+            "schema_version": 1,
+            "method": "test-live-systemd-run-v1",
+            "pid": process.pid,
+            "starttime": runner._proc_starttime(process.pid),
+            "parent_pid": parent_pid,
+            "parent_starttime": runner._proc_starttime(parent_pid),
+            "parent_death_signal_setup": "SIGKILL",
+            "parent_death_signal_set_get_verified_before_exec": True,
+            "parent_identity_checked_before_exec": True,
+            "all_checks_passed": True,
+        },
     )
     write_identity(directory, "systemd-run", process.pid, runner)
     try:
