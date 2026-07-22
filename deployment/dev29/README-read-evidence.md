@@ -42,7 +42,7 @@
 以下变量仅用于缩短示例；其值必须从受信外部记录填写：
 
 ```sh
-RELEASE='0.1.0.dev31-<commit12>'
+RELEASE='0.1.0.dev32-<commit12>'
 EVIDENCE_NAME='dev29-<unique-run-id>'
 RUNNER="/opt/odoo-accounting-cli-v3/releases/${RELEASE}/deployment/dev29/run_read_evidence.py"
 ```

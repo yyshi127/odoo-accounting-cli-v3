@@ -269,6 +269,22 @@ def test_database_graph_rejects_unsorted_or_uninstalled_dependencies(tmp_path: P
         )
 
 
+def test_module_manifest_uses_the_odoo_default_version_when_omitted(
+    tmp_path: Path,
+) -> None:
+    module = tmp_path / "account_asset"
+    write(module / "__manifest__.py", b"{'depends': ['accountant']}\n")
+
+    path, parsed = closure._module_manifest(module)
+
+    assert path == module / "__manifest__.py"
+    assert parsed == {"version": "1.0", "depends": ["accountant"]}
+
+    write(module / "__manifest__.py", b"{'version': None, 'depends': []}\n")
+    with pytest.raises(closure.ClosureError, match="manifest fields"):
+        closure._module_manifest(module)
+
+
 def test_python_audit_removes_editable_cache_metadata_and_normalizes_pyvenv(tmp_path: Path) -> None:
     venv = make_venv(tmp_path)
     site = venv / "lib/python3.12/site-packages"

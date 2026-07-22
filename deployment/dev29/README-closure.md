@@ -53,6 +53,9 @@ wrapper symlink is not part of this trust boundary. The direct client and
 Module names and dependency pairs are aggregated using PostgreSQL's explicit
 `C` collation so their order matches the bytewise canonical manifest order and
 does not depend on the database locale.
+The literal manifest parser applies Odoo 19's own omitted-version default of
+`1.0`; an explicitly supplied version must still be a string. Dependencies
+must remain a literal list of valid module names.
 The target host's `/usr/bin/mount` and `/usr/bin/umount` are accepted only with
 their audited root-owned, single-link mode `04755` identity.
 

@@ -1070,7 +1070,7 @@ def _module_manifest(module_root: Path) -> tuple[Path, dict[str, Any]]:
         raise ClosureError(f"module manifest is not a literal object: {module_root.name}") from exc
     if not isinstance(value, dict):
         raise ClosureError(f"module manifest is not an object: {module_root.name}")
-    version = value.get("version")
+    version = value.get("version", "1.0")
     dependencies = value.get("depends", [])
     if not isinstance(version, str) or not isinstance(dependencies, list) or any(
         not isinstance(item, str) or MODULE.fullmatch(item) is None for item in dependencies
