@@ -18,6 +18,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from odoo_accounting_cli_v3.domain.ar_open_items import OpenItemsError
+from odoo_accounting_cli_v3.domain.multicurrency_balance import MulticurrencyBalanceError
+from odoo_accounting_cli_v3.domain.trial_balance import TrialBalanceError
 from odoo_accounting_cli_v3.odoo.runner import (
     FIXED_CHILD_ENVIRONMENT,
     OdooRunnerError,
@@ -454,6 +457,21 @@ def response(runtime, result=None):
             True,
             "authentication_replayed",
         ),
+        (
+            TrialBalanceError("company is outside the authenticated allowed companies"),
+            False,
+            "company_binding_rejected",
+        ),
+        (
+            OpenItemsError("company does not exist or is not visible"),
+            False,
+            "company_binding_rejected",
+        ),
+        (
+            MulticurrencyBalanceError("company does not exist or is not visible"),
+            False,
+            "company_binding_rejected",
+        ),
     ),
 )
 def test_trusted_read_rejection_classifier_maps_only_fixed_plan_failures(
@@ -475,6 +493,7 @@ def test_trusted_read_rejection_classifier_rejects_near_matches_and_subclasses()
         (GatewayError("request context authentication failed"), False),
         (RuntimeError("Odoo ACL rejected capability"), False),
         (OdooRunnerError("Odoo shell timed out"), False),
+        (TrialBalanceError("company does not exist or is not visible "), False),
     )
     for error, replay_rejected in failures:
         assert (
