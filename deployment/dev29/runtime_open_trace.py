@@ -67,6 +67,7 @@ _DYNAMIC_BOOTSTRAP_MARKERS = frozenset(
     for _option, marker in DYNAMIC_BOOTSTRAP_OPTIONS
 ) | frozenset(DYNAMIC_MOUNT_ARGUMENTS)
 VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER = "@DEV29_BUNDLE_MANIFEST_SHA256@"
+VERIFIER_EVIDENCE_DIR_MARKER = "@DEV29_EVIDENCE_DIR@"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$")
 PID_PREFIX = re.compile(r"^(?:\[pid\s+(\d+)\]|(\d+))\s+")
@@ -403,6 +404,21 @@ def _canonical_absolute(value: Any, *, label: str) -> str:
     return value
 
 
+def _canonical_manifest_path(
+    value: Any, *, label: str, verifier_template: bool
+) -> str:
+    if (
+        verifier_template
+        and isinstance(value, str)
+        and value.startswith(VERIFIER_EVIDENCE_DIR_MARKER + "/")
+        and "\x00" not in value
+        and not any(ord(character) < 0x20 for character in value)
+        and posixpath.normpath(value) == value
+    ):
+        return value
+    return _canonical_absolute(value, label=label)
+
+
 def _argv(value: Any, *, label: str) -> tuple[str, ...]:
     if type(value) is not list or not value or len(value) > MAX_ARGV_ITEMS:
         raise RuntimeOpenTraceError(f"{label} is invalid")
@@ -690,22 +706,42 @@ def materialize_bootstrap_template(
         manifest,
         bootstrap_argv=bootstrap_values,
         final_argv=final_values,
+        allowed_paths=tuple(
+            _materialize_verifier_evidence_path(path, final_values)
+            for path in manifest.allowed_paths
+        ),
+        path_access_policy=tuple(
+            replace(
+                policy,
+                path=_materialize_verifier_evidence_path(policy.path, final_values),
+            )
+            for policy in manifest.path_access_policy
+        ),
         dynamic_argv_template=False,
     )
 
 
 def verifier_final_argv_template(final: Sequence[str]) -> tuple[str, ...]:
     values = _argv(list(final), label="verifier final argv")
-    if values.count(VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER) != 0:
+    if (
+        values.count(VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER) != 0
+        or values.count(VERIFIER_EVIDENCE_DIR_MARKER) != 0
+    ):
         raise RuntimeOpenTraceError("verifier final argv is already templated")
     try:
-        index = values.index("--expected-bundle-manifest-sha256")
+        bundle_index = values.index("--expected-bundle-manifest-sha256")
+        evidence_index = values.index("--evidence-dir")
     except ValueError as exc:
-        raise RuntimeOpenTraceError("verifier bundle digest option is absent") from exc
-    if index + 1 >= len(values) or HEX64.fullmatch(values[index + 1]) is None:
+        raise RuntimeOpenTraceError("verifier dynamic option is absent") from exc
+    if bundle_index + 1 >= len(values) or HEX64.fullmatch(values[bundle_index + 1]) is None:
         raise RuntimeOpenTraceError("verifier bundle digest value is invalid")
+    if evidence_index + 1 >= len(values) or not _is_verifier_evidence_dir(
+        values[evidence_index + 1]
+    ):
+        raise RuntimeOpenTraceError("verifier evidence directory value is invalid")
     templated = list(values)
-    templated[index + 1] = VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+    templated[bundle_index + 1] = VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+    templated[evidence_index + 1] = VERIFIER_EVIDENCE_DIR_MARKER
     return tuple(templated)
 
 
@@ -716,13 +752,33 @@ def _materialized_final_argv_template(
     manifest: TraceManifest,
 ) -> tuple[str, ...]:
     marker_count = template.count(VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER)
-    if marker_count == 0:
+    evidence_marker_count = template.count(VERIFIER_EVIDENCE_DIR_MARKER)
+    if marker_count == 0 and evidence_marker_count == 0:
         return template
     if (
-        marker_count != 1
+        evidence_marker_count > 1
         or manifest.target_id != "independent-verifier"
         or manifest.role != "verifier"
         or len(template) != len(actual)
+    ):
+        raise RuntimeOpenTraceError("verifier final argv template is invalid")
+    materialized = list(template)
+    if evidence_marker_count == 1:
+        try:
+            evidence_index = template.index("--evidence-dir")
+        except ValueError as exc:
+            raise RuntimeOpenTraceError("verifier evidence directory option is absent") from exc
+        if (
+            evidence_index + 1 >= len(template)
+            or template[evidence_index + 1] != VERIFIER_EVIDENCE_DIR_MARKER
+            or not _is_verifier_evidence_dir(actual[evidence_index + 1])
+        ):
+            raise RuntimeOpenTraceError("verifier evidence directory value is invalid")
+        materialized[evidence_index + 1] = actual[evidence_index + 1]
+    if marker_count == 0:
+        return tuple(materialized)
+    if (
+        marker_count != 1
     ):
         raise RuntimeOpenTraceError("verifier final argv template is invalid")
     try:
@@ -735,7 +791,6 @@ def _materialized_final_argv_template(
         or HEX64.fullmatch(actual[index + 1]) is None
     ):
         raise RuntimeOpenTraceError("verifier bundle digest value is invalid")
-    materialized = list(template)
     materialized[index + 1] = actual[index + 1]
     return tuple(materialized)
 
@@ -746,23 +801,55 @@ def _materialized_bootstrap_argv_template(
     *,
     manifest: TraceManifest,
 ) -> tuple[str, ...]:
-    if VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER not in approved_template:
+    dynamic_markers = {
+        VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER,
+        VERIFIER_EVIDENCE_DIR_MARKER,
+    }
+    if not any(item in dynamic_markers for item in approved_template):
         return bootstrap_template
     if len(bootstrap_template) != len(approved_template):
         raise RuntimeOpenTraceError("verifier bootstrap argv template is invalid")
     materialized = list(bootstrap_template)
     for index, value in enumerate(approved_template):
-        if value == VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER:
+        if value in dynamic_markers:
             if (
                 manifest.target_id != "independent-verifier"
                 or manifest.role != "verifier"
-                or HEX64.fullmatch(bootstrap_template[index]) is None
             ):
                 raise RuntimeOpenTraceError(
                     "verifier bootstrap argv template is invalid"
                 )
-            materialized[index] = VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+            if value == VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER:
+                if HEX64.fullmatch(bootstrap_template[index]) is None:
+                    raise RuntimeOpenTraceError(
+                        "verifier bootstrap argv template is invalid"
+                    )
+            elif not _is_verifier_evidence_dir(bootstrap_template[index]):
+                raise RuntimeOpenTraceError(
+                    "verifier bootstrap argv template is invalid"
+                )
+            materialized[index] = value
     return tuple(materialized)
+
+
+def _is_verifier_evidence_dir(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    prefix = "/var/lib/odoo-accounting-cli-v3/evidence/"
+    name = value.removeprefix(prefix)
+    return value.startswith(prefix) and "/" not in name and NAME.fullmatch(name) is not None
+
+
+def _materialize_verifier_evidence_path(path: str, final: tuple[str, ...]) -> str:
+    if not path.startswith(VERIFIER_EVIDENCE_DIR_MARKER + "/"):
+        return path
+    try:
+        index = final.index("--evidence-dir")
+    except ValueError as exc:
+        raise RuntimeOpenTraceError("verifier evidence directory option is absent") from exc
+    if index + 1 >= len(final) or not _is_verifier_evidence_dir(final[index + 1]):
+        raise RuntimeOpenTraceError("verifier evidence directory value is invalid")
+    return final[index + 1] + path[len(VERIFIER_EVIDENCE_DIR_MARKER) :]
 
 
 @dataclass(frozen=True)
@@ -979,7 +1066,9 @@ def manifest_path(request: TraceRequest, *, parent: Path = MANIFEST_PARENT) -> P
     return parent / request.release / f"{request.target_id}.json"
 
 
-def _path_access_policies(value: Any, *, role: str) -> tuple[PathAccessPolicy, ...]:
+def _path_access_policies(
+    value: Any, *, role: str, verifier_template: bool = False
+) -> tuple[PathAccessPolicy, ...]:
     if type(value) is not list or not value or len(value) > MAX_PATHS:
         raise RuntimeOpenTraceError("path access policy is invalid")
     policies: list[PathAccessPolicy] = []
@@ -997,7 +1086,11 @@ def _path_access_policies(value: Any, *, role: str) -> tuple[PathAccessPolicy, .
             "failure_guard",
         }:
             raise RuntimeOpenTraceError("path access policy entry schema is invalid")
-        path = _canonical_absolute(item.get("path"), label="path policy path")
+        path = _canonical_manifest_path(
+            item.get("path"),
+            label="path policy path",
+            verifier_template=verifier_template,
+        )
         classification = item.get("classification")
         access = item.get("allowed_access")
         suffixes = item.get("create_suffixes")
@@ -1157,11 +1250,32 @@ def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManife
         raise RuntimeOpenTraceError("allowed path set is invalid")
     if type(watch_raw) is not list or not watch_raw or len(watch_raw) > MAX_PATHS:
         raise RuntimeOpenTraceError("watch root set is invalid")
+    verifier_template = (
+        request.target_id == "independent-verifier"
+        and role == "verifier"
+        and (
+            VERIFIER_EVIDENCE_DIR_MARKER in final
+            or any(
+                isinstance(item, str)
+                and item.startswith(VERIFIER_EVIDENCE_DIR_MARKER + "/")
+                for item in allowed_raw
+            )
+        )
+    )
     allowed = tuple(
-        _canonical_absolute(item, label="allowed path") for item in allowed_raw
+        _canonical_manifest_path(
+            item,
+            label="allowed path",
+            verifier_template=verifier_template,
+        )
+        for item in allowed_raw
     )
     watches = tuple(_canonical_absolute(item, label="watch root") for item in watch_raw)
-    policies = _path_access_policies(value.get("path_access_policy"), role=role)
+    policies = _path_access_policies(
+        value.get("path_access_policy"),
+        role=role,
+        verifier_template=verifier_template,
+    )
     if list(allowed) != sorted(set(allowed)) or list(watches) != sorted(set(watches)):
         raise RuntimeOpenTraceError("manifest path sets are not sorted and unique")
     if _sha256(canonical_json(watches)) != request.expected_watch_roots_sha256:
@@ -3717,6 +3831,7 @@ __all__ = [
     "STRACE_OPTIONS",
     "STRACE_PATH",
     "VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER",
+    "VERIFIER_EVIDENCE_DIR_MARKER",
     "PRODUCTION_PROMOTION_ALLOWED",
     "PathAccessPolicy",
     "ParsedTrace",

@@ -751,6 +751,7 @@ def test_verifier_template_allows_only_bundle_manifest_digest_to_vary() -> None:
         *verifier_final,
     )
     final_template = trace.verifier_final_argv_template(verifier_final)
+    assert trace.VERIFIER_EVIDENCE_DIR_MARKER in final_template
     bootstrap_template = trace.dynamic_bootstrap_template(
         verifier_bootstrap,
         verifier_final,
@@ -773,8 +774,17 @@ def test_verifier_template_allows_only_bundle_manifest_digest_to_vary() -> None:
         environment=dict(trace.ROLE_ENVIRONMENTS["verifier"]),
         bootstrap_argv=approved_bootstrap,
         final_argv=final_template,
-        allowed_paths=expected_paths(),
-        path_access_policy=policies(expected_paths(), role="verifier"),
+        allowed_paths=(
+            trace.VERIFIER_EVIDENCE_DIR_MARKER + "/BUNDLE-MANIFEST.json",
+            *expected_paths(),
+        ),
+        path_access_policy=policies(
+            (
+                trace.VERIFIER_EVIDENCE_DIR_MARKER + "/BUNDLE-MANIFEST.json",
+                *expected_paths(),
+            ),
+            role="verifier",
+        ),
         watch_roots=VALID_WATCH_ROOTS,
         expected_static_closure_sha256="a" * 64,
         expected_child_environment_sha256=hashlib.sha256(
@@ -797,6 +807,10 @@ def test_verifier_template_allows_only_bundle_manifest_digest_to_vary() -> None:
     )
 
     assert materialized.final_argv == verifier_final_b
+    assert (
+        "/var/lib/odoo-accounting-cli-v3/evidence/dev29-proof-001/BUNDLE-MANIFEST.json"
+        in materialized.allowed_paths
+    )
     altered = list(verifier_final_b)
     altered[altered.index("--expected-release") + 1] = "0.1.0.dev29-other"
     altered_bootstrap = list(verifier_bootstrap_b)

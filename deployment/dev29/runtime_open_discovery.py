@@ -18,7 +18,7 @@ import posixpath
 import re
 import sys
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 
 sys.dont_write_bytecode = True
@@ -194,6 +194,33 @@ def _target_order(targets: Sequence[Any]) -> tuple[Any, ...]:
     return tuple(item.get("target_id") if type(item) is dict else None for item in targets)
 
 
+def _verifier_evidence_path_normalizer(final: Sequence[str]) -> Callable[[str], str]:
+    try:
+        index = tuple(final).index("--evidence-dir")
+    except ValueError as exc:
+        raise DiscoveryError("verifier evidence directory option is absent") from exc
+    if index + 1 >= len(final):
+        raise DiscoveryError("verifier evidence directory value is absent")
+    evidence_dir = final[index + 1]
+    prefix = "/var/lib/odoo-accounting-cli-v3/evidence/"
+    if (
+        not isinstance(evidence_dir, str)
+        or not evidence_dir.startswith(prefix)
+        or "/" in evidence_dir.removeprefix(prefix)
+        or SAFE_NAME.fullmatch(evidence_dir.removeprefix(prefix)) is None
+    ):
+        raise DiscoveryError("verifier evidence directory is invalid")
+
+    def normalize(path: str) -> str:
+        if path == evidence_dir:
+            return runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER
+        if path.startswith(evidence_dir + "/"):
+            return runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER + path[len(evidence_dir) :]
+        return path
+
+    return normalize
+
+
 def merge_fragments(
     suite_fragment: Mapping[str, Any],
     verifier_fragment: Mapping[str, Any],
@@ -276,6 +303,21 @@ def _policy_for_path(
     success = "success" in outcomes
     errnos = tuple(sorted(item for item in set(outcomes) if item != "success"))
     mutates = bool(set(access) & {"write", "create", "truncate", "append", "delete"})
+    if path.startswith(runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER + "/"):
+        if role != "verifier" or errnos:
+            raise DiscoveryError("verifier evidence bundle path is unsafe")
+        return {
+            "path": path,
+            "role": role,
+            "classification": "mutable-state",
+            "allowed_access": list(access),
+            "create_suffixes": [],
+            "delta_verifier": runtime_trace.SQLITE_DELTA_VERIFIER,
+            "delta_contract_sha256": sqlite_delta_contract_sha256,
+            "allow_success": success,
+            "allowed_errnos": [],
+            "failure_guard": None,
+        }
     if runtime_trace._is_process_view_path(path):
         classification = "process-view"
     elif set(access) <= runtime_trace.SOCKET_ACCESS and any(
@@ -406,12 +448,14 @@ def _manifest_from_entry(
         )
         manifest_final = final
         manifest_bootstrap = template
+        path_normalizer: Callable[[str], str] = lambda value: value
         if (
             target_id == "independent-verifier"
             and "--expected-bundle-manifest-sha256" in final
         ):
             manifest_final = runtime_trace.verifier_final_argv_template(final)
             marker = runtime_trace.VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+            evidence_marker = runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER
             if (
                 len(manifest_final) != len(final)
                 or len(manifest_bootstrap) != len(template)
@@ -419,15 +463,19 @@ def _manifest_from_entry(
                 raise DiscoveryError("verifier discovery argv template is invalid")
             approved_template = (*template[: -len(final)], *manifest_final)
             manifest_bootstrap = tuple(
-                marker if approved == marker else value
+                approved if approved in {marker, evidence_marker} else value
                 for value, approved in zip(template, approved_template)
             )
+            path_normalizer = _verifier_evidence_path_normalizer(final)
     except runtime_trace.RuntimeOpenTraceError as exc:
         raise DiscoveryError("discovery bootstrap argv cannot be templated") from exc
-    access_by_path = {path: access for path, access in parsed.accesses}
-    outcomes_by_path: dict[str, list[str]] = {path: [] for path in parsed.paths}
+    normalized_paths = tuple(path_normalizer(path) for path in parsed.paths)
+    access_by_path = {
+        path_normalizer(path): access for path, access in parsed.accesses
+    }
+    outcomes_by_path: dict[str, list[str]] = {path: [] for path in normalized_paths}
     for path, _access, outcome in parsed.attempts:
-        outcomes_by_path.setdefault(path, []).append(outcome)
+        outcomes_by_path.setdefault(path_normalizer(path), []).append(outcome)
     policies = [
         _policy_for_path(
             path,
@@ -438,7 +486,7 @@ def _manifest_from_entry(
             watch_roots=watch_roots,
             sqlite_delta_contract_sha256=sqlite_delta_contract_sha256,
         )
-        for path in parsed.paths
+        for path in normalized_paths
     ]
     environment = dict(runtime_trace.ROLE_ENVIRONMENTS[role])
     manifest = {
@@ -451,7 +499,7 @@ def _manifest_from_entry(
         "environment": environment,
         "bootstrap_argv": list(manifest_bootstrap),
         "final_argv": list(manifest_final),
-        "allowed_paths": list(parsed.paths),
+        "allowed_paths": list(normalized_paths),
         "path_access_policy": policies,
         "watch_roots": list(watch_roots),
         "expected_static_closure_sha256": expected_static_closure_sha256,
@@ -480,9 +528,9 @@ def _manifest_from_entry(
         "target_id": target_id,
         "trace_path": str(trace_path),
         "trace_sha256": hashlib.sha256(payload).hexdigest(),
-        "canonical_path_count": len(parsed.paths),
+        "canonical_path_count": len(normalized_paths),
         "canonical_path_set_sha256": hashlib.sha256(
-            runtime_trace.canonical_json(parsed.paths)
+            runtime_trace.canonical_json(normalized_paths)
         ).hexdigest(),
         "leader_returncode": parsed.leader_returncode,
         "candidate_manifest_sha256": request.expected_manifest_sha256,
