@@ -1878,6 +1878,7 @@ def _spawn_pinned_worker(
     script: Path,
     script_sha256: str,
     worker_action: str,
+    forbidden_child_fds: Iterable[int] = (),
 ) -> tuple[subprocess.Popen[bytes], int, int, dict[str, Any]]:
     python_fd, python_identity, python_file = _open_pinned_program(
         SYSTEM_PYTHON,
@@ -1940,6 +1941,20 @@ def _spawn_pinned_worker(
             )
         )
         expected_parent_pid = os.getpid()
+        forbidden_fds = tuple(
+            descriptor
+            for descriptor in forbidden_child_fds
+            if descriptor not in {read_gate, write_gate}
+        )
+
+        def worker_preexec() -> None:
+            for descriptor in forbidden_fds:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            _ptrace_traceme_with_parent_death(expected_parent_pid)
+
         for descriptor in (read_gate,):
             os.set_inheritable(descriptor, True)
         try:
@@ -1947,9 +1962,7 @@ def _spawn_pinned_worker(
                 worker_argv,
                 executable=str(SYSTEM_PYTHON),
                 pass_fds=(read_gate,),
-                preexec_fn=lambda: _ptrace_traceme_with_parent_death(
-                    expected_parent_pid
-                ),
+                preexec_fn=worker_preexec,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
                 cwd=root,
@@ -2090,6 +2103,7 @@ def _unit_wrapper(arguments: argparse.Namespace) -> int:
             script=script,
             script_sha256=arguments.expected_worker_script_sha256,
             worker_action=worker_action,
+            forbidden_child_fds=(lease_fd,),
         )
         if not _flock_is_owned_elsewhere(lease_fd):
             raise SupervisorError("launcher lease was lost before worker arm")
