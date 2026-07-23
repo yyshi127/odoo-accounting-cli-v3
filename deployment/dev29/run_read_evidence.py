@@ -3608,14 +3608,26 @@ def _launch_guardian(
     if Path(__file__).resolve(strict=True) != script.resolve(strict=True):
         raise SupervisorError("launcher is outside the expected release")
     expected_top_argv = _top_level_argv(arguments, root=root)
+    observed_parent_argv = _read_proc_argv(launcher_pid)
+    observed_guardian_argv = _read_proc_argv(os.getpid())
+    observed_parent_death = _parent_death_signal()
+    observed_parent_pid = os.getppid()
+    observed_parent_starttime = _proc_starttime(launcher_pid)
     if (
-        _parent_death_signal() != SIGKILL
-        or os.getppid() != launcher_pid
-        or _proc_starttime(launcher_pid) != launcher_starttime
-        or _read_proc_argv(os.getpid()) != expected_top_argv
-        or _read_proc_argv(launcher_pid) != expected_top_argv
+        observed_parent_death != SIGKILL
+        or observed_parent_pid != launcher_pid
+        or observed_parent_starttime != launcher_starttime
+        or observed_guardian_argv != expected_top_argv
+        or observed_parent_argv != expected_top_argv
     ):
-        raise SupervisorError("launcher guardian parent-death binding is invalid")
+        raise SupervisorError(
+            "launcher guardian parent-death binding is invalid "
+            f"(pdeath={observed_parent_death == SIGKILL}, "
+            f"ppid={observed_parent_pid == launcher_pid}, "
+            f"starttime={observed_parent_starttime == launcher_starttime}, "
+            f"guardian_argv={observed_guardian_argv == expected_top_argv}, "
+            f"launcher_argv={observed_parent_argv == expected_top_argv})"
+        )
     unit = f"odoo-accounting-cli-v3-dev29-{arguments.evidence_name}.service"
     expected_worker_script_sha256 = _manifest_member_sha256(
         release_manifest, RUNNER_RELATIVE
