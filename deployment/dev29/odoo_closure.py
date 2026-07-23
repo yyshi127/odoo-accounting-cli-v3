@@ -5000,28 +5000,34 @@ def verify_active(
     command_runner: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run,
     service_gid: int | None = None,
     database_graph: dict[str, Any] | None = None,
+    preverified: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify both the image and the four post-mount supervisor bindings."""
 
-    result = verify(
-        expected,
-        expected_system_python_sha256=expected_system_python_sha256,
-        expected_loader_preload_sha256=expected_loader_preload_sha256,
-        expected_ldconfig_sha256=expected_ldconfig_sha256,
-        expected_closure_anchor_sha256=expected_closure_anchor_sha256,
-        expected_closure_image_sha256=expected_closure_image_sha256,
-        expected_odoo_config_sha256=expected_odoo_config_sha256,
-        expected_database_name=expected_database_name,
-        expected_database_uuid=expected_database_uuid,
-        root=root,
-        script_path=script_path,
-        test_mode=test_mode,
-        mount_observation=mount_observation,
-        native_roots=native_roots,
-        command_runner=command_runner,
-        service_gid=service_gid,
-        database_graph=database_graph,
-    )
+    if preverified is None:
+        result = verify(
+            expected,
+            expected_system_python_sha256=expected_system_python_sha256,
+            expected_loader_preload_sha256=expected_loader_preload_sha256,
+            expected_ldconfig_sha256=expected_ldconfig_sha256,
+            expected_closure_anchor_sha256=expected_closure_anchor_sha256,
+            expected_closure_image_sha256=expected_closure_image_sha256,
+            expected_odoo_config_sha256=expected_odoo_config_sha256,
+            expected_database_name=expected_database_name,
+            expected_database_uuid=expected_database_uuid,
+            root=root,
+            script_path=script_path,
+            test_mode=test_mode,
+            mount_observation=mount_observation,
+            native_roots=native_roots,
+            command_runner=command_runner,
+            service_gid=service_gid,
+            database_graph=database_graph,
+        )
+    else:
+        result = dict(preverified)
+        if result.get("status") not in {"verified", "mounted"}:
+            raise ClosureError("pre-bind closure verification is invalid")
     layout = build_layout(root, expected)
     bindings = _binding_observation(layout)
     if _affected_mount_rows(layout, process="1"):
@@ -5079,7 +5085,7 @@ def activated_closure(
     body_failed = False
     try:
         baseline = _lifecycle_baseline(layout)
-        mount(
+        mounted = mount(
             expected,
             expected_system_python_sha256=expected_system_python_sha256,
             expected_loader_preload_sha256=expected_loader_preload_sha256,
@@ -5108,6 +5114,7 @@ def activated_closure(
             root=root,
             script_path=script_path,
             command_runner=command_runner,
+            preverified=mounted,
         )
         result["lifecycle"] = {
             "lock_held_until_cleanup": True,
