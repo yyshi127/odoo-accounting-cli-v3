@@ -165,6 +165,15 @@ def test_direct_child_mount_endpoint_failure_reports_path_and_errno() -> None:
     assert "errno={exc.errno}" in source
 
 
+def test_direct_child_allows_unstatable_closure_root_only() -> None:
+    source = (ROOT / "deployment" / "dev29" / "direct_child.py").read_text("utf-8")
+
+    assert "if len(expected) == 0:" in source
+    assert "if index == 0:" in source
+    assert 'read_only = "ro" in rows[item["destination_path"]]["options"]' in source
+    assert "index != 0" in source
+
+
 def test_child_attestation_uses_closure_identity_external_runtime_paths() -> None:
     source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
 

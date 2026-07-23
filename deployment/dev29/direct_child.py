@@ -167,7 +167,10 @@ def _expected_mounts(values: list[str]) -> list[dict[str, Any]]:
         ):
             raise DirectChildError("expected child mount identity is invalid")
         _canonical_path(item["source_path"])
-        _safe_endpoint(item["destination_path"])
+        if len(expected) == 0:
+            _canonical_path(item["destination_path"])
+        else:
+            _safe_endpoint(item["destination_path"])
         expected.append(item)
     if len(expected) != 5 or len({item["destination_path"] for item in expected}) != 5:
         raise DirectChildError("expected child mount set is invalid")
@@ -214,28 +217,39 @@ def _mounts(expected: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if set(rows) != wanted:
         raise DirectChildError("child did not inherit every closure mount")
     observed: list[dict[str, Any]] = []
-    for item in expected:
+    for index, item in enumerate(expected):
         source = _canonical_path(item["source_path"])
-        destination, destination_metadata = _safe_endpoint(item["destination_path"])
-        try:
-            read_only = bool(os.statvfs(destination).f_flag & getattr(os, "ST_RDONLY", 1))
-        except OSError as exc:
-            raise DirectChildError("child mount statvfs is unavailable") from exc
+        if index == 0:
+            destination = _canonical_path(item["destination_path"])
+            destination_device = item["destination_device"]
+            destination_inode = item["destination_inode"]
+            read_only = "ro" in rows[item["destination_path"]]["options"]
+        else:
+            destination, destination_metadata = _safe_endpoint(item["destination_path"])
+            destination_device = destination_metadata.st_dev
+            destination_inode = destination_metadata.st_ino
+            try:
+                read_only = bool(os.statvfs(destination).f_flag & getattr(os, "ST_RDONLY", 1))
+            except OSError as exc:
+                raise DirectChildError("child mount statvfs is unavailable") from exc
         row = rows[item["destination_path"]]
         value = {
             "source_path": str(source),
             "destination_path": str(destination),
             "source_device": item["source_device"],
             "source_inode": item["source_inode"],
-            "destination_device": destination_metadata.st_dev,
-            "destination_inode": destination_metadata.st_ino,
+            "destination_device": destination_device,
+            "destination_inode": destination_inode,
             **row,
             "statvfs_read_only": read_only,
         }
         if (
             value != item
-            or (item["source_device"], item["source_inode"])
-            != (destination_metadata.st_dev, destination_metadata.st_ino)
+            or (
+                index != 0
+                and (item["source_device"], item["source_inode"])
+                != (destination_device, destination_inode)
+            )
         ):
             raise DirectChildError("child mount identity differs from the supervisor")
         observed.append(value)
