@@ -1061,9 +1061,22 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
         "--plan",
         str(paths["plan"]),
     ]
+    oracle_verify = [
+        configuration["odoo_python"],
+        "-I",
+        str(paths["oracle"]),
+        "verify",
+        "--plan",
+        str(paths["plan"]),
+        "--case",
+        "trial_balance",
+        "--request-stdin",
+        "--response-stdin",
+    ]
     assert suite._validate_direct_child_command("odoo", launcher, runtime=configuration, expected=identity) == launcher
     assert suite._validate_direct_child_command("signer", signer, runtime=configuration, expected=identity) == signer
     assert suite._validate_direct_child_command("postgres", oracle, runtime=configuration, expected=identity) == oracle
+    assert suite._validate_direct_child_command("postgres", oracle_verify, runtime=configuration, expected=identity) == oracle_verify
     for role, command in (
         ("odoo", ["/bin/true"]),
         ("odoo", signer),

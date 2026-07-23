@@ -3693,7 +3693,17 @@ def _validate_direct_child_command(
         )
     elif role == "postgres" and script == str(paths["oracle"]):
         allowed = arguments == ["witness", "--plan", str(paths["plan"])]
-        if len(arguments) == 9 and arguments[:4] == [
+        if len(arguments) == 7 and arguments[:4] == [
+            "verify",
+            "--plan",
+            str(paths["plan"]),
+            "--case",
+        ]:
+            allowed = (
+                arguments[4] in FINANCIAL_NAMES
+                and arguments[5:] == ["--request-stdin", "--response-stdin"]
+            )
+        elif len(arguments) == 9 and arguments[:4] == [
             "verify",
             "--plan",
             str(paths["plan"]),
@@ -3708,7 +3718,7 @@ def _validate_direct_child_command(
                 and request_path.name == "request.json"
                 and response_path.name == "response.json"
                 and request_path.parent == response_path.parent
-                and request_path.parent.parent == Path("/run")
+                and request_path.parent.parent == ORACLE_STAGING_PARENT
                 and request_path.parent.name.startswith(
                     "odoo-accounting-cli-v3-dev29-oracle-"
                 )
@@ -4849,39 +4859,39 @@ def run_oracle_verify(
     postgres_uid: int,
     postgres_gid: int,
 ) -> subprocess.CompletedProcess[bytes]:
-    staging, request_path, response_path = _oracle_staging(
-        request_bytes,
-        response_bytes,
-        release=expected.release,
-        case_name=case_name,
-        uid=postgres_uid,
-        gid=postgres_gid,
-    )
     try:
-        return _run_postgres(
-            [
-                runtime["odoo_python"],
-                "-I",
-                str(paths["oracle"]),
-                "verify",
-                "--plan",
-                str(paths["plan"]),
-                "--case",
-                case_name,
-                "--request",
-                str(request_path),
-                "--response",
-                str(response_path),
-            ],
-            trace_target_id=f"positive-{case_name}-oracle",
-            trace_gate=trace_gate,
-            runtime=runtime,
-            expected=expected,
-            closure=closure,
-            timeout=180,
+        stdin = canonical_json(
+            {
+                "schema_version": 1,
+                "request": json.loads(request_bytes),
+                "response": json.loads(response_bytes),
+            }
         )
-    finally:
-        _cleanup_oracle_staging(staging)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ReadSuiteError("Oracle stdin payload is invalid") from exc
+    if len(stdin) > 32 * 1024 * 1024:
+        raise ReadSuiteError("Oracle stdin payload exceeds the fixed boundary")
+    return _run_postgres(
+        [
+            runtime["odoo_python"],
+            "-I",
+            str(paths["oracle"]),
+            "verify",
+            "--plan",
+            str(paths["plan"]),
+            "--case",
+            case_name,
+            "--request-stdin",
+            "--response-stdin",
+        ],
+        trace_target_id=f"positive-{case_name}-oracle",
+        trace_gate=trace_gate,
+        stdin=stdin,
+        runtime=runtime,
+        expected=expected,
+        closure=closure,
+        timeout=180,
+    )
 
 
 def _validate_oracle_result(

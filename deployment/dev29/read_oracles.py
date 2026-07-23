@@ -1691,6 +1691,30 @@ def _read_json_file(path: str, label: str, max_bytes: int = 16 * 1024 * 1024) ->
     return value
 
 
+def _read_verify_stdin(max_bytes: int = 32 * 1024 * 1024) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        payload = sys.stdin.buffer.read(max_bytes + 1)
+    except OSError as exc:
+        raise OracleInputError("verify stdin cannot be read") from exc
+    if len(payload) > max_bytes:
+        raise OracleInputError("verify stdin exceeds the fixed boundary")
+    if not payload:
+        raise OracleInputError("verify stdin is empty")
+    try:
+        document = parse_json(payload.decode("utf-8"), "verify stdin")
+    except UnicodeError as exc:
+        raise OracleInputError("verify stdin is not utf-8") from exc
+    if (
+        not isinstance(document, dict)
+        or type(document.get("schema_version")) is not int
+        or document.get("schema_version") != 1
+        or not isinstance(document.get("request"), dict)
+        or not isinstance(document.get("response"), dict)
+    ):
+        raise OracleInputError("verify stdin document is invalid")
+    return document["request"], document["response"]
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="read_oracles.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1699,8 +1723,12 @@ def _parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify")
     verify.add_argument("--plan", required=True)
     verify.add_argument("--case", required=True, choices=CASE_NAMES)
-    verify.add_argument("--request", required=True)
-    verify.add_argument("--response", required=True)
+    request = verify.add_mutually_exclusive_group(required=True)
+    request.add_argument("--request")
+    request.add_argument("--request-stdin", action="store_true")
+    response = verify.add_mutually_exclusive_group(required=True)
+    response.add_argument("--response")
+    response.add_argument("--response-stdin", action="store_true")
     return parser
 
 
@@ -1730,8 +1758,13 @@ def main(argv: list[str] | None = None) -> int:
         python_identity = verify_runtime_python(plan)
         if args.command == "verify":
             case = case_by_name(plan, args.case)
-            request = _read_json_file(args.request, "request")
-            response = _read_json_file(args.response, "response")
+            if args.request_stdin and args.response_stdin:
+                request, response = _read_verify_stdin()
+            elif args.request and args.response:
+                request = _read_json_file(args.request, "request")
+                response = _read_json_file(args.response, "response")
+            else:
+                raise OracleInputError("request and response sources must match")
             validate_request(plan, case, request)
             connection = open_connection(plan)
             report, transaction = run_read_only_transaction(
