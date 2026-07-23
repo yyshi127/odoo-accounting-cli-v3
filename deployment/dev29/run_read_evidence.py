@@ -121,6 +121,11 @@ DISCOVERY_OPTIONS = (
         "--runtime-open-discovery-sqlite-delta-contract-sha256",
     ),
 )
+VERIFIER_DISCOVERY_OPTIONS = (
+    ("verifier_evidence_dir", "--verifier-evidence-dir"),
+    ("verifier_fragment_output", "--verifier-fragment-output"),
+    ("expected_bundle_manifest_sha256", "--expected-bundle-manifest-sha256"),
+)
 LEASE_OPTIONS = (
     ("expected_lease_nonce", "--expected-lease-nonce"),
     ("expected_lease_device", "--expected-lease-device"),
@@ -1068,6 +1073,11 @@ def _json(payload: bytes, *, label: str, canonical: bool = False) -> dict[str, A
 
 def _identity(arguments: argparse.Namespace) -> dict[str, str]:
     discovery_mode = arguments.runtime_open_discovery_inventory is not None
+    verifier_fragment_mode = arguments.action in {
+        "trace-verifier-fragment",
+        "trace-verifier-fragment-unit-wrapper",
+        "trace-verifier-fragment-supervise-worker",
+    }
     value = {
         "release": arguments.expected_release,
         "version": arguments.expected_version,
@@ -1086,6 +1096,8 @@ def _identity(arguments: argparse.Namespace) -> dict[str, str]:
         or HEX64.fullmatch(arguments.expected_ldconfig_sha256) is None
     ):
         raise SupervisorError("expected release identity is invalid")
+    if discovery_mode and verifier_fragment_mode:
+        raise SupervisorError("runtime-open discovery mode is ambiguous")
     if discovery_mode:
         if (
             arguments.action not in {"launch", "unit-wrapper", "supervise-worker"}
@@ -1119,9 +1131,32 @@ def _identity(arguments: argparse.Namespace) -> dict[str, str]:
             or not arguments.runtime_open_discovery_watch_root
         ):
             raise SupervisorError("runtime-open discovery identity is invalid")
+    elif verifier_fragment_mode:
+        if (
+            HEX64.fullmatch(arguments.expected_runtime_open_index_sha256 or "")
+            is None
+            or HEX64.fullmatch(arguments.expected_bundle_manifest_sha256 or "")
+            is None
+            or not arguments.runtime_open_discovery_watch_root
+        ):
+            raise SupervisorError("runtime-open verifier discovery identity is invalid")
+        _validate_verifier_fragment_paths(arguments)
     elif HEX64.fullmatch(arguments.expected_runtime_open_index_sha256 or "") is None:
         raise SupervisorError("expected release identity is invalid")
     return value
+
+
+def _validate_verifier_fragment_paths(arguments: argparse.Namespace) -> None:
+    evidence = Path(arguments.verifier_evidence_dir)
+    output = Path(arguments.verifier_fragment_output)
+    if (
+        evidence.parent != EVIDENCE_PARENT
+        or SAFE_NAME.fullmatch(evidence.name) is None
+        or output.parent != PRIVATE_EVIDENCE_PARENT
+        or not output.name.endswith(".json")
+        or SAFE_NAME.fullmatch(output.name.removesuffix(".json")) is None
+    ):
+        raise SupervisorError("runtime-open verifier discovery paths are invalid")
 
 
 def _program(path: Path, expected_sha256: str, *, label: str) -> dict[str, Any]:
@@ -1739,7 +1774,7 @@ def _top_level_argv(
     arguments: argparse.Namespace, *, root: Path, action: str | None = None
 ) -> list[str]:
     top_action = action or arguments.action
-    if top_action not in {"launch", "recover"}:
+    if top_action not in {"launch", "recover", "trace-verifier-fragment"}:
         raise SupervisorError("top-level launcher action is invalid")
     result = [
         str(SYSTEM_PYTHON),
@@ -1750,6 +1785,8 @@ def _top_level_argv(
         *_forward_options(arguments, COMMON_OPTIONS),
         *_forward_options(arguments, DISCOVERY_OPTIONS),
     ]
+    if top_action == "trace-verifier-fragment":
+        result.extend(_forward_options(arguments, VERIFIER_DISCOVERY_OPTIONS))
     if top_action == "recover":
         digest = arguments.expected_bundle_manifest_sha256
         if not isinstance(digest, str) or HEX64.fullmatch(digest) is None:
@@ -1766,7 +1803,11 @@ def _wrapper_argv(
     unit: str,
     worker_script_sha256: str,
 ) -> list[str]:
-    if action not in {"unit-wrapper", "recover-unit-wrapper"}:
+    if action not in {
+        "unit-wrapper",
+        "recover-unit-wrapper",
+        "trace-verifier-fragment-unit-wrapper",
+    }:
         raise SupervisorError("unit wrapper action is invalid")
     result = [
         str(SYSTEM_PYTHON),
@@ -1777,6 +1818,8 @@ def _wrapper_argv(
         *_forward_options(arguments, COMMON_OPTIONS),
         *_forward_options(arguments, DISCOVERY_OPTIONS),
     ]
+    if action == "trace-verifier-fragment-unit-wrapper":
+        result.extend(_forward_options(arguments, VERIFIER_DISCOVERY_OPTIONS))
     if action == "recover-unit-wrapper":
         digest = arguments.expected_bundle_manifest_sha256
         if not isinstance(digest, str) or HEX64.fullmatch(digest) is None:
@@ -1910,6 +1953,8 @@ def _spawn_pinned_worker(
             *_forward_options(arguments, DISCOVERY_OPTIONS),
             *_forward_options(arguments, LEASE_OPTIONS),
         ]
+        if worker_action == "trace-verifier-fragment-supervise-worker":
+            worker_argv.extend(_forward_options(arguments, VERIFIER_DISCOVERY_OPTIONS))
         if worker_action == "recover-supervise-worker":
             worker_argv.extend(
                 (
@@ -2096,6 +2141,8 @@ def _unit_wrapper(arguments: argparse.Namespace) -> int:
         worker_action = (
             "recover-supervise-worker"
             if arguments.action == "recover-unit-wrapper"
+            else "trace-verifier-fragment-supervise-worker"
+            if arguments.action == "trace-verifier-fragment-unit-wrapper"
             else "supervise-worker"
         )
         process, pidfd, gate, execution = _spawn_pinned_worker(
@@ -2575,11 +2622,12 @@ def _outer_unit_evidence(
     if worker_argv != WORKER_BOOTSTRAP["wrapper_execution"]["argv"]:
         raise SupervisorError("outer transient unit worker argv drifted")
     wrapper_argv = _read_proc_argv(wrapper_pid)
-    wrapper_action = (
-        "recover-unit-wrapper"
-        if internal_action == "recover-supervise-worker"
-        else "unit-wrapper"
-    )
+    if internal_action == "recover-supervise-worker":
+        wrapper_action = "recover-unit-wrapper"
+    elif internal_action == "trace-verifier-fragment-supervise-worker":
+        wrapper_action = "trace-verifier-fragment-unit-wrapper"
+    else:
+        wrapper_action = "unit-wrapper"
     expected_wrapper_argv = _wrapper_argv(
         arguments,
         root=root,
@@ -2700,9 +2748,12 @@ def _outer_unit_evidence(
         writable=writable,
         wrapper_argv=expected_wrapper_argv,
     )
-    top_action = (
-        "recover" if internal_action == "recover-supervise-worker" else "launch"
-    )
+    if internal_action == "recover-supervise-worker":
+        top_action = "recover"
+    elif internal_action == "trace-verifier-fragment-supervise-worker":
+        top_action = "trace-verifier-fragment"
+    else:
+        top_action = "launch"
     expected_top_argv = _top_level_argv(arguments, root=root, action=top_action)
     if (
         lease["launcher_argv"] != expected_top_argv
@@ -3067,6 +3118,162 @@ def _supervise(arguments: argparse.Namespace) -> dict[str, Any]:
     raise SupervisorError("publisher exec unexpectedly returned")
 
 
+def _trace_verifier_fragment_supervise(arguments: argparse.Namespace) -> dict[str, Any]:
+    _require_system_python()
+    expected = _identity(arguments)
+    _validate_verifier_fragment_paths(arguments)
+    _program(
+        SYSTEM_PYTHON, arguments.expected_system_python_sha256, label="system Python"
+    )
+    _verify_preload(arguments.expected_ld_so_preload_sha256)
+    systemd_run_identity = _program_with_inode(
+        SYSTEMD_RUN, arguments.expected_systemd_run_sha256, label="systemd-run"
+    )
+    systemctl_identity = _program(
+        SYSTEMCTL, arguments.expected_systemctl_sha256, label="systemctl"
+    )
+    _program(LDCONFIG, arguments.expected_ldconfig_sha256, label="ldconfig.real")
+    _program(Path("/usr/bin/strace"), arguments.expected_strace_sha256, label="strace")
+    root, _manifest = _bootstrap_release(expected)
+    suite = _load_module("_dev29_verifier_fragment_suite", root.joinpath(*SUITE_RELATIVE.parts))
+    closure_module = _load_module(
+        "_dev29_verifier_fragment_closure", root.joinpath(*CLOSURE_RELATIVE.parts)
+    )
+    suite_expected = suite.ExpectedIdentity(**expected)
+    suite_closure = suite.ExpectedClosure(
+        anchor_sha256=arguments.expected_closure_anchor_sha256,
+        image_sha256=arguments.expected_closure_image_sha256,
+        system_python_sha256=arguments.expected_system_python_sha256,
+        loader_preload_sha256=arguments.expected_ld_so_preload_sha256,
+        ldconfig_sha256=arguments.expected_ldconfig_sha256,
+    )
+    suite_expected.validate()
+    suite_closure.validate()
+    paths = suite._release_paths(suite_expected)
+    import grp
+
+    service_gid = grp.getgrnam("odoo").gr_gid
+    plan, _plan_bytes = suite.load_plan(paths, enforce_root=True)
+    runtime, _runtime_bytes = suite.load_runtime(
+        paths["runtime"],
+        plan,
+        suite_expected,
+        service_gid=service_gid,
+        enforce_root=True,
+    )
+    _outer_unit_evidence(
+        arguments,
+        root=root,
+        runtime=runtime,
+        systemctl_identity=systemctl_identity,
+        systemd_run_identity=systemd_run_identity,
+        internal_action="trace-verifier-fragment-supervise-worker",
+    )
+    output = Path(arguments.verifier_fragment_output)
+    verifier_sidecar = _verifier_private_sidecar_path(
+        f"{arguments.evidence_name}.verifier-fragment"
+    )
+    if os.path.lexists(output) or os.path.lexists(verifier_sidecar):
+        raise SupervisorError("runtime-open verifier discovery output already exists")
+    os.mkdir(verifier_sidecar, 0o700)
+    os.mkdir(verifier_sidecar / ".trace-staging", 0o700)
+    closure_expected = closure_module.ExpectedIdentity(**expected)
+    with closure_module.activated_closure(
+        closure_expected,
+        expected_system_python_sha256=arguments.expected_system_python_sha256,
+        expected_loader_preload_sha256=arguments.expected_ld_so_preload_sha256,
+        expected_ldconfig_sha256=arguments.expected_ldconfig_sha256,
+        expected_closure_anchor_sha256=arguments.expected_closure_anchor_sha256,
+        expected_closure_image_sha256=arguments.expected_closure_image_sha256,
+        expected_odoo_config_sha256=runtime["odoo_config_sha256"],
+        expected_database_name=plan["database"]["name"],
+        expected_database_uuid=plan["database"]["uuid"],
+        root=Path("/"),
+        script_path=paths["closure"],
+    ) as active:
+        verifier_command = [
+            str(SYSTEM_PYTHON),
+            "-I",
+            "-S",
+            str(paths["verifier"]),
+            "--validate-only",
+            "--evidence-dir",
+            str(arguments.verifier_evidence_dir),
+            "--expected-bundle-manifest-sha256",
+            arguments.expected_bundle_manifest_sha256,
+            "--expected-release",
+            expected["release"],
+            "--expected-version",
+            expected["version"],
+            "--expected-commit",
+            expected["commit"],
+            "--expected-manifest-sha256",
+            expected["manifest_sha256"],
+            "--expected-package-sha256",
+            expected["package_sha256"],
+            "--expected-closure-anchor-sha256",
+            arguments.expected_closure_anchor_sha256,
+            "--expected-closure-image-sha256",
+            arguments.expected_closure_image_sha256,
+            "--expected-system-python-sha256",
+            arguments.expected_system_python_sha256,
+            "--expected-ld-so-preload-sha256",
+            arguments.expected_ld_so_preload_sha256,
+            "--expected-ldconfig-sha256",
+            arguments.expected_ldconfig_sha256,
+            "--expected-runtime-open-index-sha256",
+            arguments.expected_runtime_open_index_sha256,
+            "--expected-strace-sha256",
+            arguments.expected_strace_sha256,
+        ]
+        trace_gate = suite.RuntimeTraceDiscoveryGate(
+            suite_expected,
+            expected_strace_sha256=arguments.expected_strace_sha256,
+            private_sidecar=verifier_sidecar,
+            watch_roots=tuple(arguments.runtime_open_discovery_watch_root),
+        )
+        process = suite._run_direct_child(
+            "verifier",
+            verifier_command,
+            trace_target_id="independent-verifier",
+            trace_gate=trace_gate,
+            stdin=b"",
+            runtime=runtime,
+            expected=suite_expected,
+            closure=active,
+            timeout=600,
+        )
+        suite._strict_success(process, label="independent evidence verifier")
+        inventory = trace_gate.inventory(
+            required_targets=("independent-verifier",),
+            expected_static_closure_sha256=(
+                arguments.runtime_open_discovery_static_closure_sha256
+            ),
+            watch_roots=tuple(arguments.runtime_open_discovery_watch_root),
+            mutable_roots=tuple(arguments.runtime_open_discovery_mutable_root),
+            sqlite_delta_contract_sha256=(
+                arguments.runtime_open_discovery_sqlite_delta_contract_sha256
+                or suite.discovery_sqlite_delta_contract_sha256()
+            ),
+            scope=suite.RUNTIME_OPEN_DISCOVERY_VERIFIER_FRAGMENT_SCOPE,
+        )
+    payload = suite.canonical_json(inventory) + b"\n"
+    suite.write_private(output, payload)
+    return {
+        "schema_version": 1,
+        "scope": (
+            "odoo-accounting-cli-v3.dev29."
+            "runtime-open-discovery-verifier-evidence.v1"
+        ),
+        "verifier_evidence_dir": str(arguments.verifier_evidence_dir),
+        "verifier_fragment": str(output),
+        "verifier_fragment_sha256": hashlib.sha256(payload).hexdigest(),
+        "target_count": len(inventory["targets"]),
+        "candidate_is_approval": False,
+        "production_promotion_allowed": False,
+    }
+
+
 def _recover_supervise(arguments: argparse.Namespace) -> dict[str, Any]:
     _require_system_python()
     expected = _identity(arguments)
@@ -3294,6 +3501,12 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--runtime-open-discovery-sqlite-delta-contract-sha256")
 
 
+def _verifier_discovery(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--verifier-evidence-dir", required=True, type=Path)
+    parser.add_argument("--verifier-fragment-output", required=True, type=Path)
+    parser.add_argument("--expected-bundle-manifest-sha256", required=True)
+
+
 def _lease_options(parser: argparse.ArgumentParser) -> None:
     for _dest, option in LEASE_OPTIONS:
         parser.add_argument(option, required=True)
@@ -3337,6 +3550,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="action", required=True)
     _common(subparsers.add_parser("launch"))
+    verifier = subparsers.add_parser("trace-verifier-fragment")
+    _common(verifier)
+    _verifier_discovery(verifier)
     recover = subparsers.add_parser("recover")
     _common(recover)
     recover.add_argument("--expected-bundle-manifest-sha256", required=True)
@@ -3344,8 +3560,24 @@ def _parser() -> argparse.ArgumentParser:
     _common(status_parser)
     status_parser.add_argument("--expected-bundle-manifest-sha256", required=True)
     _wrapper_parser(subparsers, "unit-wrapper", recovery=False)
+    verifier_wrapper = subparsers.add_parser("trace-verifier-fragment-unit-wrapper")
+    _common(verifier_wrapper)
+    _verifier_discovery(verifier_wrapper)
+    _lease_options(verifier_wrapper)
+    verifier_wrapper.add_argument("--expected-worker-script-sha256", required=True)
+    verifier_wrapper.add_argument("--expected-unit", required=True)
     _wrapper_parser(subparsers, "recover-unit-wrapper", recovery=True)
     _worker_parser(subparsers, "supervise-worker", recovery=False)
+    verifier_worker = subparsers.add_parser("trace-verifier-fragment-supervise-worker")
+    _common(verifier_worker)
+    _verifier_discovery(verifier_worker)
+    _lease_options(verifier_worker)
+    verifier_worker.add_argument("--expected-unit", required=True)
+    verifier_worker.add_argument("--expected-wrapper-pid", required=True, type=int)
+    verifier_worker.add_argument("--worker-gate-fd", required=True, type=int)
+    verifier_worker.add_argument("--expected-worker-script-sha256", required=True)
+    for _dest, option in WORKER_PIN_OPTIONS:
+        verifier_worker.add_argument(option, required=True)
     _worker_parser(subparsers, "recover-supervise-worker", recovery=True)
     return parser
 
@@ -3436,9 +3668,12 @@ def _launch_guardian(
     }
     for path, (uid, gid, mode) in exact_writable.items():
         _verify_writable_directory(path, uid=uid, gid=gid, mode=mode)
-    internal_action = (
-        "recover-unit-wrapper" if arguments.action == "recover" else "unit-wrapper"
-    )
+    if arguments.action == "recover":
+        internal_action = "recover-unit-wrapper"
+    elif arguments.action == "trace-verifier-fragment":
+        internal_action = "trace-verifier-fragment-unit-wrapper"
+    else:
+        internal_action = "unit-wrapper"
     if arguments.action == "recover":
         if HEX64.fullmatch(arguments.expected_bundle_manifest_sha256) is None:
             raise SupervisorError("expected bundle manifest digest is invalid")
@@ -3586,9 +3821,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         _require_system_python()
         arguments = _parser().parse_args(list(argv) if argv is not None else None)
-        if arguments.action in {"launch", "recover"}:
+        if arguments.action in {"launch", "recover", "trace-verifier-fragment"}:
             return _launch(arguments)
-        if arguments.action in {"unit-wrapper", "recover-unit-wrapper"}:
+        if arguments.action in {
+            "unit-wrapper",
+            "recover-unit-wrapper",
+            "trace-verifier-fragment-unit-wrapper",
+        }:
             return _unit_wrapper(arguments)
         if arguments.action == "status":
             result = _status(arguments)
@@ -3597,6 +3836,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             _await_worker_gate(arguments, root=root)
             if arguments.action == "recover-supervise-worker":
                 result = _recover_supervise(arguments)
+            elif arguments.action == "trace-verifier-fragment-supervise-worker":
+                result = _trace_verifier_fragment_supervise(arguments)
             elif arguments.action == "supervise-worker":
                 result = _supervise(arguments)
             else:  # pragma: no cover - argparse owns action validation

@@ -109,6 +109,27 @@ def discovery_cli(tmp_path: Path) -> list[str]:
     ]
 
 
+def verifier_fragment_cli() -> list[str]:
+    return [
+        "--verifier-evidence-dir",
+        "/var/lib/odoo-accounting-cli-v3/evidence/dev29-proof-001",
+        "--verifier-fragment-output",
+        "/var/lib/odoo-accounting-cli-v3/evidence-private/dev29-verifier-fragment.json",
+        "--expected-bundle-manifest-sha256",
+        "a" * 64,
+        "--runtime-open-discovery-watch-root",
+        "/opt/odoo-accounting-cli-v3/releases/" + RELEASE,
+        "--runtime-open-discovery-watch-root",
+        "/usr/bin/python3.12",
+        "--runtime-open-discovery-mutable-root",
+        "/var/lib/odoo-accounting-cli-v3/test/candidates/" + RELEASE,
+        "--runtime-open-discovery-static-closure-sha256",
+        "8" * 64,
+        "--runtime-open-discovery-sqlite-delta-contract-sha256",
+        "9" * 64,
+    ]
+
+
 def lease_cli() -> list[str]:
     values = {
         "expected_lease_nonce": "8" * 64,
@@ -196,6 +217,29 @@ def test_discovery_launch_allows_missing_runtime_index_and_forwards_options(
     assert "--expected-runtime-open-index-sha256" not in argv
     assert argv.count("--runtime-open-discovery-watch-root") == 2
     assert "--runtime-open-discovery-inventory" in argv
+
+
+def test_verifier_fragment_action_forwards_bundle_and_fragment_options() -> None:
+    launch = runner._parser().parse_args(
+        ["trace-verifier-fragment", *common_cli(), *verifier_fragment_cli()]
+    )
+    assert runner._identity(launch)["release"] == RELEASE
+    argv = runner._top_level_argv(launch, root=Path("/release"))
+    assert Path(argv[3]).parts[-3:] == ("deployment", "dev29", "run_read_evidence.py")
+    assert argv[4] == "trace-verifier-fragment"
+    assert "--expected-runtime-open-index-sha256" in argv
+    assert "--expected-bundle-manifest-sha256" in argv
+    assert "--verifier-evidence-dir" in argv
+    assert "--verifier-fragment-output" in argv
+
+
+def test_verifier_fragment_action_rejects_escaped_output() -> None:
+    argv = ["trace-verifier-fragment", *common_cli(), *verifier_fragment_cli()]
+    index = argv.index("--verifier-fragment-output")
+    argv[index + 1] = "/tmp/dev29-verifier-fragment.json"
+    parsed = runner._parser().parse_args(argv)
+    with pytest.raises(runner.SupervisorError, match="verifier discovery paths"):
+        runner._identity(parsed)
 
 
 def test_normal_launch_still_requires_runtime_index() -> None:
