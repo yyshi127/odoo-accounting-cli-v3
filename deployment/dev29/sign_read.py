@@ -45,6 +45,7 @@ RUNTIME_FIELDS = frozenset(
         "canonical_package_sha256",
         "auth_state_path",
         "receipt_state_path",
+        "gcov_state_path",
         "auth_key_id",
         "receipt_key_id",
         "auth_secret_path",
