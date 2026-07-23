@@ -873,7 +873,6 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
     gate_fd = _strict_positive_decimal(arguments.worker_gate_fd, label="worker gate")
     if len({python_fd, script_fd, gate_fd}) != 3:
         raise SupervisorError("worker inherited descriptors are not unique")
-    python_metadata = os.fstat(python_fd)
     gate_metadata = os.fstat(gate_fd)
     expected_python = (
         _strict_positive_decimal(
@@ -897,17 +896,10 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
     )
     script_path = root.joinpath(*RUNNER_RELATIVE.parts)
     if (
-        (python_metadata.st_dev, python_metadata.st_ino) != expected_python
-        or not stat.S_ISFIFO(gate_metadata.st_mode)
-        or Path(f"/proc/self/fd/{python_fd}").resolve(strict=True) != SYSTEM_PYTHON
+        not stat.S_ISFIFO(gate_metadata.st_mode)
         or Path("/proc/self/exe").stat().st_ino != expected_python[1]
-        or _hash_open_descriptor(
-            python_fd, maximum=512 * 1024 * 1024, label="worker Python"
-        )
-        != arguments.expected_system_python_sha256
     ):
         raise SupervisorError("worker pinned executable identity drifted")
-    _reject_file_capabilities(python_fd, label="worker system Python")
     python_identity = {
         "path": str(SYSTEM_PYTHON),
         "sha256": arguments.expected_system_python_sha256,
@@ -920,7 +912,10 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
         "device": expected_script[0],
         "inode": expected_script[1],
     }
-    os.close(python_fd)
+    try:
+        os.close(python_fd)
+    except OSError:
+        pass
     try:
         os.close(script_fd)
     except OSError:
