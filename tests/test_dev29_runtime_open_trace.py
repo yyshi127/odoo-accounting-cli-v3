@@ -591,6 +591,82 @@ def test_exec_chain_is_exact_not_merely_an_executable_path_set() -> None:
         trace.validate_trace_bytes(raw_trace(), altered, expected_leader_pid=410)
 
 
+def test_approved_bootstrap_template_reuses_policy_across_dynamic_namespaces() -> None:
+    document = manifest_document()
+    document["bootstrap_argv"] = list(
+        trace.dynamic_bootstrap_template(
+            BOOTSTRAP,
+            FINAL,
+            role="signer",
+            release_root=RELEASE_ROOT,
+        )
+    )
+    template = trace.validate_manifest_document(
+        document, request(VALID_WATCH_ROOTS)
+    )
+    second = list(BOOTSTRAP)
+    replacements = {
+        "--expected-self-namespace-device": "9",
+        "--expected-self-namespace-inode": "901",
+        "--expected-host-namespace-device": "9",
+        "--expected-host-namespace-inode": "902",
+        "--expected-loop-device": "/dev/loop3",
+    }
+    for option, value in replacements.items():
+        second[second.index(option) + 1] = value
+    for index, option in enumerate(
+        position
+        for position, value in enumerate(second)
+        if value == "--expected-mount-json"
+    ):
+        second[option + 1] = json.dumps(
+            {"mount": index, "namespace": 901},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    first_effective = trace.materialize_bootstrap_template(
+        template, BOOTSTRAP, FINAL
+    )
+    second_effective = trace.materialize_bootstrap_template(
+        template, tuple(second), FINAL
+    )
+
+    assert template.dynamic_argv_template is True
+    assert first_effective.dynamic_argv_template is False
+    assert first_effective.bootstrap_argv == BOOTSTRAP
+    assert second_effective.bootstrap_argv == tuple(second)
+    assert second_effective.manifest_sha256 == template.manifest_sha256
+    with pytest.raises(trace.RuntimeOpenTraceError, match="must be materialized"):
+        trace.demotion_argv(template)
+    altered_static = list(second)
+    altered_static[altered_static.index("--attestation-fd") + 1] = "9"
+    with pytest.raises(trace.RuntimeOpenTraceError, match="approved dynamic template"):
+        trace.materialize_bootstrap_template(
+            template, tuple(altered_static), FINAL
+        )
+    assert trace.validate_trace_bytes(
+        raw_trace(), template, expected_leader_pid=410
+    ).trace_sha256 == hashlib.sha256(raw_trace()).hexdigest()
+
+
+def test_bootstrap_template_rejects_partial_or_misplaced_dynamic_markers() -> None:
+    template = list(
+        trace.dynamic_bootstrap_template(
+            BOOTSTRAP,
+            FINAL,
+            role="signer",
+            release_root=RELEASE_ROOT,
+        )
+    )
+    template[template.index("--expected-loop-device") + 1] = "/dev/loop7"
+    document = manifest_document()
+    document["bootstrap_argv"] = template
+
+    with pytest.raises(trace.RuntimeOpenTraceError, match="dynamic template"):
+        trace.validate_manifest_document(document, request(VALID_WATCH_ROOTS))
+
+
 def test_manifest_schema_rejects_self_reported_or_unbound_policy() -> None:
     document = manifest_document()
     document["self_reported_allowed_paths"] = ["/tmp/escape"]

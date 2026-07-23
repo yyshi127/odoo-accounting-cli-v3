@@ -91,7 +91,9 @@ def _target_role(target_id: str) -> str:
     return "odoo"
 
 
-def _full_manifests(parent: Path, release: str) -> None:
+def _full_manifests(
+    parent: Path, release: str, *, dynamic_template: bool = True
+) -> None:
     parent.mkdir()
     release_root = f"/opt/odoo-accounting-cli-v3/releases/{release}"
     mounts = [
@@ -152,6 +154,15 @@ def _full_manifests(parent: Path, release: str) -> None:
         for mount in mounts:
             bootstrap.extend(("--expected-mount-json", mount))
         bootstrap.extend(("--", *final))
+        if dynamic_template:
+            bootstrap = list(
+                runtime_trace.dynamic_bootstrap_template(
+                    tuple(bootstrap),
+                    tuple(final),
+                    role=role,
+                    release_root=release_root,
+                )
+            )
         environment = dict(runtime_trace.ROLE_ENVIRONMENTS[role])
         document = {
             "schema_version": 1,
@@ -448,6 +459,46 @@ def test_full_32_target_candidate_uses_real_validator_and_fresh_index(
             expected_strace_sha256="1" * 64,
             enforce_root=False,
         )
+
+
+def test_builder_rejects_policy_bound_to_one_ephemeral_namespace(
+    tmp_path: Path,
+) -> None:
+    release = "0.1.0.dev29-a1234567890b"
+    release_root = tmp_path / "release"
+    runtime_sha256, release_manifest_sha256 = _release_artifacts(
+        release_root,
+        commit="a1234567890b" + "c" * 28,
+    )
+    manifests = tmp_path / "ephemeral-manifests"
+    _full_manifests(manifests, release, dynamic_template=False)
+    candidate = source_tool.build_candidate(
+        manifests,
+        release=release,
+        expected_strace_sha256="1" * 64,
+        expected_static_closure_sha256="2" * 64,
+        expected_runtime_module_sha256=runtime_sha256,
+        expected_release_manifest_sha256=release_manifest_sha256,
+    )
+    source_sha256 = hashlib.sha256(
+        source_tool.canonical_json(candidate) + b"\n"
+    ).hexdigest()
+    install_parent = tmp_path / "installed"
+    install_parent.mkdir()
+
+    with pytest.raises(builder.PolicyBuildError, match="dynamic bootstrap template"):
+        builder.build_policy(
+            candidate,
+            expected_source_sha256=source_sha256,
+            expected_strace_sha256="1" * 64,
+            expected_runtime_module_sha256=runtime_sha256,
+            expected_release_manifest_sha256=release_manifest_sha256,
+            release_root=release_root,
+            install_parent=install_parent,
+            enforce_root=False,
+        )
+
+    assert not any(install_parent.iterdir())
 
 
 @pytest.mark.skipif(

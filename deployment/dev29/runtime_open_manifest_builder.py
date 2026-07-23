@@ -516,7 +516,11 @@ def build_policy(
             expected_child_environment_sha256=child_environment_sha256,
             expected_watch_roots_sha256=watch_sha256,
         )
-        runtime.validate_manifest_document(manifest, request)
+        parsed_manifest = runtime.validate_manifest_document(manifest, request)
+        if getattr(parsed_manifest, "dynamic_argv_template", False) is not True:
+            raise PolicyBuildError(
+                "runtime-open policy must use a dynamic bootstrap template"
+            )
         ordered.append(target_id)
         payloads.append((f"{target_id}.json", payload))
         index_entries.append(

@@ -27,7 +27,7 @@ import stat
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -52,6 +52,20 @@ MAX_ARG_BYTES = 64 * 1024
 MAX_WATCH_ENTRIES = 250_000
 MAX_WATCH_FILE_BYTES = 512 * 1024 * 1024
 MAX_MOUNTINFO_BYTES = 16 * 1024 * 1024
+DYNAMIC_BOOTSTRAP_OPTIONS = (
+    ("--expected-self-namespace-device", "@DEV29_SELF_NAMESPACE_DEVICE@"),
+    ("--expected-self-namespace-inode", "@DEV29_SELF_NAMESPACE_INODE@"),
+    ("--expected-host-namespace-device", "@DEV29_HOST_NAMESPACE_DEVICE@"),
+    ("--expected-host-namespace-inode", "@DEV29_HOST_NAMESPACE_INODE@"),
+    ("--expected-loop-device", "@DEV29_LOOP_DEVICE@"),
+)
+DYNAMIC_MOUNT_ARGUMENTS = tuple(
+    f"@DEV29_MOUNT_JSON_{index}@" for index in range(5)
+)
+_DYNAMIC_BOOTSTRAP_MARKERS = frozenset(
+    marker
+    for _option, marker in DYNAMIC_BOOTSTRAP_OPTIONS
+) | frozenset(DYNAMIC_MOUNT_ARGUMENTS)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$")
 PID_PREFIX = re.compile(r"^(?:\[pid\s+(\d+)\]|(\d+))\s+")
@@ -416,7 +430,7 @@ def _validate_bootstrap_argv(
     *,
     role: str,
     release_root: str,
-) -> tuple[int, int]:
+) -> tuple[int, int, bool]:
     """Validate the exact direct_child option template, including duplicates."""
 
     delimiter = len(bootstrap) - len(final) - 1
@@ -484,22 +498,91 @@ def _validate_bootstrap_argv(
         raise RuntimeOpenTraceError("attestation fd is not private")
     _positive_decimal(parsed["--expected-uid"], label="expected uid", allow_zero=True)
     _positive_decimal(parsed["--expected-gid"], label="expected gid", allow_zero=True)
-    namespace_values = [
-        _positive_decimal(parsed[name], label=name)
-        for name in fixed_names[7:11]
+    template_options = dict(DYNAMIC_BOOTSTRAP_OPTIONS)
+    marker_occurrences = tuple(
+        value for value in bootstrap if value in _DYNAMIC_BOOTSTRAP_MARKERS
+    )
+    uses_template = bool(marker_occurrences)
+    if uses_template:
+        if (
+            any(parsed[option] != marker for option, marker in template_options.items())
+            or tuple(mounts) != DYNAMIC_MOUNT_ARGUMENTS
+            or len(marker_occurrences) != len(_DYNAMIC_BOOTSTRAP_MARKERS)
+        ):
+            raise RuntimeOpenTraceError(
+                "bootstrap dynamic template is partial or misplaced"
+            )
+    else:
+        namespace_values = [
+            _positive_decimal(parsed[name], label=name)
+            for name in fixed_names[7:11]
+        ]
+        if namespace_values[:2] == namespace_values[2:]:
+            raise RuntimeOpenTraceError(
+                "bootstrap self and host namespace identities are equal"
+            )
+        if re.fullmatch(r"/dev/loop[0-9]+", parsed["--expected-loop-device"]) is None:
+            raise RuntimeOpenTraceError("bootstrap loop device is invalid")
+        for item in mounts:
+            try:
+                document = json.loads(
+                    item, object_pairs_hook=_pairs, parse_constant=_constant
+                )
+            except (json.JSONDecodeError, UnicodeError) as exc:
+                raise RuntimeOpenTraceError("bootstrap mount JSON is invalid") from exc
+            if (
+                type(document) is not dict
+                or canonical_json(document).decode("utf-8") != item
+            ):
+                raise RuntimeOpenTraceError("bootstrap mount JSON is not canonical")
+    return (
+        int(parsed["--expected-uid"]),
+        int(parsed["--expected-gid"]),
+        uses_template,
+    )
+
+
+def dynamic_bootstrap_template(
+    bootstrap: Sequence[str],
+    final: Sequence[str],
+    *,
+    role: str,
+    release_root: str,
+) -> tuple[str, ...]:
+    """Replace only per-unit attestation values with fixed reviewed markers."""
+
+    bootstrap_values = _argv(list(bootstrap), label="bootstrap argv")
+    final_values = _argv(list(final), label="final argv")
+    _uid, _gid, is_template = _validate_bootstrap_argv(
+        bootstrap_values,
+        final_values,
+        role=role,
+        release_root=release_root,
+    )
+    if is_template:
+        raise RuntimeOpenTraceError("bootstrap argv is already a dynamic template")
+    result = list(bootstrap_values)
+    for option, marker in DYNAMIC_BOOTSTRAP_OPTIONS:
+        result[result.index(option) + 1] = marker
+    mount_positions = [
+        index
+        for index, value in enumerate(result)
+        if value == "--expected-mount-json"
     ]
-    if namespace_values[:2] == namespace_values[2:]:
-        raise RuntimeOpenTraceError("bootstrap self and host namespace identities are equal")
-    if re.fullmatch(r"/dev/loop[0-9]+", parsed["--expected-loop-device"]) is None:
-        raise RuntimeOpenTraceError("bootstrap loop device is invalid")
-    for item in mounts:
-        try:
-            document = json.loads(item, object_pairs_hook=_pairs, parse_constant=_constant)
-        except (json.JSONDecodeError, UnicodeError) as exc:
-            raise RuntimeOpenTraceError("bootstrap mount JSON is invalid") from exc
-        if type(document) is not dict or canonical_json(document).decode("utf-8") != item:
-            raise RuntimeOpenTraceError("bootstrap mount JSON is not canonical")
-    return int(parsed["--expected-uid"]), int(parsed["--expected-gid"])
+    if len(mount_positions) != len(DYNAMIC_MOUNT_ARGUMENTS):
+        raise RuntimeOpenTraceError("bootstrap mount template count is invalid")
+    for position, marker in zip(mount_positions, DYNAMIC_MOUNT_ARGUMENTS):
+        result[position + 1] = marker
+    template = tuple(result)
+    _uid, _gid, is_template = _validate_bootstrap_argv(
+        template,
+        final_values,
+        role=role,
+        release_root=release_root,
+    )
+    if not is_template:
+        raise RuntimeOpenTraceError("bootstrap dynamic template was not created")
+    return template
 
 
 @dataclass(frozen=True)
@@ -541,12 +624,59 @@ class TraceManifest:
     expected_gid: int
     manifest_sha256: str
     expected_strace_sha256: str
+    dynamic_argv_template: bool = False
 
     @property
     def expected_execve_argv(
         self,
     ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        if self.dynamic_argv_template:
+            raise RuntimeOpenTraceError(
+                "bootstrap dynamic template must be materialized before execution"
+            )
         return (demotion_argv(self), self.bootstrap_argv, self.final_argv)
+
+
+def materialize_bootstrap_template(
+    manifest: TraceManifest,
+    bootstrap: Sequence[str],
+    final: Sequence[str],
+) -> TraceManifest:
+    """Bind one approved template to the current attested unit identities."""
+
+    if not isinstance(manifest, TraceManifest) or not manifest.dynamic_argv_template:
+        raise RuntimeOpenTraceError("runtime trace manifest is not a dynamic template")
+    bootstrap_values = _argv(list(bootstrap), label="effective bootstrap argv")
+    final_values = _argv(list(final), label="effective final argv")
+    release_root = f"/opt/odoo-accounting-cli-v3/releases/{manifest.release}"
+    uid, gid, is_template = _validate_bootstrap_argv(
+        bootstrap_values,
+        final_values,
+        role=manifest.role,
+        release_root=release_root,
+    )
+    if (
+        is_template
+        or final_values != manifest.final_argv
+        or uid != manifest.expected_uid
+        or gid != manifest.expected_gid
+        or dynamic_bootstrap_template(
+            bootstrap_values,
+            final_values,
+            role=manifest.role,
+            release_root=release_root,
+        )
+        != manifest.bootstrap_argv
+    ):
+        raise RuntimeOpenTraceError(
+            "effective bootstrap argv differs from the approved dynamic template"
+        )
+    return replace(
+        manifest,
+        bootstrap_argv=bootstrap_values,
+        final_argv=final_values,
+        dynamic_argv_template=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -912,7 +1042,7 @@ def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManife
     bootstrap = _argv(value.get("bootstrap_argv"), label="bootstrap argv")
     final = _argv(value.get("final_argv"), label="final argv")
     release_root = f"/opt/odoo-accounting-cli-v3/releases/{request.release}"
-    expected_uid, expected_gid = _validate_bootstrap_argv(
+    expected_uid, expected_gid, dynamic_argv_template = _validate_bootstrap_argv(
         bootstrap, final, role=role, release_root=release_root
     )
     allowed_raw = value.get("allowed_paths")
@@ -997,12 +1127,17 @@ def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManife
         expected_gid=expected_gid,
         manifest_sha256=request.expected_manifest_sha256,
         expected_strace_sha256=request.expected_strace_sha256,
+        dynamic_argv_template=dynamic_argv_template,
     )
 
 
 def demotion_argv(manifest: TraceManifest) -> tuple[str, ...]:
     """Return the fixed root tracee that drops credentials before direct_child."""
 
+    if manifest.dynamic_argv_template:
+        raise RuntimeOpenTraceError(
+            "bootstrap dynamic template must be materialized before execution"
+        )
     script = (
         f"/opt/odoo-accounting-cli-v3/releases/{manifest.release}/"
         "deployment/dev29/runtime_open_trace.py"
@@ -3236,7 +3371,18 @@ def validate_trace_bytes(
         working_directory=manifest.working_directory,
         expected_leader_pid=expected_leader_pid,
     )
-    if parsed.execve_argv != manifest.expected_execve_argv:
+    effective_manifest = manifest
+    if manifest.dynamic_argv_template:
+        if len(parsed.execve_argv) != 3:
+            raise RuntimeOpenTraceError(
+                "successful execve chain differs from the fixed child argv"
+            )
+        effective_manifest = materialize_bootstrap_template(
+            manifest,
+            parsed.execve_argv[1],
+            parsed.execve_argv[2],
+        )
+    if parsed.execve_argv != effective_manifest.expected_execve_argv:
         raise RuntimeOpenTraceError("successful execve chain differs from the fixed child argv")
     if parsed.leader_returncode not in manifest.expected_returncodes:
         raise RuntimeOpenTraceError("traced child exit status is not approved")
@@ -3368,13 +3514,13 @@ def _internal_demote_exec(arguments: Sequence[str]) -> None:
         or _sha256(canonical_json(final)) != final_sha
     ):
         raise RuntimeOpenTraceError("internal fixed argv digest mismatch")
-    expected_uid, expected_gid = _validate_bootstrap_argv(
+    expected_uid, expected_gid, is_template = _validate_bootstrap_argv(
         bootstrap,
         final,
         role=role,
         release_root=f"/opt/odoo-accounting-cli-v3/releases/{release}",
     )
-    if (uid, gid) != (expected_uid, expected_gid):
+    if is_template or (uid, gid) != (expected_uid, expected_gid):
         raise RuntimeOpenTraceError("internal credential values differ from direct_child")
     if os.name != "posix" or os.geteuid() != 0 or dict(os.environ) != ROLE_ENVIRONMENTS[role]:
         raise RuntimeOpenTraceError("credential-drop shim lacks the fixed root environment")
@@ -3482,6 +3628,8 @@ __all__ = [
     "verify_and_release_traced_process",
     "capture_runtime_environment",
     "demotion_argv",
+    "dynamic_bootstrap_template",
+    "materialize_bootstrap_template",
     "MutationWatch",
     "PrivateTraceStaging",
     "recover_stale_private_staging",

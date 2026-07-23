@@ -791,14 +791,17 @@ class RuntimeTraceGate:
             ],
             expected_watch_roots_sha256=entry["watch_roots_sha256"],
         )
-        manifest, _identity = self.module.load_trace_manifest(request)
-        if (
-            manifest.bootstrap_argv != tuple(bootstrap)
-            or manifest.final_argv != tuple(final)
-            or manifest.target_id != target_id
-        ):
+        template, _identity = self.module.load_trace_manifest(request)
+        if template.target_id != target_id:
             raise ReadSuiteError("runtime-open trace manifest argv binding differs")
-        return manifest
+        try:
+            return self.module.materialize_bootstrap_template(
+                template, tuple(bootstrap), tuple(final)
+            )
+        except self.module.RuntimeOpenTraceError as exc:
+            raise ReadSuiteError(
+                "runtime-open trace manifest argv binding differs"
+            ) from exc
 
     def record(
         self,

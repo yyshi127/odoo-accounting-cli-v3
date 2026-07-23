@@ -81,6 +81,16 @@ operations. It must contain exactly the 32 fixed target manifests named
 `<target-id>.json`; each file is canonical JSON plus LF. The generator does
 not discover policy from a child or from a trace:
 
+Each manifest approves a static bootstrap template, not values copied from one
+ephemeral systemd unit. The four mount-namespace identities, loop device, and
+five canonical mount JSON arguments must use the fixed `@DEV29_*@` markers
+produced by `runtime_open_trace.dynamic_bootstrap_template`. At execution the
+suite validates the current attested values, substitutes them only into that
+approved template, and then launches the child. The independent verifier and
+publisher repeat the same materialization from the successful `execve` chain
+in the retained raw trace. The builder rejects a concrete per-unit bootstrap,
+a partial template, a misplaced marker, or any change to static argv.
+
 ```sh
 /usr/bin/python3.12 -I -S \
   /opt/odoo-accounting-cli-v3/releases/$RELEASE/deployment/dev29/runtime_open_policy_source.py \

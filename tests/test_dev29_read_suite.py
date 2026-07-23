@@ -408,6 +408,53 @@ def test_runtime_trace_gate_rejects_callback_child_environment_drift() -> None:
         suite._attested_child_environment_sha256(completed, digest)
 
 
+def test_runtime_trace_gate_materializes_approved_dynamic_argv_template() -> None:
+    target_id = "release-identity"
+    template = SimpleNamespace(target_id=target_id, dynamic_argv_template=True)
+    effective = SimpleNamespace(target_id=target_id, dynamic_argv_template=False)
+    observed: dict[str, object] = {}
+
+    class TraceError(Exception):
+        pass
+
+    def load_manifest(request):
+        observed["request"] = request
+        return template, SimpleNamespace()
+
+    def materialize(candidate, bootstrap, final):
+        observed["materialize"] = (candidate, bootstrap, final)
+        return effective
+
+    gate = object.__new__(suite.RuntimeTraceGate)
+    gate.expected = SimpleNamespace(release=RELEASE)
+    gate.index = {
+        "expected_strace_sha256": "1" * 64,
+        "expected_static_closure_sha256": "2" * 64,
+    }
+    gate.targets = {
+        target_id: {
+            "manifest_sha256": "3" * 64,
+            "child_environment_sha256": "4" * 64,
+            "watch_roots_sha256": "5" * 64,
+        }
+    }
+    gate.consumed = set()
+    gate.module = SimpleNamespace(
+        TraceRequest=lambda **values: SimpleNamespace(**values),
+        RuntimeOpenTraceError=TraceError,
+        load_trace_manifest=load_manifest,
+        materialize_bootstrap_template=materialize,
+    )
+    bootstrap = ("/usr/bin/python3.12", "bootstrap")
+    final = ("/usr/bin/python3.12", "final")
+
+    assert gate.manifest(target_id, bootstrap, final) is effective
+    request = observed["request"]
+    assert request.target_id == target_id
+    assert request.expected_manifest_sha256 == "3" * 64
+    assert observed["materialize"] == (template, bootstrap, final)
+
+
 def test_runtime_trace_receipt_set_binds_policy_and_release_members() -> None:
     gate = object.__new__(suite.RuntimeTraceGate)
     gate.expected = SimpleNamespace(release="0.1.0.dev29-a1234567890b")

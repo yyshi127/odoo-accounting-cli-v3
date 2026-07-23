@@ -352,6 +352,12 @@ that policy-source digest from the installed index and all 32 canonical target
 manifests; none may trust the digest as a self-asserted string. They also bind
 the exact runtime validator bytes to the raw release manifest and its unique
 member entry before execution or publication.
+The reviewed manifests contain fixed dynamic-argv markers for the transient
+unit's namespace identities, loop device, and five mount JSON arguments. The
+builder refuses concrete values captured from an earlier unit. The suite
+materializes one current attested instance without changing the approved
+manifest bytes, while the verifier and publisher independently reconstruct and
+validate that same instance from the retained raw trace's exact `execve` chain.
 Install the exact release member
 `deployment/dev29/systemd/odoo-accounting-cli-v3-dev29-tmpfiles.conf` under
 `/etc/tmpfiles.d/` and run `systemd-tmpfiles --create` before the runtime setup;

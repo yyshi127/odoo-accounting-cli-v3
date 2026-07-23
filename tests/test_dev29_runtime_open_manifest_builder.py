@@ -279,11 +279,13 @@ def test_builder_validates_every_target_and_atomically_installs_index(
         def __init__(self, **values):
             self.__dict__.update(values)
 
+    def validate_template(_manifest: object, request: object) -> object:
+        validated.append(request.target_id)
+        return SimpleNamespace(dynamic_argv_template=True)
+
     fake = SimpleNamespace(
         TraceRequest=Request,
-        validate_manifest_document=lambda manifest, request: validated.append(
-            request.target_id
-        ),
+        validate_manifest_document=validate_template,
     )
     monkeypatch.setattr(builder, "_load_runtime_module", lambda _payload, _path: fake)
     install_parent = tmp_path / "installed"
@@ -339,7 +341,9 @@ def test_builder_rejects_missing_or_reordered_required_target(
     source["targets"] = list(reversed(source["targets"]))
     fake = SimpleNamespace(
         TraceRequest=lambda **values: SimpleNamespace(**values),
-        validate_manifest_document=lambda _manifest, _request: None,
+        validate_manifest_document=lambda _manifest, _request: SimpleNamespace(
+            dynamic_argv_template=True
+        ),
     )
     monkeypatch.setattr(builder, "_load_runtime_module", lambda _payload, _path: fake)
     install_parent = tmp_path / "installed"
@@ -371,7 +375,9 @@ def test_builder_recomputes_source_digest_for_direct_call(
         "_load_runtime_module",
         lambda _payload, _path: SimpleNamespace(
             TraceRequest=lambda **values: SimpleNamespace(**values),
-            validate_manifest_document=lambda _manifest, _request: None,
+            validate_manifest_document=lambda _manifest, _request: SimpleNamespace(
+                dynamic_argv_template=True
+            ),
         ),
     )
     install_parent = tmp_path / "installed"
@@ -411,7 +417,9 @@ def test_builder_rejects_symlink_install_parent(
         "_load_runtime_module",
         lambda _payload, _path: SimpleNamespace(
             TraceRequest=lambda **values: SimpleNamespace(**values),
-            validate_manifest_document=lambda _manifest, _request: None,
+            validate_manifest_document=lambda _manifest, _request: SimpleNamespace(
+                dynamic_argv_template=True
+            ),
         ),
     )
     with pytest.raises(builder.PolicyBuildError, match="parent is invalid"):
@@ -451,7 +459,9 @@ def test_builder_rejects_last_moment_validator_path_replacement(
     observed: list[bytes] = []
     fake = SimpleNamespace(
         TraceRequest=lambda **values: SimpleNamespace(**values),
-        validate_manifest_document=lambda _manifest, _request: None,
+        validate_manifest_document=lambda _manifest, _request: SimpleNamespace(
+            dynamic_argv_template=True
+        ),
     )
 
     def replace_after_verified(payload: bytes, path: Path) -> object:
