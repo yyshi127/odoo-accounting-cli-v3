@@ -133,8 +133,10 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
     config = runtime_config(tmp_path)
     observed_payload: dict = {}
     observed_environment: dict = {}
+    observed_argv: list[str] = []
 
     def child_process(argv, *, source, payload_fd, env, **_kwargs):
+        observed_argv[:] = list(argv)
         os.lseek(payload_fd, 0, os.SEEK_SET)
         observed_payload.update(json.loads(os.read(payload_fd, 65536)))
         observed_environment.update(env)
@@ -185,6 +187,10 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
     assert observed_environment["GCOV_ERROR_FILE"] == str(
         config.auth_state_path.parent / "gcov" / "gcov-error.log"
     )
+    assert observed_argv[:2] == [str(config.odoo_python), "-c"]
+    assert "shell" not in observed_argv
+    assert "Registry.new" in observed_argv[2]
+    assert "update_module=False" in observed_argv[2]
     assert not any("auth" in key or "receipt" in key or "state" in key for key in observed_payload)
 
 

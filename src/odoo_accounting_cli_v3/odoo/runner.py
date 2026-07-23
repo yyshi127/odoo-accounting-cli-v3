@@ -971,6 +971,36 @@ def _evidence_child_source(
     )
 
 
+def _odoo_env_stdin_launcher(config: RuntimeConfig) -> str:
+    """Build a fixed Python launcher that creates an Odoo env without shell preload writes."""
+
+    odoo_root = str(config.odoo_bin.parent)
+    config_path = str(config.odoo_config)
+    database_name = config.database_name
+    return (
+        "import sys, threading\n"
+        f"sys.path.insert(0, {odoo_root!r})\n"
+        "import odoo\n"
+        "from odoo import api\n"
+        "from odoo.modules.registry import Registry\n"
+        "from odoo.tools import config as odoo_config\n"
+        f"odoo_config.parser.prog = {str(config.odoo_bin)!r}\n"
+        "odoo_config.parse_config("
+        f"{['-c', config_path, '-d', database_name, '--no-http', '--logfile=/dev/null']!r}, "
+        "setup_logging=True)\n"
+        f"threading.current_thread().dbname = {database_name!r}\n"
+        f"registry = Registry.new({database_name!r}, update_module=False)\n"
+        "with registry.cursor() as cr:\n"
+        "    uid = api.SUPERUSER_ID\n"
+        "    ctx = api.Environment(cr, uid, {})['res.users'].context_get()\n"
+        "    env = api.Environment(cr, uid, ctx)\n"
+        "    cr.rollback()\n"
+        "    namespace = {'__name__': '__main__', 'env': env}\n"
+        "    exec(compile(sys.stdin.read(), '<odoo-accounting-cli-v3-stdin>', 'exec'), namespace, namespace)\n"
+        "    cr.rollback()\n"
+    )
+
+
 def _kill_child_process_group(process: subprocess.Popen) -> None:
     try:
         if os.name == "posix":
@@ -1566,14 +1596,8 @@ def run_read_boundary_evidence(
         raise OdooRunnerError("result marker generation failed")
     argv = [
         str(config.odoo_python),
-        str(config.odoo_bin),
-        "shell",
         "-c",
-        str(config.odoo_config),
-        "-d",
-        config.database_name,
-        "--no-http",
-        "--logfile=/dev/null",
+        _odoo_env_stdin_launcher(config),
     ]
     with _private_payload_fd(payload) as payload_fd:
         completed = _run_child_process(
