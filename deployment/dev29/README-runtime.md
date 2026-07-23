@@ -76,6 +76,28 @@ contains secrets, secret paths, or key IDs.
 
 ## Runtime-open policy candidate and installation
 
+`runtime_open_discovery.py` is the non-approval discovery step used before the
+reviewed manifest directory exists. It consumes an operator-supplied inventory
+for the exact 32 targets and retained raw traces, parses the actual `execve`
+chain, replaces only dynamic namespace and mount values with the reviewed
+`@DEV29_*@` markers, and writes one candidate manifest per target plus
+`DISCOVERY-REVIEW.json`:
+
+```sh
+/usr/bin/python3.12 -I -S \
+  /opt/odoo-accounting-cli-v3/releases/$RELEASE/deployment/dev29/runtime_open_discovery.py \
+  --inventory "$DISCOVERY_INVENTORY" \
+  --output-directory "$DISCOVERY_REVIEW_DIR"
+```
+
+The discovery output is intentionally not approval, does not write an
+`INDEX.json`, and is marked with `candidate_is_approval:false` and
+`production_promotion_allowed:false`. Each review entry binds the candidate
+manifest to the retained raw trace SHA-256, canonical path-set SHA-256, and
+leader return code. Human review must still check the proposed path classes,
+watch roots, mutable roots, Odoo business meaning, and trace provenance before
+the directory is passed to `runtime_open_policy_source.py`.
+
 The manifest directory is an external policy input reviewed by finance and
 operations. It must contain exactly the 32 fixed target manifests named
 `<target-id>.json`; each file is canonical JSON plus LF. The generator does

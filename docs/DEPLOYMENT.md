@@ -339,6 +339,12 @@ parse the same bytes; the public anchor exposes only their bound digests and
 canonical access-set summary. Any runtime access outside the independently
 fixed immutable/mutable policy, an unapproved access mode, a malformed or
 truncated trace, or tracing-tool identity drift closes the promotion gate.
+If the 32 target manifests do not yet exist, first use the exact release member
+`deployment/dev29/runtime_open_discovery.py` to turn retained raw traces and
+their operator-supplied execution inventory into a non-approval review
+directory. Its `DISCOVERY-REVIEW.json` binds each candidate manifest to the raw
+trace SHA-256 and is explicitly marked `candidate_is_approval:false`; it does
+not install `INDEX.json` and does not authorize production promotion.
 Install the externally reviewed, release-specific policy and index only with
 `deployment/dev29/runtime_open_policy_source.py` using the canonical
 `deployment/dev29/runtime_open_policy_source.template.json`, then build the
