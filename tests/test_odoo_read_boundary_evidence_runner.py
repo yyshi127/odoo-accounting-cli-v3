@@ -191,6 +191,7 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
     assert "shell" not in observed_argv
     assert "Registry.new" in observed_argv[2]
     assert "update_module=False" in observed_argv[2]
+    assert "odoo_loading.reset_modules_state = _odoo_accounting_cli_v3_noop_reset_modules_state" in observed_argv[2]
     assert not any("auth" in key or "receipt" in key or "state" in key for key in observed_payload)
 
 
