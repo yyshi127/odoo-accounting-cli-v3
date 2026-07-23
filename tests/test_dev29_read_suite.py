@@ -748,6 +748,45 @@ def test_runtime_trace_discovery_inventory_can_emit_verifier_fragment_scope() ->
         )
 
 
+def test_runtime_trace_discovery_manifest_accepts_independent_verifier() -> None:
+    class TraceError(Exception):
+        pass
+
+    def validate_bootstrap(_bootstrap, _final, *, role, release_root):
+        assert role == "verifier"
+        assert release_root.endswith(RELEASE)
+        return 0, 0, False
+
+    gate = object.__new__(suite.RuntimeTraceDiscoveryGate)
+    gate.expected = suite.ExpectedIdentity(
+        release=RELEASE,
+        version=VERSION,
+        commit=COMMIT,
+        manifest_sha256="1" * 64,
+        package_sha256="2" * 64,
+    )
+    gate.expected_strace_sha256 = "1" * 64
+    gate.watch_roots = ("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,)
+    gate.static_closure_sha256 = None
+    gate.consumed = set()
+    gate.module = SimpleNamespace(
+        RuntimeOpenTraceError=TraceError,
+        ROLE_ENVIRONMENTS={"verifier": {"PATH": "/usr/bin"}},
+        dynamic_bootstrap_template=lambda *_args, **_kwargs: None,
+        _validate_bootstrap_argv=validate_bootstrap,
+        capture_runtime_environment=lambda _candidate: {"static_closure": []},
+    )
+
+    manifest = gate._manifest(
+        "independent-verifier",
+        ("/usr/bin/python3.12", "-I", "-S"),
+        ("/usr/bin/python3.12", "-I", "-S"),
+    )
+
+    assert manifest.target_id == "independent-verifier"
+    assert manifest.role == "verifier"
+
+
 def test_runtime_trace_discovery_inventory_rejects_static_closure_mismatch() -> None:
     gate = object.__new__(suite.RuntimeTraceDiscoveryGate)
     gate.expected = SimpleNamespace(release=RELEASE)

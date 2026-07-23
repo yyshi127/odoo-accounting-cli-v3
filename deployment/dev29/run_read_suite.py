@@ -1264,7 +1264,7 @@ class RuntimeTraceDiscoveryGate:
     def _manifest(
         self, target_id: str, bootstrap: Sequence[str], final: Sequence[str]
     ) -> _DiscoveryTraceManifest:
-        if target_id not in suite_runtime_trace_targets() or target_id in self.consumed:
+        if target_id not in expected_runtime_trace_targets() or target_id in self.consumed:
             raise ReadSuiteError("runtime-open discovery target state is invalid")
         role = _expected_trace_role(target_id)
         release_root = str(_release_paths(self.expected)["root"])
