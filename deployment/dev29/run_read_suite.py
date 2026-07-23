@@ -3665,6 +3665,7 @@ def _validate_direct_child_command(
                 str(paths["runtime"]),
                 "--timeout-seconds",
                 "120",
+                "--launcher-diagnostics",
             ]
             or arguments
             == [
