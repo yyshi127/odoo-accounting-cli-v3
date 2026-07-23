@@ -155,6 +155,14 @@ def test_child_attestation_uses_closure_identity_external_runtime_paths() -> Non
     assert 'closure["external_runtime_paths"]' not in source
 
 
+def test_child_credential_attestation_failure_reports_bounded_context() -> None:
+    source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
+
+    assert "credential_sha256=" in source
+    assert "credential_preview=" in source
+    assert "payload[:512]" in source
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,

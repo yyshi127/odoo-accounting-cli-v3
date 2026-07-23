@@ -4015,15 +4015,27 @@ def _validate_child_attestation(
         "CapAmb": "0000000000000000",
         "NoNewPrivs": "1",
     }
-    if credentials != {
+    expected_credentials = {
         "uid": expected_uid,
         "gid": expected_gid,
         "groups": [],
         "status": expected_status,
         "capabilities_all_zero": True,
         "no_new_privileges": True,
-    }:
-        raise ReadSuiteError("direct child credential attestation is invalid")
+    }
+    if credentials != expected_credentials:
+        payload = canonical_json(
+            {
+                "observed": credentials,
+                "expected": expected_credentials,
+            }
+        )
+        preview = payload[:512].decode("utf-8", errors="replace")
+        raise ReadSuiteError(
+            "direct child credential attestation is invalid: "
+            f"credential_sha256={hashlib.sha256(payload).hexdigest()} "
+            f"credential_preview={preview!r}"
+        )
     click = value["click"]
     if role != "odoo":
         if click is not None:
