@@ -160,7 +160,8 @@ def test_child_credential_attestation_failure_reports_bounded_context() -> None:
 
     assert "credential_sha256=" in source
     assert "credential_preview=" in source
-    assert "payload[:512]" in source
+    assert '"mismatches": mismatches' in source
+    assert "payload[:2048]" in source
 
 
 def expected_identity():

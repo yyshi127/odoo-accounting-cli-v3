@@ -4024,13 +4024,27 @@ def _validate_child_attestation(
         "no_new_privileges": True,
     }
     if credentials != expected_credentials:
+        mismatches: list[dict[str, Any]] = []
+        observed_mapping = credentials if type(credentials) is dict else {}
+        for key in sorted(set(observed_mapping) | set(expected_credentials)):
+            observed_item = observed_mapping.get(key)
+            expected_item = expected_credentials.get(key)
+            if observed_item != expected_item:
+                mismatches.append(
+                    {
+                        "field": key,
+                        "observed": observed_item,
+                        "expected": expected_item,
+                    }
+                )
         payload = canonical_json(
             {
                 "observed": credentials,
                 "expected": expected_credentials,
+                "mismatches": mismatches,
             }
         )
-        preview = payload[:512].decode("utf-8", errors="replace")
+        preview = payload[:2048].decode("utf-8", errors="replace")
         raise ReadSuiteError(
             "direct child credential attestation is invalid: "
             f"credential_sha256={hashlib.sha256(payload).hexdigest()} "
