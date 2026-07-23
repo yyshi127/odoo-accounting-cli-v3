@@ -4456,6 +4456,7 @@ def validate_outer_unit(
         "proc",
         "expected_environment",
         "read_write_paths",
+        "read_only_paths",
         "capability_bounding_set",
         "all_checks_passed",
     }:
@@ -4477,6 +4478,8 @@ def validate_outer_unit(
         or set(process) != {"argv", "argv_sha256", "cgroup"}
         or value.get("expected_environment") != environment
         or value.get("read_write_paths") != writable
+        or value.get("read_only_paths")
+        != ["/run/odoo-accounting-cli-v3-dev29-leases"]
         or value.get("capability_bounding_set") != capabilities
         or value.get("all_checks_passed") is not True
     ):

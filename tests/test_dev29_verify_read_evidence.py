@@ -573,6 +573,7 @@ def test_independent_verifier_requeries_live_systemd_properties(
         },
         "expected_environment": environment,
         "read_write_paths": writable,
+        "read_only_paths": ["/run/odoo-accounting-cli-v3-dev29-leases"],
         "capability_bounding_set": capabilities,
         "all_checks_passed": True,
     }

@@ -5572,6 +5572,7 @@ def run_suite(
             "proc",
             "expected_environment",
             "read_write_paths",
+            "read_only_paths",
             "capability_bounding_set",
             "all_checks_passed",
         }
@@ -5579,6 +5580,8 @@ def run_suite(
             outer_unit_evidence.get("schema_version")
         )
         or outer_unit_evidence.get("supervisor_pid") != os.getpid()
+        or outer_unit_evidence.get("read_only_paths")
+        != ["/run/odoo-accounting-cli-v3-dev29-leases"]
         or outer_unit_evidence.get("all_checks_passed") is not True
     ):
         raise ReadSuiteError("outer transient unit evidence is invalid")
