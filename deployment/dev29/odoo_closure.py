@@ -995,7 +995,12 @@ def query_database_graph(
     except (OSError, subprocess.SubprocessError) as exc:
         raise ClosureError("database installed-module query failed") from exc
     if process.returncode != 0 or len(process.stdout) > MAX_PSQL_BYTES:
-        raise ClosureError("database installed-module query failed")
+        stderr_head = process.stderr[:2048].decode("utf-8", "replace")
+        raise ClosureError(
+            "database installed-module query failed "
+            f"(returncode={process.returncode}, stdout_size={len(process.stdout)}, "
+            f"stderr={stderr_head!r})"
+        )
     lines = [line for line in process.stdout.splitlines() if line.strip()]
     if len(lines) != 1:
         raise ClosureError("database installed-module query returned ambiguous output")
