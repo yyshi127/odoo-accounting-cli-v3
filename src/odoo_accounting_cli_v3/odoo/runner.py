@@ -1984,6 +1984,11 @@ def _classify_trusted_read_rejection(
         }:
             return "company_binding_rejected"
         return None
+    if (
+        exc.__class__.__name__ == "AccessError"
+        and message == "Access to unauthorized or invalid companies."
+    ):
+        return "company_binding_rejected"
     return None
 
 

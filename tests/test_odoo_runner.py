@@ -48,6 +48,10 @@ from odoo_accounting_cli_v3.receipts import create_read_receipt
 from odoo_accounting_cli_v3.release import ReleaseIdentity, source_manifest
 
 
+class AccessError(Exception):
+    pass
+
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATABASE_UUID = "11111111-1111-4111-8111-111111111111"
 AUTH_SECRET = b"test-only-auth-secret-32-bytes!!"
@@ -472,6 +476,11 @@ def response(runtime, result=None):
             False,
             "company_binding_rejected",
         ),
+        (
+            AccessError("Access to unauthorized or invalid companies."),
+            False,
+            "company_binding_rejected",
+        ),
     ),
 )
 def test_trusted_read_rejection_classifier_maps_only_fixed_plan_failures(
@@ -494,6 +503,7 @@ def test_trusted_read_rejection_classifier_rejects_near_matches_and_subclasses()
         (RuntimeError("Odoo ACL rejected capability"), False),
         (OdooRunnerError("Odoo shell timed out"), False),
         (TrialBalanceError("company does not exist or is not visible "), False),
+        (AccessError("Access to unauthorized or invalid companies"), False),
     )
     for error, replay_rejected in failures:
         assert (
