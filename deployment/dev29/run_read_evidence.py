@@ -1715,7 +1715,7 @@ def _run_pinned_program(
                 reaped = True
             except SupervisorError as cleanup_exc:
                 cleanup_error = cleanup_exc
-        if cleanup_error is not None:
+        if cleanup_error is not None and not isinstance(exc, SupervisorError):
             raise cleanup_error from exc
         raise
     finally:
