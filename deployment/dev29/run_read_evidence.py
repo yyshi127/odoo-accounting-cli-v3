@@ -2651,26 +2651,27 @@ def _outer_unit_evidence(
         or exec_argv != expected_wrapper_argv
     ):
         raise SupervisorError("outer transient unit properties drifted")
+    expected_lease = _expected_lease(arguments, unit=expected_unit)
+    inherited_worker_lease_fds = _process_fd_matches(
+        worker_pid, device=expected_lease["device"], inode=expected_lease["inode"]
+    )
     lease_fd, lease = _open_monitored_lease(arguments, unit=expected_unit)
     try:
         wrapper_lease_fds = _process_fd_matches(
             wrapper_pid, device=lease["device"], inode=lease["inode"]
         )
-        worker_lease_fds = _process_fd_matches(
-            worker_pid, device=lease["device"], inode=lease["inode"]
-        )
         wrapper_has_worker_pidfd = _process_has_pidfd_for(wrapper_pid, worker_pid)
         parent_death_signal = _parent_death_signal()
         if (
             len(wrapper_lease_fds) != 1
-            or worker_lease_fds
+            or inherited_worker_lease_fds
             or not wrapper_has_worker_pidfd
             or parent_death_signal != SIGKILL
         ):
             raise SupervisorError(
                 "outer transient unit lease monitor is invalid "
                 f"(wrapper_lease_fds={wrapper_lease_fds}, "
-                f"worker_lease_fds={worker_lease_fds}, "
+                f"inherited_worker_lease_fds={inherited_worker_lease_fds}, "
                 f"wrapper_has_worker_pidfd={wrapper_has_worker_pidfd}, "
                 f"parent_death_signal={parent_death_signal})"
             )
