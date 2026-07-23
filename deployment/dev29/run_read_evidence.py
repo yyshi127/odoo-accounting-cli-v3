@@ -1167,6 +1167,28 @@ def _validate_verifier_fragment_paths(arguments: argparse.Namespace) -> None:
         raise SupervisorError("runtime-open verifier discovery paths are invalid")
 
 
+def _create_verifier_fragment_evidence_dir(path: Path) -> None:
+    path = Path(path).absolute()
+    if (
+        path.parent != EVIDENCE_PARENT
+        or SAFE_NAME.fullmatch(path.name) is None
+        or os.path.lexists(path)
+    ):
+        raise SupervisorError("runtime-open verifier evidence directory is invalid")
+    os.mkdir(path, 0o700)
+    if os.name == "posix":
+        os.chmod(path, 0o500, follow_symlinks=False)
+    else:
+        os.chmod(path, 0o500)
+    metadata = path.lstat()
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or (os.name == "posix" and stat.S_IMODE(metadata.st_mode) != 0o500)
+    ):
+        raise SupervisorError("runtime-open verifier evidence directory is unsafe")
+
+
 def _program(path: Path, expected_sha256: str, *, label: str) -> dict[str, Any]:
     if HEX64.fullmatch(expected_sha256) is None:
         raise SupervisorError(f"expected {label} digest is invalid")
@@ -3212,6 +3234,7 @@ def _trace_verifier_fragment_supervise(arguments: argparse.Namespace) -> dict[st
     )
     if os.path.lexists(output) or os.path.lexists(verifier_sidecar):
         raise SupervisorError("runtime-open verifier discovery output already exists")
+    _create_verifier_fragment_evidence_dir(Path(arguments.verifier_evidence_dir))
     os.mkdir(verifier_sidecar, 0o700)
     os.mkdir(verifier_sidecar / ".trace-staging", 0o700)
     closure_expected = closure_module.ExpectedIdentity(**expected)

@@ -269,6 +269,40 @@ def test_verifier_fragment_action_rejects_escaped_output() -> None:
         runner._identity(parsed)
 
 
+def test_verifier_fragment_creates_frozen_empty_evidence_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence_parent = tmp_path / "evidence"
+    evidence_parent.mkdir()
+    monkeypatch.setattr(runner, "EVIDENCE_PARENT", evidence_parent)
+    evidence = evidence_parent / "dev29-verifier-001"
+
+    runner._create_verifier_fragment_evidence_dir(evidence)
+
+    metadata = evidence.lstat()
+    assert evidence.is_dir()
+    assert not evidence.is_symlink()
+    if os.name == "posix":
+        assert stat.S_IMODE(metadata.st_mode) == 0o500
+    with pytest.raises(
+        runner.SupervisorError, match="verifier evidence directory is invalid"
+    ):
+        runner._create_verifier_fragment_evidence_dir(evidence)
+
+
+def test_verifier_fragment_evidence_dir_must_be_fixed_parent_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    evidence_parent = tmp_path / "evidence"
+    evidence_parent.mkdir()
+    monkeypatch.setattr(runner, "EVIDENCE_PARENT", evidence_parent)
+
+    with pytest.raises(
+        runner.SupervisorError, match="verifier evidence directory is invalid"
+    ):
+        runner._create_verifier_fragment_evidence_dir(tmp_path / "escape")
+
+
 def test_worker_stderr_tail_is_bounded_and_single_line() -> None:
     class Process:
         stderr = SimpleNamespace(read=lambda _maximum: b"alpha\n" + b"b" * 5000)
