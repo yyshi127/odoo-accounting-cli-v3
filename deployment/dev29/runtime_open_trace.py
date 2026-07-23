@@ -246,6 +246,9 @@ ROLE_ENVIRONMENTS = {
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON": (
+            "/opt/odoo/odoo19/odoo19-venv/bin/python"
+        ),
     },
     "signer": {
         "PATH": "/usr/bin:/bin",
@@ -262,6 +265,9 @@ ROLE_ENVIRONMENTS = {
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON": (
+            "/opt/odoo/odoo19/odoo19-venv/bin/python"
+        ),
     },
     "verifier": {
         "PATH": "/usr/bin:/bin",
