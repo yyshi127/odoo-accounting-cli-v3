@@ -224,7 +224,7 @@ def wrapper(arguments) -> int:
         write_identity(directory, "worker-spawned", process.pid, runner)
         execution = {
             "schema_version": 1,
-            "method": "pinned-fd-ptrace-gated-worker-v1",
+            "method": "path-exec-ptrace-gated-worker-with-pinned-fds-v1",
             "worker_pid": process.pid,
             "argv": command,
             "argv_sha256": "0" * 64,

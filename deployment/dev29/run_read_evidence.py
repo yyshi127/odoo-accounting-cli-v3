@@ -950,7 +950,7 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
             type(wrapper_execution) is not dict
             or canonical_json(wrapper_execution) + b"\n" != bytes(gate_payload[1:])
             or wrapper_execution.get("method")
-            != "pinned-fd-ptrace-gated-worker-v1"
+            != "path-exec-ptrace-gated-worker-with-pinned-fds-v1"
             or wrapper_execution.get("worker_pid") != os.getpid()
             or wrapper_execution.get("parent_death_signal") != "SIGKILL"
             or wrapper_execution.get("pidfd_monitoring") is not True
@@ -1891,6 +1891,7 @@ def _spawn_pinned_worker(
     process: subprocess.Popen[bytes] | None = None
     pidfd: int | None = None
     traced = False
+    handed_off = False
     try:
         script_fd, script_identity = _open_pinned_publisher_script(
             script, script_sha256
@@ -1945,7 +1946,7 @@ def _spawn_pinned_worker(
         try:
             process = subprocess.Popen(
                 worker_argv,
-                executable=f"/proc/self/fd/{python_fd}",
+                executable=str(SYSTEM_PYTHON),
                 pass_fds=(python_fd, script_fd, read_gate),
                 preexec_fn=lambda: _ptrace_traceme_with_parent_death(
                     expected_parent_pid
@@ -1974,9 +1975,20 @@ def _spawn_pinned_worker(
         ):
             raise SupervisorError("unit worker exec trace stop is invalid")
         _ptrace_set_exitkill(process.pid)
-        executed = Path(f"/proc/{process.pid}/exe").stat()
-        inherited_python = Path(f"/proc/{process.pid}/fd/{python_fd}").stat()
-        inherited_script = Path(f"/proc/{process.pid}/fd/{script_fd}").stat()
+        try:
+            executed = Path(f"/proc/{process.pid}/exe").stat()
+            inherited_python = Path(f"/proc/{process.pid}/fd/{python_fd}").stat()
+            inherited_script = Path(f"/proc/{process.pid}/fd/{script_fd}").stat()
+        except OSError as exc:
+            try:
+                child_fds = sorted(os.listdir(f"/proc/{process.pid}/fd"))
+            except OSError:
+                child_fds = []
+            raise SupervisorError(
+                "unit worker inherited descriptors are unavailable "
+                f"(python_fd={python_fd}, script_fd={script_fd}, "
+                f"gate_fd={read_gate}, child_fds={child_fds})"
+            ) from exc
         if (
             (executed.st_dev, executed.st_ino) != python_identity[:2]
             or (inherited_python.st_dev, inherited_python.st_ino)
@@ -1993,7 +2005,7 @@ def _spawn_pinned_worker(
         script_fd = None
         result = {
             "schema_version": 1,
-            "method": "pinned-fd-ptrace-gated-worker-v1",
+            "method": "path-exec-ptrace-gated-worker-with-pinned-fds-v1",
             "worker_pid": process.pid,
             "argv": worker_argv,
             "argv_sha256": hashlib.sha256(canonical_json(worker_argv)).hexdigest(),
