@@ -708,6 +708,46 @@ def test_runtime_trace_discovery_inventory_is_nonapproval_suite_fragment() -> No
         )
 
 
+def test_runtime_trace_discovery_inventory_can_emit_verifier_fragment_scope() -> None:
+    gate = object.__new__(suite.RuntimeTraceDiscoveryGate)
+    gate.expected = SimpleNamespace(release=RELEASE)
+    gate.static_closure_sha256 = "1" * 64
+    verifier_target = ("independent-verifier",)
+    gate.entries = [
+        {
+            "target_id": verifier_target[0],
+            "trace_path": "/private/independent-verifier.strace",
+            "expected_leader_pid": 2000,
+            "role": "verifier",
+            "working_directory": f"/opt/odoo-accounting-cli-v3/releases/{RELEASE}",
+            "bootstrap_argv": ["/usr/bin/python3.12", "-I", "-S"],
+            "final_argv": ["/usr/bin/python3.12", "-I", "-S"],
+            "expected_returncodes": [0],
+        }
+    ]
+
+    inventory = gate.inventory(
+        required_targets=verifier_target,
+        expected_static_closure_sha256="1" * 64,
+        watch_roots=("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,),
+        mutable_roots=("/var/lib/odoo-accounting-cli-v3/test/candidates/" + RELEASE,),
+        sqlite_delta_contract_sha256=suite.discovery_sqlite_delta_contract_sha256(),
+        scope=suite.RUNTIME_OPEN_DISCOVERY_VERIFIER_FRAGMENT_SCOPE,
+    )
+
+    assert inventory["scope"].endswith("runtime-open-discovery-verifier-fragment.v1")
+    assert [item["target_id"] for item in inventory["targets"]] == list(verifier_target)
+    with pytest.raises(suite.ReadSuiteError, match="fragment scope"):
+        gate.inventory(
+            required_targets=verifier_target,
+            expected_static_closure_sha256="1" * 64,
+            watch_roots=("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,),
+            mutable_roots=(),
+            sqlite_delta_contract_sha256=suite.discovery_sqlite_delta_contract_sha256(),
+            scope="odoo-accounting-cli-v3.dev29.runtime-open-discovery.v1",
+        )
+
+
 def test_runtime_trace_discovery_inventory_rejects_static_closure_mismatch() -> None:
     gate = object.__new__(suite.RuntimeTraceDiscoveryGate)
     gate.expected = SimpleNamespace(release=RELEASE)

@@ -81,6 +81,20 @@ TRACE_INDEX_SCOPE = "odoo-accounting-cli-v3.dev29.runtime-open-index.v1"
 TRACE_POLICY_SOURCE_SCOPE = (
     "odoo-accounting-cli-v3.dev29.runtime-open-policy-source.v1"
 )
+RUNTIME_OPEN_DISCOVERY_SUITE_FRAGMENT_SCOPE = (
+    "odoo-accounting-cli-v3.dev29."
+    "runtime-open-discovery-suite-fragment.v1"
+)
+RUNTIME_OPEN_DISCOVERY_VERIFIER_FRAGMENT_SCOPE = (
+    "odoo-accounting-cli-v3.dev29."
+    "runtime-open-discovery-verifier-fragment.v1"
+)
+RUNTIME_OPEN_DISCOVERY_FRAGMENT_SCOPES = frozenset(
+    {
+        RUNTIME_OPEN_DISCOVERY_SUITE_FRAGMENT_SCOPE,
+        RUNTIME_OPEN_DISCOVERY_VERIFIER_FRAGMENT_SCOPE,
+    }
+)
 TRACE_ATTESTATION_FD = 198
 POSITIVE_NAMES = (
     "registry",
@@ -1407,7 +1421,10 @@ class RuntimeTraceDiscoveryGate:
         watch_roots: Sequence[str],
         mutable_roots: Sequence[str],
         sqlite_delta_contract_sha256: str,
+        scope: str = RUNTIME_OPEN_DISCOVERY_SUITE_FRAGMENT_SCOPE,
     ) -> dict[str, Any]:
+        if scope not in RUNTIME_OPEN_DISCOVERY_FRAGMENT_SCOPES:
+            raise ReadSuiteError("runtime-open discovery fragment scope is invalid")
         if tuple(item["target_id"] for item in self.entries) != tuple(required_targets):
             raise ReadSuiteError("runtime-open discovery target set is incomplete")
         if self.static_closure_sha256 is None:
@@ -1419,10 +1436,7 @@ class RuntimeTraceDiscoveryGate:
             raise ReadSuiteError("runtime-open discovery static closure mismatched")
         return {
             "schema_version": 1,
-            "scope": (
-                "odoo-accounting-cli-v3.dev29."
-                "runtime-open-discovery-suite-fragment.v1"
-            ),
+            "scope": scope,
             "release": self.expected.release,
             "expected_static_closure_sha256": self.static_closure_sha256,
             "watch_roots": list(watch_roots),
