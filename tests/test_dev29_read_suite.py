@@ -195,6 +195,7 @@ def test_direct_child_environment_declares_odoo_venv_python_for_oracles() -> Non
         assert "stdlib" in source
     for source in (suite_source, child_source):
         assert 'role in {"odoo", "postgres"}' in source
+    assert 'expected_prefix = [expected_python, "-I", "-B"]' in child_source
 
 
 def test_child_attestation_uses_closure_identity_external_runtime_paths() -> None:

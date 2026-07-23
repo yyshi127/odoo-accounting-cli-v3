@@ -394,7 +394,7 @@ def _validate_command(
     expected_python: str,
     release_root: Path,
 ) -> None:
-    expected_prefix = [expected_python, "-I"]
+    expected_prefix = [expected_python, "-I", "-B"]
     if role in {"signer", "verifier"}:
         expected_prefix.append("-S")
     if len(command) <= len(expected_prefix) or command[: len(expected_prefix)] != expected_prefix:
