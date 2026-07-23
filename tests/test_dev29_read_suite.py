@@ -164,6 +164,14 @@ def test_child_credential_attestation_failure_reports_bounded_context() -> None:
     assert "payload[:2048]" in source
 
 
+def test_child_credential_uid_gid_status_whitespace_is_normalized() -> None:
+    source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
+
+    assert 'for key in ("Uid", "Gid")' in source
+    assert '".join(comparable_status[key].split())' in source
+    assert "comparable_credentials != expected_credentials" in source
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,

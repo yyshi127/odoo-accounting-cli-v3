@@ -4023,9 +4023,21 @@ def _validate_child_attestation(
         "capabilities_all_zero": True,
         "no_new_privileges": True,
     }
-    if credentials != expected_credentials:
+    comparable_credentials = credentials
+    if type(credentials) is dict and type(credentials.get("status")) is dict:
+        comparable_status = dict(credentials["status"])
+        for key in ("Uid", "Gid"):
+            if isinstance(comparable_status.get(key), str):
+                comparable_status[key] = " ".join(comparable_status[key].split())
+        comparable_credentials = {
+            **credentials,
+            "status": comparable_status,
+        }
+    if comparable_credentials != expected_credentials:
         mismatches: list[dict[str, Any]] = []
-        observed_mapping = credentials if type(credentials) is dict else {}
+        observed_mapping = (
+            comparable_credentials if type(comparable_credentials) is dict else {}
+        )
         for key in sorted(set(observed_mapping) | set(expected_credentials)):
             observed_item = observed_mapping.get(key)
             expected_item = expected_credentials.get(key)
