@@ -1902,6 +1902,7 @@ def load_runtime(
         "canonical_package_sha256": expected.package_sha256,
         "auth_state_path": f"{state_root}/auth/state.sqlite3",
         "receipt_state_path": f"{state_root}/receipt/state.sqlite3",
+        "gcov_state_path": f"{state_root}/gcov",
         "auth_secret_path": f"{secret_root}/auth.hmac",
         "receipt_secret_path": f"{secret_root}/receipt.hmac",
     }

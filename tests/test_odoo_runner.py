@@ -169,6 +169,7 @@ def test_safe_environment_can_pin_gcov_to_runtime_state(tmp_path: Path) -> None:
         receipt_secret_path=tmp_path / "secrets" / "receipt.hmac",
     )
     config.auth_state_path.parent.mkdir(parents=True)
+    (config.auth_state_path.parent.parent / "gcov").mkdir(mode=0o700)
 
     environment = _safe_environment(config)
 
@@ -584,6 +585,7 @@ class OdooRunnerTest(unittest.TestCase):
             "canonical_package_sha256": self.config.canonical_package_sha256,
             "auth_state_path": str(self.config.auth_state_path),
             "receipt_state_path": str(self.config.receipt_state_path),
+            "gcov_state_path": str(self.config.gcov_state_path),
             "auth_key_id": self.config.auth_key_id,
             "receipt_key_id": self.config.receipt_key_id,
             "auth_secret_path": str(self.config.auth_secret_path),

@@ -640,6 +640,7 @@ def _child_runtime(
         canonical_package_sha256=payload.get("canonical_package_sha256"),
         auth_state_path=release_root / ".unused-read-auth-state",
         receipt_state_path=release_root / ".unused-read-receipt-state",
+        gcov_state_path=release_root / ".unused-gcov-state",
         auth_key_id="unused-read-auth",
         receipt_key_id="unused-read-receipt",
         auth_secret_path=release_root / ".unused-read-auth-secret",

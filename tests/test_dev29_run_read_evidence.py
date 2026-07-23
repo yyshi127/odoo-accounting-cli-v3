@@ -256,6 +256,7 @@ def test_launch_uses_named_exact_ownership_for_private_trace_and_state_paths() -
     assert "RUNTIME_TRACE_STAGING_PARENT: (0, 0, 0o700)" in source
     assert "auth_state_parent: (odoo.pw_uid, odoo_group.gr_gid, 0o700)" in source
     assert "receipt_state_parent: (odoo.pw_uid, odoo_group.gr_gid, 0o700)" in source
+    assert "gcov_state_parent: (odoo.pw_uid, odoo_group.gr_gid, 0o700)" in source
     assert "writable[" not in source
 
 

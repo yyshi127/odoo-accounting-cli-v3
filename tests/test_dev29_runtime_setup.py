@@ -159,7 +159,7 @@ def test_setup_is_release_specific_config_last_and_idempotent(
     document = json.loads(result.config_path.read_text(encoding="utf-8"))
 
     assert set(document) == runtime_setup.CONFIG_FIELDS
-    assert len(document) == 20
+    assert len(document) == 21
     assert document["environment"] == "test"
     assert document["capability_channel"] == "staged"
     assert document["database_name"] == "odoo_test"
@@ -171,6 +171,7 @@ def test_setup_is_release_specific_config_last_and_idempotent(
     assert document["auth_key_id"] != document["receipt_key_id"]
     assert Path(document["auth_state_path"]).parent == layout.auth_state_parent
     assert Path(document["receipt_state_path"]).parent == layout.receipt_state_parent
+    assert Path(document["gcov_state_path"]) == layout.gcov_state_parent
     assert (
         f"odoo-accounting-cli-v3{os.sep}test{os.sep}candidates{os.sep}{RELEASE}"
         in document["auth_state_path"]
@@ -229,6 +230,7 @@ def test_runtime_metadata_is_read_only_for_odoo_except_state(
     assert stat.S_IMODE(layout.state_root.stat().st_mode) == 0o710
     assert stat.S_IMODE(layout.auth_state_parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(layout.receipt_state_parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(layout.gcov_state_parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(layout.child_home.stat().st_mode) == 0o700
     assert stat.S_IMODE(layout.private_evidence_parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(layout.runtime_trace_staging_parent.stat().st_mode) == 0o700

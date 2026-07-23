@@ -64,6 +64,7 @@ CONFIG_FIELDS = frozenset(
         "canonical_package_sha256",
         "auth_state_path",
         "receipt_state_path",
+        "gcov_state_path",
         "auth_key_id",
         "receipt_key_id",
         "auth_secret_path",
@@ -129,6 +130,7 @@ class Layout:
     state_root: Path
     auth_state_parent: Path
     receipt_state_parent: Path
+    gcov_state_parent: Path
     private_evidence_parent: Path
     runtime_trace_staging_parent: Path
     runtime_open_manifest_parent: Path
@@ -209,6 +211,7 @@ def build_layout(root: Path, expected: ExpectedIdentity) -> Layout:
         state_root=state_root,
         auth_state_parent=state_root / "auth",
         receipt_state_parent=state_root / "receipt",
+        gcov_state_parent=state_root / "gcov",
         private_evidence_parent=_rooted(
             root, "/var/lib/odoo-accounting-cli-v3/evidence-private"
         ),
@@ -1069,6 +1072,7 @@ def _config_document(
         "canonical_package_sha256": expected.package_sha256,
         "auth_state_path": str(layout.auth_state_parent / "state.sqlite3"),
         "receipt_state_path": str(layout.receipt_state_parent / "state.sqlite3"),
+        "gcov_state_path": str(layout.gcov_state_parent),
         "auth_key_id": auth_key_id,
         "receipt_key_id": receipt_key_id,
         "auth_secret_path": str(layout.auth_secret),
@@ -1189,6 +1193,19 @@ def _verify_state_parent(
             directory=False,
             test_mode=test_mode,
         )
+
+
+def _verify_private_state_parent(
+    path: Path, *, service_uid: int, service_gid: int, test_mode: bool
+) -> None:
+    _verify_owner_mode(
+        path,
+        uid=service_uid,
+        gid=service_gid,
+        mode=0o700,
+        directory=True,
+        test_mode=test_mode,
+    )
 
 
 def _existing_runtime(
@@ -1346,6 +1363,12 @@ def _existing_runtime(
             service_gid=service_gid,
             test_mode=test_mode,
         )
+    _verify_private_state_parent(
+        layout.gcov_state_parent,
+        service_uid=service_uid,
+        service_gid=service_gid,
+        test_mode=test_mode,
+    )
     _verify_child_home(
         layout.child_home,
         uid=service_uid,
@@ -1626,7 +1649,11 @@ def setup_candidate_runtime(
             test_mode=test_mode,
             transaction=transaction,
         )
-        for parent in (layout.auth_state_parent, layout.receipt_state_parent):
+        for parent in (
+            layout.auth_state_parent,
+            layout.receipt_state_parent,
+            layout.gcov_state_parent,
+        ):
             _mkdir_exact(
                 parent,
                 uid=service_uid,
@@ -1661,7 +1688,7 @@ def setup_candidate_runtime(
             auth_key_id=f"test-auth-dev29-{secrets.token_hex(12)}",
             receipt_key_id=f"test-receipt-dev29-{secrets.token_hex(12)}",
         )
-        if set(document) != CONFIG_FIELDS or len(document) != 20:
+        if set(document) != CONFIG_FIELDS or len(document) != 21:
             raise RuntimeSetupError("internal runtime configuration contract failed")
         config_bytes = (
             json.dumps(

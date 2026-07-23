@@ -70,6 +70,7 @@ CONFIG_FIELDS = frozenset(
         "canonical_package_sha256",
         "auth_state_path",
         "receipt_state_path",
+        "gcov_state_path",
         "auth_key_id",
         "receipt_key_id",
         "auth_secret_path",
@@ -206,6 +207,7 @@ class RuntimeConfig:
     receipt_key_id: str
     auth_secret_path: Path
     receipt_secret_path: Path
+    gcov_state_path: Path | None = None
 
     def __post_init__(self) -> None:
         _strict_text(self.instance_id, "instance_id")
@@ -225,6 +227,10 @@ class RuntimeConfig:
         except (AttributeError, TypeError, ValueError) as exc:
             raise OdooRunnerError("database_uuid must be a UUID") from exc
         object.__setattr__(self, "database_uuid", normalized_uuid)
+        if self.gcov_state_path is None:
+            object.__setattr__(
+                self, "gcov_state_path", self.auth_state_path.parent.parent / "gcov"
+            )
         for field in (
             "odoo_python",
             "odoo_bin",
@@ -233,6 +239,7 @@ class RuntimeConfig:
             "canonical_package_path",
             "auth_state_path",
             "receipt_state_path",
+            "gcov_state_path",
             "auth_secret_path",
             "receipt_secret_path",
         ):
@@ -241,6 +248,14 @@ class RuntimeConfig:
                 raise OdooRunnerError(f"{field} must be an absolute path")
         if self.auth_state_path == self.receipt_state_path:
             raise OdooRunnerError("authentication and receipt state paths must be distinct")
+        if self.gcov_state_path in (
+            self.auth_state_path,
+            self.receipt_state_path,
+            self.auth_state_path.parent,
+            self.receipt_state_path.parent,
+            self.auth_state_path.parent.parent,
+        ):
+            raise OdooRunnerError("gcov state path must be purpose-isolated")
         if self.auth_secret_path == self.receipt_secret_path:
             raise OdooRunnerError("authentication and receipt secret paths must be distinct")
         _strict_text(self.auth_key_id, "auth_key_id")
@@ -290,6 +305,7 @@ def _config_from_mapping(value: Any) -> RuntimeConfig:
         canonical_package_sha256=value["canonical_package_sha256"],
         auth_state_path=_absolute_path(value["auth_state_path"], "auth_state_path"),
         receipt_state_path=_absolute_path(value["receipt_state_path"], "receipt_state_path"),
+        gcov_state_path=_absolute_path(value["gcov_state_path"], "gcov_state_path"),
         auth_key_id=_strict_text(value["auth_key_id"], "auth_key_id"),
         receipt_key_id=_strict_text(value["receipt_key_id"], "receipt_key_id"),
         auth_secret_path=_absolute_path(value["auth_secret_path"], "auth_secret_path"),
@@ -391,6 +407,7 @@ def _require_immutable_dependency_mounts(config: RuntimeConfig) -> None:
     writable_paths = (
         (config.auth_state_path.parent, "auth_state_parent"),
         (config.receipt_state_path.parent, "receipt_state_parent"),
+        (config.gcov_state_path, "gcov_state_path"),
         (Path(FIXED_CHILD_ENVIRONMENT["HOME"]), "child_home"),
     )
     try:
@@ -764,9 +781,8 @@ def load_runtime_secrets(config: RuntimeConfig) -> tuple[bytes, bytes]:
 
 
 def _runtime_gcov_directory(config: RuntimeConfig) -> Path:
-    prefix = config.auth_state_path.parent.parent / "gcov"
+    prefix = config.gcov_state_path
     try:
-        prefix.mkdir(mode=0o700, parents=False, exist_ok=True)
         metadata = prefix.lstat()
         parent = prefix.parent.resolve(strict=True)
         if (
@@ -1809,6 +1825,7 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
         canonical_package_sha256=payload["canonical_package_sha256"],
         auth_state_path=_absolute_path(payload["auth_state_path"], "auth_state_path"),
         receipt_state_path=_absolute_path(payload["receipt_state_path"], "receipt_state_path"),
+        gcov_state_path=child_release_root / ".unused-gcov-state",
         auth_key_id=_strict_text(payload["auth_key_id"], "auth_key_id"),
         receipt_key_id=_strict_text(payload["receipt_key_id"], "receipt_key_id"),
         auth_secret_path=child_release_root / ".unused-auth-secret",
@@ -2003,6 +2020,7 @@ def _evidence_child_main(root_env: Any, payload_fd: int, marker: str) -> None:
         canonical_package_sha256=payload["canonical_package_sha256"],
         auth_state_path=child_release_root / ".unused-evidence-auth-state",
         receipt_state_path=child_release_root / ".unused-evidence-receipt-state",
+        gcov_state_path=child_release_root / ".unused-evidence-gcov-state",
         auth_key_id="unused-evidence-auth-key",
         receipt_key_id="unused-evidence-receipt-key",
         auth_secret_path=child_release_root / ".unused-evidence-auth-secret",
