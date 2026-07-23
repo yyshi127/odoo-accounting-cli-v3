@@ -4275,19 +4275,26 @@ def _same_cgroup_identity(left: Mapping[str, Any], right: Mapping[str, Any]) -> 
 
 
 def _cleanup_cgroup_descendants(
-    baseline: Mapping[str, Any], *, deadline_seconds: float = 5.0
+    baseline: Mapping[str, Any],
+    *,
+    deadline_seconds: float = 5.0,
+    natural_exit_grace_seconds: float = 0.25,
 ) -> tuple[dict[str, Any], list[int]]:
     baseline_processes = set(baseline["processes"])
     deadline = time.monotonic() + deadline_seconds
+    natural_exit_deadline = time.monotonic() + natural_exit_grace_seconds
     observed: set[int] = set()
     while True:
         current = _unit_cgroup_snapshot()
         if not _same_cgroup_identity(baseline, current):
             raise ReadSuiteError("Dev29 unit cgroup identity changed during child execution")
         unexpected = set(current["processes"]) - baseline_processes
-        observed.update(unexpected)
         if not unexpected:
             return current, sorted(observed)
+        if time.monotonic() < natural_exit_deadline:
+            time.sleep(0.02)
+            continue
+        observed.update(unexpected)
         for process in unexpected:
             try:
                 descriptor = os.pidfd_open(process, 0)

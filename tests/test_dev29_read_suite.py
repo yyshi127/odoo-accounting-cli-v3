@@ -1105,6 +1105,66 @@ def test_read_oracle_currency_rounding_uses_canonical_decimal_text() -> None:
     assert read_oracles._rounding_text("0.000001") == "0.000001"
 
 
+def test_cgroup_cleanup_allows_short_lived_descendant(monkeypatch) -> None:
+    baseline = {
+        "version": 2,
+        "relative_path": "/unit",
+        "device": 1,
+        "inode": 2,
+        "processes": [10],
+        "subtree": [{"path": "/unit", "device": 1, "inode": 2}],
+    }
+    snapshots = [
+        {**baseline, "processes": [10, 99]},
+        baseline,
+    ]
+    monkeypatch.setattr(suite, "_unit_cgroup_snapshot", lambda: snapshots.pop(0))
+    monkeypatch.setattr(suite.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(suite.time, "monotonic", lambda: 0.0)
+
+    current, observed = suite._cleanup_cgroup_descendants(baseline)
+
+    assert current == baseline
+    assert observed == []
+
+
+def test_cgroup_cleanup_reports_killed_persistent_descendant(monkeypatch) -> None:
+    baseline = {
+        "version": 2,
+        "relative_path": "/unit",
+        "device": 1,
+        "inode": 2,
+        "processes": [10],
+        "subtree": [{"path": "/unit", "device": 1, "inode": 2}],
+    }
+    snapshots = [
+        {**baseline, "processes": [10, 99]},
+        baseline,
+    ]
+    killed = []
+    monkeypatch.setattr(suite, "_unit_cgroup_snapshot", lambda: snapshots.pop(0))
+    monkeypatch.setattr(
+        suite.os, "pidfd_open", lambda process, _flags: process + 1000, raising=False
+    )
+    monkeypatch.setattr(
+        suite.signal,
+        "pidfd_send_signal",
+        lambda descriptor, sig: killed.append((descriptor, sig)),
+        raising=False,
+    )
+    monkeypatch.setattr(suite.signal, "SIGKILL", 9, raising=False)
+    monkeypatch.setattr(suite.os, "close", lambda _descriptor: None)
+    monkeypatch.setattr(suite.time, "sleep", lambda _seconds: None)
+
+    current, observed = suite._cleanup_cgroup_descendants(
+        baseline, natural_exit_grace_seconds=0
+    )
+
+    assert current == baseline
+    assert observed == [99]
+    assert killed == [(1099, 9)]
+
+
 def test_sandbox_profile_forbids_nested_systemd_and_has_exact_role_accounts():
     outer = {
         "read_write_paths": [
