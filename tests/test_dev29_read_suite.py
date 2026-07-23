@@ -139,6 +139,15 @@ def test_direct_child_failure_context_is_bounded_and_hashes_stderr() -> None:
     assert len(context) < 700
 
 
+def test_direct_child_does_not_require_child_access_to_host_namespace() -> None:
+    source = (ROOT / "deployment" / "dev29" / "direct_child.py").read_text("utf-8")
+
+    assert '_namespace("self")' in source
+    assert '_namespace("1")' not in source
+    assert "arguments.expected_host_namespace_device" in source
+    assert "arguments.expected_host_namespace_inode" in source
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,

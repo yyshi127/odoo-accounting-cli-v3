@@ -432,17 +432,15 @@ def main(argv: list[str] | None = None) -> int:
     ):
         raise DirectChildError("direct child credentials or capabilities are not sealed")
     self_namespace = _namespace("self")
-    host_namespace = _namespace("1")
+    host_namespace = {
+        "device": arguments.expected_host_namespace_device,
+        "inode": arguments.expected_host_namespace_inode,
+    }
     if (
         self_namespace
         != {
             "device": arguments.expected_self_namespace_device,
             "inode": arguments.expected_self_namespace_inode,
-        }
-        or host_namespace
-        != {
-            "device": arguments.expected_host_namespace_device,
-            "inode": arguments.expected_host_namespace_inode,
         }
         or self_namespace == host_namespace
     ):
