@@ -989,6 +989,24 @@ def _odoo_env_stdin_launcher(config: RuntimeConfig, *, diagnostics: bool = False
         else "    def _oacv3_checkpoint(label):\n"
         "        return None\n"
     )
+    module_loader_patch = (
+        "    from odoo.modules import module as odoo_module\n"
+        "    _oacv3_original_load_openerp_module = odoo_module.load_openerp_module\n"
+        "    def _oacv3_load_openerp_module(module_name, *args, **kwargs):\n"
+        "        try:\n"
+        "            return _oacv3_original_load_openerp_module(module_name, *args, **kwargs)\n"
+        "        except BaseException:\n"
+        "            with open(_oacv3_diagnostic_log_path, 'a', encoding='utf-8') as _oacv3_log:\n"
+        "                _oacv3_log.write('__OACV3_MODULE_LOAD_EXCEPTION__:' + str(module_name) + '\\n')\n"
+        "                traceback.print_exc(file=_oacv3_log)\n"
+        "                _oacv3_log.flush()\n"
+        "            raise\n"
+        "    odoo_module.load_openerp_module = _oacv3_load_openerp_module\n"
+        "    if hasattr(odoo_loading, 'load_openerp_module'):\n"
+        "        odoo_loading.load_openerp_module = _oacv3_load_openerp_module\n"
+        if diagnostics
+        else ""
+    )
     return (
         "import sys, threading, traceback\n"
         f"sys.path.insert(0, {odoo_root!r})\n"
@@ -1002,6 +1020,7 @@ def _odoo_env_stdin_launcher(config: RuntimeConfig, *, diagnostics: bool = False
         "    from odoo.modules.registry import Registry\n"
         "    from odoo.tools import config as odoo_config\n"
         "    _oacv3_checkpoint('after_import_odoo')\n"
+        f"{module_loader_patch}"
         "    def _odoo_accounting_cli_v3_noop_reset_modules_state(db_name):\n"
         "        return None\n"
         "    odoo_loading.reset_modules_state = _odoo_accounting_cli_v3_noop_reset_modules_state\n"
