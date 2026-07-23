@@ -473,6 +473,44 @@ def test_runtime_trace_receipt_set_binds_policy_and_release_members() -> None:
     assert document["release_manifest_sha256"] == "6" * 64
 
 
+def test_runtime_trace_discovery_inventory_is_nonapproval_suite_fragment() -> None:
+    gate = object.__new__(suite.RuntimeTraceDiscoveryGate)
+    gate.expected = SimpleNamespace(release=RELEASE)
+    targets = suite.suite_runtime_trace_targets()
+    gate.entries = [
+        {
+            "target_id": target_id,
+            "trace_path": f"/private/{target_id}.strace",
+            "expected_leader_pid": 1000 + index,
+            "role": "odoo",
+            "working_directory": f"/opt/odoo-accounting-cli-v3/releases/{RELEASE}",
+            "bootstrap_argv": ["/usr/bin/python3.12", "-I"],
+            "final_argv": ["/usr/bin/python3.12", "-I"],
+            "expected_returncodes": [0],
+        }
+        for index, target_id in enumerate(targets)
+    ]
+    inventory = gate.inventory(
+        required_targets=targets,
+        expected_static_closure_sha256="1" * 64,
+        watch_roots=("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,),
+        mutable_roots=("/var/lib/odoo-accounting-cli-v3/test/candidates/" + RELEASE,),
+        sqlite_delta_contract_sha256="2" * 64,
+    )
+    assert inventory["scope"].endswith("runtime-open-discovery-suite-fragment.v1")
+    assert [item["target_id"] for item in inventory["targets"]] == list(targets)
+    assert inventory.get("production_promotion_allowed") is None
+    gate.entries = gate.entries[:-1]
+    with pytest.raises(suite.ReadSuiteError, match="target set"):
+        gate.inventory(
+            required_targets=targets,
+            expected_static_closure_sha256="1" * 64,
+            watch_roots=("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,),
+            mutable_roots=(),
+            sqlite_delta_contract_sha256="2" * 64,
+        )
+
+
 def _runtime_trace_release_fixture(
     tmp_path: Path,
 ) -> tuple[suite.ExpectedIdentity, dict[str, object], bytes, Path]:

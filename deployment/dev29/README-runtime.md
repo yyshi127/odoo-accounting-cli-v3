@@ -98,6 +98,17 @@ leader return code. Human review must still check the proposed path classes,
 watch roots, mutable roots, Odoo business meaning, and trace provenance before
 the directory is passed to `runtime_open_policy_source.py`.
 
+When no reviewed runtime-open index exists yet, `run_read_suite.py` can be
+started in discovery mode with `--runtime-open-discovery-inventory`. In that
+mode it executes the normal read-suite targets under the same strace guard and
+writes a private suite inventory fragment instead of a success bundle. That
+fragment is deliberately scoped as
+`odoo-accounting-cli-v3.dev29.runtime-open-discovery-suite-fragment.v1`: it
+covers the suite's 31 traced children only and is not accepted by
+`runtime_open_discovery.py` as a complete 32-target inventory. The separately
+traced independent-verifier inventory must be added before the non-approval
+review directory can be generated.
+
 The manifest directory is an external policy input reviewed by finance and
 operations. It must contain exactly the 32 fixed target manifests named
 `<target-id>.json`; each file is canonical JSON plus LF. The generator does

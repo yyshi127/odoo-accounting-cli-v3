@@ -265,6 +265,16 @@ def suite_runtime_trace_targets() -> tuple[str, ...]:
     )
 
 
+def _expected_trace_role(target_id: str) -> str:
+    if target_id in {"witness-pre", "witness-post"} or target_id.endswith("-oracle"):
+        return "postgres"
+    if target_id.endswith("-signer"):
+        return "signer"
+    if target_id == "independent-verifier":
+        return "verifier"
+    return "odoo"
+
+
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     value: dict[str, Any] = {}
     for key, item in pairs:
@@ -1114,6 +1124,216 @@ class RuntimeTraceGate:
         }
 
 
+@dataclass(frozen=True)
+class _DiscoveryTraceManifest:
+    release: str
+    target_id: str
+    role: str
+    working_directory: str
+    environment: Mapping[str, str]
+    bootstrap_argv: tuple[str, ...]
+    final_argv: tuple[str, ...]
+    expected_strace_sha256: str
+    expected_child_environment_sha256: str
+    expected_uid: int
+    expected_gid: int
+    dynamic_argv_template: bool = False
+
+
+class RuntimeTraceDiscoveryGate:
+    """Collect raw traces and exact argv inventory without approving policy."""
+
+    def __init__(
+        self,
+        expected: ExpectedIdentity,
+        *,
+        expected_strace_sha256: str,
+        private_sidecar: Path,
+    ) -> None:
+        if not isinstance(expected_strace_sha256, str) or HEX64.fullmatch(
+            expected_strace_sha256
+        ) is None:
+            raise ReadSuiteError("runtime-open discovery strace identity is invalid")
+        paths = _release_paths(expected)
+        manifest = load_json_bytes(
+            stable_read(
+                paths["manifest"],
+                label="runtime-open discovery release manifest",
+                expected_uid=0 if os.name == "posix" else None,
+                expected_gid=0 if os.name == "posix" else None,
+                allowed_modes=frozenset({0o444}) if os.name == "posix" else None,
+            ),
+            label="runtime-open discovery release manifest",
+        )
+        indexed = _manifest_index(manifest, expected)
+        trace_member = indexed.get(str(TRACE_RELATIVE))
+        if trace_member is None:
+            raise ReadSuiteError("runtime-open discovery validator is absent")
+        runtime_path = paths["root"].joinpath(*TRACE_RELATIVE.parts)
+        runtime_payload = stable_read(
+            runtime_path,
+            label="runtime-open discovery validator",
+            maximum=MAX_RELEASE_FILE_BYTES,
+            expected_uid=0 if os.name == "posix" else None,
+            expected_gid=0 if os.name == "posix" else None,
+            allowed_modes=frozenset({_expected_release_member_mode(str(TRACE_RELATIVE))})
+            if os.name == "posix"
+            else None,
+        )
+        self.module = _load_runtime_trace_module(
+            runtime_payload,
+            runtime_path,
+            expected_sha256=trace_member["sha256"],
+        )
+        self.expected = expected
+        self.expected_strace_sha256 = expected_strace_sha256
+        self.private_sidecar = Path(private_sidecar)
+        self.entries: list[dict[str, Any]] = []
+        self.consumed: set[str] = set()
+
+    def _manifest(
+        self, target_id: str, bootstrap: Sequence[str], final: Sequence[str]
+    ) -> _DiscoveryTraceManifest:
+        if target_id not in suite_runtime_trace_targets() or target_id in self.consumed:
+            raise ReadSuiteError("runtime-open discovery target state is invalid")
+        role = _expected_trace_role(target_id)
+        release_root = str(_release_paths(self.expected)["root"])
+        try:
+            self.module.dynamic_bootstrap_template(
+                tuple(bootstrap),
+                tuple(final),
+                role=role,
+                release_root=release_root,
+            )
+            uid, gid, is_template = self.module._validate_bootstrap_argv(
+                tuple(bootstrap),
+                tuple(final),
+                role=role,
+                release_root=release_root,
+            )
+        except self.module.RuntimeOpenTraceError as exc:
+            raise ReadSuiteError(
+                "runtime-open discovery argv cannot be templated"
+            ) from exc
+        if is_template:
+            raise ReadSuiteError("runtime-open discovery received a template argv")
+        environment = dict(self.module.ROLE_ENVIRONMENTS[role])
+        return _DiscoveryTraceManifest(
+            release=self.expected.release,
+            target_id=target_id,
+            role=role,
+            working_directory=release_root,
+            environment=environment,
+            bootstrap_argv=tuple(bootstrap),
+            final_argv=tuple(final),
+            expected_strace_sha256=self.expected_strace_sha256,
+            expected_child_environment_sha256=hashlib.sha256(
+                canonical_json(environment)
+            ).hexdigest(),
+            expected_uid=uid,
+            expected_gid=gid,
+        )
+
+    def execute(
+        self,
+        target_id: str,
+        bootstrap: Sequence[str],
+        final: Sequence[str],
+        *,
+        inherited_fds: Sequence[int],
+        callback: Callable[[subprocess.Popen[bytes]], Any],
+    ) -> Any:
+        manifest = self._manifest(target_id, bootstrap, final)
+        process: subprocess.Popen[bytes] | None = None
+        with self.module.validate_strace_tool(self.expected_strace_sha256) as trusted:
+            with self.module.PrivateTraceStaging(target_id) as staging:
+                try:
+                    launch = self.module.build_strace_launch(
+                        staging.path,
+                        manifest,
+                        trusted,
+                        inherited_fds=inherited_fds,
+                    )
+                    process = subprocess.Popen(
+                        launch.argv,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        cwd=manifest.working_directory,
+                        env=dict(manifest.environment),
+                        close_fds=True,
+                        pass_fds=launch.pass_fds,
+                    )
+                    self.module.verify_and_release_traced_process(
+                        process.pid,
+                        trusted,
+                        manifest,
+                        supervisor_pid=os.getpid(),
+                        timeout_seconds=5.0,
+                    )
+                    value = callback(process)
+                    _attested_child_environment_sha256(
+                        value, manifest.expected_child_environment_sha256
+                    )
+                    staging.assert_private_identity()
+                    raw_identity = staging.seal_to(
+                        self.private_sidecar / f"{target_id}.strace",
+                        target_id=target_id,
+                        manifest_sha256="0" * 64,
+                        expected_leader_pid=process.pid,
+                    )
+                    self.entries.append(
+                        {
+                            "target_id": target_id,
+                            "trace_path": raw_identity["path"],
+                            "expected_leader_pid": process.pid,
+                            "role": manifest.role,
+                            "working_directory": manifest.working_directory,
+                            "bootstrap_argv": list(manifest.bootstrap_argv),
+                            "final_argv": list(manifest.final_argv),
+                            "expected_returncodes": [int(value.returncode)],
+                        }
+                    )
+                    self.consumed.add(target_id)
+                    return value
+                except BaseException:
+                    if process is not None and process.poll() is None:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            process.kill()
+                        try:
+                            process.communicate(timeout=5)
+                        except (OSError, subprocess.TimeoutExpired):
+                            pass
+                    raise
+
+    def inventory(
+        self,
+        *,
+        required_targets: Sequence[str],
+        expected_static_closure_sha256: str,
+        watch_roots: Sequence[str],
+        mutable_roots: Sequence[str],
+        sqlite_delta_contract_sha256: str,
+    ) -> dict[str, Any]:
+        if tuple(item["target_id"] for item in self.entries) != tuple(required_targets):
+            raise ReadSuiteError("runtime-open discovery target set is incomplete")
+        return {
+            "schema_version": 1,
+            "scope": (
+                "odoo-accounting-cli-v3.dev29."
+                "runtime-open-discovery-suite-fragment.v1"
+            ),
+            "release": self.expected.release,
+            "expected_static_closure_sha256": expected_static_closure_sha256,
+            "watch_roots": list(watch_roots),
+            "mutable_roots": list(mutable_roots),
+            "sqlite_delta_contract_sha256": sqlite_delta_contract_sha256,
+            "targets": list(self.entries),
+        }
+
+
 def _fsync_directory(path: Path) -> None:
     if os.name != "posix":
         return
@@ -1273,6 +1493,7 @@ def _manifest_index(manifest: dict[str, Any], expected: ExpectedIdentity) -> dic
         str(CLOSURE_RELATIVE),
         str(DIRECT_CHILD_RELATIVE),
         str(RUNNER_RELATIVE),
+        str(TRACE_RELATIVE),
         str(VERIFIER_RELATIVE),
         str(LAUNCHER_RELATIVE),
     ):
@@ -5212,8 +5433,13 @@ def run_suite(
     *,
     runtime_path: Path | None = None,
     outer_unit_evidence: Mapping[str, Any],
-    expected_runtime_trace_index_sha256: str,
+    expected_runtime_trace_index_sha256: str | None,
     expected_strace_sha256: str,
+    runtime_open_discovery_inventory: Path | None = None,
+    runtime_open_discovery_static_closure_sha256: str | None = None,
+    runtime_open_discovery_watch_roots: Sequence[str] = (),
+    runtime_open_discovery_mutable_roots: Sequence[str] = (),
+    runtime_open_discovery_sqlite_delta_contract_sha256: str | None = None,
 ) -> tuple[Path, str]:
     if os.name != "posix" or os.geteuid() != 0:
         raise ReadSuiteError("Dev29 read suite must run as root on POSIX")
@@ -5290,12 +5516,32 @@ def run_suite(
         or (sidecar_metadata.st_uid, sidecar_metadata.st_gid) != (0, 0)
     ):
         raise ReadSuiteError("private runtime-open evidence sidecar is unsafe")
-    trace_gate = RuntimeTraceGate(
-        expected,
-        expected_index_sha256=expected_runtime_trace_index_sha256,
-        expected_strace_sha256=expected_strace_sha256,
-        private_sidecar=private_sidecar,
-    )
+    discovery_mode = runtime_open_discovery_inventory is not None
+    if discovery_mode:
+        if (
+            expected_runtime_trace_index_sha256 is not None
+            or not isinstance(runtime_open_discovery_static_closure_sha256, str)
+            or HEX64.fullmatch(runtime_open_discovery_static_closure_sha256) is None
+            or not isinstance(runtime_open_discovery_sqlite_delta_contract_sha256, str)
+            or HEX64.fullmatch(runtime_open_discovery_sqlite_delta_contract_sha256)
+            is None
+            or not runtime_open_discovery_watch_roots
+        ):
+            raise ReadSuiteError("runtime-open discovery inputs are invalid")
+        trace_gate = RuntimeTraceDiscoveryGate(
+            expected,
+            expected_strace_sha256=expected_strace_sha256,
+            private_sidecar=private_sidecar,
+        )
+    else:
+        if not isinstance(expected_runtime_trace_index_sha256, str):
+            raise ReadSuiteError("runtime-open index SHA-256 is required")
+        trace_gate = RuntimeTraceGate(
+            expected,
+            expected_index_sha256=expected_runtime_trace_index_sha256,
+            expected_strace_sha256=expected_strace_sha256,
+            private_sidecar=private_sidecar,
+        )
     for name in ("release", "closure", "boundary", "positive", "negative"):
         _mkdir_private(evidence / name)
     for name in POSITIVE_NAMES:
@@ -5725,6 +5971,36 @@ def run_suite(
         watch_document = guard.document()
 
     write_json(evidence / "dependency-watch.json", watch_document)
+    if isinstance(trace_gate, RuntimeTraceDiscoveryGate):
+        assert runtime_open_discovery_inventory is not None
+        assert runtime_open_discovery_static_closure_sha256 is not None
+        assert runtime_open_discovery_sqlite_delta_contract_sha256 is not None
+        inventory = trace_gate.inventory(
+            required_targets=suite_runtime_trace_targets(),
+            expected_static_closure_sha256=(
+                runtime_open_discovery_static_closure_sha256
+            ),
+            watch_roots=runtime_open_discovery_watch_roots,
+            mutable_roots=runtime_open_discovery_mutable_roots,
+            sqlite_delta_contract_sha256=(
+                runtime_open_discovery_sqlite_delta_contract_sha256
+            ),
+        )
+        payload = canonical_json(inventory) + b"\n"
+        write_private(runtime_open_discovery_inventory, payload)
+        write_json(
+            evidence / "runtime-open-discovery.json",
+            {
+                "schema_version": 1,
+                "scope": "odoo-accounting-cli-v3.dev29.runtime-open-discovery-suite.v1",
+                "inventory_path": str(runtime_open_discovery_inventory),
+                "inventory_sha256": hashlib.sha256(payload).hexdigest(),
+                "target_count": len(inventory["targets"]),
+                "candidate_is_approval": False,
+                "production_promotion_allowed": False,
+            },
+        )
+        return evidence, hashlib.sha256(payload).hexdigest()
     runtime_trace_private = trace_gate.seal_private_manifest(
         suite_runtime_trace_targets()
     )
@@ -5798,8 +6074,21 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-closure-image-sha256", required=True)
     parser.add_argument("--expected-system-python-sha256", required=True)
     parser.add_argument("--expected-ld-so-preload-sha256", required=True)
-    parser.add_argument("--expected-runtime-open-index-sha256", required=True)
+    parser.add_argument("--expected-runtime-open-index-sha256")
     parser.add_argument("--expected-strace-sha256", required=True)
+    parser.add_argument("--runtime-open-discovery-inventory", type=Path)
+    parser.add_argument("--runtime-open-discovery-static-closure-sha256")
+    parser.add_argument(
+        "--runtime-open-discovery-watch-root",
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--runtime-open-discovery-mutable-root",
+        action="append",
+        default=[],
+    )
+    parser.add_argument("--runtime-open-discovery-sqlite-delta-contract-sha256")
     return parser
 
 
@@ -5834,6 +6123,21 @@ def main(argv: Iterable[str] | None = None) -> int:
                 arguments.expected_runtime_open_index_sha256
             ),
             expected_strace_sha256=arguments.expected_strace_sha256,
+            runtime_open_discovery_inventory=(
+                arguments.runtime_open_discovery_inventory
+            ),
+            runtime_open_discovery_static_closure_sha256=(
+                arguments.runtime_open_discovery_static_closure_sha256
+            ),
+            runtime_open_discovery_watch_roots=tuple(
+                arguments.runtime_open_discovery_watch_root
+            ),
+            runtime_open_discovery_mutable_roots=tuple(
+                arguments.runtime_open_discovery_mutable_root
+            ),
+            runtime_open_discovery_sqlite_delta_contract_sha256=(
+                arguments.runtime_open_discovery_sqlite_delta_contract_sha256
+            ),
         )
     except (OSError, ReadSuiteError, subprocess.SubprocessError) as exc:
         print(f"Dev29 read suite refused: {exc}", file=sys.stderr)
@@ -5842,6 +6146,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         json.dumps(
             {
                 "bundle_manifest_sha256": manifest_sha256,
+                "discovery_inventory": (
+                    str(arguments.runtime_open_discovery_inventory)
+                    if arguments.runtime_open_discovery_inventory is not None
+                    else None
+                ),
                 "evidence_path": str(evidence),
                 "production_promotion_allowed": False,
             },

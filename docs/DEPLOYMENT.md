@@ -345,6 +345,14 @@ their operator-supplied execution inventory into a non-approval review
 directory. Its `DISCOVERY-REVIEW.json` binds each candidate manifest to the raw
 trace SHA-256 and is explicitly marked `candidate_is_approval:false`; it does
 not install `INDEX.json` and does not authorize production promotion.
+Before that full 32-target inventory exists, the read suite may be run in
+discovery mode with `--runtime-open-discovery-inventory`. This writes only the
+suite fragment, scoped as
+`odoo-accounting-cli-v3.dev29.runtime-open-discovery-suite-fragment.v1`, and
+returns without producing a runtime-open success bundle. The fragment covers 31
+suite children; it must be combined with the separately collected
+independent-verifier trace inventory before `runtime_open_discovery.py` is
+allowed to produce its non-approval review directory.
 Install the externally reviewed, release-specific policy and index only with
 `deployment/dev29/runtime_open_policy_source.py` using the canonical
 `deployment/dev29/runtime_open_policy_source.template.json`, then build the
