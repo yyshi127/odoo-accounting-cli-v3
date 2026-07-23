@@ -212,6 +212,7 @@ def closure_document() -> dict:
                 "/etc/ld.so.preload",
                 "/usr/bin/python3.12",
                 "/usr/lib/python3.12",
+                "/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2",
                 "/usr/lib/x86_64-linux-gnu/libc.so.6",
                 "/usr/lib/x86_64-linux-gnu/libonion.so",
             ],
@@ -219,7 +220,7 @@ def closure_document() -> dict:
                 "static-python-elf-dt-needed-loader-preload-plus-root-owned-ld-cache-v2"
             ),
             "external_runtime_entry_count": 1200,
-            "external_runtime_native_path_count": 1,
+            "external_runtime_native_path_count": 3,
             "closure_elf_count": 48,
         },
         "database_scope": {

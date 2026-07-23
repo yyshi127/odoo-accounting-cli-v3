@@ -2709,7 +2709,7 @@ def validate_external_runtime_manifest(
         or hashlib.sha256(canonical_json(document)).hexdigest()
         != identity["external_runtime_manifest_sha256"]
         or identity.get("external_runtime_entry_count") != len(entries)
-        or identity.get("external_runtime_native_path_count") != len(roots) - 3
+        or identity.get("external_runtime_native_path_count") != len(roots) - 4
     ):
         raise EvidenceVerificationError("closure external runtime manifest is invalid")
     entry_paths = [item.get("path") for item in entries if type(item) is dict]

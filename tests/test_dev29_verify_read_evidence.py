@@ -973,7 +973,12 @@ def test_dependency_validator_rejects_attacker_self_reported_root_and_none_path_
 def test_external_runtime_rejects_self_consistent_omitted_actual_elf_dependency(
     monkeypatch,
 ):
-    roots = ["/etc/ld.so.cache", "/usr/bin/python3.12", "/usr/lib/python3.12"]
+    roots = [
+        "/etc/ld.so.cache",
+        "/etc/ld.so.preload",
+        "/usr/bin/python3.12",
+        "/usr/lib/python3.12",
+    ]
     entries = [
         {
             "path": "/etc/ld.so.cache",
@@ -983,6 +988,15 @@ def test_external_runtime_rejects_self_consistent_omitted_actual_elf_dependency(
             "gid": 0,
             "size": 1,
             "sha256": "1" * 64,
+        },
+        {
+            "path": "/etc/ld.so.preload",
+            "kind": "regular",
+            "mode": "0644",
+            "uid": 0,
+            "gid": 0,
+            "size": 1,
+            "sha256": "4" * 64,
         },
         {
             "path": "/usr/bin/python3.12",
@@ -1044,7 +1058,12 @@ def test_external_runtime_rejects_self_consistent_omitted_actual_elf_dependency(
 
 
 def test_external_runtime_rejects_self_consistent_omitted_stdlib_file(monkeypatch):
-    roots = ["/etc/ld.so.cache", "/usr/bin/python3.12", "/usr/lib/python3.12"]
+    roots = [
+        "/etc/ld.so.cache",
+        "/etc/ld.so.preload",
+        "/usr/bin/python3.12",
+        "/usr/lib/python3.12",
+    ]
     entries = [
         {
             "path": "/etc/ld.so.cache",
@@ -1054,6 +1073,15 @@ def test_external_runtime_rejects_self_consistent_omitted_stdlib_file(monkeypatc
             "gid": 0,
             "size": 1,
             "sha256": "1" * 64,
+        },
+        {
+            "path": "/etc/ld.so.preload",
+            "kind": "regular",
+            "mode": "0644",
+            "uid": 0,
+            "gid": 0,
+            "size": 1,
+            "sha256": "4" * 64,
         },
         {
             "path": "/usr/bin/python3.12",
