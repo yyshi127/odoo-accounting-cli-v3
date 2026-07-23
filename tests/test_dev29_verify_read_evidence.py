@@ -1729,7 +1729,7 @@ def _installed_runtime_open_policy_fixture(
         environment_sha256 = hashlib.sha256(
             verifier.canonical_json(environment)
         ).hexdigest()
-        watch_roots = ["/dev", "/opt"]
+        watch_roots = ["/dev", "/opt", "/usr"]
         watch_roots_sha256 = hashlib.sha256(
             verifier.canonical_json(tuple(watch_roots))
         ).hexdigest()
@@ -1743,8 +1743,20 @@ def _installed_runtime_open_policy_fixture(
             "environment": environment,
             "bootstrap_argv": ["/usr/bin/python3.12", "-I", "bootstrap.py"],
             "final_argv": ["/usr/bin/python3.12", "-I", "command.py"],
-            "allowed_paths": ["/usr/bin/python3.12"],
+            "allowed_paths": ["/proc/self/exe", "/usr/bin/python3.12"],
             "path_access_policy": [
+                {
+                    "path": "/proc/self/exe",
+                    "role": role,
+                    "classification": "process-view",
+                    "allowed_access": ["metadata", "read"],
+                    "create_suffixes": [],
+                    "delta_verifier": None,
+                    "delta_contract_sha256": None,
+                    "allow_success": True,
+                    "allowed_errnos": [],
+                    "failure_guard": None,
+                },
                 {
                     "path": "/usr/bin/python3.12",
                     "role": role,
@@ -2039,6 +2051,65 @@ def test_runtime_open_index_binds_policy_environment_and_exact_release_members(
             expected_strace_sha256="1" * 64,
             enforce_root=False,
         )
+
+    watched_process_view_manifest = json.loads(first_manifest_payload)
+    watched_process_view_manifest["watch_roots"] = sorted(
+        [*watched_process_view_manifest["watch_roots"], "/proc/self"]
+    )
+    watched_process_view_manifest["expected_watch_roots_sha256"] = hashlib.sha256(
+        verifier.canonical_json(tuple(watched_process_view_manifest["watch_roots"]))
+    ).hexdigest()
+    watched_process_view_payload = (
+        verifier.canonical_json(watched_process_view_manifest) + b"\n"
+    )
+    first_manifest_path.write_bytes(watched_process_view_payload)
+    watched_process_view_index = deepcopy(index)
+    watched_process_view_index["targets"][0]["manifest_sha256"] = hashlib.sha256(
+        watched_process_view_payload
+    ).hexdigest()
+    watched_process_view_index["targets"][0]["watch_roots_sha256"] = (
+        watched_process_view_manifest["expected_watch_roots_sha256"]
+    )
+    _synchronize_policy_source_digest(destination, watched_process_view_index)
+    with pytest.raises(
+        verifier.EvidenceVerificationError, match="non-immutable path is watched"
+    ):
+        verifier._read_runtime_trace_index(
+            EXPECTED,
+            root=release_root,
+            release_manifest=release_manifest,
+            expected_sha256=install(watched_process_view_index),
+            expected_strace_sha256="1" * 64,
+            enforce_root=False,
+        )
+    first_manifest_path.write_bytes(first_manifest_payload)
+
+    writable_process_view_manifest = json.loads(first_manifest_payload)
+    for policy in writable_process_view_manifest["path_access_policy"]:
+        if policy["path"] == "/proc/self/exe":
+            policy["allowed_access"] = ["metadata", "read", "write"]
+            break
+    writable_process_view_payload = (
+        verifier.canonical_json(writable_process_view_manifest) + b"\n"
+    )
+    first_manifest_path.write_bytes(writable_process_view_payload)
+    writable_process_view_index = deepcopy(index)
+    writable_process_view_index["targets"][0]["manifest_sha256"] = hashlib.sha256(
+        writable_process_view_payload
+    ).hexdigest()
+    _synchronize_policy_source_digest(destination, writable_process_view_index)
+    with pytest.raises(
+        verifier.EvidenceVerificationError, match="access policy is unsafe"
+    ):
+        verifier._read_runtime_trace_index(
+            EXPECTED,
+            root=release_root,
+            release_manifest=release_manifest,
+            expected_sha256=install(writable_process_view_index),
+            expected_strace_sha256="1" * 64,
+            enforce_root=False,
+        )
+    first_manifest_path.write_bytes(first_manifest_payload)
 
     missing_environment = deepcopy(index)
     del missing_environment["targets"][0]["child_environment_sha256"]

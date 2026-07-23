@@ -5909,7 +5909,7 @@ def _validate_runtime_trace_manifest(
             or set(policy) != policy_fields
             or policy.get("role") != manifest["role"]
             or policy.get("classification")
-            not in {"immutable", "mutable-state", "unix-socket"}
+            not in {"immutable", "mutable-state", "unix-socket", "process-view"}
             or not isinstance(policy.get("path"), str)
             or not policy["path"].startswith("/")
             or type(policy.get("allowed_access")) is not list
@@ -5920,6 +5920,8 @@ def _validate_runtime_trace_manifest(
             or type(policy.get("allowed_errnos")) is not list
         ):
             raise EvidenceVerificationError("runtime-open access policy is invalid")
+        if not _runtime_access_policy_is_safe(policy):
+            raise EvidenceVerificationError("runtime-open access policy is unsafe")
         policy_paths.append(policy["path"])
     if policy_paths != sorted(set(policy_paths)):
         raise EvidenceVerificationError("runtime-open access policy is ambiguous")
@@ -5927,18 +5929,97 @@ def _validate_runtime_trace_manifest(
         matches = [
             policy
             for policy in policies
-            if observed == policy["path"]
-            or (
-                policy["classification"] == "mutable-state"
-                and any(
-                    observed == policy["path"] + suffix
-                    for suffix in policy["create_suffixes"]
-                )
-            )
+            if _runtime_policy_matches(policy, observed)
         ]
         if len(matches) != 1:
             raise EvidenceVerificationError("runtime-open allow path policy is ambiguous")
+        watched = any(observed == root or observed.startswith(root + "/") for root in watches)
+        if matches[0]["classification"] == "immutable":
+            if not watched:
+                raise EvidenceVerificationError("runtime-open immutable path is unwatched")
+        elif watched:
+            raise EvidenceVerificationError("runtime-open non-immutable path is watched")
     return manifest, hashlib.sha256(canonical_json(policies)).hexdigest()
+
+
+def _runtime_process_view_path(path: str) -> bool:
+    roots = ("/proc/self", "/proc/@self", "/proc/1")
+    return any(path == root or path.startswith(root + "/") for root in roots)
+
+
+def _runtime_policy_matches(policy: Mapping[str, Any], observed: str) -> bool:
+    return observed == policy["path"] or (
+        policy["classification"] == "mutable-state"
+        and any(observed == policy["path"] + suffix for suffix in policy["create_suffixes"])
+    )
+
+
+def _runtime_access_policy_is_safe(policy: Mapping[str, Any]) -> bool:
+    immutable_access = {"read", "metadata", "execute"}
+    mutable_access = {"read", "write", "create", "truncate", "append", "delete", "metadata"}
+    socket_access = {"unix-connect", "unix-send"}
+    process_view_access = {"read", "metadata"}
+    access = set(policy["allowed_access"])
+    suffixes = policy["create_suffixes"]
+    errnos = policy["allowed_errnos"]
+    classification = policy["classification"]
+    delta = policy["delta_verifier"]
+    delta_contract = policy["delta_contract_sha256"]
+    guard = policy["failure_guard"]
+    if (
+        suffixes != sorted(set(suffixes))
+        or any(
+            not isinstance(suffix, str)
+            or re.fullmatch(r"-[0-9A-Za-z._-]{1,31}", suffix) is None
+            for suffix in suffixes
+        )
+        or errnos != sorted(set(errnos))
+        or any(
+            not isinstance(errno, str)
+            or re.fullmatch(r"E[A-Z0-9_]{1,63}", errno) is None
+            for errno in errnos
+        )
+        or (not policy["allow_success"] and not errnos)
+    ):
+        return False
+    if classification == "immutable":
+        return (
+            access <= immutable_access
+            and not suffixes
+            and delta is None
+            and delta_contract is None
+            and guard == ("dev29-watch-tree-identity-v1" if errnos else None)
+        )
+    if classification == "mutable-state":
+        return (
+            access <= mutable_access
+            and delta == "dev29-sqlite-state-delta-v1"
+            and isinstance(delta_contract, str)
+            and re.fullmatch(r"[0-9a-f]{64}", delta_contract) is not None
+            and (not suffixes or {"create", "write"} <= access)
+            and guard == (delta if errnos else None)
+        )
+    if classification == "unix-socket":
+        return (
+            access <= socket_access
+            and not suffixes
+            and delta is None
+            and delta_contract is None
+            and policy["allow_success"]
+            and not errnos
+            and guard is None
+        )
+    return (
+        classification == "process-view"
+        and _runtime_process_view_path(policy["path"])
+        and access <= process_view_access
+        and not suffixes
+        and delta is None
+        and delta_contract is None
+        and policy["allow_success"]
+        and not errnos
+        and guard is None
+    )
 
 
 def _load_runtime_trace_module(

@@ -103,7 +103,6 @@ VALID_WATCH_ROOTS = tuple(
             "/etc",
             "/opt/odoo-accounting-cli-v3/dependencies/odoo19-venv",
             RELEASE_ROOT,
-            "/proc/self/exe",
             "/usr/bin/python3.12",
         }
     )
@@ -161,20 +160,39 @@ def policies(allowed: tuple[str, ...]) -> tuple[trace.PathAccessPolicy, ...]:
     result = []
     for path in allowed:
         socket = path.startswith("/var/run/postgresql/")
+        process_view = path.startswith("/proc/self/") or path.startswith("/proc/@self/")
         result.append(
             trace.PathAccessPolicy(
                 path=path,
                 role="signer",
-                classification="unix-socket" if socket else "immutable",
-                allowed_access=("unix-connect", "unix-send") if socket else ("execute", "metadata", "read"),
+                classification=(
+                    "unix-socket"
+                    if socket
+                    else "process-view"
+                    if process_view
+                    else "immutable"
+                ),
+                allowed_access=(
+                    ("unix-connect", "unix-send")
+                    if socket
+                    else ("metadata", "read")
+                    if process_view
+                    else ("execute", "metadata", "read")
+                ),
                 create_suffixes=(),
                 delta_verifier=None,
                 delta_contract_sha256=None,
-                allow_success=path != "/etc/definitely-missing",
-                allowed_errnos=("ENOENT",) if path == "/etc/definitely-missing" else (),
+                allow_success=process_view or path != "/etc/definitely-missing",
+                allowed_errnos=(
+                    ()
+                    if process_view
+                    else ("ENOENT",)
+                    if path == "/etc/definitely-missing"
+                    else ()
+                ),
                 failure_guard=(
                     trace.WATCH_TREE_FAILURE_GUARD
-                    if path == "/etc/definitely-missing"
+                    if not process_view and path == "/etc/definitely-missing"
                     else None
                 ),
             )
@@ -745,6 +763,88 @@ def test_manifest_rejects_mutable_state_inside_immutable_watch_tree() -> None:
     )
     with pytest.raises(trace.RuntimeOpenTraceError, match="outside the watched closure"):
         trace.validate_manifest_document(document, request(VALID_WATCH_ROOTS))
+
+
+def test_manifest_accepts_readonly_process_view_outside_watch_tree() -> None:
+    loaded = trace.validate_manifest_document(
+        manifest_document(), request(VALID_WATCH_ROOTS)
+    )
+    policy = next(
+        item for item in loaded.path_access_policy if item.path == "/proc/self/exe"
+    )
+
+    assert policy.classification == "process-view"
+    assert policy.allowed_access == ("metadata", "read")
+    assert not any(
+        "/proc/self/exe" == root or "/proc/self/exe".startswith(root + "/")
+        for root in loaded.watch_roots
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/proc-like",
+        "/proc/sys/kernel/hostname",
+        "/proc/2/status",
+        "/proc/selfish/status",
+    ],
+)
+def test_manifest_rejects_process_view_outside_bound_process_paths(path: str) -> None:
+    document = manifest_document()
+    document["allowed_paths"] = sorted([*document["allowed_paths"], path])  # type: ignore[index]
+    document["path_access_policy"] = sorted(  # type: ignore[index]
+        [
+            *document["path_access_policy"],  # type: ignore[index]
+            {
+                "path": path,
+                "role": "signer",
+                "classification": "process-view",
+                "allowed_access": ["metadata", "read"],
+                "create_suffixes": [],
+                "delta_verifier": None,
+                "delta_contract_sha256": None,
+                "allow_success": True,
+                "allowed_errnos": [],
+                "failure_guard": None,
+            },
+        ],
+        key=lambda item: item["path"],
+    )
+    with pytest.raises(trace.RuntimeOpenTraceError, match="process view"):
+        trace.validate_manifest_document(document, request(VALID_WATCH_ROOTS))
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        {"allowed_access": ["metadata", "read", "write"]},
+        {"create_suffixes": ["-journal"]},
+        {"allow_success": False, "allowed_errnos": ["ENOENT"], "failure_guard": trace.WATCH_TREE_FAILURE_GUARD},
+        {"delta_verifier": trace.SQLITE_DELTA_VERIFIER, "delta_contract_sha256": "d" * 64},
+    ],
+)
+def test_manifest_rejects_unsafe_process_view_policy(mutation: dict[str, object]) -> None:
+    document = manifest_document()
+    for policy in document["path_access_policy"]:  # type: ignore[index]
+        if policy["path"] == "/proc/self/exe":
+            policy.update(mutation)
+            break
+
+    with pytest.raises(trace.RuntimeOpenTraceError, match="classification"):
+        trace.validate_manifest_document(document, request(VALID_WATCH_ROOTS))
+
+
+def test_manifest_rejects_watched_process_view() -> None:
+    watches = tuple(sorted((*VALID_WATCH_ROOTS, "/proc/self")))
+    document = manifest_document()
+    document["watch_roots"] = list(watches)
+    document["expected_watch_roots_sha256"] = hashlib.sha256(
+        trace.canonical_json(watches)
+    ).hexdigest()
+
+    with pytest.raises(trace.RuntimeOpenTraceError, match="outside the watched closure"):
+        trace.validate_manifest_document(document, request(watches))
 
 
 def test_fixed_strace_command_has_no_path_lookup_or_attach_mode(

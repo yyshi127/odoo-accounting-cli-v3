@@ -136,3 +136,12 @@ and sealed mode `0400` below the evidence-specific directory under
 `/var/lib/odoo-accounting-cli-v3/evidence-private`. A per-target seal journal
 remains until the private `MANIFEST.json` is durably published; stale staging
 recovery never turns that pending state into public success.
+
+Runtime-open path policies use four classifications. `immutable` paths must be
+inside a watched closure root and may only be read, metadata-checked, or
+executed. `mutable-state` paths are outside the watched closure and require the
+SQLite delta verifier. `unix-socket` paths are exact client endpoints. The
+`process-view` classification is reserved for successful read/metadata access
+to `/proc/self`, `/proc/@self`, or `/proc/1` paths, and must not be included in
+watch roots because those paths are dynamic process views rather than stable
+filesystem artifacts.

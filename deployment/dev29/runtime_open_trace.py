@@ -231,6 +231,7 @@ MUTABLE_ACCESS = frozenset(
     {"read", "write", "create", "truncate", "append", "delete", "metadata"}
 )
 SOCKET_ACCESS = frozenset({"unix-connect", "unix-send"})
+PROCESS_VIEW_ACCESS = frozenset({"read", "metadata"})
 SQLITE_DELTA_VERIFIER = "dev29-sqlite-state-delta-v1"
 WATCH_TREE_FAILURE_GUARD = "dev29-watch-tree-identity-v1"
 PRODUCTION_PROMOTION_ALLOWED = False
@@ -922,7 +923,8 @@ def _path_access_policies(value: Any, *, role: str) -> tuple[PathAccessPolicy, .
         failure_guard = item.get("failure_guard")
         if (
             item.get("role") != role
-            or classification not in {"immutable", "mutable-state", "unix-socket"}
+            or classification
+            not in {"immutable", "mutable-state", "unix-socket", "process-view"}
             or type(access) is not list
             or not access
             or access != sorted(set(access))
@@ -965,15 +967,29 @@ def _path_access_policies(value: Any, *, role: str) -> tuple[PathAccessPolicy, .
                 and failure_guard == (delta if errnos else None)
             )
         else:
-            valid = (
-                allowed <= SOCKET_ACCESS
-                and not suffixes
-                and delta is None
-                and delta_contract is None
-                and allow_success
-                and not errnos
-                and failure_guard is None
-            )
+            if classification == "process-view":
+                valid = (
+                    _is_process_view_path(path)
+                    and allowed <= PROCESS_VIEW_ACCESS
+                    and not suffixes
+                    and delta is None
+                    and delta_contract is None
+                    and allow_success
+                    and not errnos
+                    and failure_guard is None
+                )
+            else:
+                valid = (
+                    allowed <= SOCKET_ACCESS
+                    and not suffixes
+                    and delta is None
+                    and delta_contract is None
+                    and allow_success
+                    and not errnos
+                    and failure_guard is None
+                )
+        if classification == "process-view" and not _is_process_view_path(path):
+            raise RuntimeOpenTraceError("path access policy process view path is unsafe")
         if not valid:
             raise RuntimeOpenTraceError("path access policy classification is unsafe")
         policies.append(
@@ -994,6 +1010,11 @@ def _path_access_policies(value: Any, *, role: str) -> tuple[PathAccessPolicy, .
     if keys != sorted(set(keys)):
         raise RuntimeOpenTraceError("path access policy entries are not sorted and unique")
     return tuple(policies)
+
+
+def _is_process_view_path(path: str) -> bool:
+    roots = ("/proc/self", "/proc/@self", "/proc/1")
+    return any(path == root or path.startswith(root + "/") for root in roots)
 
 
 def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManifest:
