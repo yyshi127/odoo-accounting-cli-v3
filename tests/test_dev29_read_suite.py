@@ -69,6 +69,21 @@ def test_external_runtime_allows_only_symlink_reachable_outside_roots(
         )
 
 
+def test_source_tree_snapshot_skips_backup_directories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "v2"
+    backup = root / "backups"
+    backup.mkdir(parents=True)
+    (root / "live.py").write_text("print('live')\n", encoding="utf-8")
+    (backup / "old.py").write_text("print('backup')\n", encoding="utf-8")
+    monkeypatch.setattr(suite, "MAX_TREE_FILES", 1)
+
+    snapshot = suite._tree_snapshot(root)
+
+    assert snapshot["count"] == 1
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,

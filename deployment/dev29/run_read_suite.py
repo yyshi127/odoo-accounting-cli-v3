@@ -135,6 +135,7 @@ SKIP_DIRECTORIES = frozenset(
         "dist",
         "tmp",
         ".tox",
+        "backups",
     }
 )
 SKIP_SUFFIXES = ("~", ".bak", ".backup", ".orig", ".rej", ".pyc", ".pyo")
