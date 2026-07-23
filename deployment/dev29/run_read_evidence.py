@@ -3628,7 +3628,7 @@ def _parser() -> argparse.ArgumentParser:
     _verifier_discovery(verifier_worker)
     _lease_options(verifier_worker)
     verifier_worker.add_argument("--expected-unit", required=True)
-    verifier_worker.add_argument("--expected-wrapper-pid", required=True, type=int)
+    verifier_worker.add_argument("--expected-wrapper-pid", required=True)
     verifier_worker.add_argument("--worker-gate-fd", required=True, type=int)
     verifier_worker.add_argument("--expected-worker-script-sha256", required=True)
     for _dest, option in WORKER_PIN_OPTIONS:

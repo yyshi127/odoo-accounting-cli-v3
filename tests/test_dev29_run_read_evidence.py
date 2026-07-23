@@ -233,6 +233,31 @@ def test_verifier_fragment_action_forwards_bundle_and_fragment_options() -> None
     assert "--verifier-fragment-output" in argv
 
 
+def test_verifier_fragment_worker_keeps_wrapper_pid_as_strict_decimal() -> None:
+    parsed = runner._parser().parse_args(
+        [
+            "trace-verifier-fragment-supervise-worker",
+            *common_cli(),
+            *verifier_fragment_cli(),
+            *lease_cli(),
+            "--expected-unit",
+            "odoo-accounting-cli-v3-dev29-dev29-proof-001.service",
+            "--expected-wrapper-pid",
+            "19",
+            "--worker-gate-fd",
+            "26",
+            "--expected-worker-script-sha256",
+            "9" * 64,
+            *worker_pin_cli(),
+        ]
+    )
+
+    assert parsed.expected_wrapper_pid == "19"
+    assert runner._strict_positive_decimal(
+        parsed.expected_wrapper_pid, label="worker wrapper PID"
+    ) == 19
+
+
 def test_verifier_fragment_action_rejects_escaped_output() -> None:
     argv = ["trace-verifier-fragment", *common_cli(), *verifier_fragment_cli()]
     index = argv.index("--verifier-fragment-output")
