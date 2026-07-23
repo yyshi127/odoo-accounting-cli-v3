@@ -94,6 +94,8 @@ def _runtime(tmp_path: Path) -> tuple[WriteRuntimeConfig, WriteRuntimeSecrets]:
         auth_secret_path=tmp_path / "read-auth.hmac",
         receipt_secret_path=tmp_path / "read-receipt.hmac",
     )
+    base.gcov_state_path.mkdir(mode=0o700, exist_ok=True)
+    base.gcov_state_path.chmod(0o700)
     roles = {
         name: WriteRoleConfig(
             key_id=f"{name}-v1",
