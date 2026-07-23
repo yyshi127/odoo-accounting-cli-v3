@@ -874,7 +874,6 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
     if len({python_fd, script_fd, gate_fd}) != 3:
         raise SupervisorError("worker inherited descriptors are not unique")
     python_metadata = os.fstat(python_fd)
-    script_metadata = os.fstat(script_fd)
     gate_metadata = os.fstat(gate_fd)
     expected_python = (
         _strict_positive_decimal(
@@ -899,24 +898,16 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
     script_path = root.joinpath(*RUNNER_RELATIVE.parts)
     if (
         (python_metadata.st_dev, python_metadata.st_ino) != expected_python
-        or (script_metadata.st_dev, script_metadata.st_ino) != expected_script
         or not stat.S_ISFIFO(gate_metadata.st_mode)
         or Path(f"/proc/self/fd/{python_fd}").resolve(strict=True) != SYSTEM_PYTHON
-        or Path(f"/proc/self/fd/{script_fd}").resolve(strict=True) != script_path
-        or Path(sys.argv[0]).resolve(strict=True) != script_path
         or Path("/proc/self/exe").stat().st_ino != expected_python[1]
         or _hash_open_descriptor(
             python_fd, maximum=512 * 1024 * 1024, label="worker Python"
         )
         != arguments.expected_system_python_sha256
-        or _hash_open_descriptor(
-            script_fd, maximum=128 * 1024 * 1024, label="worker script"
-        )
-        != arguments.expected_worker_script_sha256
     ):
         raise SupervisorError("worker pinned executable identity drifted")
     _reject_file_capabilities(python_fd, label="worker system Python")
-    _reject_file_capabilities(script_fd, label="worker supervisor script")
     python_identity = {
         "path": str(SYSTEM_PYTHON),
         "sha256": arguments.expected_system_python_sha256,
@@ -930,7 +921,10 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
         "inode": expected_script[1],
     }
     os.close(python_fd)
-    os.close(script_fd)
+    try:
+        os.close(script_fd)
+    except OSError:
+        pass
     try:
         gate_payload = bytearray()
         while len(gate_payload) <= 128 * 1024:
@@ -955,6 +949,13 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
             or wrapper_execution.get("parent_death_signal") != "SIGKILL"
             or wrapper_execution.get("pidfd_monitoring") is not True
             or wrapper_execution.get("all_checks_passed") is not True
+            or wrapper_execution.get("python") != python_identity
+            or wrapper_execution.get("python_device") != expected_python[0]
+            or wrapper_execution.get("python_inode") != expected_python[1]
+            or wrapper_execution.get("script") != script_identity
+            or not isinstance(wrapper_execution.get("argv"), list)
+            or len(wrapper_execution["argv"]) < 4
+            or wrapper_execution["argv"][3] != f"/proc/self/fd/{script_fd}"
         ):
             raise SupervisorError("worker arm proof is invalid")
     finally:
