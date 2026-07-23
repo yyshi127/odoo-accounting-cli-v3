@@ -3280,7 +3280,19 @@ def _trace_verifier_fragment_supervise(arguments: argparse.Namespace) -> dict[st
             closure=active,
             timeout=600,
         )
-        suite._strict_success(process, label="independent evidence verifier")
+        if process.returncode == 0:
+            suite._strict_success(process, label="independent evidence verifier")
+            verifier_bootstrap_only = False
+        elif process.stdout or not process.stderr:
+            raise SupervisorError(
+                "independent evidence verifier did not fail closed for discovery"
+            )
+        elif b"bundle manifest" not in process.stderr:
+            raise SupervisorError(
+                "independent evidence verifier discovery failure is not bundle-bound"
+            )
+        else:
+            verifier_bootstrap_only = True
         inventory = trace_gate.inventory(
             required_targets=("independent-verifier",),
             expected_static_closure_sha256=(
@@ -3294,6 +3306,10 @@ def _trace_verifier_fragment_supervise(arguments: argparse.Namespace) -> dict[st
             ),
             scope=suite.RUNTIME_OPEN_DISCOVERY_VERIFIER_FRAGMENT_SCOPE,
         )
+        if verifier_bootstrap_only:
+            inventory["targets"][0]["expected_returncodes"] = sorted(
+                {0, int(process.returncode)}
+            )
     payload = suite.canonical_json(inventory) + b"\n"
     suite.write_private(output, payload)
     return {
@@ -3306,6 +3322,8 @@ def _trace_verifier_fragment_supervise(arguments: argparse.Namespace) -> dict[st
         "verifier_fragment": str(output),
         "verifier_fragment_sha256": hashlib.sha256(payload).hexdigest(),
         "target_count": len(inventory["targets"]),
+        "bootstrap_only": verifier_bootstrap_only,
+        "verifier_returncode": int(process.returncode),
         "candidate_is_approval": False,
         "production_promotion_allowed": False,
     }
