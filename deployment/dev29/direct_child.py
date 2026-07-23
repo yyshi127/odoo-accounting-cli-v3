@@ -112,7 +112,10 @@ def _safe_endpoint(path_text: str) -> tuple[Path, os.stat_result]:
                 raise DirectChildError("child mount endpoint has a symlink ancestor")
         metadata = path.stat()
     except OSError as exc:
-        raise DirectChildError("child mount endpoint is unavailable") from exc
+        raise DirectChildError(
+            "child mount endpoint is unavailable: "
+            f"path={path_text!r} errno={exc.errno}"
+        ) from exc
     return path, metadata
 
 

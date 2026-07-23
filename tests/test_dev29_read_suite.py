@@ -157,6 +157,14 @@ def test_direct_child_does_not_require_child_access_to_bind_source() -> None:
     assert '(item["source_device"], item["source_inode"])' in source
 
 
+def test_direct_child_mount_endpoint_failure_reports_path_and_errno() -> None:
+    source = (ROOT / "deployment" / "dev29" / "direct_child.py").read_text("utf-8")
+
+    assert "child mount endpoint is unavailable: " in source
+    assert "path={path_text!r}" in source
+    assert "errno={exc.errno}" in source
+
+
 def test_child_attestation_uses_closure_identity_external_runtime_paths() -> None:
     source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
 
