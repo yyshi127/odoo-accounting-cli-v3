@@ -2596,12 +2596,14 @@ def _outer_unit_evidence(
         dependency_mount_parent,
         auth_state_parent,
         receipt_state_parent,
+        gcov_state_parent,
         _broker_home,
         _staging_parent,
     ) = writable
     if (
         str(Path(runtime["auth_state_path"]).parent) != auth_state_parent
         or str(Path(runtime["receipt_state_path"]).parent) != receipt_state_parent
+        or str(Path(runtime["gcov_state_path"])) != gcov_state_parent
         or "/opt/odoo-accounting-cli-v3/dependencies" != dependency_mount_parent
     ):
         raise SupervisorError("outer runtime writable path contract drifted")
