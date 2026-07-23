@@ -204,6 +204,7 @@ RUNTIME_FIELDS = frozenset(
         "canonical_package_sha256",
         "auth_state_path",
         "receipt_state_path",
+        "gcov_state_path",
         "auth_key_id",
         "receipt_key_id",
         "auth_secret_path",
@@ -1202,6 +1203,9 @@ def validate_runtime(
         ),
         "receipt_state_path": (
             f"/var/lib/odoo-accounting-cli-v3/test/candidates/{release}/receipt/state.sqlite3"
+        ),
+        "gcov_state_path": (
+            f"/var/lib/odoo-accounting-cli-v3/test/candidates/{release}/gcov"
         ),
         "auth_secret_path": (
             f"/etc/odoo-accounting-cli-v3/secrets/test/candidates/{release}/auth.hmac"
