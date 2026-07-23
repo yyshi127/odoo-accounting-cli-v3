@@ -109,6 +109,24 @@ covers the suite's 31 traced children only and is not accepted by
 traced independent-verifier inventory must be added before the non-approval
 review directory can be generated.
 
+After both fragments exist, merge them into the exact full inventory with the
+same release member:
+
+```sh
+/usr/bin/python3.12 -I -S \
+  /opt/odoo-accounting-cli-v3/releases/$RELEASE/deployment/dev29/runtime_open_discovery.py \
+  --suite-fragment "$SUITE_FRAGMENT" \
+  --verifier-fragment "$VERIFIER_FRAGMENT" \
+  --output-inventory "$DISCOVERY_INVENTORY"
+```
+
+The merger refuses mismatched release, closure, watch-root, mutable-root, or
+SQLite delta-contract identities. It also refuses any suite fragment that is
+not exactly the first 31 fixed targets and any verifier fragment that is not
+exactly the final `independent-verifier` target. The merged inventory is still
+non-approval input; only the later reviewed policy-source and installed index
+can satisfy the runtime-open execution gate.
+
 The manifest directory is an external policy input reviewed by finance and
 operations. It must contain exactly the 32 fixed target manifests named
 `<target-id>.json`; each file is canonical JSON plus LF. The generator does

@@ -352,7 +352,11 @@ suite fragment, scoped as
 returns without producing a runtime-open success bundle. The fragment covers 31
 suite children; it must be combined with the separately collected
 independent-verifier trace inventory before `runtime_open_discovery.py` is
-allowed to produce its non-approval review directory.
+allowed to produce its non-approval review directory. Use the same
+`runtime_open_discovery.py` release member with `--suite-fragment`,
+`--verifier-fragment`, and `--output-inventory`; the merger refuses identity
+drift and incorrect target order, and the resulting full inventory remains
+non-approval input.
 Install the externally reviewed, release-specific policy and index only with
 `deployment/dev29/runtime_open_policy_source.py` using the canonical
 `deployment/dev29/runtime_open_policy_source.template.json`, then build the

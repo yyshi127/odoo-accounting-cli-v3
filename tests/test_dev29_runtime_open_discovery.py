@@ -216,6 +216,85 @@ def test_discovery_rejects_incomplete_target_set(tmp_path: Path) -> None:
         discovery.build_review(value, output_directory=tmp_path / "review")
 
 
+def fragments(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
+    full = inventory(tmp_path)
+    suite_fragment = json.loads(json.dumps(full))
+    verifier_fragment = json.loads(json.dumps(full))
+    expected = discovery.policy_source.expected_targets()
+    suite_fragment["scope"] = discovery.SUITE_FRAGMENT_SCOPE
+    suite_fragment["targets"] = suite_fragment["targets"][:-1]
+    assert [item["target_id"] for item in suite_fragment["targets"]] == list(
+        expected[:-1]
+    )
+    verifier_fragment["scope"] = discovery.VERIFIER_FRAGMENT_SCOPE
+    verifier_fragment["targets"] = verifier_fragment["targets"][-1:]
+    assert verifier_fragment["targets"][0]["target_id"] == expected[-1]
+    return suite_fragment, verifier_fragment
+
+
+def test_discovery_merges_suite_and_verifier_fragments(tmp_path: Path) -> None:
+    suite_fragment, verifier_fragment = fragments(tmp_path)
+    output = tmp_path / "inventory.json"
+    result = discovery.merge_fragments(
+        suite_fragment,
+        verifier_fragment,
+        output_inventory=output,
+    )
+    merged = json.loads(output.read_bytes())
+    assert result["target_count"] == 32
+    assert result["candidate_is_approval"] is False
+    assert result["production_promotion_allowed"] is False
+    assert merged["scope"] == discovery.DISCOVERY_SCOPE
+    assert tuple(item["target_id"] for item in merged["targets"]) == (
+        discovery.policy_source.expected_targets()
+    )
+    assert result["inventory_sha256"] == hashlib.sha256(
+        discovery.canonical_json(merged) + b"\n"
+    ).hexdigest()
+    with pytest.raises(FileExistsError):
+        discovery.merge_fragments(
+            suite_fragment,
+            verifier_fragment,
+            output_inventory=output,
+        )
+
+
+def test_discovery_merge_refuses_fragment_identity_drift(tmp_path: Path) -> None:
+    suite_fragment, verifier_fragment = fragments(tmp_path)
+    verifier_fragment["expected_static_closure_sha256"] = "3" * 64
+    with pytest.raises(discovery.DiscoveryError, match="one identity"):
+        discovery.merge_fragments(
+            suite_fragment,
+            verifier_fragment,
+            output_inventory=tmp_path / "inventory.json",
+        )
+
+
+def test_discovery_cli_merges_fragments(tmp_path: Path, capsys) -> None:
+    suite_fragment, verifier_fragment = fragments(tmp_path)
+    suite_path = tmp_path / "suite.json"
+    verifier_path = tmp_path / "verifier.json"
+    output = tmp_path / "inventory.json"
+    suite_path.write_bytes(discovery.canonical_json(suite_fragment) + b"\n")
+    verifier_path.write_bytes(discovery.canonical_json(verifier_fragment) + b"\n")
+    assert (
+        discovery.main(
+            [
+                "--suite-fragment",
+                str(suite_path),
+                "--verifier-fragment",
+                str(verifier_path),
+                "--output-inventory",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["inventory_path"] == str(output)
+    assert json.loads(output.read_bytes())["scope"] == discovery.DISCOVERY_SCOPE
+
+
 def test_discovery_refuses_watched_process_view(tmp_path: Path) -> None:
     value = inventory(tmp_path)
     value["watch_roots"] = sorted((*WATCH_ROOTS, "/proc/self"))

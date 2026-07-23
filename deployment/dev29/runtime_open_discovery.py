@@ -24,6 +24,12 @@ from typing import Any, Iterable, Mapping, Sequence
 sys.dont_write_bytecode = True
 
 DISCOVERY_SCOPE = "odoo-accounting-cli-v3.dev29.runtime-open-discovery.v1"
+SUITE_FRAGMENT_SCOPE = (
+    "odoo-accounting-cli-v3.dev29.runtime-open-discovery-suite-fragment.v1"
+)
+VERIFIER_FRAGMENT_SCOPE = (
+    "odoo-accounting-cli-v3.dev29.runtime-open-discovery-verifier-fragment.v1"
+)
 REVIEW_SCOPE = "odoo-accounting-cli-v3.dev29.runtime-open-discovery-review.v1"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 SAFE_NAME = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$")
@@ -109,6 +115,15 @@ def _read_trace(path: Path) -> bytes:
     return payload
 
 
+def _write_json_once(path: Path, value: Mapping[str, Any]) -> str:
+    payload = canonical_json(value) + b"\n"
+    with path.open("xb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _role_for_target(target_id: str) -> str:
     if target_id in {"witness-pre", "witness-post"} or target_id.endswith("-oracle"):
         return "postgres"
@@ -117,6 +132,111 @@ def _role_for_target(target_id: str) -> str:
     if target_id == "independent-verifier":
         return "verifier"
     return "odoo"
+
+
+def _inventory_identity(inventory: Mapping[str, Any], *, scope: str) -> dict[str, Any]:
+    if type(inventory) is not dict or set(inventory) != {
+        "schema_version",
+        "scope",
+        "release",
+        "expected_static_closure_sha256",
+        "watch_roots",
+        "mutable_roots",
+        "sqlite_delta_contract_sha256",
+        "targets",
+    }:
+        raise DiscoveryError("discovery inventory schema is invalid")
+    release = inventory.get("release")
+    static = inventory.get("expected_static_closure_sha256")
+    delta = inventory.get("sqlite_delta_contract_sha256")
+    if (
+        type(inventory.get("schema_version")) is not int
+        or inventory.get("schema_version") != 1
+        or inventory.get("scope") != scope
+        or not isinstance(release, str)
+        or SAFE_NAME.fullmatch(release) is None
+        or not isinstance(static, str)
+        or HEX64.fullmatch(static) is None
+        or not isinstance(delta, str)
+        or HEX64.fullmatch(delta) is None
+    ):
+        raise DiscoveryError("discovery inventory identity is invalid")
+    watch_roots = tuple(
+        _canonical_absolute(item, label="watch root")
+        for item in _string_tuple(inventory.get("watch_roots"), label="watch roots")
+    )
+    mutable_roots = tuple(
+        _canonical_absolute(item, label="mutable root")
+        for item in _string_tuple(
+            inventory.get("mutable_roots"), label="mutable roots", allow_empty=True
+        )
+    )
+    if (
+        tuple(sorted(set(watch_roots))) != watch_roots
+        or tuple(sorted(set(mutable_roots))) != mutable_roots
+        or any(_covered(root, watch_roots) for root in mutable_roots)
+    ):
+        raise DiscoveryError("discovery roots are not safe and deterministic")
+    targets = inventory.get("targets")
+    if type(targets) is not list:
+        raise DiscoveryError("discovery target set is invalid")
+    return {
+        "release": release,
+        "expected_static_closure_sha256": static,
+        "watch_roots": watch_roots,
+        "mutable_roots": mutable_roots,
+        "sqlite_delta_contract_sha256": delta,
+        "targets": targets,
+    }
+
+
+def _target_order(targets: Sequence[Any]) -> tuple[Any, ...]:
+    return tuple(item.get("target_id") if type(item) is dict else None for item in targets)
+
+
+def merge_fragments(
+    suite_fragment: Mapping[str, Any],
+    verifier_fragment: Mapping[str, Any],
+    *,
+    output_inventory: Path,
+) -> dict[str, Any]:
+    suite = _inventory_identity(suite_fragment, scope=SUITE_FRAGMENT_SCOPE)
+    verifier = _inventory_identity(verifier_fragment, scope=VERIFIER_FRAGMENT_SCOPE)
+    for key in (
+        "release",
+        "expected_static_closure_sha256",
+        "watch_roots",
+        "mutable_roots",
+        "sqlite_delta_contract_sha256",
+    ):
+        if suite[key] != verifier[key]:
+            raise DiscoveryError("discovery fragments do not share one identity")
+    expected = policy_source.expected_targets()
+    suite_targets = suite["targets"]
+    verifier_targets = verifier["targets"]
+    if _target_order(suite_targets) != expected[:-1]:
+        raise DiscoveryError("suite discovery fragment target order is incomplete")
+    if _target_order(verifier_targets) != (expected[-1],):
+        raise DiscoveryError("verifier discovery fragment target order is invalid")
+    inventory = {
+        "schema_version": 1,
+        "scope": DISCOVERY_SCOPE,
+        "release": suite["release"],
+        "expected_static_closure_sha256": suite["expected_static_closure_sha256"],
+        "watch_roots": list(suite["watch_roots"]),
+        "mutable_roots": list(suite["mutable_roots"]),
+        "sqlite_delta_contract_sha256": suite["sqlite_delta_contract_sha256"],
+        "targets": [*suite_targets, *verifier_targets],
+    }
+    inventory_sha256 = _write_json_once(output_inventory, inventory)
+    return {
+        "schema_version": 1,
+        "inventory_path": str(output_inventory),
+        "inventory_sha256": inventory_sha256,
+        "target_count": len(inventory["targets"]),
+        "candidate_is_approval": False,
+        "production_promotion_allowed": False,
+    }
 
 
 def _string_tuple(value: Any, *, label: str, allow_empty: bool = False) -> tuple[str, ...]:
@@ -454,18 +574,42 @@ def build_review(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--inventory", required=True, type=Path)
-    parser.add_argument("--output-directory", required=True, type=Path)
+    parser.add_argument("--inventory", type=Path)
+    parser.add_argument("--output-directory", type=Path)
+    parser.add_argument("--suite-fragment", type=Path)
+    parser.add_argument("--verifier-fragment", type=Path)
+    parser.add_argument("--output-inventory", type=Path)
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     arguments = _parser().parse_args(list(argv) if argv is not None else None)
     try:
-        result = build_review(
-            _read_json(arguments.inventory),
-            output_directory=arguments.output_directory,
-        )
+        if arguments.output_inventory is not None:
+            if (
+                arguments.inventory is not None
+                or arguments.output_directory is not None
+                or arguments.suite_fragment is None
+                or arguments.verifier_fragment is None
+            ):
+                raise DiscoveryError("discovery fragment merge arguments are invalid")
+            result = merge_fragments(
+                _read_json(arguments.suite_fragment),
+                _read_json(arguments.verifier_fragment),
+                output_inventory=arguments.output_inventory,
+            )
+        else:
+            if (
+                arguments.inventory is None
+                or arguments.output_directory is None
+                or arguments.suite_fragment is not None
+                or arguments.verifier_fragment is not None
+            ):
+                raise DiscoveryError("discovery review arguments are invalid")
+            result = build_review(
+                _read_json(arguments.inventory),
+                output_directory=arguments.output_directory,
+            )
     except (OSError, DiscoveryError) as exc:
         print(f"Dev29 runtime-open discovery refused: {exc}", file=sys.stderr)
         return 2
