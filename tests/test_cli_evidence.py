@@ -77,6 +77,42 @@ def test_evidence_read_boundary_returns_exact_release_runtime_and_evidence(
         config,
         release_digest=RELEASE_DIGEST,
         timeout_seconds=12.0,
+        launcher_diagnostics=False,
+    )
+
+
+def test_evidence_read_boundary_can_enable_hidden_launcher_diagnostics(tmp_path: Path):
+    config = runtime_config(tmp_path)
+    runner = CliRunner()
+
+    with patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_config", return_value=config
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=identity(config),
+    ), patch(
+        "odoo_accounting_cli_v3.cli._assert_runtime_release"
+    ), patch(
+        "odoo_accounting_cli_v3.cli.run_read_boundary_evidence",
+        return_value=valid_evidence(),
+    ) as collector:
+        result = runner.invoke(
+            main,
+            [
+                "evidence",
+                "read-boundary",
+                "--runtime-config",
+                str(tmp_path / "runtime.json"),
+                "--launcher-diagnostics",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    collector.assert_called_once_with(
+        config,
+        release_digest=RELEASE_DIGEST,
+        timeout_seconds=30.0,
+        launcher_diagnostics=True,
     )
 
 

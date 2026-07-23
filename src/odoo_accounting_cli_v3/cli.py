@@ -550,7 +550,17 @@ def evidence_group() -> None:
     default=30.0,
     show_default=True,
 )
-def evidence_read_boundary(runtime_config: Path, timeout_seconds: float) -> None:
+@click.option(
+    "--launcher-diagnostics",
+    is_flag=True,
+    hidden=True,
+    help="Emit Odoo launcher checkpoints and Odoo startup logs to stderr for failed evidence triage.",
+)
+def evidence_read_boundary(
+    runtime_config: Path,
+    timeout_seconds: float,
+    launcher_diagnostics: bool,
+) -> None:
     """Prove the Odoo shell PostgreSQL rollback-only boundary."""
 
     command = "evidence.read-boundary"
@@ -579,6 +589,7 @@ def evidence_read_boundary(runtime_config: Path, timeout_seconds: float) -> None
             config,
             release_digest=identity["manifest_sha256"],
             timeout_seconds=timeout_seconds,
+            launcher_diagnostics=launcher_diagnostics,
         )
     except OdooRunnerError as exc:
         raise CliFailure(

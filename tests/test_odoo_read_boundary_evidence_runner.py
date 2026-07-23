@@ -186,10 +186,45 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
     assert "shell" not in observed_argv
     assert "traceback.print_exc(file=sys.stderr)" in observed_argv[2]
     assert "sys.modules['_rjsmin'] = None" in observed_argv[2]
+    assert "__OACV3_LAUNCHER_CHECKPOINT__" not in observed_argv[2]
+    assert "--logfile=/proc/self/fd/2" not in observed_argv[2]
     assert "Registry.new" in observed_argv[2]
     assert "update_module=False" in observed_argv[2]
     assert "odoo_loading.reset_modules_state = _odoo_accounting_cli_v3_noop_reset_modules_state" in observed_argv[2]
     assert not any("auth" in key or "receipt" in key or "state" in key for key in observed_payload)
+
+
+def test_runner_can_emit_launcher_diagnostics_when_requested(tmp_path: Path):
+    config = runtime_config(tmp_path)
+    observed_argv: list[str] = []
+
+    def child_process(argv, *, source, payload_fd, **_kwargs):
+        observed_argv[:] = list(argv)
+        marker = source.rsplit("_evidence_child_main(env, ", 1)[1].split(", ", 1)[1]
+        marker = marker.split(")", 1)[0].strip().strip("'\"")
+        stdout = marker + canonical_json(response(config)).decode("utf-8") + "\n"
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    with patch(
+        "odoo_accounting_cli_v3.odoo.runner._validate_canonical_package_binding"
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner._verify_child_release"
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner._validate_runtime_execution_paths"
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner._run_child_process",
+        side_effect=child_process,
+    ):
+        result = run_read_boundary_evidence(
+            config,
+            release_digest=RELEASE_DIGEST,
+            launcher_diagnostics=True,
+        )
+
+    assert result == valid_evidence()
+    assert "__OACV3_LAUNCHER_CHECKPOINT__" in observed_argv[2]
+    assert "--logfile=/proc/self/fd/2" in observed_argv[2]
+    assert "_oacv3_checkpoint('before_registry_new')" in observed_argv[2]
 
 
 def test_runner_rejects_response_runtime_mismatch(tmp_path: Path):

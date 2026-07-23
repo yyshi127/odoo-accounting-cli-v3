@@ -971,38 +971,55 @@ def _evidence_child_source(
     )
 
 
-def _odoo_env_stdin_launcher(config: RuntimeConfig) -> str:
+def _odoo_env_stdin_launcher(config: RuntimeConfig, *, diagnostics: bool = False) -> str:
     """Build a fixed Python launcher that creates an Odoo env without shell preload writes."""
 
     odoo_root = str(config.odoo_bin.parent)
     config_path = str(config.odoo_config)
     database_name = config.database_name
+    log_file = "/proc/self/fd/2" if diagnostics else "/dev/null"
+    checkpoint = (
+        "    def _oacv3_checkpoint(label):\n"
+        "        sys.stderr.write('__OACV3_LAUNCHER_CHECKPOINT__:' + label + '\\n')\n"
+        "        sys.stderr.flush()\n"
+        if diagnostics
+        else "    def _oacv3_checkpoint(label):\n"
+        "        return None\n"
+    )
     return (
         "import sys, threading, traceback\n"
         f"sys.path.insert(0, {odoo_root!r})\n"
         "sys.modules['_rjsmin'] = None\n"
         "try:\n"
+        f"{checkpoint}"
+        "    _oacv3_checkpoint('before_import_odoo')\n"
         "    import odoo\n"
         "    from odoo import api\n"
         "    from odoo.modules import loading as odoo_loading\n"
         "    from odoo.modules.registry import Registry\n"
         "    from odoo.tools import config as odoo_config\n"
+        "    _oacv3_checkpoint('after_import_odoo')\n"
         "    def _odoo_accounting_cli_v3_noop_reset_modules_state(db_name):\n"
         "        return None\n"
         "    odoo_loading.reset_modules_state = _odoo_accounting_cli_v3_noop_reset_modules_state\n"
         f"    odoo_config.parser.prog = {str(config.odoo_bin)!r}\n"
         "    odoo_config.parse_config("
-        f"{['-c', config_path, '-d', database_name, '--no-http', '--logfile=/dev/null']!r}, "
+        f"{['-c', config_path, '-d', database_name, '--no-http', f'--logfile={log_file}']!r}, "
         "setup_logging=True)\n"
         f"    threading.current_thread().dbname = {database_name!r}\n"
+        "    _oacv3_checkpoint('before_registry_new')\n"
         f"    registry = Registry.new({database_name!r}, update_module=False)\n"
+        "    _oacv3_checkpoint('after_registry_new')\n"
         "    with registry.cursor() as cr:\n"
+        "        _oacv3_checkpoint('after_registry_cursor')\n"
         "        uid = api.SUPERUSER_ID\n"
         "        ctx = api.Environment(cr, uid, {})['res.users'].context_get()\n"
         "        env = api.Environment(cr, uid, ctx)\n"
         "        cr.rollback()\n"
         "        namespace = {'__name__': '__main__', 'env': env}\n"
+        "        _oacv3_checkpoint('before_stdin_exec')\n"
         "        exec(compile(sys.stdin.read(), '<odoo-accounting-cli-v3-stdin>', 'exec'), namespace, namespace)\n"
+        "        _oacv3_checkpoint('after_stdin_exec')\n"
         "        cr.rollback()\n"
         "except BaseException:\n"
         "    traceback.print_exc(file=sys.stderr)\n"
@@ -1564,6 +1581,7 @@ def run_read_boundary_evidence(
     *,
     release_digest: str,
     timeout_seconds: float = 30.0,
+    launcher_diagnostics: bool = False,
 ) -> dict[str, Any]:
     """Collect rollback-only evidence without loading auth or receipt state."""
 
@@ -1582,6 +1600,8 @@ def run_read_boundary_evidence(
         raise OdooRunnerError(
             f"timeout_seconds must be positive and no greater than {MAX_TIMEOUT_SECONDS:g}"
         )
+    if not isinstance(launcher_diagnostics, bool):
+        raise OdooRunnerError("launcher_diagnostics must be a boolean")
     _validate_canonical_package_binding(config)
     _verify_child_release(
         config.release_root,
@@ -1606,7 +1626,7 @@ def run_read_boundary_evidence(
     argv = [
         str(config.odoo_python),
         "-c",
-        _odoo_env_stdin_launcher(config),
+        _odoo_env_stdin_launcher(config, diagnostics=launcher_diagnostics),
     ]
     with _private_payload_fd(payload) as payload_fd:
         completed = _run_child_process(
