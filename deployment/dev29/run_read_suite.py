@@ -916,7 +916,10 @@ class RuntimeTraceGate:
         with self.module.validate_strace_tool(
             self.index["expected_strace_sha256"]
         ) as trusted_strace:
-            with self.module.PrivateTraceStaging(target_id) as staging:
+            with self.module.PrivateTraceStaging(
+                target_id,
+                parent=self.private_sidecar / ".trace-staging",
+            ) as staging:
                 with self.module.RuntimeEnvironmentGuard(manifest) as guard:
                     try:
                         process = self.module.launch_traced_process(
@@ -1330,7 +1333,10 @@ class RuntimeTraceDiscoveryGate:
         manifest = self._manifest(target_id, bootstrap, final)
         process: subprocess.Popen[bytes] | None = None
         with self.module.validate_strace_tool(self.expected_strace_sha256) as trusted:
-            with self.module.PrivateTraceStaging(target_id) as staging:
+            with self.module.PrivateTraceStaging(
+                target_id,
+                parent=self.private_sidecar / ".trace-staging",
+            ) as staging:
                 try:
                     launch = self.module.build_strace_launch(
                         staging.path,
@@ -5732,11 +5738,16 @@ def run_suite(
     if os.path.lexists(private_sidecar):
         raise ReadSuiteError("private runtime-open evidence sidecar already exists")
     os.mkdir(private_sidecar, 0o700)
+    os.mkdir(private_sidecar / ".trace-staging", 0o700)
     sidecar_metadata = private_sidecar.lstat()
+    trace_staging_metadata = (private_sidecar / ".trace-staging").lstat()
     if (
         not stat.S_ISDIR(sidecar_metadata.st_mode)
         or stat.S_IMODE(sidecar_metadata.st_mode) != 0o700
         or (sidecar_metadata.st_uid, sidecar_metadata.st_gid) != (0, 0)
+        or not stat.S_ISDIR(trace_staging_metadata.st_mode)
+        or stat.S_IMODE(trace_staging_metadata.st_mode) != 0o700
+        or (trace_staging_metadata.st_uid, trace_staging_metadata.st_gid) != (0, 0)
     ):
         raise ReadSuiteError("private runtime-open evidence sidecar is unsafe")
     discovery_mode = runtime_open_discovery_inventory is not None

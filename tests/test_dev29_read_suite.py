@@ -172,6 +172,13 @@ def test_child_credential_uid_gid_status_whitespace_is_normalized() -> None:
     assert "comparable_credentials != expected_credentials" in source
 
 
+def test_runtime_open_traces_stage_under_private_sidecar() -> None:
+    source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
+
+    assert 'private_sidecar / ".trace-staging"' in source
+    assert "parent=self.private_sidecar / \".trace-staging\"" in source
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,

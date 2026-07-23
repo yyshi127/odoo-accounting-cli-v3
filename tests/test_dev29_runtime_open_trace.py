@@ -938,6 +938,19 @@ def test_private_trace_seal_preserves_inode_and_raw_bytes(
     assert (sidecar / ".target.seal.json").is_file()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process identity")
+def test_private_trace_staging_accepts_custom_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(trace, "_proc_starttime", lambda _pid: 123)
+
+    staging = trace.PrivateTraceStaging("target", parent=tmp_path)
+
+    assert staging.staging_parent == tmp_path
+    assert staging.directory.parent == tmp_path
+    assert staging.directory.name.startswith(".target.")
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX device identities")
 def test_private_trace_seal_rejects_cross_filesystem_destination(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

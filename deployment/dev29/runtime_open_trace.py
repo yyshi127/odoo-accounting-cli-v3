@@ -2537,15 +2537,19 @@ def recover_stale_private_staging(
 class PrivateTraceStaging:
     """Root-only O_EXCL/0600 staging sealed as mode-0400 audit evidence."""
 
-    def __init__(self, run_id: str) -> None:
+    def __init__(self, run_id: str, *, parent: Path = STAGING_PARENT) -> None:
         if not isinstance(run_id, str) or NAME.fullmatch(run_id) is None:
             raise RuntimeOpenTraceError("runtime trace run id is invalid")
+        parent = Path(parent)
+        if not parent.is_absolute():
+            raise RuntimeOpenTraceError("private trace staging parent is invalid")
         self.run_id = run_id
         pid = os.getpid()
         starttime = _proc_starttime(pid) if os.name == "posix" else None
         if starttime is None:
             raise RuntimeOpenTraceError("runtime trace supervisor identity is unavailable")
-        self.directory = STAGING_PARENT / _staging_name(run_id, pid, starttime)
+        self.staging_parent = parent
+        self.directory = parent / _staging_name(run_id, pid, starttime)
         self.path = self.directory / "trace.log"
         self.lease_path = self.directory / "lease.json"
         self._directory_fd: int | None = None
@@ -2557,11 +2561,15 @@ class PrivateTraceStaging:
     def __enter__(self) -> "PrivateTraceStaging":
         if os.name != "posix" or os.geteuid() != 0:
             raise RuntimeOpenTraceError("private trace staging requires the Linux root supervisor")
-        _validate_root_chain(STAGING_PARENT)
-        parent = STAGING_PARENT.lstat()
-        if stat.S_IMODE(parent.st_mode) != 0o700:
+        _validate_root_chain(self.staging_parent)
+        parent = self.staging_parent.lstat()
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or (parent.st_uid, parent.st_gid) != (0, 0)
+            or stat.S_IMODE(parent.st_mode) != 0o700
+        ):
             raise RuntimeOpenTraceError("private trace staging parent is not mode 0700")
-        recover_stale_private_staging(parent=STAGING_PARENT)
+        recover_stale_private_staging(parent=self.staging_parent)
         try:
             os.mkdir(self.directory, 0o700)
             directory_fd = os.open(
