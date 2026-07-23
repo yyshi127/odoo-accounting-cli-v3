@@ -233,7 +233,7 @@ def test_verifier_fragment_action_forwards_bundle_and_fragment_options() -> None
     assert "--verifier-fragment-output" in argv
 
 
-def test_verifier_fragment_worker_keeps_wrapper_pid_as_strict_decimal() -> None:
+def test_verifier_fragment_worker_keeps_gate_values_as_strict_decimals() -> None:
     parsed = runner._parser().parse_args(
         [
             "trace-verifier-fragment-supervise-worker",
@@ -253,9 +253,11 @@ def test_verifier_fragment_worker_keeps_wrapper_pid_as_strict_decimal() -> None:
     )
 
     assert parsed.expected_wrapper_pid == "19"
+    assert parsed.worker_gate_fd == "26"
     assert runner._strict_positive_decimal(
         parsed.expected_wrapper_pid, label="worker wrapper PID"
     ) == 19
+    assert runner._strict_positive_decimal(parsed.worker_gate_fd, label="worker gate") == 26
 
 
 def test_verifier_fragment_action_rejects_escaped_output() -> None:
