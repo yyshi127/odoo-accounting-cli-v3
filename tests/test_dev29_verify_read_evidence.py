@@ -488,7 +488,7 @@ def test_independent_verifier_requeries_live_systemd_properties(
         "/var/lib/odoo-accounting-cli-v3/evidence-private",
         "/var/lib/odoo-accounting-cli-v3/runtime-open-trace",
         "/var/lib/odoo-accounting-cli-v3/evidence-anchors",
-        f"/opt/odoo-accounting-cli-v3/dependencies/{RELEASE}",
+        "/opt/odoo-accounting-cli-v3/dependencies",
         str(Path(runtime["auth_state_path"]).parent),
         str(Path(runtime["receipt_state_path"]).parent),
         "/var/lib/odoo-accounting-cli-v3-broker",

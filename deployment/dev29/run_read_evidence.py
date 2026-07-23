@@ -1801,7 +1801,7 @@ def _outer_writable_paths(release: str) -> list[str]:
         str(PRIVATE_EVIDENCE_PARENT),
         str(RUNTIME_TRACE_STAGING_PARENT),
         str(ANCHOR_PARENT),
-        f"/opt/odoo-accounting-cli-v3/dependencies/{release}",
+        "/opt/odoo-accounting-cli-v3/dependencies",
         str(test_candidate / "auth"),
         str(test_candidate / "receipt"),
         str(BROKER_HOME),
@@ -2592,7 +2592,7 @@ def _outer_unit_evidence(
         _private_evidence_parent,
         _runtime_trace_staging_parent,
         _anchor_parent,
-        dependency_mount_point,
+        dependency_mount_parent,
         auth_state_parent,
         receipt_state_parent,
         _broker_home,
@@ -2601,8 +2601,7 @@ def _outer_unit_evidence(
     if (
         str(Path(runtime["auth_state_path"]).parent) != auth_state_parent
         or str(Path(runtime["receipt_state_path"]).parent) != receipt_state_parent
-        or f"/opt/odoo-accounting-cli-v3/dependencies/{arguments.expected_release}"
-        != dependency_mount_point
+        or "/opt/odoo-accounting-cli-v3/dependencies" != dependency_mount_parent
     ):
         raise SupervisorError("outer runtime writable path contract drifted")
     static = {
@@ -3400,7 +3399,7 @@ def _launch_guardian(
         PRIVATE_EVIDENCE_PARENT,
         RUNTIME_TRACE_STAGING_PARENT,
         ANCHOR_PARENT,
-        dependency_mount_point,
+        dependency_mount_point.parent,
         auth_state_parent,
         receipt_state_parent,
         BROKER_HOME,
@@ -3418,7 +3417,7 @@ def _launch_guardian(
         PRIVATE_EVIDENCE_PARENT: (0, 0, 0o700),
         RUNTIME_TRACE_STAGING_PARENT: (0, 0, 0o700),
         ANCHOR_PARENT: (0, 0, 0o755),
-        dependency_mount_point: (0, odoo_group.gr_gid, 0o750),
+        dependency_mount_point.parent: (0, odoo_group.gr_gid, 0o750),
         auth_state_parent: (odoo.pw_uid, odoo_group.gr_gid, 0o700),
         receipt_state_parent: (odoo.pw_uid, odoo_group.gr_gid, 0o700),
         BROKER_HOME: (odoo.pw_uid, odoo_group.gr_gid, 0o700),

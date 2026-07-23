@@ -4440,7 +4440,7 @@ def validate_outer_unit(
         "/var/lib/odoo-accounting-cli-v3/evidence-private",
         "/var/lib/odoo-accounting-cli-v3/runtime-open-trace",
         "/var/lib/odoo-accounting-cli-v3/evidence-anchors",
-        f"/opt/odoo-accounting-cli-v3/dependencies/{release}",
+        "/opt/odoo-accounting-cli-v3/dependencies",
         str(Path(runtime["auth_state_path"]).parent),
         str(Path(runtime["receipt_state_path"]).parent),
         "/var/lib/odoo-accounting-cli-v3-broker",
