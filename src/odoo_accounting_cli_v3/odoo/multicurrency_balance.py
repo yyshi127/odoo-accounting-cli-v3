@@ -18,6 +18,10 @@ from ..domain.multicurrency_balance import (
 )
 
 
+def _is_odoo_access_error(exc: BaseException) -> bool:
+    return exc.__class__.__name__ == "AccessError"
+
+
 class OdooMulticurrencyBalanceBackend:
     def __init__(self, env: Any, *, user_id: int, allowed_company_ids: frozenset[int]) -> None:
         self._env = env
@@ -34,11 +38,16 @@ class OdooMulticurrencyBalanceBackend:
             raise MulticurrencyBalanceError(
                 "company is outside the authenticated allowed companies"
             )
-        company = self._env["res.company"].browse(company_id).exists()
-        if not company or len(company) != 1:
-            raise MulticurrencyBalanceError("company does not exist or is not visible")
-        company.check_access_rights("read")
-        company.check_access_rule("read")
+        try:
+            company = self._env["res.company"].browse(company_id).exists()
+            if not company or len(company) != 1:
+                raise MulticurrencyBalanceError("company does not exist or is not visible")
+            company.check_access_rights("read")
+            company.check_access_rule("read")
+        except Exception as exc:
+            if _is_odoo_access_error(exc):
+                raise MulticurrencyBalanceError("company does not exist or is not visible") from exc
+            raise
         return company
 
     def assert_read_access(self, *, company_id: int) -> None:

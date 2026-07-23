@@ -10,6 +10,10 @@ from odoo_accounting_cli_v3.odoo.multicurrency_balance import (
 )
 
 
+class AccessError(Exception):
+    pass
+
+
 class Record:
     def exists(self):
         return self
@@ -303,6 +307,15 @@ class OdooMulticurrencyBalanceBackendTest(unittest.TestCase):
             self.assertIn({"allowed_company_ids": [9]}, model.contexts)
             self.assertGreaterEqual(len(model.company_ids), 1)
             self.assertEqual(set(model.company_ids), {9})
+
+    def test_company_access_error_is_reported_as_company_visibility(self):
+        env, backend = self.backend()
+        env.company.check_access_rule = lambda _operation: (_ for _ in ()).throw(
+            AccessError("hidden company")
+        )
+
+        with self.assertRaisesRegex(MulticurrencyBalanceError, "company does not exist"):
+            backend.assert_read_access(company_id=9)
 
     def test_company_specific_cutoff_rate_precedes_global_and_records_direction(self):
         env = Environment(specific_rate=True, global_rate=True)

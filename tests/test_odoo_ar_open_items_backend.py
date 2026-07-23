@@ -2,8 +2,13 @@ import unittest
 from datetime import date
 from decimal import Decimal
 
+from odoo_accounting_cli_v3.domain.ar_open_items import OpenItemsError
 from odoo_accounting_cli_v3.odoo.ar_open_items import OdooArOpenItemsBackend
 from odoo_accounting_cli_v3.odoo.ap_open_items import OdooApOpenItemsBackend
+
+
+class AccessError(Exception):
+    pass
 
 
 class Record:
@@ -288,6 +293,14 @@ class OdooArOpenItemsBackendTest(unittest.TestCase):
 
         self.env.su = True
         with self.assertRaisesRegex(ValueError, "non-superuser"):
+            self.backend.assert_read_access(company_id=7)
+
+    def test_company_access_error_is_reported_as_company_visibility(self):
+        self.env.company.check_access_rule = lambda _operation: (_ for _ in ()).throw(
+            AccessError("hidden company")
+        )
+
+        with self.assertRaisesRegex(OpenItemsError, "company does not exist"):
             self.backend.assert_read_access(company_id=7)
 
 

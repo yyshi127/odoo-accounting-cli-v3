@@ -14,6 +14,10 @@ from ..domain.ar_open_items import (
 )
 
 
+def _is_odoo_access_error(exc: BaseException) -> bool:
+    return exc.__class__.__name__ == "AccessError"
+
+
 class OdooArOpenItemsBackend:
     ACCOUNT_TYPE = "asset_receivable"
 
@@ -30,11 +34,16 @@ class OdooArOpenItemsBackend:
     def _company(self, company_id: int) -> Any:
         if company_id not in self._allowed_company_ids:
             raise OpenItemsError("company is outside the authenticated allowed companies")
-        company = self._env["res.company"].browse(company_id).exists()
-        if not company or len(company) != 1:
-            raise OpenItemsError("company does not exist or is not visible")
-        company.check_access_rights("read")
-        company.check_access_rule("read")
+        try:
+            company = self._env["res.company"].browse(company_id).exists()
+            if not company or len(company) != 1:
+                raise OpenItemsError("company does not exist or is not visible")
+            company.check_access_rights("read")
+            company.check_access_rule("read")
+        except Exception as exc:
+            if _is_odoo_access_error(exc):
+                raise OpenItemsError("company does not exist or is not visible") from exc
+            raise
         return company
 
     def assert_read_access(self, *, company_id: int) -> None:
