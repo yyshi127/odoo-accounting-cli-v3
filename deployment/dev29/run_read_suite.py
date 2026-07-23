@@ -389,8 +389,17 @@ def stable_read(
     expected_uid: int | None = None,
     expected_gid: int | None = None,
     allowed_modes: frozenset[int] | None = None,
+    allow_path_symlink: bool = False,
 ) -> bytes:
     path = Path(path)
+    original_path = path
+    link_before: os.stat_result | None = None
+    if allow_path_symlink:
+        try:
+            link_before = path.lstat()
+            path = path.resolve(strict=True)
+        except OSError as exc:
+            raise ReadSuiteError(f"{label} symlink cannot be resolved safely") from exc
     flags = (
         os.O_RDONLY
         | getattr(os, "O_BINARY", 0)
@@ -414,6 +423,13 @@ def stable_read(
             or (allowed_modes is not None and mode not in allowed_modes)
         ):
             raise ReadSuiteError(f"{label} metadata is invalid")
+        if link_before is not None:
+            try:
+                link_after = original_path.lstat()
+            except OSError as exc:
+                raise ReadSuiteError(f"{label} symlink cannot be rechecked") from exc
+            if _fingerprint(link_before) != _fingerprint(link_after):
+                raise ReadSuiteError(f"{label} symlink drifted during read")
         identity = _fingerprint(before)
         remaining = before.st_size
         chunks: list[bytes] = []
@@ -1908,6 +1924,7 @@ def load_runtime(
             label=f"fixed runtime dependency {path_field}",
             maximum=MAX_RELEASE_FILE_BYTES,
             allow_empty=False,
+            allow_path_symlink=path_field == "odoo_python",
         )
         if hashlib.sha256(payload).hexdigest() != runtime[digest_field]:
             raise ReadSuiteError(f"fixed runtime dependency drifted: {path_field}")
