@@ -383,6 +383,13 @@ def _amount(value: Any, increment: Any) -> str:
     return f"{rounded:.{places}f}"
 
 
+def _rounding_text(value: Any) -> str:
+    rounding = _decimal(value, "currency rounding")
+    if rounding <= 0:
+        raise OracleInputError("currency rounding is not positive")
+    return format(rounding.normalize(), "f")
+
+
 def _rate(value: Any) -> str:
     result = _decimal(value, "rate")
     if result <= 0:
@@ -449,7 +456,7 @@ def build_trial_balance(
         "currency": {
             "id": int(currency["id"]), "name": str(currency["name"]),
             "symbol": str(currency["symbol"] or currency["name"]),
-            "rounding": format(rounding, "f"),
+            "rounding": _rounding_text(rounding),
         },
     }
     return result, {
@@ -608,7 +615,7 @@ def build_open_items(
         "company_currency": {
             "id": int(company_currency["id"]), "name": str(company_currency["name"]),
             "symbol": str(company_currency["symbol"] or company_currency["name"]),
-            "rounding": format(company_rounding, "f"),
+            "rounding": _rounding_text(company_rounding),
         },
     }
     historical_fields = AR_HISTORICAL_FIELDS if kind == "ar" else AP_HISTORICAL_FIELDS
@@ -1250,7 +1257,7 @@ def build_multicurrency(
         currency_summaries.append({
             "currency_id": currency_id, "currency_name": currency["name"],
             "currency_symbol": currency["symbol"],
-            "currency_rounding": format(currency["rounding"], "f"),
+            "currency_rounding": _rounding_text(currency["rounding"]),
             "ledger_company_balance": _amount(
                 sum((item["company_balance"] for item in selected), Decimal("0")),
                 company_rounding,
@@ -1329,7 +1336,7 @@ def build_multicurrency(
         "company_currency": {
             "id": company_id, "name": str(company_currency["name"]),
             "symbol": str(company_currency["symbol"] or company_currency["name"]),
-            "rounding": format(company_rounding, "f"),
+            "rounding": _rounding_text(company_rounding),
         },
     }
     historical_balances = [

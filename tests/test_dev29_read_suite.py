@@ -33,6 +33,15 @@ runtime_trace = importlib.util.module_from_spec(TRACE_SPEC)
 sys.modules[TRACE_SPEC.name] = runtime_trace
 TRACE_SPEC.loader.exec_module(runtime_trace)
 
+ORACLE_PATH = ROOT / "deployment" / "dev29" / "read_oracles.py"
+ORACLE_SPEC = importlib.util.spec_from_file_location(
+    "dev29_read_oracles_for_suite", ORACLE_PATH
+)
+assert ORACLE_SPEC is not None and ORACLE_SPEC.loader is not None
+read_oracles = importlib.util.module_from_spec(ORACLE_SPEC)
+sys.modules[ORACLE_SPEC.name] = read_oracles
+ORACLE_SPEC.loader.exec_module(read_oracles)
+
 VERSION = "0.1.0.dev29"
 COMMIT = "a1234567890bcdef1234567890abcdef12345678"
 RELEASE = f"{VERSION}-{COMMIT[:12]}"
@@ -1088,6 +1097,12 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
 
 def test_oracle_staging_uses_outer_readwrite_run_directory() -> None:
     assert suite.ORACLE_STAGING_PARENT == Path("/run/odoo-accounting-cli-v3-dev29")
+
+
+def test_read_oracle_currency_rounding_uses_canonical_decimal_text() -> None:
+    assert read_oracles._rounding_text("0.010000") == "0.01"
+    assert read_oracles._rounding_text("1.000000") == "1"
+    assert read_oracles._rounding_text("0.000001") == "0.000001"
 
 
 def test_sandbox_profile_forbids_nested_systemd_and_has_exact_role_accounts():
