@@ -5926,6 +5926,7 @@ def run_suite(
                 str(configured_runtime),
                 "--timeout-seconds",
                 "120",
+                "--launcher-diagnostics",
             ],
             trace_target_id="boundary-probe",
             trace_gate=trace_gate,
