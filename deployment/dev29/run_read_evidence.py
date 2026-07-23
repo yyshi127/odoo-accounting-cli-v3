@@ -2645,13 +2645,21 @@ def _outer_unit_evidence(
         worker_lease_fds = _process_fd_matches(
             worker_pid, device=lease["device"], inode=lease["inode"]
         )
+        wrapper_has_worker_pidfd = _process_has_pidfd_for(wrapper_pid, worker_pid)
+        parent_death_signal = _parent_death_signal()
         if (
             len(wrapper_lease_fds) != 1
             or worker_lease_fds
-            or not _process_has_pidfd_for(wrapper_pid, worker_pid)
-            or _parent_death_signal() != SIGKILL
+            or not wrapper_has_worker_pidfd
+            or parent_death_signal != SIGKILL
         ):
-            raise SupervisorError("outer transient unit lease monitor is invalid")
+            raise SupervisorError(
+                "outer transient unit lease monitor is invalid "
+                f"(wrapper_lease_fds={wrapper_lease_fds}, "
+                f"worker_lease_fds={worker_lease_fds}, "
+                f"wrapper_has_worker_pidfd={wrapper_has_worker_pidfd}, "
+                f"parent_death_signal={parent_death_signal})"
+            )
     finally:
         os.close(lease_fd)
     wrapper_cgroup_rows = Path(f"/proc/{wrapper_pid}/cgroup").read_text("ascii").splitlines()
