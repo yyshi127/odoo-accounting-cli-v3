@@ -4679,7 +4679,9 @@ def verify(
         canonical_sha256(payload_manifest) != closure["payload_manifest_sha256"]
         or len(payload_manifest["entries"]) != closure["payload_entry_count"]
         or _module_payload_mapping(
-            payload_manifest, closure["installed_modules"]["mapping"]
+            payload_manifest,
+            closure["installed_modules"]["mapping"],
+            import_only_mapping=closure["import_only_addons"]["mapping"],
         )
         != closure["installed_modules"]["payload_mapping"]
     ):
