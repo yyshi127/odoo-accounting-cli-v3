@@ -404,6 +404,24 @@ def _manifest_from_entry(
             role=role,
             release_root=release_root,
         )
+        manifest_final = final
+        manifest_bootstrap = template
+        if (
+            target_id == "independent-verifier"
+            and "--expected-bundle-manifest-sha256" in final
+        ):
+            manifest_final = runtime_trace.verifier_final_argv_template(final)
+            marker = runtime_trace.VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+            if (
+                len(manifest_final) != len(final)
+                or len(manifest_bootstrap) != len(template)
+            ):
+                raise DiscoveryError("verifier discovery argv template is invalid")
+            approved_template = (*template[: -len(final)], *manifest_final)
+            manifest_bootstrap = tuple(
+                marker if approved == marker else value
+                for value, approved in zip(template, approved_template)
+            )
     except runtime_trace.RuntimeOpenTraceError as exc:
         raise DiscoveryError("discovery bootstrap argv cannot be templated") from exc
     access_by_path = {path: access for path, access in parsed.accesses}
@@ -431,8 +449,8 @@ def _manifest_from_entry(
         "role": role,
         "working_directory": working_directory,
         "environment": environment,
-        "bootstrap_argv": list(template),
-        "final_argv": list(final),
+        "bootstrap_argv": list(manifest_bootstrap),
+        "final_argv": list(manifest_final),
         "allowed_paths": list(parsed.paths),
         "path_access_policy": policies,
         "watch_roots": list(watch_roots),

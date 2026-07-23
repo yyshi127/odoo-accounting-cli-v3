@@ -156,7 +156,9 @@ def expected_paths() -> tuple[str, ...]:
     )
 
 
-def policies(allowed: tuple[str, ...]) -> tuple[trace.PathAccessPolicy, ...]:
+def policies(
+    allowed: tuple[str, ...], *, role: str = "signer"
+) -> tuple[trace.PathAccessPolicy, ...]:
     result = []
     for path in allowed:
         socket = path.startswith("/var/run/postgresql/")
@@ -164,7 +166,7 @@ def policies(allowed: tuple[str, ...]) -> tuple[trace.PathAccessPolicy, ...]:
         result.append(
             trace.PathAccessPolicy(
                 path=path,
-                role="signer",
+                role=role,
                 classification=(
                     "unix-socket"
                     if socket
@@ -666,6 +668,147 @@ def test_approved_bootstrap_template_reuses_policy_across_dynamic_namespaces() -
     assert trace.validate_trace_bytes(
         raw_trace(), template, expected_leader_pid=410
     ).trace_sha256 == hashlib.sha256(raw_trace()).hexdigest()
+
+
+def test_verifier_template_allows_only_bundle_manifest_digest_to_vary() -> None:
+    bundle_a = "1" * 64
+    bundle_b = "2" * 64
+    verifier_final = (
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        f"{RELEASE_ROOT}/deployment/dev29/verify_read_evidence.py",
+        "--validate-only",
+        "--evidence-dir",
+        "/var/lib/odoo-accounting-cli-v3/evidence/dev29-proof-001",
+        "--expected-bundle-manifest-sha256",
+        bundle_a,
+        "--expected-release",
+        RELEASE,
+        "--expected-version",
+        "0.1.0.dev29",
+        "--expected-commit",
+        "a1234567890b1234567890b1234567890b123456",
+        "--expected-manifest-sha256",
+        "3" * 64,
+        "--expected-package-sha256",
+        "4" * 64,
+        "--expected-closure-anchor-sha256",
+        "5" * 64,
+        "--expected-closure-image-sha256",
+        "6" * 64,
+        "--expected-system-python-sha256",
+        "7" * 64,
+        "--expected-ld-so-preload-sha256",
+        "8" * 64,
+        "--expected-ldconfig-sha256",
+        "9" * 64,
+        "--expected-runtime-open-index-sha256",
+        "a" * 64,
+        "--expected-strace-sha256",
+        "b" * 64,
+    )
+    verifier_bootstrap = (
+        "/usr/bin/python3.12",
+        "-I",
+        "-S",
+        f"{RELEASE_ROOT}/deployment/dev29/direct_child.py",
+        "--role",
+        "verifier",
+        "--attestation-fd",
+        "7",
+        "--expected-uid",
+        "0",
+        "--expected-gid",
+        "0",
+        "--expected-python",
+        "/usr/bin/python3.12",
+        "--expected-venv-root",
+        "/opt/odoo-accounting-cli-v3/dependencies/odoo19-venv",
+        "--release-root",
+        RELEASE_ROOT,
+        "--expected-self-namespace-device",
+        "4",
+        "--expected-self-namespace-inode",
+        "100",
+        "--expected-host-namespace-device",
+        "4",
+        "--expected-host-namespace-inode",
+        "200",
+        "--expected-loop-device",
+        "/dev/loop7",
+        "--expected-mount-json",
+        MOUNTS[0],
+        "--expected-mount-json",
+        MOUNTS[1],
+        "--expected-mount-json",
+        MOUNTS[2],
+        "--expected-mount-json",
+        MOUNTS[3],
+        "--expected-mount-json",
+        MOUNTS[4],
+        "--",
+        *verifier_final,
+    )
+    final_template = trace.verifier_final_argv_template(verifier_final)
+    bootstrap_template = trace.dynamic_bootstrap_template(
+        verifier_bootstrap,
+        verifier_final,
+        role="verifier",
+        release_root=RELEASE_ROOT,
+    )
+    marker = trace.VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+    approved_bootstrap = tuple(
+        marker if approved == marker else value
+        for value, approved in zip(
+            bootstrap_template,
+            (*bootstrap_template[: -len(verifier_final)], *final_template),
+        )
+    )
+    template = trace.TraceManifest(
+        release=RELEASE,
+        target_id="independent-verifier",
+        role="verifier",
+        working_directory=RELEASE_ROOT,
+        environment=dict(trace.ROLE_ENVIRONMENTS["verifier"]),
+        bootstrap_argv=approved_bootstrap,
+        final_argv=final_template,
+        allowed_paths=expected_paths(),
+        path_access_policy=policies(expected_paths(), role="verifier"),
+        watch_roots=VALID_WATCH_ROOTS,
+        expected_static_closure_sha256="a" * 64,
+        expected_child_environment_sha256=hashlib.sha256(
+            trace.canonical_json(trace.ROLE_ENVIRONMENTS["verifier"])
+        ).hexdigest(),
+        expected_returncodes=(0,),
+        expected_uid=0,
+        expected_gid=0,
+        manifest_sha256="b" * 64,
+        expected_strace_sha256="c" * 64,
+        dynamic_argv_template=True,
+    )
+    verifier_final_b = tuple(bundle_b if item == bundle_a else item for item in verifier_final)
+    verifier_bootstrap_b = tuple(
+        bundle_b if item == bundle_a else item for item in verifier_bootstrap
+    )
+
+    materialized = trace.materialize_bootstrap_template(
+        template, verifier_bootstrap_b, verifier_final_b
+    )
+
+    assert materialized.final_argv == verifier_final_b
+    altered = list(verifier_final_b)
+    altered[altered.index("--expected-release") + 1] = "0.1.0.dev29-other"
+    altered_bootstrap = list(verifier_bootstrap_b)
+    altered_bootstrap[
+        altered_bootstrap.index("--expected-release") + 1
+    ] = "0.1.0.dev29-other"
+    with pytest.raises(trace.RuntimeOpenTraceError, match="approved dynamic template"):
+        trace.materialize_bootstrap_template(
+            template,
+            tuple(altered_bootstrap),
+            tuple(altered),
+        )
 
 
 def test_bootstrap_template_rejects_partial_or_misplaced_dynamic_markers() -> None:

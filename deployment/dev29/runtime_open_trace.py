@@ -66,6 +66,7 @@ _DYNAMIC_BOOTSTRAP_MARKERS = frozenset(
     marker
     for _option, marker in DYNAMIC_BOOTSTRAP_OPTIONS
 ) | frozenset(DYNAMIC_MOUNT_ARGUMENTS)
+VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER = "@DEV29_BUNDLE_MANIFEST_SHA256@"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$")
 PID_PREFIX = re.compile(r"^(?:\[pid\s+(\d+)\]|(\d+))\s+")
@@ -662,18 +663,25 @@ def materialize_bootstrap_template(
         role=manifest.role,
         release_root=release_root,
     )
-    if (
-        is_template
-        or final_values != manifest.final_argv
-        or uid != manifest.expected_uid
-        or gid != manifest.expected_gid
-        or dynamic_bootstrap_template(
+    expected_final = _materialized_final_argv_template(
+        manifest.final_argv, final_values, manifest=manifest
+    )
+    expected_bootstrap = _materialized_bootstrap_argv_template(
+        dynamic_bootstrap_template(
             bootstrap_values,
             final_values,
             role=manifest.role,
             release_root=release_root,
-        )
-        != manifest.bootstrap_argv
+        ),
+        manifest.bootstrap_argv,
+        manifest=manifest,
+    )
+    if (
+        is_template
+        or expected_final != final_values
+        or uid != manifest.expected_uid
+        or gid != manifest.expected_gid
+        or expected_bootstrap != manifest.bootstrap_argv
     ):
         raise RuntimeOpenTraceError(
             "effective bootstrap argv differs from the approved dynamic template"
@@ -684,6 +692,77 @@ def materialize_bootstrap_template(
         final_argv=final_values,
         dynamic_argv_template=False,
     )
+
+
+def verifier_final_argv_template(final: Sequence[str]) -> tuple[str, ...]:
+    values = _argv(list(final), label="verifier final argv")
+    if values.count(VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER) != 0:
+        raise RuntimeOpenTraceError("verifier final argv is already templated")
+    try:
+        index = values.index("--expected-bundle-manifest-sha256")
+    except ValueError as exc:
+        raise RuntimeOpenTraceError("verifier bundle digest option is absent") from exc
+    if index + 1 >= len(values) or HEX64.fullmatch(values[index + 1]) is None:
+        raise RuntimeOpenTraceError("verifier bundle digest value is invalid")
+    templated = list(values)
+    templated[index + 1] = VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+    return tuple(templated)
+
+
+def _materialized_final_argv_template(
+    template: tuple[str, ...],
+    actual: tuple[str, ...],
+    *,
+    manifest: TraceManifest,
+) -> tuple[str, ...]:
+    marker_count = template.count(VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER)
+    if marker_count == 0:
+        return template
+    if (
+        marker_count != 1
+        or manifest.target_id != "independent-verifier"
+        or manifest.role != "verifier"
+        or len(template) != len(actual)
+    ):
+        raise RuntimeOpenTraceError("verifier final argv template is invalid")
+    try:
+        index = template.index("--expected-bundle-manifest-sha256")
+    except ValueError as exc:
+        raise RuntimeOpenTraceError("verifier bundle digest option is absent") from exc
+    if (
+        index + 1 >= len(template)
+        or template[index + 1] != VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+        or HEX64.fullmatch(actual[index + 1]) is None
+    ):
+        raise RuntimeOpenTraceError("verifier bundle digest value is invalid")
+    materialized = list(template)
+    materialized[index + 1] = actual[index + 1]
+    return tuple(materialized)
+
+
+def _materialized_bootstrap_argv_template(
+    bootstrap_template: tuple[str, ...],
+    approved_template: tuple[str, ...],
+    *,
+    manifest: TraceManifest,
+) -> tuple[str, ...]:
+    if VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER not in approved_template:
+        return bootstrap_template
+    if len(bootstrap_template) != len(approved_template):
+        raise RuntimeOpenTraceError("verifier bootstrap argv template is invalid")
+    materialized = list(bootstrap_template)
+    for index, value in enumerate(approved_template):
+        if value == VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER:
+            if (
+                manifest.target_id != "independent-verifier"
+                or manifest.role != "verifier"
+                or HEX64.fullmatch(bootstrap_template[index]) is None
+            ):
+                raise RuntimeOpenTraceError(
+                    "verifier bootstrap argv template is invalid"
+                )
+            materialized[index] = VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER
+    return tuple(materialized)
 
 
 @dataclass(frozen=True)
@@ -3637,6 +3716,7 @@ __all__ = [
     "STAGING_PARENT",
     "STRACE_OPTIONS",
     "STRACE_PATH",
+    "VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER",
     "PRODUCTION_PROMOTION_ALLOWED",
     "PathAccessPolicy",
     "ParsedTrace",
@@ -3665,6 +3745,7 @@ __all__ = [
     "demotion_argv",
     "dynamic_bootstrap_template",
     "materialize_bootstrap_template",
+    "verifier_final_argv_template",
     "MutationWatch",
     "PrivateTraceStaging",
     "recover_stale_private_staging",
