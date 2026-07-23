@@ -1801,6 +1801,7 @@ def _outer_writable_paths(release: str) -> list[str]:
         str(PRIVATE_EVIDENCE_PARENT),
         str(RUNTIME_TRACE_STAGING_PARENT),
         str(ANCHOR_PARENT),
+        f"/opt/odoo-accounting-cli-v3/dependencies/{release}",
         str(test_candidate / "auth"),
         str(test_candidate / "receipt"),
         str(BROKER_HOME),

@@ -3076,6 +3076,12 @@ def build(
             config_digest, _ = _sha_file(layout.sealed_config, maximum=MAX_CONFIG_BYTES)
             if image_digest != anchor["image"]["sha256"] or config_digest != expected_odoo_config_sha256:
                 raise ClosureError("existing immutable closure artifact conflicts")
+            _ensure_parent_chain(
+                layout.mount_point,
+                final_mode=0o750,
+                final_gid=service_gid,
+                test_mode=test_mode,
+            )
             return {
                 "schema_version": 1,
                 "status": "built",
@@ -3496,6 +3502,12 @@ def build(
             _publish_no_replace(anchor_temporary, layout.closure_anchor, mode=0o444, uid=uid, gid=gid)
             anchor_temporary = None
             created.append(layout.closure_anchor)
+            _ensure_parent_chain(
+                layout.mount_point,
+                final_mode=0o750,
+                final_gid=service_gid,
+                test_mode=test_mode,
+            )
             return {
                 "schema_version": 1,
                 "status": "built",
