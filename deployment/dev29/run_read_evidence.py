@@ -3387,6 +3387,9 @@ def _launch_guardian(
     receipt_state_parent = Path(
         f"/var/lib/odoo-accounting-cli-v3/test/candidates/{expected['release']}/receipt"
     )
+    dependency_mount_point = Path(
+        f"/opt/odoo-accounting-cli-v3/dependencies/{expected['release']}"
+    )
     writable_text = _outer_writable_paths(expected["release"])
     writable = [Path(item) for item in writable_text]
     expected_writable = [
@@ -3394,6 +3397,7 @@ def _launch_guardian(
         PRIVATE_EVIDENCE_PARENT,
         RUNTIME_TRACE_STAGING_PARENT,
         ANCHOR_PARENT,
+        dependency_mount_point,
         auth_state_parent,
         receipt_state_parent,
         BROKER_HOME,
@@ -3411,6 +3415,7 @@ def _launch_guardian(
         PRIVATE_EVIDENCE_PARENT: (0, 0, 0o700),
         RUNTIME_TRACE_STAGING_PARENT: (0, 0, 0o700),
         ANCHOR_PARENT: (0, 0, 0o755),
+        dependency_mount_point: (0, odoo_group.gr_gid, 0o750),
         auth_state_parent: (odoo.pw_uid, odoo_group.gr_gid, 0o700),
         receipt_state_parent: (odoo.pw_uid, odoo_group.gr_gid, 0o700),
         BROKER_HOME: (odoo.pw_uid, odoo_group.gr_gid, 0o700),
