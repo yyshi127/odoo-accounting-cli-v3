@@ -468,6 +468,26 @@ def test_independent_state_delta_rejects_structural_and_temporal_mutations(mutat
         )
 
 
+def test_independent_state_delta_accepts_equivalent_utc_expiry_formats():
+    before, after, requests, receipts, runtime, started, finished = (
+        _valid_state_delta_fixture()
+    )
+    for row in after["auth"]["queries"]["selected_tokens"]:
+        row["expires_at"] = row["expires_at"].replace("Z", "+00:00")
+
+    valid = verifier.validate_state_delta(
+        before,
+        after,
+        requests=requests,
+        receipts=receipts,
+        runtime=runtime,
+        suite_started_at=started,
+        observed_not_after=finished,
+    )
+
+    assert valid["all_checks_passed"] is True
+
+
 def test_expired_negative_must_predate_suite_start():
     request = {"context": {"auth_expires_at": "2026-07-19T23:59:59Z"}}
     verifier.validate_expired_negative_time(

@@ -5304,11 +5304,14 @@ def verify_state_delta(
         context = request["context"]
         issued = _state_timestamp(context["auth_issued_at"], label="auth issued_at")
         expires = _state_timestamp(context["auth_expires_at"], label="auth expires_at")
+        stored_expires = _state_timestamp(
+            row["expires_at"], label="auth stored expires_at"
+        )
         consumed = _state_timestamp(row["consumed_at"], label="auth consumed_at")
         if (
             row["request_digest"]
             != hashlib.sha256(canonical_json(request)).hexdigest()
-            or row["expires_at"] != context["auth_expires_at"]
+            or stored_expires != expires
             or not issued <= consumed < expires
             or not suite_started <= consumed <= observed_upper
         ):
