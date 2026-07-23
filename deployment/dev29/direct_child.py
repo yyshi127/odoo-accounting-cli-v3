@@ -116,6 +116,13 @@ def _safe_endpoint(path_text: str) -> tuple[Path, os.stat_result]:
     return path, metadata
 
 
+def _canonical_path(path_text: str) -> Path:
+    path = Path(path_text)
+    if not path.is_absolute() or str(PurePosixPath(path_text)) != path_text:
+        raise DirectChildError("child mount endpoint is not canonical")
+    return path
+
+
 def _expected_mounts(values: list[str]) -> list[dict[str, Any]]:
     expected: list[dict[str, Any]] = []
     for value in values:
@@ -156,7 +163,7 @@ def _expected_mounts(values: list[str]) -> list[dict[str, Any]]:
             or item.get("statvfs_read_only") is not True
         ):
             raise DirectChildError("expected child mount identity is invalid")
-        _safe_endpoint(item["source_path"])
+        _canonical_path(item["source_path"])
         _safe_endpoint(item["destination_path"])
         expected.append(item)
     if len(expected) != 5 or len({item["destination_path"] for item in expected}) != 5:
@@ -205,7 +212,7 @@ def _mounts(expected: list[dict[str, Any]]) -> list[dict[str, Any]]:
         raise DirectChildError("child did not inherit every closure mount")
     observed: list[dict[str, Any]] = []
     for item in expected:
-        source, source_metadata = _safe_endpoint(item["source_path"])
+        source = _canonical_path(item["source_path"])
         destination, destination_metadata = _safe_endpoint(item["destination_path"])
         try:
             read_only = bool(os.statvfs(destination).f_flag & getattr(os, "ST_RDONLY", 1))
@@ -215,8 +222,8 @@ def _mounts(expected: list[dict[str, Any]]) -> list[dict[str, Any]]:
         value = {
             "source_path": str(source),
             "destination_path": str(destination),
-            "source_device": source_metadata.st_dev,
-            "source_inode": source_metadata.st_ino,
+            "source_device": item["source_device"],
+            "source_inode": item["source_inode"],
             "destination_device": destination_metadata.st_dev,
             "destination_inode": destination_metadata.st_ino,
             **row,
@@ -224,7 +231,7 @@ def _mounts(expected: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         if (
             value != item
-            or (source_metadata.st_dev, source_metadata.st_ino)
+            or (item["source_device"], item["source_inode"])
             != (destination_metadata.st_dev, destination_metadata.st_ino)
         ):
             raise DirectChildError("child mount identity differs from the supervisor")
