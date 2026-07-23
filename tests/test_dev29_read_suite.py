@@ -312,6 +312,7 @@ def runtime() -> dict:
         "canonical_package_sha256": "c" * 64,
         "auth_state_path": f"{state}/auth/state.sqlite3",
         "receipt_state_path": f"{state}/receipt/state.sqlite3",
+        "gcov_state_path": f"{state}/gcov",
         "auth_key_id": "test-auth-dev29-unit",
         "receipt_key_id": "test-receipt-dev29-unit",
         "auth_secret_path": f"{secrets}/auth.hmac",
