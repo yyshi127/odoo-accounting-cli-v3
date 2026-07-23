@@ -707,9 +707,12 @@ def _validate_live_systemd_run_execution(
     }
     systemd_pid = value.get("pid") if type(value) is dict else None
     file_identity = value.get("file") if type(value) is dict else None
-    wrapper_action = (
-        "recover-unit-wrapper" if "recover" in arguments.action else "unit-wrapper"
-    )
+    if "recover" in arguments.action:
+        wrapper_action = "recover-unit-wrapper"
+    elif "trace-verifier-fragment" in arguments.action:
+        wrapper_action = "trace-verifier-fragment-unit-wrapper"
+    else:
+        wrapper_action = "unit-wrapper"
     root = RELEASE_PARENT / arguments.expected_release
     wrapper_argv = _wrapper_argv(
         arguments,
