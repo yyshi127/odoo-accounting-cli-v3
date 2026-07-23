@@ -2840,6 +2840,7 @@ def _supervise(arguments: argparse.Namespace) -> dict[str, Any]:
         image_sha256=arguments.expected_closure_image_sha256,
         system_python_sha256=arguments.expected_system_python_sha256,
         loader_preload_sha256=arguments.expected_ld_so_preload_sha256,
+        ldconfig_sha256=arguments.expected_ldconfig_sha256,
     )
     paths = suite._release_paths(suite_expected)
     import grp
@@ -3095,6 +3096,7 @@ def _recover_supervise(arguments: argparse.Namespace) -> dict[str, Any]:
         image_sha256=arguments.expected_closure_image_sha256,
         system_python_sha256=arguments.expected_system_python_sha256,
         loader_preload_sha256=arguments.expected_ld_so_preload_sha256,
+        ldconfig_sha256=arguments.expected_ldconfig_sha256,
     )
     suite_expected.validate()
     suite_closure.validate()

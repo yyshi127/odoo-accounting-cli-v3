@@ -225,6 +225,7 @@ class ExpectedClosure:
     image_sha256: str
     system_python_sha256: str
     loader_preload_sha256: str
+    ldconfig_sha256: str
 
     def validate(self) -> "ExpectedClosure":
         if (
@@ -236,6 +237,8 @@ class ExpectedClosure:
             or HEX64.fullmatch(self.system_python_sha256) is None
             or not isinstance(self.loader_preload_sha256, str)
             or HEX64.fullmatch(self.loader_preload_sha256) is None
+            or not isinstance(self.ldconfig_sha256, str)
+            or HEX64.fullmatch(self.ldconfig_sha256) is None
         ):
             raise ReadSuiteError("expected Odoo closure identity is invalid")
         return self
@@ -1967,6 +1970,8 @@ def run_closure_verify(
             expected_closure.system_python_sha256,
             "--expected-ld-so-preload-sha256",
             expected_closure.loader_preload_sha256,
+            "--expected-ldconfig-sha256",
+            expected_closure.ldconfig_sha256,
             "--expected-odoo-config-sha256",
             runtime["odoo_config_sha256"],
             "--expected-database-name",
@@ -6186,6 +6191,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-closure-image-sha256", required=True)
     parser.add_argument("--expected-system-python-sha256", required=True)
     parser.add_argument("--expected-ld-so-preload-sha256", required=True)
+    parser.add_argument("--expected-ldconfig-sha256", required=True)
     parser.add_argument("--expected-runtime-open-index-sha256")
     parser.add_argument("--expected-strace-sha256", required=True)
     parser.add_argument("--runtime-open-discovery-inventory", type=Path)
@@ -6224,6 +6230,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         image_sha256=arguments.expected_closure_image_sha256,
         system_python_sha256=arguments.expected_system_python_sha256,
         loader_preload_sha256=arguments.expected_ld_so_preload_sha256,
+        ldconfig_sha256=arguments.expected_ldconfig_sha256,
     )
     try:
         evidence, manifest_sha256 = run_suite(

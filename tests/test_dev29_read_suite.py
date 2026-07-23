@@ -107,6 +107,7 @@ def expected_closure():
         image_sha256="e" * 64,
         system_python_sha256="f" * 64,
         loader_preload_sha256="8" * 64,
+        ldconfig_sha256="9" * 64,
     )
 
 
