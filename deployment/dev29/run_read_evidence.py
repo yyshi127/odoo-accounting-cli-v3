@@ -1940,18 +1940,24 @@ def _spawn_pinned_worker(
             )
         )
         expected_parent_pid = os.getpid()
-        process = subprocess.Popen(
-            worker_argv,
-            executable=f"/proc/self/fd/{python_fd}",
-            pass_fds=(python_fd, script_fd, read_gate),
-            preexec_fn=lambda: _ptrace_traceme_with_parent_death(
-                expected_parent_pid
-            ),
-            close_fds=True,
-            stdin=subprocess.DEVNULL,
-            cwd=root,
-            env=dict(OUTER_ENVIRONMENT),
-        )
+        for descriptor in (python_fd, script_fd, read_gate):
+            os.set_inheritable(descriptor, True)
+        try:
+            process = subprocess.Popen(
+                worker_argv,
+                executable=f"/proc/self/fd/{python_fd}",
+                pass_fds=(python_fd, script_fd, read_gate),
+                preexec_fn=lambda: _ptrace_traceme_with_parent_death(
+                    expected_parent_pid
+                ),
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                cwd=root,
+                env=dict(OUTER_ENVIRONMENT),
+            )
+        finally:
+            for descriptor in (python_fd, script_fd, read_gate):
+                os.set_inheritable(descriptor, False)
         traced = True
         os.close(read_gate)
         read_gate = None
