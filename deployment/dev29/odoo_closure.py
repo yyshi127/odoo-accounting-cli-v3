@@ -1370,6 +1370,7 @@ class InotifyGuard:
         | 0x00008000  # IN_IGNORED
     )
     _MAX_EVENT_BYTES = 16 * 1024 * 1024
+    _PYTHON_CACHE_SUFFIXES = (".pyc", ".pyo")
 
     def __init__(self, roots: Iterable[Path], *, test_mode: bool = False) -> None:
         self.roots = tuple(dict.fromkeys(Path(path).absolute() for path in roots))
@@ -1434,7 +1435,8 @@ class InotifyGuard:
                     names[:] = [
                         name
                         for name in names
-                        if not (Path(directory) / name).is_symlink()
+                        if name != "__pycache__"
+                        and not (Path(directory) / name).is_symlink()
                     ]
             else:
                 request(root.parent, {root.name})
@@ -1455,6 +1457,10 @@ class InotifyGuard:
             elif descriptor not in self._watch_all:
                 self._watch_names.setdefault(descriptor, set()).update(names)
         self.watches = len(self._watch_all | set(self._watch_names))
+
+    @classmethod
+    def _ignored_python_cache_event(cls, name: str) -> bool:
+        return name == "__pycache__" or name.endswith(cls._PYTHON_CACHE_SUFFIXES)
 
     def _payload_mutates_scope(self, payload: bytes) -> bool:
         offset = 0
@@ -1480,6 +1486,8 @@ class InotifyGuard:
                 decoded_name = ""
             if mask & self._COVERAGE_LOSS_MASK:
                 return True
+            if decoded_name and self._ignored_python_cache_event(decoded_name):
+                continue
             if watch in self._watch_all:
                 return True
             names = self._watch_names.get(watch)

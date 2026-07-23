@@ -344,6 +344,22 @@ def test_inotify_scope_ignores_only_unrelated_file_parent_siblings() -> None:
     assert guard._payload_mutates_scope(_inotify_event(99, 0x00000100, "x")) is True
 
 
+def test_inotify_scope_ignores_python_cache_events_but_not_source() -> None:
+    guard = closure.InotifyGuard([])
+    guard._watch_all = {21}
+
+    cache_payload = b"".join(
+        [
+            _inotify_event(21, 0x00000100, "__pycache__"),
+            _inotify_event(21, 0x00000002, "module.cpython-312.pyc"),
+            _inotify_event(21, 0x00000008, "legacy.pyo"),
+        ]
+    )
+
+    assert guard._payload_mutates_scope(cache_payload) is False
+    assert guard._payload_mutates_scope(_inotify_event(21, 0x00000002, "module.py")) is True
+
+
 def test_inotify_watch_policy_merges_exact_names_and_directory_scope(
     tmp_path: Path,
 ) -> None:
@@ -369,6 +385,28 @@ def test_inotify_watch_policy_merges_exact_names_and_directory_scope(
     assert guard.watches == 2
     assert guard._watch_all == {12}
     assert guard._payload_mutates_scope(_inotify_event(12, 0x00000002, "child")) is True
+
+
+def test_inotify_watch_policy_skips_python_cache_directories(tmp_path: Path) -> None:
+    directory = tmp_path / "tree"
+    write(directory / "pkg/__pycache__/cached.pyc", b"cache")
+    write(directory / "pkg/live.py", b"live")
+    descriptors: dict[Path, int] = {}
+
+    def add_watch(_fd: int, raw: bytes, _mask: int) -> int:
+        watched = Path(os.fsdecode(raw))
+        descriptor = len(descriptors) + 30
+        descriptors[watched] = descriptor
+        return descriptor
+
+    guard = closure.InotifyGuard([])
+    guard.fd = 1
+    guard._add_watch = add_watch
+
+    guard.add_roots([directory])
+
+    assert directory / "pkg" in descriptors
+    assert directory / "pkg" / "__pycache__" not in descriptors
 
 
 def test_inotify_directory_scope_dominates_an_aliased_file_parent(
