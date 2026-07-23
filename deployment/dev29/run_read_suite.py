@@ -2900,6 +2900,9 @@ def _systemctl_show(unit: str) -> dict[str, Any]:
         if key in values or key not in fields:
             raise ReadSuiteError(f"systemd identity fields are invalid: {unit}")
         values[key] = value
+    if set(values) != set(fields) and values.get("LoadState") == "not-found":
+        for missing in set(fields) - set(values):
+            values[missing] = "0" if missing in {"MainPID", "NRestarts"} else ""
     if set(values) != set(fields):
         raise ReadSuiteError(f"systemd identity fields are incomplete: {unit}")
     fragment: dict[str, Any] | None = None

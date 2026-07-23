@@ -84,6 +84,39 @@ def test_source_tree_snapshot_skips_backup_directories(
     assert snapshot["count"] == 1
 
 
+def test_systemctl_show_accepts_not_found_socket_missing_service_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(*_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=(
+                b"Id=odoo-accounting-cli-v3-pi-broker.socket\n"
+                b"Names=odoo-accounting-cli-v3-pi-broker.socket\n"
+                b"LoadState=not-found\n"
+                b"ActiveState=inactive\n"
+                b"SubState=dead\n"
+                b"FragmentPath=\n"
+                b"SourcePath=\n"
+                b"DropInPaths=\n"
+                b"UnitFileState=\n"
+                b"StateChangeTimestampMonotonic=0\n"
+                b"InvocationID=\n"
+            ),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(suite.subprocess, "run", run)
+
+    identity = suite._systemctl_show("odoo-accounting-cli-v3-pi-broker.socket")
+
+    assert identity["properties"]["LoadState"] == "not-found"
+    assert identity["properties"]["MainPID"] == "0"
+    assert identity["properties"]["ExecMainStartTimestampMonotonic"] == ""
+    assert identity["properties"]["NRestarts"] == "0"
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,
