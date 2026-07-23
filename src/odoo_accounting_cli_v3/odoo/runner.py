@@ -980,6 +980,7 @@ def _odoo_env_stdin_launcher(config: RuntimeConfig) -> str:
     return (
         "import sys, threading\n"
         f"sys.path.insert(0, {odoo_root!r})\n"
+        "sys.modules['_rjsmin'] = None\n"
         "import odoo\n"
         "from odoo import api\n"
         "from odoo.modules import loading as odoo_loading\n"
