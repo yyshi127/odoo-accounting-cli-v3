@@ -11,7 +11,7 @@ import sys
 import time
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -43,6 +43,39 @@ EXPECTED = {
     "manifest_sha256": "b" * 64,
     "package_sha256": "c" * 64,
 }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink resolution is required")
+def test_verifier_external_runtime_allows_only_symlink_reachable_outside_roots(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "usr/lib/python3.12"
+    outside = tmp_path / "etc/python3.12/sitecustomize.py"
+    root.mkdir(parents=True)
+    outside.parent.mkdir(parents=True)
+    outside.write_text("pass\n", encoding="utf-8")
+    link = root / "sitecustomize.py"
+    link.symlink_to(outside)
+    entries = [
+        {"path": str(root), "kind": "directory"},
+        {"path": str(link), "kind": "symlink", "target": str(outside)},
+        {"path": str(outside), "kind": "regular"},
+    ]
+
+    allowed = verifier._external_runtime_allowed_roots(
+        [PurePosixPath(str(root))], entries
+    )
+
+    assert PurePosixPath(str(outside)) in allowed
+    assert not verifier._under_any_root(
+        PurePosixPath(str(tmp_path / "etc/passwd")), allowed
+    )
+    with pytest.raises(
+        verifier.EvidenceVerificationError, match="symlink target is uncovered"
+    ):
+        verifier._external_runtime_allowed_roots(
+            [PurePosixPath(str(root))], entries[:2]
+        )
 
 
 def plan() -> dict:

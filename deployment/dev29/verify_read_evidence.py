@@ -2676,6 +2676,50 @@ def independently_snapshot_external_manifest(roots: Sequence[str]) -> dict[str, 
     }
 
 
+def _under_any_root(path: PurePosixPath, roots: Sequence[PurePosixPath]) -> bool:
+    return any(path == root or root in path.parents for root in roots)
+
+
+def _external_runtime_allowed_roots(
+    roots: Sequence[PurePosixPath], entries: Sequence[Any]
+) -> tuple[PurePosixPath, ...]:
+    allowed: list[PurePosixPath] = list(roots)
+    entry_paths = {
+        item.get("path")
+        for item in entries
+        if type(item) is dict and isinstance(item.get("path"), str)
+    }
+    changed = True
+    while changed:
+        changed = False
+        for item in entries:
+            if type(item) is not dict or item.get("kind") != "symlink":
+                continue
+            path_text = item.get("path")
+            target = item.get("target")
+            if not isinstance(path_text, str) or not isinstance(target, str):
+                continue
+            link_path = PurePosixPath(path_text)
+            if not _under_any_root(link_path, allowed):
+                continue
+            try:
+                resolved = Path(path_text).resolve(strict=True)
+            except OSError as exc:
+                raise EvidenceVerificationError(
+                    "closure external runtime symlink target is absent"
+                ) from exc
+            resolved_text = str(resolved)
+            if resolved_text not in entry_paths:
+                raise EvidenceVerificationError(
+                    "closure external runtime symlink target is uncovered"
+                )
+            portable = PurePosixPath(resolved_text)
+            if portable not in allowed:
+                allowed.append(portable)
+                changed = True
+    return tuple(allowed)
+
+
 def validate_external_runtime_manifest(
     closure: Mapping[str, Any], *, verify_live_files: bool, expected_ldconfig_sha256: str
 ) -> dict[str, Any]:
@@ -2734,6 +2778,7 @@ def validate_external_runtime_manifest(
             "closure external runtime manifest omits or changes a live dependency entry"
         )
     root_paths = [PurePosixPath(item) for item in roots]
+    allowed_paths = _external_runtime_allowed_roots(root_paths, entries)
     for item in entries:
         path_text = item.get("path") if type(item) is dict else None
         kind = item.get("kind") if type(item) is dict else None
@@ -2750,7 +2795,7 @@ def validate_external_runtime_manifest(
             or str(portable) != path_text
             or kind not in fields
             or set(item) != fields[kind]
-            or not any(portable == root or root in portable.parents for root in root_paths)
+            or not _under_any_root(portable, allowed_paths)
             or not isinstance(item.get("mode"), str)
             or re.fullmatch(r"[0-7]{4}", item["mode"]) is None
             or item.get("uid") != 0

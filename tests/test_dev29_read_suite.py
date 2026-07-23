@@ -10,7 +10,7 @@ import stat
 import subprocess
 import sys
 from copy import deepcopy
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +36,37 @@ TRACE_SPEC.loader.exec_module(runtime_trace)
 VERSION = "0.1.0.dev29"
 COMMIT = "a1234567890bcdef1234567890abcdef12345678"
 RELEASE = f"{VERSION}-{COMMIT[:12]}"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink resolution is required")
+def test_external_runtime_allows_only_symlink_reachable_outside_roots(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "usr/lib/python3.12"
+    outside = tmp_path / "etc/python3.12/sitecustomize.py"
+    root.mkdir(parents=True)
+    outside.parent.mkdir(parents=True)
+    outside.write_text("pass\n", encoding="utf-8")
+    link = root / "sitecustomize.py"
+    link.symlink_to(outside)
+    entries = [
+        {"path": str(root), "kind": "directory"},
+        {"path": str(link), "kind": "symlink", "target": str(outside)},
+        {"path": str(outside), "kind": "regular"},
+    ]
+
+    allowed = suite._external_runtime_allowed_roots(
+        [PurePosixPath(str(root))], entries
+    )
+
+    assert PurePosixPath(str(outside)) in allowed
+    assert not suite._under_any_root(
+        PurePosixPath(str(tmp_path / "etc/passwd")), allowed
+    )
+    with pytest.raises(suite.ReadSuiteError, match="symlink target is uncovered"):
+        suite._external_runtime_allowed_roots(
+            [PurePosixPath(str(root))], entries[:2]
+        )
 
 
 def expected_identity():
