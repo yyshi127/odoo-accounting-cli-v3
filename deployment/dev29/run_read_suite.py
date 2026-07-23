@@ -4242,6 +4242,18 @@ def _process_set_sha256(processes: Sequence[int]) -> str:
     return hashlib.sha256(canonical_json(list(processes))).hexdigest()
 
 
+def _direct_child_failure_context(returncode: int | None, stderr: bytes) -> str:
+    try:
+        preview = stderr[:512].decode("utf-8", "replace")
+    except AttributeError:
+        preview = ""
+    preview = preview.replace("\n", "\\n")
+    return (
+        f"returncode={returncode} stderr_sha256={hashlib.sha256(stderr).hexdigest()} "
+        f"stderr_preview={preview!r}"
+    )
+
+
 def _dedicated_supervisor_processes(processes: Sequence[int]) -> bool:
     current = os.getpid()
     parent = os.getppid()
@@ -4322,9 +4334,21 @@ def _communicate_direct_child(
     reader.join(5)
     if reader.is_alive() or read_error:
         raise ReadSuiteError("direct child attestation pipe did not close cleanly")
-    attestation = load_json_bytes(
-        b"".join(chunks), label="direct child attestation", canonical=True
-    )
+    attestation_payload = b"".join(chunks)
+    if not attestation_payload:
+        raise ReadSuiteError(
+            "direct child attestation is absent: "
+            + _direct_child_failure_context(process.returncode, stderr)
+        )
+    try:
+        attestation = load_json_bytes(
+            attestation_payload, label="direct child attestation", canonical=True
+        )
+    except ReadSuiteError as exc:
+        raise ReadSuiteError(
+            "direct child attestation is invalid: "
+            + _direct_child_failure_context(process.returncode, stderr)
+        ) from exc
     final_cgroup, observed_descendants = _cleanup_cgroup_descendants(baseline_cgroup)
     if observed_descendants:
         raise ReadSuiteError("completed direct child left descendants in the unit cgroup")

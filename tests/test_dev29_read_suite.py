@@ -128,6 +128,17 @@ def test_dedicated_supervisor_processes_accepts_worker_and_wrapper(
     assert not suite._dedicated_supervisor_processes([100, 200, 300])
 
 
+def test_direct_child_failure_context_is_bounded_and_hashes_stderr() -> None:
+    stderr = b"Dev29 direct child refused: sample reason\n" + b"x" * 600
+
+    context = suite._direct_child_failure_context(126, stderr)
+
+    assert "returncode=126" in context
+    assert hashlib.sha256(stderr).hexdigest() in context
+    assert "sample reason" in context
+    assert len(context) < 700
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,
