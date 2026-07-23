@@ -54,12 +54,13 @@ class LinuxRunnerGateTest(unittest.TestCase):
         *,
         payload: bytes = b"linux-runner-gate-payload-32-bytes",
         arguments: tuple[str, ...] = (),
+        source: str = "# fixed runner gate bootstrap\n",
         timeout_seconds: float = 10.0,
     ):
         with _private_payload_fd(payload) as payload_fd:
             return _run_child_process(
                 [sys.executable, "-c", code, str(payload_fd), *arguments],
-                source="# fixed runner gate bootstrap\n",
+                source=source,
                 payload_fd=payload_fd,
                 timeout_seconds=timeout_seconds,
                 cwd=tempfile.gettempdir(),
@@ -115,6 +116,13 @@ class LinuxRunnerGateTest(unittest.TestCase):
         self.assertEqual(observed["env_hits"], 0)
         self.assertEqual(observed["stdin_hits"], 0)
         self.assertEqual(observed["env"], FIXED_CHILD_ENVIRONMENT)
+
+    def test_bootstrap_source_is_delivered_through_child_stdin(self) -> None:
+        source = "print('bootstrap delivered ✓')\n"
+        code = "import sys; exec(compile(sys.stdin.read(), '<bootstrap>', 'exec'))"
+        completed = self.run_helper(code, source=source)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), "bootstrap delivered ✓")
 
     def test_managed_home_is_visible_private_owned_and_writable(self) -> None:
         home = Path(FIXED_CHILD_ENVIRONMENT["HOME"])

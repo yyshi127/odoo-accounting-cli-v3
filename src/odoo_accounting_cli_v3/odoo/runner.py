@@ -1333,11 +1333,10 @@ def _run_child_process(
     try:
         if process.stdin is None or process.stdout is None or process.stderr is None:
             raise OdooRunnerError("Odoo shell pipes could not be created")
-        try:
-            process.stdin.write(source_bytes)
-            process.stdin.close()
-        except (BrokenPipeError, OSError):
-            process.stdin.close()
+        stdin = process.stdin
+        stdin_offset = 0
+        os.set_blocking(stdin.fileno(), False)
+        selector.register(stdin, selectors.EVENT_WRITE, ("stdin", None, None))
 
         for label, (stream, maximum, buffer) in streams.items():
             os.set_blocking(stream.fileno(), False)
@@ -1354,6 +1353,33 @@ def _run_child_process(
                 raise OdooRunnerError("Odoo shell timed out")
             for key, _event in selector.select(timeout=min(remaining, 0.1)):
                 label, maximum, buffer = key.data
+                if label == "stdin":
+                    try:
+                        written = os.write(
+                            key.fileobj.fileno(),
+                            source_bytes[stdin_offset : stdin_offset + 65_536],
+                        )
+                    except BlockingIOError:
+                        continue
+                    except (BrokenPipeError, OSError) as exc:
+                        try:
+                            selector.unregister(key.fileobj)
+                        except (KeyError, ValueError):
+                            pass
+                        key.fileobj.close()
+                        raise OdooRunnerError(
+                            "Odoo shell closed stdin before receiving bootstrap"
+                        ) from exc
+                    if written <= 0:
+                        _kill_child_process_group(process)
+                        raise OdooRunnerError(
+                            "Odoo shell bootstrap could not be written"
+                        )
+                    stdin_offset += written
+                    if stdin_offset >= len(source_bytes):
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                    continue
                 try:
                     chunk = os.read(key.fileobj.fileno(), min(65_536, maximum + 1 - len(buffer)))
                 except BlockingIOError:
