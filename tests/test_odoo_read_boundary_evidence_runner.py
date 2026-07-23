@@ -223,7 +223,10 @@ def test_runner_can_emit_launcher_diagnostics_when_requested(tmp_path: Path):
 
     assert result == valid_evidence()
     assert "__OACV3_LAUNCHER_CHECKPOINT__" in observed_argv[2]
-    assert "--logfile=/proc/self/fd/2" in observed_argv[2]
+    diagnostic_log = config.auth_state_path.parent / "read-boundary-launcher-diagnostics.log"
+    escaped_diagnostic_log = str(diagnostic_log).replace("\\", "\\\\")
+    assert f"--logfile={escaped_diagnostic_log}" in observed_argv[2]
+    assert f"_oacv3_diagnostic_log_path = {str(diagnostic_log)!r}" in observed_argv[2]
     assert "_oacv3_checkpoint('before_registry_new')" in observed_argv[2]
 
 

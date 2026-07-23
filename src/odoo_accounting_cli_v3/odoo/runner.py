@@ -977,11 +977,14 @@ def _odoo_env_stdin_launcher(config: RuntimeConfig, *, diagnostics: bool = False
     odoo_root = str(config.odoo_bin.parent)
     config_path = str(config.odoo_config)
     database_name = config.database_name
-    log_file = "/proc/self/fd/2" if diagnostics else "/dev/null"
+    diagnostic_log = str(config.auth_state_path.parent / "read-boundary-launcher-diagnostics.log")
+    log_file = diagnostic_log if diagnostics else "/dev/null"
     checkpoint = (
+        f"    _oacv3_diagnostic_log_path = {diagnostic_log!r}\n"
         "    def _oacv3_checkpoint(label):\n"
-        "        sys.stderr.write('__OACV3_LAUNCHER_CHECKPOINT__:' + label + '\\n')\n"
-        "        sys.stderr.flush()\n"
+        "        with open(_oacv3_diagnostic_log_path, 'a', encoding='utf-8') as _oacv3_log:\n"
+        "            _oacv3_log.write('__OACV3_LAUNCHER_CHECKPOINT__:' + label + '\\n')\n"
+        "            _oacv3_log.flush()\n"
         if diagnostics
         else "    def _oacv3_checkpoint(label):\n"
         "        return None\n"
