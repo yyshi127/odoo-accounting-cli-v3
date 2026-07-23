@@ -191,6 +191,8 @@ def test_direct_child_environment_declares_odoo_venv_python_for_oracles() -> Non
     for source in (suite_source, child_source, trace_source):
         assert "ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON" in source
         assert "/opt/odoo/odoo19/odoo19-venv/bin/python" in source
+        assert "SETUPTOOLS_USE_DISTUTILS" in source
+        assert "stdlib" in source
     for source in (suite_source, child_source):
         assert 'role in {"odoo", "postgres"}' in source
 

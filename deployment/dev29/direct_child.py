@@ -270,6 +270,7 @@ def _expected_environment(role: str) -> dict[str, str]:
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "SETUPTOOLS_USE_DISTUTILS": "stdlib",
     }
     if role in {"odoo", "postgres"}:
         environment["ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON"] = (

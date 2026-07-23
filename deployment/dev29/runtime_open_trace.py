@@ -248,6 +248,7 @@ ROLE_ENVIRONMENTS = {
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "SETUPTOOLS_USE_DISTUTILS": "stdlib",
         "ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON": (
             "/opt/odoo/odoo19/odoo19-venv/bin/python"
         ),
@@ -259,6 +260,7 @@ ROLE_ENVIRONMENTS = {
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "SETUPTOOLS_USE_DISTUTILS": "stdlib",
     },
     "postgres": {
         "PATH": "/usr/bin:/bin",
@@ -267,6 +269,7 @@ ROLE_ENVIRONMENTS = {
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "SETUPTOOLS_USE_DISTUTILS": "stdlib",
         "ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON": (
             "/opt/odoo/odoo19/odoo19-venv/bin/python"
         ),
@@ -278,6 +281,7 @@ ROLE_ENVIRONMENTS = {
         "LC_ALL": "C.UTF-8",
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "SETUPTOOLS_USE_DISTUTILS": "stdlib",
     },
 }
 IN_ATTRIB = 0x00000004
