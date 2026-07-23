@@ -764,7 +764,7 @@ def load_runtime_secrets(config: RuntimeConfig) -> tuple[bytes, bytes]:
 
 
 def _runtime_gcov_directory(config: RuntimeConfig) -> Path:
-    prefix = config.auth_state_path.parent / "gcov"
+    prefix = config.auth_state_path.parent.parent / "gcov"
     try:
         prefix.mkdir(mode=0o700, parents=False, exist_ok=True)
         metadata = prefix.lstat()

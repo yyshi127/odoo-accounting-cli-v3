@@ -172,9 +172,9 @@ def test_safe_environment_can_pin_gcov_to_runtime_state(tmp_path: Path) -> None:
 
     environment = _safe_environment(config)
 
-    assert environment["GCOV_PREFIX"] == str(config.auth_state_path.parent / "gcov")
+    assert environment["GCOV_PREFIX"] == str(config.auth_state_path.parent.parent / "gcov")
     assert environment["GCOV_ERROR_FILE"] == str(
-        config.auth_state_path.parent / "gcov" / "gcov-error.log"
+        config.auth_state_path.parent.parent / "gcov" / "gcov-error.log"
     )
     assert environment["GCOV_EXIT_AT_ERROR"] == "0"
     assert environment["GCOV_PREFIX_STRIP"] == "0"
@@ -683,10 +683,10 @@ class OdooRunnerTest(unittest.TestCase):
         expected_environment = {
             **FIXED_CHILD_ENVIRONMENT,
             "GCOV_ERROR_FILE": str(
-                self.config.auth_state_path.parent / "gcov" / "gcov-error.log"
+                self.config.auth_state_path.parent.parent / "gcov" / "gcov-error.log"
             ),
             "GCOV_EXIT_AT_ERROR": "0",
-            "GCOV_PREFIX": str(self.config.auth_state_path.parent / "gcov"),
+            "GCOV_PREFIX": str(self.config.auth_state_path.parent.parent / "gcov"),
             "GCOV_PREFIX_STRIP": "0",
         }
         self.assertEqual(options["env"], expected_environment)
