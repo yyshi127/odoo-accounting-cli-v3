@@ -1073,6 +1073,10 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
             suite._validate_direct_child_command(role, command, runtime=configuration, expected=identity)
 
 
+def test_oracle_staging_uses_outer_readwrite_run_directory() -> None:
+    assert suite.ORACLE_STAGING_PARENT == Path("/run/odoo-accounting-cli-v3-dev29")
+
+
 def test_sandbox_profile_forbids_nested_systemd_and_has_exact_role_accounts():
     outer = {
         "read_write_paths": [

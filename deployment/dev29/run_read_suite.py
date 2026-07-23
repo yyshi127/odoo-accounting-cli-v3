@@ -53,6 +53,7 @@ PRIVATE_EVIDENCE_PARENT = Path(
     "/var/lib/odoo-accounting-cli-v3/evidence-private"
 )
 ANCHOR_PARENT = Path("/var/lib/odoo-accounting-cli-v3/evidence-anchors")
+ORACLE_STAGING_PARENT = Path("/run/odoo-accounting-cli-v3-dev29")
 RELEASE_PARENT = Path("/opt/odoo-accounting-cli-v3/releases")
 PACKAGE_PARENT = Path("/opt/odoo-accounting-cli-v3/packages")
 TRUSTED_ARTIFACT_PARENT = Path("/opt/odoo-accounting-cli-v3/trusted-artifacts")
@@ -4804,7 +4805,7 @@ def _oracle_staging(
     uid: int,
     gid: int,
 ) -> tuple[Path, Path, Path]:
-    parent = Path("/run")
+    parent = ORACLE_STAGING_PARENT
     if EVIDENCE_NAME.fullmatch(release) is None or case_name not in FINANCIAL_NAMES:
         raise ReadSuiteError("Oracle staging identity is invalid")
     path = parent / f"odoo-accounting-cli-v3-dev29-oracle-{release}-{case_name}"
@@ -4824,7 +4825,7 @@ def _oracle_staging(
 
 
 def _cleanup_oracle_staging(path: Path) -> None:
-    if path.parent != Path("/run") or not path.name.startswith(
+    if path.parent != ORACLE_STAGING_PARENT or not path.name.startswith(
         "odoo-accounting-cli-v3-dev29-oracle-"
     ):
         raise ReadSuiteError("Oracle staging path is unsafe")
