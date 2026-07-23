@@ -592,6 +592,8 @@ def evidence_read_boundary(
             launcher_diagnostics=launcher_diagnostics,
         )
     except OdooRunnerError as exc:
+        if launcher_diagnostics:
+            click.echo(str(exc), err=True)
         raise CliFailure(
             command=command,
             code="odoo_read_boundary_evidence_failed",

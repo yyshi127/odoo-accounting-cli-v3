@@ -227,6 +227,37 @@ def test_runner_can_emit_launcher_diagnostics_when_requested(tmp_path: Path):
     assert "_oacv3_checkpoint('before_registry_new')" in observed_argv[2]
 
 
+def test_runner_reports_child_stderr_only_for_launcher_diagnostics(tmp_path: Path):
+    config = runtime_config(tmp_path)
+
+    def child_process(argv, **_kwargs):
+        return subprocess.CompletedProcess(
+            argv,
+            1,
+            stdout="",
+            stderr="private odoo registry failure",
+        )
+
+    with patch(
+        "odoo_accounting_cli_v3.odoo.runner._validate_canonical_package_binding"
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner._verify_child_release"
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner._validate_runtime_execution_paths"
+    ), patch(
+        "odoo_accounting_cli_v3.odoo.runner._run_child_process",
+        side_effect=child_process,
+    ):
+        with pytest.raises(OdooRunnerError, match="Odoo shell exited with status 1$"):
+            run_read_boundary_evidence(config, release_digest=RELEASE_DIGEST)
+        with pytest.raises(OdooRunnerError, match="private odoo registry failure"):
+            run_read_boundary_evidence(
+                config,
+                release_digest=RELEASE_DIGEST,
+                launcher_diagnostics=True,
+            )
+
+
 def test_runner_rejects_response_runtime_mismatch(tmp_path: Path):
     config = runtime_config(tmp_path)
     changed = response(config)

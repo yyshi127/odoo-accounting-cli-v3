@@ -147,6 +147,36 @@ def test_evidence_read_boundary_hides_runner_failure_detail(tmp_path: Path):
     assert '"code":"odoo_read_boundary_evidence_failed"' in result.output
 
 
+def test_evidence_read_boundary_diagnostics_emit_runner_failure_to_stderr(tmp_path: Path):
+    config = runtime_config(tmp_path)
+    runner = CliRunner()
+    with patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_config", return_value=config
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=identity(config),
+    ), patch(
+        "odoo_accounting_cli_v3.cli._assert_runtime_release"
+    ), patch(
+        "odoo_accounting_cli_v3.cli.run_read_boundary_evidence",
+        side_effect=OdooRunnerError("diagnostic child stderr"),
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "evidence",
+                "read-boundary",
+                "--runtime-config",
+                str(tmp_path / "runtime.json"),
+                "--launcher-diagnostics",
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert "diagnostic child stderr" in result.stderr
+    assert '"code":"odoo_read_boundary_evidence_failed"' in result.output
+
+
 @pytest.mark.parametrize(
     ("environment", "channel"),
     (("production", "enabled"), ("test", "enabled")),

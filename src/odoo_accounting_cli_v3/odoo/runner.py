@@ -1638,6 +1638,11 @@ def run_read_boundary_evidence(
             env=_safe_environment(),
         )
     if completed.returncode != 0:
+        if launcher_diagnostics and completed.stderr:
+            stderr_tail = completed.stderr[-4000:]
+            raise OdooRunnerError(
+                f"Odoo shell exited with status {completed.returncode}; stderr tail: {stderr_tail}"
+            )
         raise OdooRunnerError(f"Odoo shell exited with status {completed.returncode}")
     result = _parse_response(completed.stdout, marker, config)
     from .read_boundary_evidence import (
