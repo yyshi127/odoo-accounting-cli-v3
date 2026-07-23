@@ -3043,8 +3043,9 @@ def _supervise(arguments: argparse.Namespace) -> dict[str, Any]:
                         "production_promotion_allowed": False,
                     }
                 verifier_command = [
-                    str(SYSTEM_PYTHON),
+                    str(suite.CLOSURE_PYTHON),
                     "-I",
+                    "-B",
                     "-S",
                     str(paths["verifier"]),
                     "--validate-only",
@@ -3252,8 +3253,9 @@ def _trace_verifier_fragment_supervise(arguments: argparse.Namespace) -> dict[st
         script_path=paths["closure"],
     ) as active:
         verifier_command = [
-            str(SYSTEM_PYTHON),
+            str(suite.CLOSURE_PYTHON),
             "-I",
+            "-B",
             "-S",
             str(paths["verifier"]),
             "--validate-only",

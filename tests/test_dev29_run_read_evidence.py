@@ -290,6 +290,31 @@ def test_verifier_fragment_creates_frozen_empty_evidence_dir(
         runner._create_verifier_fragment_evidence_dir(evidence)
 
 
+def test_verifier_direct_child_commands_use_closure_python() -> None:
+    source = (ROOT / "deployment" / "dev29" / "run_read_evidence.py").read_text(
+        encoding="utf-8"
+    )
+    expected = (
+        'verifier_command = [\n'
+        '                    str(suite.CLOSURE_PYTHON),\n'
+        '                    "-I",\n'
+        '                    "-B",\n'
+        '                    "-S",\n'
+        '                    str(paths["verifier"]),'
+    )
+    discovery_expected = (
+        'verifier_command = [\n'
+        '            str(suite.CLOSURE_PYTHON),\n'
+        '            "-I",\n'
+        '            "-B",\n'
+        '            "-S",\n'
+        '            str(paths["verifier"]),'
+    )
+
+    assert expected in source
+    assert discovery_expected in source
+
+
 def test_verifier_fragment_evidence_dir_must_be_fixed_parent_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
