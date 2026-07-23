@@ -184,6 +184,7 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
     assert not any(key.startswith("GCOV_") for key in observed_environment)
     assert observed_argv[:2] == [str(config.odoo_python), "-c"]
     assert "shell" not in observed_argv
+    assert "traceback.print_exc(file=sys.stderr)" in observed_argv[2]
     assert "sys.modules['_rjsmin'] = None" in observed_argv[2]
     assert "Registry.new" in observed_argv[2]
     assert "update_module=False" in observed_argv[2]
