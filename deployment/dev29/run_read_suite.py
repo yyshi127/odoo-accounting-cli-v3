@@ -3989,7 +3989,9 @@ def _validate_child_attestation(
     ):
         raise ReadSuiteError("direct child Python attestation is invalid")
     venv_root = Path(runtime["odoo_python"]).parent.parent.resolve(strict=True)
-    external_paths = [Path(item) for item in closure["external_runtime_paths"]]
+    external_paths = [
+        Path(item) for item in closure["closure_identity"]["external_runtime_paths"]
+    ]
     for item in python["sys_path"]:
         if not isinstance(item, str) or not item or not Path(item).is_absolute():
             raise ReadSuiteError("direct child Python path is not canonical")

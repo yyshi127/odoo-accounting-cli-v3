@@ -148,6 +148,13 @@ def test_direct_child_does_not_require_child_access_to_host_namespace() -> None:
     assert "arguments.expected_host_namespace_inode" in source
 
 
+def test_child_attestation_uses_closure_identity_external_runtime_paths() -> None:
+    source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
+
+    assert 'closure["closure_identity"]["external_runtime_paths"]' in source
+    assert 'closure["external_runtime_paths"]' not in source
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,
