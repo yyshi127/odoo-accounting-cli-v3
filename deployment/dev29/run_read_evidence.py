@@ -949,7 +949,10 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
             or wrapper_execution.get("parent_death_signal") != "SIGKILL"
             or wrapper_execution.get("pidfd_monitoring") is not True
             or wrapper_execution.get("all_checks_passed") is not True
-            or wrapper_execution.get("python") != python_identity
+            or not isinstance(wrapper_execution.get("python"), dict)
+            or wrapper_execution["python"].get("path") != str(SYSTEM_PYTHON)
+            or wrapper_execution["python"].get("sha256")
+            != arguments.expected_system_python_sha256
             or wrapper_execution.get("python_device") != expected_python[0]
             or wrapper_execution.get("python_inode") != expected_python[1]
             or wrapper_execution.get("script") != script_identity
