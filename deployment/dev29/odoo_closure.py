@@ -149,6 +149,7 @@ FORBIDDEN_AUTOSTART_NAMES = frozenset(
         "usercustomize.pyo",
     }
 )
+IMPORT_ONLY_COMMUNITY_ADDON_PREFIXES = frozenset({"payment_"})
 
 
 class ClosureError(RuntimeError):
@@ -1174,6 +1175,58 @@ def resolve_installed_modules(
             }
         )
         selections.append(SourceItem(source_path, destination_path, f"module:{name}"))
+    return mapping, selections
+
+
+def resolve_import_only_addons(
+    layout: Layout, installed_mapping: Sequence[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[SourceItem]]:
+    installed_names = {
+        item["name"]
+        for item in installed_mapping
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    community_root = layout.source_server / "addons"
+    mapping: list[dict[str, Any]] = []
+    selections: list[SourceItem] = []
+    try:
+        children = sorted(os.scandir(community_root), key=lambda item: item.name)
+    except OSError as exc:
+        raise ClosureError("community addon root cannot be enumerated") from exc
+    for child in children:
+        name = child.name
+        if name in installed_names or not any(
+            name.startswith(prefix) for prefix in IMPORT_ONLY_COMMUNITY_ADDON_PREFIXES
+        ):
+            continue
+        source_path = Path(child.path)
+        try:
+            metadata = source_path.lstat()
+        except OSError as exc:
+            raise ClosureError(f"import-only addon root cannot be inspected: {name}") from exc
+        if source_path.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            raise ClosureError(f"import-only addon root is not a canonical directory: {name}")
+        _manifest_path, parsed = _module_manifest(source_path)
+        tree = _tree_manifest(source_path)
+        mapping.append(
+            {
+                "name": name,
+                "source": "community",
+                "path": str(source_path),
+                "manifest_version": parsed["version"],
+                "tree_sha256": canonical_sha256(tree),
+                "reason": "import_only_addon",
+            }
+        )
+        selections.append(
+            SourceItem(
+                source_path,
+                PurePosixPath("odoo-server/addons") / name,
+                f"import-only-addon:{name}",
+            )
+        )
+    mapping.sort(key=lambda item: item["name"])
+    selections.sort(key=lambda item: str(item.destination))
     return mapping, selections
 
 
@@ -2595,6 +2648,7 @@ def _closure_manifest(
     database_uuid: str,
     graph: dict[str, Any],
     mapping: list[dict[str, Any]],
+    import_only_mapping: list[dict[str, Any]],
     source_digest: str,
     external_manifest: dict[str, Any],
     python_audit: dict[str, Any],
@@ -2605,7 +2659,9 @@ def _closure_manifest(
     loader_preload_identity: dict[str, Any],
 ) -> dict[str, Any]:
     names = [item["name"] for item in graph["modules"]]
-    payload_mapping = _module_payload_mapping(payload_manifest, mapping)
+    payload_mapping = _module_payload_mapping(
+        payload_manifest, mapping, import_only_mapping=import_only_mapping
+    )
     return {
         "schema_version": 1,
         "kind": "odoo_dependency_closure",
@@ -2627,6 +2683,13 @@ def _closure_manifest(
             "mapping": mapping,
             "payload_mapping": payload_mapping,
         },
+        "import_only_addons": {
+            "count": len(import_only_mapping),
+            "names": [item["name"] for item in import_only_mapping],
+            "names_sha256": canonical_sha256([item["name"] for item in import_only_mapping]),
+            "mapping_sha256": canonical_sha256(import_only_mapping),
+            "mapping": import_only_mapping,
+        },
         "source_manifest_sha256": source_digest,
         "external_runtime_manifest_sha256": canonical_sha256(external_manifest),
         "python_path_audit_sha256": canonical_sha256(python_audit),
@@ -2645,7 +2708,10 @@ def _closure_manifest(
 
 
 def _module_payload_mapping(
-    payload_manifest: dict[str, Any], mapping: list[dict[str, Any]]
+    payload_manifest: dict[str, Any],
+    mapping: list[dict[str, Any]],
+    *,
+    import_only_mapping: Sequence[dict[str, Any]] = (),
 ) -> list[dict[str, str]]:
     entries = payload_manifest.get("entries")
     if not isinstance(entries, list):
@@ -2656,6 +2722,11 @@ def _module_payload_mapping(
         "custom": "custom-addons",
     }
     expected_directories: dict[str, set[str]] = {key: set() for key in roots}
+    allowed_import_only_directories: dict[str, set[str]] = {key: set() for key in roots}
+    for item in import_only_mapping:
+        if not isinstance(item, dict) or item.get("source") not in roots or not isinstance(item.get("name"), str):
+            raise ClosureError("import-only addon mapping cannot be bound to image payload")
+        allowed_import_only_directories[item["source"]].add(item["name"])
     result: list[dict[str, str]] = []
     for item in mapping:
         if not isinstance(item, dict) or item.get("source") not in roots or not isinstance(item.get("name"), str):
@@ -2694,7 +2765,7 @@ def _module_payload_mapping(
             and entry["path"].startswith(root + "/")
             and entry["path"].count("/") == root.count("/") + 1
         }
-        if actual != expected_directories[source]:
+        if actual != expected_directories[source] | allowed_import_only_directories[source]:
             raise ClosureError(f"image {source} module set differs from database mapping")
     result.sort(key=lambda item: item["name"])
     return result
@@ -3139,7 +3210,10 @@ def build(
                 if graph_before.get("database_name") != expected_database_name or graph_before.get("database_uuid") != expected_database_uuid:
                     raise ClosureError("supplied database graph identity mismatch")
                 mapping, module_selections = resolve_installed_modules(layout, graph_before)
-                selections = _core_selections(layout) + module_selections
+                import_only_mapping, import_only_selections = resolve_import_only_addons(
+                    layout, mapping
+                )
+                selections = _core_selections(layout) + module_selections + import_only_selections
                 python_audit = audit_python_paths(layout.source_venv)
 
                 def derive_native(
@@ -3222,7 +3296,12 @@ def build(
                 mapping_pre_copy, module_pre_copy = resolve_installed_modules(
                     layout, graph_pre_copy
                 )
-                selections_pre_copy = _core_selections(layout) + module_pre_copy
+                import_only_pre_copy, import_only_module_pre_copy = resolve_import_only_addons(
+                    layout, mapping_pre_copy
+                )
+                selections_pre_copy = (
+                    _core_selections(layout) + module_pre_copy + import_only_module_pre_copy
+                )
                 audit_pre_copy = audit_python_paths(layout.source_venv)
                 preload_pre_copy = _validate_loader_preload(
                     expected_sha256=expected_loader_preload_sha256,
@@ -3236,6 +3315,7 @@ def build(
                     (
                         graph_before,
                         mapping,
+                        import_only_mapping,
                         selections,
                         python_audit,
                         preload_before,
@@ -3244,6 +3324,7 @@ def build(
                     (
                         graph_pre_copy,
                         mapping_pre_copy,
+                        import_only_pre_copy,
                         selections_pre_copy,
                         audit_pre_copy,
                         preload_pre_copy,
@@ -3282,7 +3363,12 @@ def build(
                 mapping_after_copy, modules_after_copy = resolve_installed_modules(
                     layout, graph_after_copy
                 )
-                selections_after_copy = _core_selections(layout) + modules_after_copy
+                import_only_after_copy, import_only_modules_after_copy = resolve_import_only_addons(
+                    layout, mapping_after_copy
+                )
+                selections_after_copy = (
+                    _core_selections(layout) + modules_after_copy + import_only_modules_after_copy
+                )
                 audit_after_copy = audit_python_paths(layout.source_venv)
                 preload_after_copy = _validate_loader_preload(
                     expected_sha256=expected_loader_preload_sha256,
@@ -3299,6 +3385,7 @@ def build(
                         config_payload,
                         graph_before,
                         mapping,
+                        import_only_mapping,
                         selections,
                         python_audit,
                         preload_before,
@@ -3310,6 +3397,7 @@ def build(
                         config_after,
                         graph_after_copy,
                         mapping_after_copy,
+                        import_only_after_copy,
                         selections_after_copy,
                         audit_after_copy,
                         preload_after_copy,
@@ -3331,6 +3419,7 @@ def build(
                     database_uuid=expected_database_uuid,
                     graph=graph_before,
                     mapping=mapping,
+                    import_only_mapping=import_only_mapping,
                     source_digest=source_before,
                     external_manifest=external_before,
                     python_audit=python_audit,
@@ -3430,7 +3519,12 @@ def build(
                 mapping_final, modules_final = resolve_installed_modules(
                     layout, graph_final
                 )
-                selections_final = _core_selections(layout) + modules_final
+                import_only_final, import_only_modules_final = resolve_import_only_addons(
+                    layout, mapping_final
+                )
+                selections_final = (
+                    _core_selections(layout) + modules_final + import_only_modules_final
+                )
                 audit_final = audit_python_paths(layout.source_venv)
                 preload_final = _validate_loader_preload(
                     expected_sha256=expected_loader_preload_sha256,
@@ -3446,6 +3540,7 @@ def build(
                         config_payload,
                         graph_before,
                         mapping,
+                        import_only_mapping,
                         selections,
                         python_audit,
                         preload_before,
@@ -3457,6 +3552,7 @@ def build(
                         config_final,
                         graph_final,
                         mapping_final,
+                        import_only_final,
                         selections_final,
                         audit_final,
                         preload_final,
@@ -4205,6 +4301,7 @@ def _validate_closure_manifest(
         "release_identity",
         "database_scope",
         "installed_modules",
+        "import_only_addons",
         "source_manifest_sha256",
         "external_runtime_manifest_sha256",
         "python_path_audit_sha256",
@@ -4244,6 +4341,7 @@ def _validate_closure_manifest(
     ):
         raise ClosureError("closure manifest identity mismatch")
     installed = document.get("installed_modules")
+    import_only = document.get("import_only_addons")
     if (
         not isinstance(installed, dict)
         or set(installed)
@@ -4279,6 +4377,18 @@ def _validate_closure_manifest(
         != anchor["installed_modules"]
     ):
         raise ClosureError("closure installed-module identity mismatch")
+    if (
+        not isinstance(import_only, dict)
+        or set(import_only)
+        != {"count", "names", "names_sha256", "mapping_sha256", "mapping"}
+        or import_only.get("count") != len(import_only.get("names", []))
+        or import_only.get("names") != sorted(set(import_only.get("names", [])))
+        or import_only.get("names_sha256") != canonical_sha256(import_only["names"])
+        or import_only.get("mapping")
+        != sorted(import_only.get("mapping", []), key=lambda item: item.get("name", ""))
+        or import_only.get("mapping_sha256") != canonical_sha256(import_only["mapping"])
+    ):
+        raise ClosureError("closure import-only addon identity mismatch")
     if (
         not isinstance(document.get("payload_entry_count"), int)
         or document["payload_entry_count"] <= 0

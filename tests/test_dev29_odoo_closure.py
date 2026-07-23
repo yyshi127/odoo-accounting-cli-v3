@@ -285,6 +285,37 @@ def test_module_manifest_uses_the_odoo_default_version_when_omitted(
         closure._module_manifest(module)
 
 
+def test_import_only_payment_addons_are_sealed_without_becoming_installed(
+    tmp_path: Path,
+) -> None:
+    layout = closure.build_layout(tmp_path, expected())
+    write(
+        layout.source_server / "addons/payment_mercado_pago/__manifest__.py",
+        b"{'version': '19.0.1.0', 'depends': ['payment']}\n",
+    )
+    write(layout.source_server / "addons/payment_mercado_pago/__init__.py", b"")
+    write(
+        layout.source_server / "addons/payment_stripe/__manifest__.py",
+        b"{'version': '19.0.1.0', 'depends': ['payment']}\n",
+    )
+    write(layout.source_server / "addons/payment_stripe/__init__.py", b"")
+    write(
+        layout.source_server / "addons/account/__manifest__.py",
+        b"{'version': '19.0.1.0', 'depends': []}\n",
+    )
+
+    mapping, selections = closure.resolve_import_only_addons(
+        layout,
+        [{"name": "payment_stripe", "source": "community"}],
+    )
+
+    assert [item["name"] for item in mapping] == ["payment_mercado_pago"]
+    assert mapping[0]["reason"] == "import_only_addon"
+    assert [str(item.destination) for item in selections] == [
+        "odoo-server/addons/payment_mercado_pago"
+    ]
+
+
 def _inotify_event(watch: int, mask: int, name: str = "") -> bytes:
     encoded = name.encode() + (b"\0" if name else b"")
     padded = encoded.ljust((len(encoded) + 3) & ~3, b"\0")
@@ -911,6 +942,43 @@ def test_module_payload_mapping_rejects_unregistered_addon_directory() -> None:
     )
     with pytest.raises(closure.ClosureError, match="custom module set"):
         closure._module_payload_mapping(payload, mapping)
+
+
+def test_module_payload_mapping_allows_declared_import_only_addon_directory() -> None:
+    payload = {
+        "schema_version": 1,
+        "entries": [
+            {"path": "odoo-server/addons/payment", "kind": "directory"},
+            {"path": "odoo-server/addons/payment_mercado_pago", "kind": "directory"},
+        ],
+    }
+    mapping = [{"name": "payment", "source": "community"}]
+    import_only = [{"name": "payment_mercado_pago", "source": "community"}]
+
+    result = closure._module_payload_mapping(
+        payload,
+        mapping,
+        import_only_mapping=import_only,
+    )
+
+    assert result == [
+        {
+            "name": "payment",
+            "destination": "odoo-server/addons/payment",
+            "payload_entries_sha256": closure.canonical_sha256(
+                [{"path": "odoo-server/addons/payment", "kind": "directory"}]
+            ),
+        }
+    ]
+    payload["entries"].append(
+        {"path": "odoo-server/addons/payment_unreviewed", "kind": "directory"}
+    )
+    with pytest.raises(closure.ClosureError, match="community module set"):
+        closure._module_payload_mapping(
+            payload,
+            mapping,
+            import_only_mapping=import_only,
+        )
 
 
 def test_capacity_gate_same_filesystem_boundaries(
