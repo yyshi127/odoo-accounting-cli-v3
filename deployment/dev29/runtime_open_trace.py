@@ -1209,6 +1209,23 @@ def _is_watch_root_metadata_ancestor(path: str, watch_roots: Sequence[str]) -> b
     return any(root.startswith(prefix) for root in watch_roots)
 
 
+def _nearest_existing_parent(path: Path) -> tuple[Path, os.stat_result]:
+    parent = path.parent
+    while True:
+        try:
+            metadata = parent.lstat()
+        except FileNotFoundError:
+            if parent == parent.parent:
+                raise RuntimeOpenTraceError("absent watch root has no existing parent")
+            parent = parent.parent
+            continue
+        except OSError as exc:
+            raise RuntimeOpenTraceError("absent watch root parent cannot be inspected") from exc
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            raise RuntimeOpenTraceError("absent watch root parent is unsafe")
+        return parent, metadata
+
+
 def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManifest:
     request.validate()
     fields = {
@@ -1920,6 +1937,35 @@ def watch_tree_snapshot(roots: Sequence[str]) -> dict[str, Any]:
         path = pending.pop()
         try:
             metadata = path.lstat()
+        except FileNotFoundError:
+            parent, parent_metadata = _nearest_existing_parent(path)
+            static_entries.append(
+                {
+                    "path": str(PurePosixPath(str(path))),
+                    "kind": "absent",
+                    "parent_path": str(PurePosixPath(str(parent))),
+                    "parent_uid": parent_metadata.st_uid,
+                    "parent_gid": parent_metadata.st_gid,
+                    "parent_mode": f"{stat.S_IMODE(parent_metadata.st_mode):04o}",
+                }
+            )
+            runtime_entries.append(
+                {
+                    "path": str(PurePosixPath(str(path))),
+                    "kind": "absent",
+                    "parent_path": str(PurePosixPath(str(parent))),
+                    "parent_uid": parent_metadata.st_uid,
+                    "parent_gid": parent_metadata.st_gid,
+                    "parent_mode": f"{stat.S_IMODE(parent_metadata.st_mode):04o}",
+                    "parent_device": parent_metadata.st_dev,
+                    "parent_inode": parent_metadata.st_ino,
+                    "parent_links": parent_metadata.st_nlink,
+                    "parent_size": parent_metadata.st_size,
+                    "parent_mtime_ns": parent_metadata.st_mtime_ns,
+                    "parent_ctime_ns": parent_metadata.st_ctime_ns,
+                }
+            )
+            continue
         except OSError as exc:
             raise RuntimeOpenTraceError("watched closure entry is unavailable") from exc
         static_common: dict[str, Any] = {
@@ -2090,7 +2136,22 @@ class MutationWatch:
             pending = [Path(root) for root in reversed(self.roots)]
             while pending:
                 path = pending.pop()
-                metadata = path.lstat()
+                try:
+                    metadata = path.lstat()
+                except FileNotFoundError:
+                    parent, parent_metadata = _nearest_existing_parent(path)
+                    identity = (parent_metadata.st_dev, parent_metadata.st_ino)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    watch = add(
+                        descriptor,
+                        os.fsencode(parent),
+                        IN_REJECT_MASK | IN_DONT_FOLLOW,
+                    )
+                    if watch < 0:
+                        raise RuntimeOpenTraceError("inotify cannot watch an absent closure parent")
+                    continue
                 identity = (metadata.st_dev, metadata.st_ino)
                 if identity in seen:
                     continue

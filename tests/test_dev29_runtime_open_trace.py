@@ -455,6 +455,41 @@ def test_failed_probe_errno_and_success_outcome_are_externally_bound() -> None:
         trace.validate_trace_bytes(appeared, base, expected_leader_pid=410)
 
 
+def test_absent_watch_root_can_guard_failed_immutable_probe() -> None:
+    missing = "/usr/bin/Modules/Setup.local"
+    base = manifest()
+    policy = trace.PathAccessPolicy(
+        path=missing,
+        role=base.role,
+        classification="immutable",
+        allowed_access=("metadata",),
+        create_suffixes=(),
+        delta_verifier=None,
+        delta_contract_sha256=None,
+        allow_success=False,
+        allowed_errnos=("ENOENT",),
+        failure_guard=trace.WATCH_TREE_FAILURE_GUARD,
+    )
+    changed = replace(
+        base,
+        allowed_paths=tuple(sorted((*base.allowed_paths, missing))),
+        path_access_policy=tuple(
+            sorted((*base.path_access_policy, policy), key=lambda item: item.path)
+        ),
+        watch_roots=tuple(sorted((*base.watch_roots, missing))),
+    )
+    line = f'410 stat("{missing}", 0x7fff) = -1 ENOENT (No such file or directory)'
+    trace.validate_trace_bytes(
+        raw_trace(extra=[line]), changed, expected_leader_pid=410
+    )
+    appeared = raw_trace(extra=[line]).replace(
+        f'410 stat("{missing}", 0x7fff) = -1 ENOENT (No such file or directory)'.encode(),
+        f'410 stat("{missing}", {{st_mode=S_IFREG|0644}}, 0) = 0'.encode(),
+    )
+    with pytest.raises(trace.RuntimeOpenTraceError, match="guarded failure"):
+        trace.validate_trace_bytes(appeared, changed, expected_leader_pid=410)
+
+
 def test_immutable_dependency_cannot_be_opened_for_write() -> None:
     write = '410 open("/etc/ld.so.cache", O_WRONLY|O_TRUNC) = 8</etc/ld.so.cache>'
     with pytest.raises(trace.RuntimeOpenTraceError, match="access type"):
@@ -933,6 +968,39 @@ def test_manifest_accepts_only_explicit_outcome_policy_and_static_closure_pin() 
     assert missing.allow_success is False
     assert missing.allowed_errnos == ("ENOENT",)
     assert missing.failure_guard == trace.WATCH_TREE_FAILURE_GUARD
+
+
+def test_manifest_accepts_guarded_absent_watch_root_policy() -> None:
+    missing = "/usr/bin/Modules/Setup.local"
+    document = manifest_document()
+    document["allowed_paths"] = sorted([*document["allowed_paths"], missing])  # type: ignore[index]
+    document["watch_roots"] = sorted([*document["watch_roots"], missing])  # type: ignore[index]
+    document["expected_watch_roots_sha256"] = hashlib.sha256(
+        trace.canonical_json(tuple(document["watch_roots"]))  # type: ignore[arg-type]
+    ).hexdigest()
+    document["path_access_policy"] = sorted(  # type: ignore[index]
+        [
+            *document["path_access_policy"],  # type: ignore[index]
+            {
+                "path": missing,
+                "role": "signer",
+                "classification": "immutable",
+                "allowed_access": ["metadata"],
+                "create_suffixes": [],
+                "delta_verifier": None,
+                "delta_contract_sha256": None,
+                "allow_success": False,
+                "allowed_errnos": ["ENOENT"],
+                "failure_guard": trace.WATCH_TREE_FAILURE_GUARD,
+            },
+        ],
+        key=lambda item: item["path"],
+    )
+
+    loaded = trace.validate_manifest_document(
+        document, request(tuple(document["watch_roots"]))  # type: ignore[arg-type]
+    )
+    assert missing in loaded.watch_roots
 
 
 def test_manifest_rejects_mutable_state_inside_immutable_watch_tree() -> None:
