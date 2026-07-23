@@ -469,12 +469,13 @@ def _validate_bootstrap_argv(
     prefix = (
         bootstrap[0],
         "-I",
+        "-B",
         *(("-S",) if no_site else ()),
         direct_child,
     )
     if bootstrap[: len(prefix)] != prefix:
         raise RuntimeOpenTraceError("bootstrap argv prefix is not the fixed direct child")
-    final_prefix = (bootstrap[0], "-I", *(("-S",) if no_site else ()))
+    final_prefix = (bootstrap[0], "-I", "-B", *(("-S",) if no_site else ()))
     if final[: len(final_prefix)] != final_prefix or len(final) <= len(final_prefix):
         raise RuntimeOpenTraceError("final argv does not use the same isolated Python")
     expected_script = {
@@ -1369,6 +1370,7 @@ def demotion_argv(manifest: TraceManifest) -> tuple[str, ...]:
     return (
         SYSTEM_PYTHON_COMMAND,
         "-I",
+        "-B",
         "-S",
         script,
         "__dev29_demote_exec_v1__",

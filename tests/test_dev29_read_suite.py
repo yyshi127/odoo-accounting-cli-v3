@@ -1132,10 +1132,18 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
     identity = expected_identity()
     configuration = runtime()
     paths = suite._release_paths(identity)
-    launcher = [configuration["odoo_python"], "-I", str(paths["launcher"]), "release", "identity"]
+    launcher = [
+        configuration["odoo_python"],
+        "-I",
+        "-B",
+        str(paths["launcher"]),
+        "release",
+        "identity",
+    ]
     signer = [
         suite.CLOSURE_PYTHON,
         "-I",
+        "-B",
         "-S",
         str(paths["signer"]),
         "--case",
@@ -1146,6 +1154,7 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
     oracle = [
         configuration["odoo_python"],
         "-I",
+        "-B",
         str(paths["oracle"]),
         "witness",
         "--plan",
@@ -1154,6 +1163,7 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
     oracle_verify = [
         configuration["odoo_python"],
         "-I",
+        "-B",
         str(paths["oracle"]),
         "verify",
         "--plan",
@@ -1166,6 +1176,7 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
     verifier = [
         suite.CLOSURE_PYTHON,
         "-I",
+        "-B",
         "-S",
         str(paths["verifier"]),
         "--validate-only",

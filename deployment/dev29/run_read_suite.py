@@ -3663,9 +3663,9 @@ def _validate_direct_child_command(
     paths = _release_paths(expected)
     values = list(command)
     prefix = (
-        [CLOSURE_PYTHON, "-I", "-S"]
+        [CLOSURE_PYTHON, "-I", "-B", "-S"]
         if role in {"signer", "verifier"}
-        else [runtime["odoo_python"], "-I"]
+        else [runtime["odoo_python"], "-I", "-B"]
     )
     if len(values) <= len(prefix) or values[: len(prefix)] != prefix:
         raise ReadSuiteError("direct child command must use sealed isolated Odoo Python")
@@ -4554,6 +4554,7 @@ def _run_direct_child(
     bootstrap = [
         child_python,
         "-I",
+        "-B",
         *(["-S"] if role in {"signer", "verifier"} else []),
         str(paths["direct_child"]),
         "--role",
@@ -4904,6 +4905,7 @@ def run_oracle_verify(
         [
             runtime["odoo_python"],
             "-I",
+            "-B",
             str(paths["oracle"]),
             "verify",
             "--plan",
@@ -5906,6 +5908,7 @@ def run_suite(
             [
                 runtime["odoo_python"],
                 "-I",
+                "-B",
                 str(paths["launcher"]),
                 "release",
                 "identity",
@@ -5944,6 +5947,7 @@ def run_suite(
             [
                 runtime["odoo_python"],
                 "-I",
+                "-B",
                 str(paths["oracle"]),
                 "witness",
                 "--plan",
@@ -5964,6 +5968,7 @@ def run_suite(
             [
                 runtime["odoo_python"],
                 "-I",
+                "-B",
                 str(paths["launcher"]),
                 "evidence",
                 "read-boundary",
@@ -6007,6 +6012,7 @@ def run_suite(
                 [
                     CLOSURE_PYTHON,
                     "-I",
+                    "-B",
                     "-S",
                     str(paths["signer"]),
                     "--case",
@@ -6038,6 +6044,7 @@ def run_suite(
                 [
                     runtime["odoo_python"],
                     "-I",
+                    "-B",
                     str(paths["launcher"]),
                     "read",
                     "--runtime-config",
@@ -6111,6 +6118,7 @@ def run_suite(
                     [
                         CLOSURE_PYTHON,
                         "-I",
+                        "-B",
                         "-S",
                         str(paths["signer"]),
                         "--negative",
@@ -6153,6 +6161,7 @@ def run_suite(
                 [
                     runtime["odoo_python"],
                     "-I",
+                    "-B",
                     str(paths["launcher"]),
                     "read",
                     "--runtime-config",
@@ -6211,6 +6220,7 @@ def run_suite(
             [
                 runtime["odoo_python"],
                 "-I",
+                "-B",
                 str(paths["oracle"]),
                 "witness",
                 "--plan",

@@ -29,6 +29,7 @@ RELEASE_ROOT = f"/opt/odoo-accounting-cli-v3/releases/{RELEASE}"
 FINAL = (
     "/usr/bin/python3.12",
     "-I",
+    "-B",
     "-S",
     f"{RELEASE_ROOT}/deployment/dev29/sign_read.py",
     "--case",
@@ -41,6 +42,7 @@ MOUNTS = tuple(
 BOOTSTRAP = (
     "/usr/bin/python3.12",
     "-I",
+    "-B",
     "-S",
     f"{RELEASE_ROOT}/deployment/dev29/direct_child.py",
     "--role",
@@ -83,6 +85,7 @@ BOOTSTRAP = (
 DEMOTION = (
     "/usr/bin/python3.12",
     "-I",
+    "-B",
     "-S",
     f"{RELEASE_ROOT}/deployment/dev29/runtime_open_trace.py",
     "__dev29_demote_exec_v1__",
@@ -676,6 +679,7 @@ def test_verifier_template_allows_only_bundle_manifest_digest_to_vary() -> None:
     verifier_final = (
         "/usr/bin/python3.12",
         "-I",
+        "-B",
         "-S",
         f"{RELEASE_ROOT}/deployment/dev29/verify_read_evidence.py",
         "--validate-only",
@@ -711,6 +715,7 @@ def test_verifier_template_allows_only_bundle_manifest_digest_to_vary() -> None:
     verifier_bootstrap = (
         "/usr/bin/python3.12",
         "-I",
+        "-B",
         "-S",
         f"{RELEASE_ROOT}/deployment/dev29/direct_child.py",
         "--role",
@@ -1033,7 +1038,7 @@ def test_fixed_strace_command_has_no_path_lookup_or_attach_mode(
     assert launch.logical_executable == "/usr/bin/strace"
     assert launch.pass_fds == (99,)
     assert any(value.startswith("--trace=%file,") for value in command)
-    assert command[-len(DEMOTION) :] == DEMOTION
+    assert command[-(len(DEMOTION) + 1) :] == ("--", *DEMOTION)
     assert "--" in command
     assert "-p" not in command
     assert not any(value.startswith("--attach") for value in command)
@@ -1734,10 +1739,11 @@ def test_real_runtime_trace_gate_binds_odoo_and_postgres_child_homes(
 
         def build_manifest(target_id: str, role: str) -> trace.TraceManifest:
             final_script = odoo_script if role == "odoo" else postgres_script
-            final = ("/usr/bin/python3.12", "-I", final_script.as_posix())
+            final = ("/usr/bin/python3.12", "-I", "-B", final_script.as_posix())
             bootstrap = (
                 "/usr/bin/python3.12",
                 "-I",
+                "-B",
                 direct.as_posix(),
                 "--role",
                 role,
@@ -1947,6 +1953,7 @@ def test_real_root_shim_stops_then_drops_credentials_and_rearms_pdeathsig(
         final = (
             "/usr/bin/python3.12",
             "-I",
+            "-B",
             "-S",
             final_script.as_posix(),
         )
@@ -1957,6 +1964,7 @@ def test_real_root_shim_stops_then_drops_credentials_and_rearms_pdeathsig(
         bootstrap = (
             "/usr/bin/python3.12",
             "-I",
+            "-B",
             "-S",
             direct.as_posix(),
             "--role",
