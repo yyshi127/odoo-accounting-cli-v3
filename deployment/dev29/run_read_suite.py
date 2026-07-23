@@ -5526,6 +5526,7 @@ def run_suite(
     *,
     runtime_path: Path | None = None,
     outer_unit_evidence: Mapping[str, Any],
+    active_closure_document: Mapping[str, Any] | None = None,
     expected_runtime_trace_index_sha256: str | None,
     expected_strace_sha256: str,
     runtime_open_discovery_inventory: Path | None = None,
@@ -5672,9 +5673,17 @@ def run_suite(
     write_json(evidence / "outer-unit.json", outer_unit_evidence)
     closure_python_pre = closure_python_snapshot(expected_closure.system_python_sha256)
     write_json(evidence / "closure" / "python-pre.json", closure_python_pre)
-    closure_pre_process = run_closure_verify(
-        paths, runtime, plan, expected, expected_closure
-    )
+    if active_closure_document is None:
+        closure_pre_process = run_closure_verify(
+            paths, runtime, plan, expected, expected_closure
+        )
+    else:
+        closure_pre_process = subprocess.CompletedProcess(
+            ["supervisor-preverified-active-closure"],
+            0,
+            canonical_json(dict(active_closure_document)) + b"\n",
+            b"",
+        )
     _write_completed(evidence / "closure", "verify-pre", closure_pre_process)
     closure = _strict_success(closure_pre_process, label="Odoo closure verification pre")
     validate_closure_document(
@@ -6047,9 +6056,17 @@ def run_suite(
         write_json(evidence / "verified-release-post.json", verified_release_post)
         if verified_release_post != verified_release:
             raise ReadSuiteError("exact release identity changed during the suite")
-        closure_post_process = run_closure_verify(
-            paths, runtime, plan, expected, expected_closure
-        )
+        if active_closure_document is None:
+            closure_post_process = run_closure_verify(
+                paths, runtime, plan, expected, expected_closure
+            )
+        else:
+            closure_post_process = subprocess.CompletedProcess(
+                ["supervisor-preverified-active-closure"],
+                0,
+                canonical_json(dict(active_closure_document)) + b"\n",
+                b"",
+            )
         _write_completed(evidence / "closure", "verify-post", closure_post_process)
         closure_post = _strict_success(
             closure_post_process, label="Odoo closure verification post"

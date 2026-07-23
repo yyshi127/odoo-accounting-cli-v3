@@ -2891,6 +2891,7 @@ def _supervise(arguments: argparse.Namespace) -> dict[str, Any]:
                     suite_closure,
                     runtime_path=paths["runtime"],
                     outer_unit_evidence=outer_unit,
+                    active_closure_document=active,
                     expected_runtime_trace_index_sha256=(
                         arguments.expected_runtime_open_index_sha256
                     ),
