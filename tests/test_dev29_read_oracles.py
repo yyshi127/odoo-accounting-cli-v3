@@ -441,6 +441,39 @@ def test_oracle_runtime_is_bound_to_isolated_odoo_python_without_odoo_imports():
         )
 
 
+def test_oracle_accepts_declared_odoo_venv_symlink_to_fixed_python(tmp_path):
+    oracle = load_module()
+    plan = oracle.read_plan(DEV29 / "read_plan.json")
+    python_bin = tmp_path / "usr" / "bin" / "python3.12"
+    venv_bin = tmp_path / "opt" / "odoo" / "odoo19" / "odoo19-venv" / "bin"
+    python_bin.parent.mkdir(parents=True)
+    venv_bin.mkdir(parents=True)
+    python_bin.write_bytes(b"fixed python\n")
+    venv_python = venv_bin / "python"
+    venv_python.symlink_to(python_bin)
+    plan["runtime"]["odoo_python"] = str(venv_python)
+    plan["runtime"]["odoo_python_sha256"] = hashlib.sha256(b"fixed python\n").hexdigest()
+
+    assert oracle.verify_runtime_python(
+        plan,
+        executable=str(python_bin),
+        isolated=1,
+        module_names={"sys", "psycopg2"},
+        declared_executable=str(venv_python),
+    ) == {
+        "path": str(venv_python),
+        "sha256": plan["runtime"]["odoo_python_sha256"],
+        "isolated": True,
+    }
+    with pytest.raises(oracle.OracleInputError):
+        oracle.verify_runtime_python(
+            plan,
+            executable=str(python_bin),
+            isolated=1,
+            module_names=set(),
+        )
+
+
 def test_source_declares_fixed_socket_schema_and_privacy_boundaries():
     source = (DEV29 / "read_oracles.py").read_text("utf-8")
     plan_source = (DEV29 / "read_plan.json").read_text("utf-8")

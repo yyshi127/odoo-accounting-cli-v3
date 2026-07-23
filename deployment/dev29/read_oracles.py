@@ -1558,20 +1558,35 @@ def verify_runtime_python(
     plan: dict[str, Any], *, executable: str | None = None,
     isolated: int | None = None, module_names: Iterable[str] | None = None,
     executable_sha256: str | None = None,
+    declared_executable: str | None = None,
 ) -> dict[str, Any]:
     expected_path = plan["runtime"]["odoo_python"]
     actual_path = executable if executable is not None else str(Path(sys.executable).absolute())
     actual_isolated = sys.flags.isolated if isolated is None else isolated
     names = set(sys.modules if module_names is None else module_names)
     digest = executable_sha256 or _sha256_file(Path(actual_path))
+    declared_path = (
+        declared_executable
+        if declared_executable is not None
+        else os.environ.get("ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON")
+    )
+    expected_runtime = actual_path == expected_path
+    if not expected_runtime and declared_path == expected_path:
+        try:
+            expected_runtime = (
+                Path(actual_path).resolve(strict=True)
+                == Path(expected_path).resolve(strict=True)
+            )
+        except OSError as exc:
+            raise OracleInputError("fixed oracle Python cannot be resolved") from exc
     if (
-        actual_path != expected_path or actual_isolated != 1
+        not expected_runtime or actual_isolated != 1
         or digest != plan["runtime"]["odoo_python_sha256"]
         or any(name == "odoo" or name.startswith("odoo.") for name in names)
         or any(name == "odoo_accounting_cli_v3" or name.startswith("odoo_accounting_cli_v3.") for name in names)
     ):
         raise OracleInputError("oracle is not running under the fixed isolated Odoo Python")
-    return {"path": actual_path, "sha256": digest, "isolated": True}
+    return {"path": expected_path, "sha256": digest, "isolated": True}
 
 
 def _witness_query(relation: dict[str, Any]) -> tuple[str, tuple[Any, ...]]:

@@ -263,7 +263,7 @@ def _expected_environment(role: str) -> dict[str, str]:
         "postgres": "/var/lib/postgresql",
         "verifier": "/root",
     }
-    return {
+    environment = {
         "PATH": "/usr/bin:/bin",
         "HOME": homes[role],
         "LANG": "C.UTF-8",
@@ -271,6 +271,11 @@ def _expected_environment(role: str) -> dict[str, str]:
         "TZ": "UTC",
         "PYTHONDONTWRITEBYTECODE": "1",
     }
+    if role in {"odoo", "postgres"}:
+        environment["ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON"] = (
+            "/opt/odoo/odoo19/odoo19-venv/bin/python"
+        )
+    return environment
 
 
 def _sha_file(path: Path) -> tuple[str, int]:

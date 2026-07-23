@@ -174,6 +174,16 @@ def test_direct_child_allows_unstatable_closure_root_only() -> None:
     assert "index != 0" in source
 
 
+def test_direct_child_environment_declares_odoo_venv_python_for_oracles() -> None:
+    suite_source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
+    child_source = (ROOT / "deployment" / "dev29" / "direct_child.py").read_text("utf-8")
+
+    for source in (suite_source, child_source):
+        assert "ODOO_ACCOUNTING_CLI_V3_EXPECTED_PYTHON" in source
+        assert "/opt/odoo/odoo19/odoo19-venv/bin/python" in source
+        assert 'role in {"odoo", "postgres"}' in source
+
+
 def test_child_attestation_uses_closure_identity_external_runtime_paths() -> None:
     source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
 
