@@ -4242,6 +4242,13 @@ def _process_set_sha256(processes: Sequence[int]) -> str:
     return hashlib.sha256(canonical_json(list(processes))).hexdigest()
 
 
+def _dedicated_supervisor_processes(processes: Sequence[int]) -> bool:
+    current = os.getpid()
+    parent = os.getppid()
+    allowed = ({current}, {current, parent} if parent > 1 else {current})
+    return set(processes) in allowed
+
+
 def _communicate_direct_child(
     process: subprocess.Popen[bytes],
     *,
@@ -4412,7 +4419,7 @@ def _run_direct_child(
     host_namespace = closure["mount"]["host_mount_namespace"]
     expected_mounts = _expected_direct_child_mounts(closure)
     baseline_cgroup = _unit_cgroup_snapshot()
-    if baseline_cgroup["processes"] != [os.getpid()]:
+    if not _dedicated_supervisor_processes(baseline_cgroup["processes"]):
         raise ReadSuiteError("Dev29 unit cgroup is not dedicated to the sole supervisor")
     read_fd, pipe_write_fd = os.pipe2(os.O_CLOEXEC)
     try:

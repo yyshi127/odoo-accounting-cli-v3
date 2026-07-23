@@ -117,6 +117,17 @@ def test_systemctl_show_accepts_not_found_socket_missing_service_fields(
     assert identity["properties"]["NRestarts"] == "0"
 
 
+def test_dedicated_supervisor_processes_accepts_worker_and_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(suite.os, "getpid", lambda: 200)
+    monkeypatch.setattr(suite.os, "getppid", lambda: 100)
+
+    assert suite._dedicated_supervisor_processes([200])
+    assert suite._dedicated_supervisor_processes([100, 200])
+    assert not suite._dedicated_supervisor_processes([100, 200, 300])
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,
