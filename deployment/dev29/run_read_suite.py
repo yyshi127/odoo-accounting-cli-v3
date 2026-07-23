@@ -265,6 +265,33 @@ def suite_runtime_trace_targets() -> tuple[str, ...]:
     )
 
 
+def discovery_sqlite_delta_contract_sha256() -> str:
+    return hashlib.sha256(
+        canonical_json(
+            {
+                "schema_version": 1,
+                "scope": (
+                    "odoo-accounting-cli-v3.dev29."
+                    "runtime-open-discovery-sqlite-delta-contract.v1"
+                ),
+                "delta_verifier": "dev29-sqlite-state-delta-v1",
+                "mutable_state_roots": [
+                    "auth_state_parent",
+                    "receipt_state_parent",
+                    "runtime_open_trace_private_sidecar",
+                ],
+                "allowed_mutations": [
+                    "sqlite_auth_nonce_store",
+                    "sqlite_receipt_nonce_store",
+                    "private_raw_trace_seal",
+                ],
+                "candidate_is_approval": False,
+                "production_promotion_allowed": False,
+            }
+        )
+    ).hexdigest()
+
+
 def _expected_trace_role(target_id: str) -> str:
     if target_id in {"witness-pre", "witness-post"} or target_id.endswith("-oracle"):
         return "postgres"
@@ -1133,7 +1160,9 @@ class _DiscoveryTraceManifest:
     environment: Mapping[str, str]
     bootstrap_argv: tuple[str, ...]
     final_argv: tuple[str, ...]
+    watch_roots: tuple[str, ...]
     expected_strace_sha256: str
+    expected_static_closure_sha256: str
     expected_child_environment_sha256: str
     expected_uid: int
     expected_gid: int
@@ -1149,6 +1178,7 @@ class RuntimeTraceDiscoveryGate:
         *,
         expected_strace_sha256: str,
         private_sidecar: Path,
+        watch_roots: Sequence[str],
     ) -> None:
         if not isinstance(expected_strace_sha256, str) or HEX64.fullmatch(
             expected_strace_sha256
@@ -1188,6 +1218,8 @@ class RuntimeTraceDiscoveryGate:
         self.expected = expected
         self.expected_strace_sha256 = expected_strace_sha256
         self.private_sidecar = Path(private_sidecar)
+        self.watch_roots = tuple(watch_roots)
+        self.static_closure_sha256: str | None = None
         self.entries: list[dict[str, Any]] = []
         self.consumed: set[str] = set()
 
@@ -1218,7 +1250,7 @@ class RuntimeTraceDiscoveryGate:
         if is_template:
             raise ReadSuiteError("runtime-open discovery received a template argv")
         environment = dict(self.module.ROLE_ENVIRONMENTS[role])
-        return _DiscoveryTraceManifest(
+        candidate = _DiscoveryTraceManifest(
             release=self.expected.release,
             target_id=target_id,
             role=role,
@@ -1226,12 +1258,44 @@ class RuntimeTraceDiscoveryGate:
             environment=environment,
             bootstrap_argv=tuple(bootstrap),
             final_argv=tuple(final),
+            watch_roots=self.watch_roots,
             expected_strace_sha256=self.expected_strace_sha256,
+            expected_static_closure_sha256="0" * 64,
             expected_child_environment_sha256=hashlib.sha256(
                 canonical_json(environment)
             ).hexdigest(),
             expected_uid=uid,
             expected_gid=gid,
+        )
+        try:
+            captured = self.module.capture_runtime_environment(candidate)
+            static_closure_sha256 = hashlib.sha256(
+                canonical_json(captured["static_closure"])
+            ).hexdigest()
+        except self.module.RuntimeOpenTraceError as exc:
+            raise ReadSuiteError(
+                "runtime-open discovery static closure cannot be captured"
+            ) from exc
+        if self.static_closure_sha256 is None:
+            self.static_closure_sha256 = static_closure_sha256
+        elif self.static_closure_sha256 != static_closure_sha256:
+            raise ReadSuiteError("runtime-open discovery static closure drifted")
+        return _DiscoveryTraceManifest(
+            release=candidate.release,
+            target_id=candidate.target_id,
+            role=candidate.role,
+            working_directory=candidate.working_directory,
+            environment=candidate.environment,
+            bootstrap_argv=candidate.bootstrap_argv,
+            final_argv=candidate.final_argv,
+            watch_roots=candidate.watch_roots,
+            expected_strace_sha256=candidate.expected_strace_sha256,
+            expected_static_closure_sha256=static_closure_sha256,
+            expected_child_environment_sha256=(
+                candidate.expected_child_environment_sha256
+            ),
+            expected_uid=candidate.expected_uid,
+            expected_gid=candidate.expected_gid,
         )
 
     def execute(
@@ -1312,13 +1376,20 @@ class RuntimeTraceDiscoveryGate:
         self,
         *,
         required_targets: Sequence[str],
-        expected_static_closure_sha256: str,
+        expected_static_closure_sha256: str | None,
         watch_roots: Sequence[str],
         mutable_roots: Sequence[str],
         sqlite_delta_contract_sha256: str,
     ) -> dict[str, Any]:
         if tuple(item["target_id"] for item in self.entries) != tuple(required_targets):
             raise ReadSuiteError("runtime-open discovery target set is incomplete")
+        if self.static_closure_sha256 is None:
+            raise ReadSuiteError("runtime-open discovery static closure is absent")
+        if (
+            expected_static_closure_sha256 is not None
+            and expected_static_closure_sha256 != self.static_closure_sha256
+        ):
+            raise ReadSuiteError("runtime-open discovery static closure mismatched")
         return {
             "schema_version": 1,
             "scope": (
@@ -1326,7 +1397,7 @@ class RuntimeTraceDiscoveryGate:
                 "runtime-open-discovery-suite-fragment.v1"
             ),
             "release": self.expected.release,
-            "expected_static_closure_sha256": expected_static_closure_sha256,
+            "expected_static_closure_sha256": self.static_closure_sha256,
             "watch_roots": list(watch_roots),
             "mutable_roots": list(mutable_roots),
             "sqlite_delta_contract_sha256": sqlite_delta_contract_sha256,
@@ -5520,11 +5591,26 @@ def run_suite(
     if discovery_mode:
         if (
             expected_runtime_trace_index_sha256 is not None
-            or not isinstance(runtime_open_discovery_static_closure_sha256, str)
-            or HEX64.fullmatch(runtime_open_discovery_static_closure_sha256) is None
-            or not isinstance(runtime_open_discovery_sqlite_delta_contract_sha256, str)
-            or HEX64.fullmatch(runtime_open_discovery_sqlite_delta_contract_sha256)
-            is None
+            or (
+                runtime_open_discovery_static_closure_sha256 is not None
+                and (
+                    not isinstance(runtime_open_discovery_static_closure_sha256, str)
+                    or HEX64.fullmatch(runtime_open_discovery_static_closure_sha256)
+                    is None
+                )
+            )
+            or (
+                runtime_open_discovery_sqlite_delta_contract_sha256 is not None
+                and (
+                    not isinstance(
+                        runtime_open_discovery_sqlite_delta_contract_sha256, str
+                    )
+                    or HEX64.fullmatch(
+                        runtime_open_discovery_sqlite_delta_contract_sha256
+                    )
+                    is None
+                )
+            )
             or not runtime_open_discovery_watch_roots
         ):
             raise ReadSuiteError("runtime-open discovery inputs are invalid")
@@ -5532,6 +5618,7 @@ def run_suite(
             expected,
             expected_strace_sha256=expected_strace_sha256,
             private_sidecar=private_sidecar,
+            watch_roots=runtime_open_discovery_watch_roots,
         )
     else:
         if not isinstance(expected_runtime_trace_index_sha256, str):
@@ -5973,8 +6060,10 @@ def run_suite(
     write_json(evidence / "dependency-watch.json", watch_document)
     if isinstance(trace_gate, RuntimeTraceDiscoveryGate):
         assert runtime_open_discovery_inventory is not None
-        assert runtime_open_discovery_static_closure_sha256 is not None
-        assert runtime_open_discovery_sqlite_delta_contract_sha256 is not None
+        sqlite_delta_contract_sha256 = (
+            runtime_open_discovery_sqlite_delta_contract_sha256
+            or discovery_sqlite_delta_contract_sha256()
+        )
         inventory = trace_gate.inventory(
             required_targets=suite_runtime_trace_targets(),
             expected_static_closure_sha256=(
@@ -5982,9 +6071,7 @@ def run_suite(
             ),
             watch_roots=runtime_open_discovery_watch_roots,
             mutable_roots=runtime_open_discovery_mutable_roots,
-            sqlite_delta_contract_sha256=(
-                runtime_open_discovery_sqlite_delta_contract_sha256
-            ),
+            sqlite_delta_contract_sha256=sqlite_delta_contract_sha256,
         )
         payload = canonical_json(inventory) + b"\n"
         write_private(runtime_open_discovery_inventory, payload)

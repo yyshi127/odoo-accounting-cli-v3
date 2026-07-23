@@ -112,12 +112,16 @@ review directory can be generated.
 For a real host run, pass those discovery options through
 `run_read_evidence.py launch` so the normal systemd unit, lease, mounted
 closure, pinned worker, and outer evidence guards still apply. Discovery mode
-requires `--runtime-open-discovery-inventory`,
-`--runtime-open-discovery-static-closure-sha256`, at least one
-`--runtime-open-discovery-watch-root`, and
-`--runtime-open-discovery-sqlite-delta-contract-sha256`; it must not receive
-`--expected-runtime-open-index-sha256`. The launcher returns a
-`runtime-open-discovery-evidence.v1` result and does not run the normal
+requires `--runtime-open-discovery-inventory` and at least one
+`--runtime-open-discovery-watch-root`; it must not receive
+`--expected-runtime-open-index-sha256`. If
+`--runtime-open-discovery-static-closure-sha256` is omitted, the suite captures
+the current static closure under the mounted dependency image, binds the first
+target to that non-approval digest, and rejects any later target whose static
+closure differs. If `--runtime-open-discovery-sqlite-delta-contract-sha256` is
+omitted, the suite uses the release-coded
+`runtime-open-discovery-sqlite-delta-contract.v1` digest. The launcher returns
+a `runtime-open-discovery-evidence.v1` result and does not run the normal
 independent verifier or publisher.
 
 After both fragments exist, merge them into the exact full inventory with the

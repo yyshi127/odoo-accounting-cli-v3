@@ -476,6 +476,7 @@ def test_runtime_trace_receipt_set_binds_policy_and_release_members() -> None:
 def test_runtime_trace_discovery_inventory_is_nonapproval_suite_fragment() -> None:
     gate = object.__new__(suite.RuntimeTraceDiscoveryGate)
     gate.expected = SimpleNamespace(release=RELEASE)
+    gate.static_closure_sha256 = "1" * 64
     targets = suite.suite_runtime_trace_targets()
     gate.entries = [
         {
@@ -492,10 +493,10 @@ def test_runtime_trace_discovery_inventory_is_nonapproval_suite_fragment() -> No
     ]
     inventory = gate.inventory(
         required_targets=targets,
-        expected_static_closure_sha256="1" * 64,
+        expected_static_closure_sha256=None,
         watch_roots=("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,),
         mutable_roots=("/var/lib/odoo-accounting-cli-v3/test/candidates/" + RELEASE,),
-        sqlite_delta_contract_sha256="2" * 64,
+        sqlite_delta_contract_sha256=suite.discovery_sqlite_delta_contract_sha256(),
     )
     assert inventory["scope"].endswith("runtime-open-discovery-suite-fragment.v1")
     assert [item["target_id"] for item in inventory["targets"]] == list(targets)
@@ -507,7 +508,35 @@ def test_runtime_trace_discovery_inventory_is_nonapproval_suite_fragment() -> No
             expected_static_closure_sha256="1" * 64,
             watch_roots=("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,),
             mutable_roots=(),
-            sqlite_delta_contract_sha256="2" * 64,
+            sqlite_delta_contract_sha256=suite.discovery_sqlite_delta_contract_sha256(),
+        )
+
+
+def test_runtime_trace_discovery_inventory_rejects_static_closure_mismatch() -> None:
+    gate = object.__new__(suite.RuntimeTraceDiscoveryGate)
+    gate.expected = SimpleNamespace(release=RELEASE)
+    targets = suite.suite_runtime_trace_targets()
+    gate.entries = [
+        {
+            "target_id": target_id,
+            "trace_path": f"/private/{target_id}.strace",
+            "expected_leader_pid": 1000 + index,
+            "role": "odoo",
+            "working_directory": f"/opt/odoo-accounting-cli-v3/releases/{RELEASE}",
+            "bootstrap_argv": ["/usr/bin/python3.12", "-I"],
+            "final_argv": ["/usr/bin/python3.12", "-I"],
+            "expected_returncodes": [0],
+        }
+        for index, target_id in enumerate(targets)
+    ]
+    gate.static_closure_sha256 = "a" * 64
+    with pytest.raises(suite.ReadSuiteError, match="static closure"):
+        gate.inventory(
+            required_targets=targets,
+            expected_static_closure_sha256="b" * 64,
+            watch_roots=("/opt/odoo-accounting-cli-v3/releases/" + RELEASE,),
+            mutable_roots=(),
+            sqlite_delta_contract_sha256=suite.discovery_sqlite_delta_contract_sha256(),
         )
 
 

@@ -362,7 +362,10 @@ On the target host, collect the suite fragment through
 of bypassing the supervisor. In that mode
 `--expected-runtime-open-index-sha256` is intentionally absent, the output is
 `runtime-open-discovery-evidence.v1`, and no normal verifier/publisher success
-anchor is created.
+anchor is created. The mounted suite captures a non-approval static closure
+pin when `--runtime-open-discovery-static-closure-sha256` is omitted and then
+requires every traced suite target to match it; an omitted SQLite delta
+contract uses the release-coded discovery contract digest.
 Install the externally reviewed, release-specific policy and index only with
 `deployment/dev29/runtime_open_policy_source.py` using the canonical
 `deployment/dev29/runtime_open_policy_source.template.json`, then build the

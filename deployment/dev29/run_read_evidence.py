@@ -1091,20 +1091,32 @@ def _identity(arguments: argparse.Namespace) -> dict[str, str]:
         if (
             arguments.action not in {"launch", "unit-wrapper", "supervise-worker"}
             or arguments.expected_runtime_open_index_sha256 is not None
-            or not isinstance(
-                arguments.runtime_open_discovery_static_closure_sha256, str
+            or (
+                arguments.runtime_open_discovery_static_closure_sha256 is not None
+                and (
+                    not isinstance(
+                        arguments.runtime_open_discovery_static_closure_sha256, str
+                    )
+                    or HEX64.fullmatch(
+                        arguments.runtime_open_discovery_static_closure_sha256
+                    )
+                    is None
+                )
             )
-            or HEX64.fullmatch(
-                arguments.runtime_open_discovery_static_closure_sha256
-            )
-            is None
-            or not isinstance(
-                arguments.runtime_open_discovery_sqlite_delta_contract_sha256, str
-            )
-            or HEX64.fullmatch(
+            or (
                 arguments.runtime_open_discovery_sqlite_delta_contract_sha256
+                is not None
+                and (
+                    not isinstance(
+                        arguments.runtime_open_discovery_sqlite_delta_contract_sha256,
+                        str,
+                    )
+                    or HEX64.fullmatch(
+                        arguments.runtime_open_discovery_sqlite_delta_contract_sha256
+                    )
+                    is None
+                )
             )
-            is None
             or not arguments.runtime_open_discovery_watch_root
         ):
             raise SupervisorError("runtime-open discovery identity is invalid")
