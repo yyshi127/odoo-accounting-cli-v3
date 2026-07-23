@@ -242,6 +242,16 @@ def test_verifier_fragment_action_rejects_escaped_output() -> None:
         runner._identity(parsed)
 
 
+def test_worker_stderr_tail_is_bounded_and_single_line() -> None:
+    class Process:
+        stderr = SimpleNamespace(read=lambda _maximum: b"alpha\n" + b"b" * 5000)
+
+    tail = runner._worker_stderr_tail(Process(), maximum=32)
+    assert "\n" not in tail
+    assert len(tail) == 32
+    assert tail == "b" * 32
+
+
 def test_normal_launch_still_requires_runtime_index() -> None:
     launch = runner._parser().parse_args(["launch", *common_cli_without_runtime_index()])
     with pytest.raises(runner.SupervisorError, match="expected release identity"):

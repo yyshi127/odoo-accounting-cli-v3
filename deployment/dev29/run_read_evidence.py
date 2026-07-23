@@ -2019,6 +2019,7 @@ def _spawn_pinned_worker(
                 preexec_fn=worker_preexec,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 cwd=root,
                 env=dict(OUTER_ENVIRONMENT),
             )
@@ -2133,6 +2134,23 @@ def _terminate_monitored_worker(
         raise SupervisorError(f"{label} did not exit") from exc
 
 
+def _worker_stderr_tail(process: subprocess.Popen[bytes], *, maximum: int = 4096) -> str:
+    """Return a bounded UTF-8 stderr tail from a failed worker, when available."""
+    stream = process.stderr
+    if stream is None:
+        return ""
+    try:
+        payload = stream.read(maximum + 1)
+    except (OSError, ValueError):
+        return ""
+    if not payload:
+        return ""
+    if len(payload) > maximum:
+        payload = payload[-maximum:]
+    text = payload.decode("utf-8", "replace").strip()
+    return text.replace("\n", "\\n")
+
+
 def _unit_wrapper(arguments: argparse.Namespace) -> int:
     """Remain MainPID while a gated, pinned worker performs and publishes work."""
     _require_system_python()
@@ -2187,11 +2205,22 @@ def _unit_wrapper(arguments: argparse.Namespace) -> int:
                 raise SupervisorError("launcher lease was abandoned")
             if poller.poll(max(1, int(LEASE_POLL_SECONDS * 1000))):
                 try:
-                    return process.wait(timeout=10)
+                    returncode = process.wait(timeout=10)
                 except ChildProcessError as exc:
                     raise SupervisorError("unit worker was externally reaped") from exc
                 except subprocess.SubprocessError as exc:
                     raise SupervisorError("unit worker exit could not be reaped") from exc
+                if returncode != 0:
+                    stderr_tail = _worker_stderr_tail(process)
+                    detail = (
+                        f": {stderr_tail}"
+                        if stderr_tail
+                        else " with no captured stderr"
+                    )
+                    raise SupervisorError(
+                        f"unit worker failed with exit code {returncode}{detail}"
+                    )
+                return returncode
     except BaseException:
         if process is not None and pidfd is not None:
             _terminate_monitored_worker(process, pidfd, label="failed unit worker")
