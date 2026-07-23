@@ -1161,14 +1161,51 @@ def test_direct_child_allowlist_requires_explicit_interpreters_and_roles():
         "--request-stdin",
         "--response-stdin",
     ]
+    verifier = [
+        suite.CLOSURE_PYTHON,
+        "-I",
+        "-S",
+        str(paths["verifier"]),
+        "--validate-only",
+        "--evidence-dir",
+        str(suite.EVIDENCE_PARENT / "dev29-verifier"),
+        "--expected-bundle-manifest-sha256",
+        "0" * 64,
+        "--expected-release",
+        identity.release,
+        "--expected-version",
+        identity.version,
+        "--expected-commit",
+        identity.commit,
+        "--expected-manifest-sha256",
+        identity.manifest_sha256,
+        "--expected-package-sha256",
+        identity.package_sha256,
+        "--expected-closure-anchor-sha256",
+        "1" * 64,
+        "--expected-closure-image-sha256",
+        "2" * 64,
+        "--expected-system-python-sha256",
+        "3" * 64,
+        "--expected-ld-so-preload-sha256",
+        "4" * 64,
+        "--expected-ldconfig-sha256",
+        "5" * 64,
+        "--expected-runtime-open-index-sha256",
+        "6" * 64,
+        "--expected-strace-sha256",
+        "7" * 64,
+    ]
     assert suite._validate_direct_child_command("odoo", launcher, runtime=configuration, expected=identity) == launcher
     assert suite._validate_direct_child_command("signer", signer, runtime=configuration, expected=identity) == signer
     assert suite._validate_direct_child_command("postgres", oracle, runtime=configuration, expected=identity) == oracle
     assert suite._validate_direct_child_command("postgres", oracle_verify, runtime=configuration, expected=identity) == oracle_verify
+    assert suite._validate_direct_child_command("verifier", verifier, runtime=configuration, expected=identity) == verifier
     for role, command in (
         ("odoo", ["/bin/true"]),
         ("odoo", signer),
         ("postgres", ["systemd-run", "/bin/true"]),
+        ("verifier", ["--evidence-dir"]),
     ):
         with pytest.raises(suite.ReadSuiteError):
             suite._validate_direct_child_command(role, command, runtime=configuration, expected=identity)

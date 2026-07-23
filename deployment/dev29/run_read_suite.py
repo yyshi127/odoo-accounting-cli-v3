@@ -3741,11 +3741,11 @@ def _validate_direct_child_command(
         allowed = len(arguments) == 29 and arguments[0] == "--validate-only"
         if allowed:
             pairs = arguments[1:]
-            values = {
+            verifier_arguments = {
                 pairs[index]: pairs[index + 1] for index in range(0, len(pairs), 2)
             }
             allowed = (
-                list(values)
+                list(verifier_arguments)
                 == [
                     "--evidence-dir",
                     "--expected-bundle-manifest-sha256",
@@ -3762,18 +3762,25 @@ def _validate_direct_child_command(
                     "--expected-runtime-open-index-sha256",
                     "--expected-strace-sha256",
                 ]
-                and Path(values["--evidence-dir"]).parent == EVIDENCE_PARENT
-                and EVIDENCE_NAME.fullmatch(Path(values["--evidence-dir"]).name)
+                and Path(verifier_arguments["--evidence-dir"]).parent
+                == EVIDENCE_PARENT
+                and EVIDENCE_NAME.fullmatch(
+                    Path(verifier_arguments["--evidence-dir"]).name
+                )
                 is not None
-                and HEX64.fullmatch(values["--expected-bundle-manifest-sha256"])
+                and HEX64.fullmatch(
+                    verifier_arguments["--expected-bundle-manifest-sha256"]
+                )
                 is not None
-                and values["--expected-release"] == expected.release
-                and values["--expected-version"] == expected.version
-                and values["--expected-commit"] == expected.commit
-                and values["--expected-manifest-sha256"] == expected.manifest_sha256
-                and values["--expected-package-sha256"] == expected.package_sha256
+                and verifier_arguments["--expected-release"] == expected.release
+                and verifier_arguments["--expected-version"] == expected.version
+                and verifier_arguments["--expected-commit"] == expected.commit
+                and verifier_arguments["--expected-manifest-sha256"]
+                == expected.manifest_sha256
+                and verifier_arguments["--expected-package-sha256"]
+                == expected.package_sha256
                 and all(
-                    HEX64.fullmatch(values[name]) is not None
+                    HEX64.fullmatch(verifier_arguments[name]) is not None
                     for name in (
                         "--expected-closure-anchor-sha256",
                         "--expected-closure-image-sha256",
