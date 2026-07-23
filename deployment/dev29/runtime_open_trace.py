@@ -1197,7 +1197,16 @@ def _path_access_policies(
 
 def _is_process_view_path(path: str) -> bool:
     roots = ("/proc/self", "/proc/@self", "/proc/1")
-    return any(path == root or path.startswith(root + "/") for root in roots)
+    exact = ("/proc/sys/crypto/fips_enabled", "/proc/sys/kernel/cap_last_cap")
+    return path in exact or any(path == root or path.startswith(root + "/") for root in roots)
+
+
+def _is_watch_root_metadata_ancestor(path: str, watch_roots: Sequence[str]) -> bool:
+    if path == "/":
+        prefix = "/"
+    else:
+        prefix = path + "/"
+    return any(root.startswith(prefix) for root in watch_roots)
 
 
 def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManifest:
@@ -1304,7 +1313,14 @@ def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManife
     }
     if (
         any(
-            policy.classification == "immutable" and not watched(path)
+            policy.classification == "immutable"
+            and not watched(path)
+            and not (
+                policy.allowed_access == ("metadata",)
+                and policy.allow_success
+                and not policy.allowed_errnos
+                and _is_watch_root_metadata_ancestor(path, watches)
+            )
             for path, policy in policy_for_allowed.items()
         )
         or any(
@@ -3440,8 +3456,22 @@ def parse_trace_bytes(
             )
         if name in CWD_CALLS:
             # The fixed launch cwd is part of the signed environment identity.
-            # Reject even failed attempts so every relative path has one stable,
-            # process-inherited base without trusting untraced cwd state.
+            # A successful chdir back to the already signed cwd is a no-op used
+            # by the sealed child bootstrap.  Any other cwd mutation is rejected
+            # so every relative path still has one stable, process-inherited
+            # base without trusting untraced cwd state.
+            if (
+                name == "chdir"
+                and success
+                and len(arguments) == 1
+                and _normalize_observed(
+                    _decode_c_string(arguments[0], label="chdir path"),
+                    base=cwd,
+                    pid=pid,
+                )
+                == cwd
+            ):
+                continue
             raise RuntimeOpenTraceError("traced child attempted to change its fixed cwd")
         if name == "close":
             if not arguments:

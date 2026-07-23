@@ -394,6 +394,40 @@ def test_relative_annotated_dirfd_resolves_without_path_lookup() -> None:
     assert f"{RELEASE_ROOT}/src/pkg.py" in parsed.paths
 
 
+def test_proc_sys_runtime_probe_is_a_process_view_path() -> None:
+    assert trace._is_process_view_path("/proc/sys/kernel/cap_last_cap") is True
+    assert trace._is_process_view_path("/proc/sys/crypto/fips_enabled") is True
+    assert trace._is_process_view_path("/proc/sys/kernel/randomize_va_space") is False
+
+
+def test_chdir_to_signed_working_directory_is_a_noop() -> None:
+    parsed = trace.parse_trace_bytes(
+        raw_trace(extra=[f'410 chdir("{RELEASE_ROOT}") = 0']),
+        working_directory=RELEASE_ROOT,
+        expected_leader_pid=410,
+    )
+    assert parsed.paths == trace.parse_trace_bytes(
+        raw_trace(), working_directory=RELEASE_ROOT, expected_leader_pid=410
+    ).paths
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '410 chdir("/tmp") = 0',
+        f'410 chdir("{RELEASE_ROOT}") = -1 EACCES (Permission denied)',
+        "410 fchdir(3) = 0",
+    ],
+)
+def test_cwd_mutations_other_than_signed_cwd_noop_are_rejected(line: str) -> None:
+    with pytest.raises(trace.RuntimeOpenTraceError, match="fixed cwd"):
+        trace.parse_trace_bytes(
+            raw_trace(extra=[line]),
+            working_directory=RELEASE_ROOT,
+            expected_leader_pid=410,
+        )
+
+
 def test_independent_leader_pid_must_match_first_successful_exec() -> None:
     with pytest.raises(trace.RuntimeOpenTraceError, match="leader differs"):
         trace.parse_trace_bytes(

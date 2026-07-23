@@ -289,6 +289,14 @@ def _covered(path: str, roots: Sequence[str]) -> bool:
     return any(path == root or path.startswith(root + "/") for root in roots)
 
 
+def _metadata_ancestor(path: str, roots: Sequence[str]) -> bool:
+    if path == "/":
+        prefix = "/"
+    else:
+        prefix = path + "/"
+    return any(root.startswith(prefix) for root in roots)
+
+
 def _policy_for_path(
     path: str,
     accesses: tuple[str, ...],
@@ -330,7 +338,13 @@ def _policy_for_path(
         classification = "immutable"
 
     if classification == "immutable":
-        if not _covered(path, watch_roots):
+        metadata_ancestor = (
+            access == ("metadata",)
+            and success
+            and not errnos
+            and _metadata_ancestor(path, (*watch_roots, *mutable_roots))
+        )
+        if not _covered(path, watch_roots) and not metadata_ancestor:
             raise DiscoveryError("immutable discovery path is outside watch roots")
         return {
             "path": path,

@@ -62,6 +62,7 @@ def final_argv(target_id: str) -> tuple[str, ...]:
     return (
         "/usr/bin/python3.12",
         "-I",
+        "-B",
         *(("-S",) if no_site else ()),
         script,
         "--fixed-test-target",
@@ -80,6 +81,7 @@ def bootstrap_argv(target_id: str) -> tuple[str, ...]:
     values = [
         "/usr/bin/python3.12",
         "-I",
+        "-B",
         *(["-S"] if no_site else []),
         f"{RELEASE_ROOT}/deployment/dev29/direct_child.py",
         "--role",
@@ -140,6 +142,8 @@ def raw_trace(target_id: str, trace_path: Path, *, exit_code: int = 0) -> None:
         f'410 execve("/usr/bin/python3.12", {argv_text(bootstrap_argv(target_id))}, 0x7fff) = 0',
         '410 openat(AT_FDCWD, "/etc/ld.so.cache", O_RDONLY|O_CLOEXEC) = 3</etc/ld.so.cache>',
         f'410 stat("{RELEASE_ROOT}", {{st_mode=S_IFDIR|0555}}, 0) = 0',
+        '410 stat("/opt", {st_mode=S_IFDIR|0755}, 0) = 0',
+        '410 openat(AT_FDCWD, "/proc/sys/kernel/cap_last_cap", O_RDONLY|O_CLOEXEC) = 6</proc/sys/kernel/cap_last_cap>',
         '410 readlink("/proc/self/exe", "/usr/bin/python3.12", 4096) = 19',
         f'410 openat2(AT_FDCWD, "runtime.json", {{flags=O_RDONLY, resolve=RESOLVE_BENEATH}}, 24) = 5<{RELEASE_ROOT}/runtime.json>',
         f'410 execve("/usr/bin/python3.12", {argv_text(final_argv(target_id))}, 0x7fff) = 0',
@@ -207,6 +211,17 @@ def test_discovery_builds_nonapproval_review_manifests(tmp_path: Path) -> None:
     assert process_policy["classification"] == "process-view"
     assert process_policy["failure_guard"] is None
     assert "/proc/self" not in first["watch_roots"]
+    cap_policy = next(
+        item
+        for item in first["path_access_policy"]
+        if item["path"] == "/proc/sys/kernel/cap_last_cap"
+    )
+    assert cap_policy["classification"] == "process-view"
+    parent_policy = next(
+        item for item in first["path_access_policy"] if item["path"] == "/opt"
+    )
+    assert parent_policy["classification"] == "immutable"
+    assert parent_policy["allowed_access"] == ["metadata"]
 
 
 def test_discovery_rejects_incomplete_target_set(tmp_path: Path) -> None:
