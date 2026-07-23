@@ -558,7 +558,12 @@ def _expected_lease(arguments: argparse.Namespace, *, unit: str) -> dict[str, An
     )
     launcher_argv = _read_proc_argv(launcher_pid)
     guardian_argv = _read_proc_argv(guardian_pid)
-    top_action = "recover" if "recover" in arguments.action else "launch"
+    if "recover" in arguments.action:
+        top_action = "recover"
+    elif "trace-verifier-fragment" in arguments.action:
+        top_action = "trace-verifier-fragment"
+    else:
+        top_action = "launch"
     expected_argv = _top_level_argv(
         arguments,
         root=RELEASE_PARENT / arguments.expected_release,
