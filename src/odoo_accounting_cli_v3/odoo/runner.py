@@ -1199,17 +1199,23 @@ def _linux_process_supervisor_main() -> None:
     try:
         if (
             sys.platform != "linux"
-            or len(sys.argv) < 5
-            or sys.argv[3] != "--"
+            or len(sys.argv) < 6
+            or sys.argv[4] != "--"
             or os.getpid() != os.getpgrp()
             or os.getsid(0) != os.getpid()
         ):
             raise OSError("invalid Odoo process supervisor boundary")
         expected_parent_pid = int(sys.argv[1])
         payload_fd = int(sys.argv[2])
-        if expected_parent_pid <= 1 or payload_fd <= 2:
+        source_fd = int(sys.argv[3])
+        if (
+            expected_parent_pid <= 1
+            or payload_fd <= 2
+            or source_fd <= 2
+            or source_fd == payload_fd
+        ):
             raise OSError("invalid Odoo process supervisor identity")
-        child_argv = sys.argv[4:]
+        child_argv = sys.argv[5:]
         if not child_argv or any(
             not isinstance(value, str) or not value for value in child_argv
         ):
@@ -1225,7 +1231,7 @@ def _linux_process_supervisor_main() -> None:
             # restores the inherited mask; it never executes request data.
             spawned = subprocess.Popen(
                 child_argv,
-                stdin=None,
+                stdin=source_fd,
                 stdout=None,
                 stderr=None,
                 text=False,
@@ -1266,7 +1272,9 @@ def _linux_process_supervisor_main() -> None:
     os._exit(returncode if 0 <= returncode <= 255 else 125)
 
 
-def _linux_supervisor_argv(argv: list[str], payload_fd: int) -> list[str]:
+def _linux_supervisor_argv(
+    argv: list[str], payload_fd: int, source_fd: int
+) -> list[str]:
     """Build a fixed supervisor invocation without request data in argv or env."""
 
     source_root = Path(__file__).resolve().parents[2]
@@ -1284,6 +1292,7 @@ def _linux_supervisor_argv(argv: list[str], payload_fd: int) -> list[str]:
         bootstrap,
         str(os.getpid()),
         str(payload_fd),
+        str(source_fd),
         "--",
         *argv,
     ]
@@ -1307,22 +1316,27 @@ def _run_child_process(
         raise OdooRunnerError("Odoo shell bootstrap is not valid UTF-8") from exc
     if not source_bytes or len(source_bytes) > 65_536:
         raise OdooRunnerError("Odoo shell bootstrap is invalid or too large")
+    source_context = _private_payload_fd(source_bytes)
     try:
-        process = subprocess.Popen(
-            _linux_supervisor_argv(argv, payload_fd),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-            shell=False,
-            close_fds=True,
-            pass_fds=(payload_fd,),
-            start_new_session=True,
-            cwd=cwd,
-            env=env,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise OdooRunnerError("Odoo shell could not be started") from exc
+        source_fd = source_context.__enter__()
+        try:
+            process = subprocess.Popen(
+                _linux_supervisor_argv(argv, payload_fd, source_fd),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=False,
+                shell=False,
+                close_fds=True,
+                pass_fds=(payload_fd, source_fd),
+                start_new_session=True,
+                cwd=cwd,
+                env=env,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OdooRunnerError("Odoo shell could not be started") from exc
+    finally:
+        source_context.__exit__(None, None, None)
 
     streams = {
         "stdout": (process.stdout, MAX_CHILD_STDOUT_BYTES, bytearray()),
@@ -1331,12 +1345,8 @@ def _run_child_process(
     selector = selectors.DefaultSelector()
     deadline = time.monotonic() + timeout_seconds
     try:
-        if process.stdin is None or process.stdout is None or process.stderr is None:
+        if process.stdout is None or process.stderr is None:
             raise OdooRunnerError("Odoo shell pipes could not be created")
-        stdin = process.stdin
-        stdin_offset = 0
-        os.set_blocking(stdin.fileno(), False)
-        selector.register(stdin, selectors.EVENT_WRITE, ("stdin", None, None))
 
         for label, (stream, maximum, buffer) in streams.items():
             os.set_blocking(stream.fileno(), False)
@@ -1353,33 +1363,6 @@ def _run_child_process(
                 raise OdooRunnerError("Odoo shell timed out")
             for key, _event in selector.select(timeout=min(remaining, 0.1)):
                 label, maximum, buffer = key.data
-                if label == "stdin":
-                    try:
-                        written = os.write(
-                            key.fileobj.fileno(),
-                            source_bytes[stdin_offset : stdin_offset + 65_536],
-                        )
-                    except BlockingIOError:
-                        continue
-                    except (BrokenPipeError, OSError) as exc:
-                        try:
-                            selector.unregister(key.fileobj)
-                        except (KeyError, ValueError):
-                            pass
-                        key.fileobj.close()
-                        raise OdooRunnerError(
-                            "Odoo shell closed stdin before receiving bootstrap"
-                        ) from exc
-                    if written <= 0:
-                        _kill_child_process_group(process)
-                        raise OdooRunnerError(
-                            "Odoo shell bootstrap could not be written"
-                        )
-                    stdin_offset += written
-                    if stdin_offset >= len(source_bytes):
-                        selector.unregister(key.fileobj)
-                        key.fileobj.close()
-                    continue
                 try:
                     chunk = os.read(key.fileobj.fileno(), min(65_536, maximum + 1 - len(buffer)))
                 except BlockingIOError:
