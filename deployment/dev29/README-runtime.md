@@ -109,6 +109,17 @@ covers the suite's 31 traced children only and is not accepted by
 traced independent-verifier inventory must be added before the non-approval
 review directory can be generated.
 
+For a real host run, pass those discovery options through
+`run_read_evidence.py launch` so the normal systemd unit, lease, mounted
+closure, pinned worker, and outer evidence guards still apply. Discovery mode
+requires `--runtime-open-discovery-inventory`,
+`--runtime-open-discovery-static-closure-sha256`, at least one
+`--runtime-open-discovery-watch-root`, and
+`--runtime-open-discovery-sqlite-delta-contract-sha256`; it must not receive
+`--expected-runtime-open-index-sha256`. The launcher returns a
+`runtime-open-discovery-evidence.v1` result and does not run the normal
+independent verifier or publisher.
+
 After both fragments exist, merge them into the exact full inventory with the
 same release member:
 

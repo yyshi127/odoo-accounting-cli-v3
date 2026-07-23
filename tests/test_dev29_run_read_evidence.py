@@ -85,6 +85,30 @@ def common_cli() -> list[str]:
     return result
 
 
+def common_cli_without_runtime_index() -> list[str]:
+    result = common_cli()
+    option = "--expected-runtime-open-index-sha256"
+    index = result.index(option)
+    return result[:index] + result[index + 2 :]
+
+
+def discovery_cli(tmp_path: Path) -> list[str]:
+    return [
+        "--runtime-open-discovery-inventory",
+        str(tmp_path / "suite-fragment.json"),
+        "--runtime-open-discovery-static-closure-sha256",
+        "8" * 64,
+        "--runtime-open-discovery-watch-root",
+        "/opt/odoo-accounting-cli-v3/releases/" + RELEASE,
+        "--runtime-open-discovery-watch-root",
+        "/usr/bin/python3.12",
+        "--runtime-open-discovery-mutable-root",
+        "/var/lib/odoo-accounting-cli-v3/test/candidates/" + RELEASE,
+        "--runtime-open-discovery-sqlite-delta-contract-sha256",
+        "9" * 64,
+    ]
+
+
 def lease_cli() -> list[str]:
     values = {
         "expected_lease_nonce": "8" * 64,
@@ -159,6 +183,25 @@ def test_launch_and_worker_require_external_registry_digest_and_lease_contract()
     )
     assert supervise.expected_unit.endswith(".service")
     assert supervise.expected_lease_nonce == "8" * 64
+
+
+def test_discovery_launch_allows_missing_runtime_index_and_forwards_options(
+    tmp_path: Path,
+) -> None:
+    launch = runner._parser().parse_args(
+        ["launch", *common_cli_without_runtime_index(), *discovery_cli(tmp_path)]
+    )
+    assert runner._identity(launch)["release"] == RELEASE
+    argv = runner._top_level_argv(launch, root=Path("/release"))
+    assert "--expected-runtime-open-index-sha256" not in argv
+    assert argv.count("--runtime-open-discovery-watch-root") == 2
+    assert "--runtime-open-discovery-inventory" in argv
+
+
+def test_normal_launch_still_requires_runtime_index() -> None:
+    launch = runner._parser().parse_args(["launch", *common_cli_without_runtime_index()])
+    with pytest.raises(runner.SupervisorError, match="expected release identity"):
+        runner._identity(launch)
 
 
 def test_operator_examples_pass_every_required_common_option() -> None:

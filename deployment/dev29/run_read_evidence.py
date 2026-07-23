@@ -108,6 +108,19 @@ COMMON_OPTIONS = (
     ("expected_runtime_open_index_sha256", "--expected-runtime-open-index-sha256"),
     ("expected_registry_digest", "--expected-registry-digest"),
 )
+DISCOVERY_OPTIONS = (
+    ("runtime_open_discovery_inventory", "--runtime-open-discovery-inventory"),
+    (
+        "runtime_open_discovery_static_closure_sha256",
+        "--runtime-open-discovery-static-closure-sha256",
+    ),
+    ("runtime_open_discovery_watch_root", "--runtime-open-discovery-watch-root"),
+    ("runtime_open_discovery_mutable_root", "--runtime-open-discovery-mutable-root"),
+    (
+        "runtime_open_discovery_sqlite_delta_contract_sha256",
+        "--runtime-open-discovery-sqlite-delta-contract-sha256",
+    ),
+)
 LEASE_OPTIONS = (
     ("expected_lease_nonce", "--expected-lease-nonce"),
     ("expected_lease_device", "--expected-lease-device"),
@@ -1055,6 +1068,7 @@ def _json(payload: bytes, *, label: str, canonical: bool = False) -> dict[str, A
 
 
 def _identity(arguments: argparse.Namespace) -> dict[str, str]:
+    discovery_mode = arguments.runtime_open_discovery_inventory is not None
     value = {
         "release": arguments.expected_release,
         "version": arguments.expected_version,
@@ -1071,8 +1085,30 @@ def _identity(arguments: argparse.Namespace) -> dict[str, str]:
         or value["release"] != f"{value['version']}-{value['commit'][:12]}"
         or HEX64.fullmatch(arguments.expected_registry_digest) is None
         or HEX64.fullmatch(arguments.expected_ldconfig_sha256) is None
-        or HEX64.fullmatch(arguments.expected_runtime_open_index_sha256) is None
     ):
+        raise SupervisorError("expected release identity is invalid")
+    if discovery_mode:
+        if (
+            arguments.action not in {"launch", "unit-wrapper", "supervise-worker"}
+            or arguments.expected_runtime_open_index_sha256 is not None
+            or not isinstance(
+                arguments.runtime_open_discovery_static_closure_sha256, str
+            )
+            or HEX64.fullmatch(
+                arguments.runtime_open_discovery_static_closure_sha256
+            )
+            is None
+            or not isinstance(
+                arguments.runtime_open_discovery_sqlite_delta_contract_sha256, str
+            )
+            or HEX64.fullmatch(
+                arguments.runtime_open_discovery_sqlite_delta_contract_sha256
+            )
+            is None
+            or not arguments.runtime_open_discovery_watch_root
+        ):
+            raise SupervisorError("runtime-open discovery identity is invalid")
+    elif HEX64.fullmatch(arguments.expected_runtime_open_index_sha256 or "") is None:
         raise SupervisorError("expected release identity is invalid")
     return value
 
@@ -1677,7 +1713,14 @@ def _forward_options(
 ) -> list[str]:
     forwarded: list[str] = []
     for name, option in options:
-        forwarded.extend((option, str(getattr(arguments, name))))
+        value = getattr(arguments, name)
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                forwarded.extend((option, str(item)))
+            continue
+        forwarded.extend((option, str(value)))
     return forwarded
 
 
@@ -1694,6 +1737,7 @@ def _top_level_argv(
         str(root.joinpath(*RUNNER_RELATIVE.parts)),
         top_action,
         *_forward_options(arguments, COMMON_OPTIONS),
+        *_forward_options(arguments, DISCOVERY_OPTIONS),
     ]
     if top_action == "recover":
         digest = arguments.expected_bundle_manifest_sha256
@@ -1720,6 +1764,7 @@ def _wrapper_argv(
         str(root.joinpath(*RUNNER_RELATIVE.parts)),
         action,
         *_forward_options(arguments, COMMON_OPTIONS),
+        *_forward_options(arguments, DISCOVERY_OPTIONS),
     ]
     if action == "recover-unit-wrapper":
         digest = arguments.expected_bundle_manifest_sha256
@@ -1848,6 +1893,7 @@ def _spawn_pinned_worker(
             f"/proc/self/fd/{script_fd}",
             worker_action,
             *_forward_options(arguments, COMMON_OPTIONS),
+            *_forward_options(arguments, DISCOVERY_OPTIONS),
             *_forward_options(arguments, LEASE_OPTIONS),
         ]
         if worker_action == "recover-supervise-worker":
@@ -2801,7 +2847,39 @@ def _supervise(arguments: argparse.Namespace) -> dict[str, Any]:
                         arguments.expected_runtime_open_index_sha256
                     ),
                     expected_strace_sha256=arguments.expected_strace_sha256,
+                    runtime_open_discovery_inventory=(
+                        arguments.runtime_open_discovery_inventory
+                    ),
+                    runtime_open_discovery_static_closure_sha256=(
+                        arguments.runtime_open_discovery_static_closure_sha256
+                    ),
+                    runtime_open_discovery_watch_roots=tuple(
+                        arguments.runtime_open_discovery_watch_root
+                    ),
+                    runtime_open_discovery_mutable_roots=tuple(
+                        arguments.runtime_open_discovery_mutable_root
+                    ),
+                    runtime_open_discovery_sqlite_delta_contract_sha256=(
+                        arguments.runtime_open_discovery_sqlite_delta_contract_sha256
+                    ),
                 )
+                if arguments.runtime_open_discovery_inventory is not None:
+                    anchor_guard.assert_clean()
+                    stage.rmdir()
+                    return {
+                        "schema_version": 1,
+                        "scope": (
+                            "odoo-accounting-cli-v3.dev29."
+                            "runtime-open-discovery-evidence.v1"
+                        ),
+                        "evidence_path": str(evidence),
+                        "discovery_inventory": str(
+                            arguments.runtime_open_discovery_inventory
+                        ),
+                        "discovery_inventory_sha256": bundle_sha256,
+                        "candidate_is_approval": False,
+                        "production_promotion_allowed": False,
+                    }
                 verifier_command = [
                     str(SYSTEM_PYTHON),
                     "-I",
@@ -3143,8 +3221,24 @@ def _status(arguments: argparse.Namespace) -> dict[str, Any]:
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
-    for _dest, option in COMMON_OPTIONS:
-        parser.add_argument(option, required=True)
+    for dest, option in COMMON_OPTIONS:
+        parser.add_argument(
+            option,
+            required=dest != "expected_runtime_open_index_sha256",
+        )
+    parser.add_argument("--runtime-open-discovery-inventory", type=Path)
+    parser.add_argument("--runtime-open-discovery-static-closure-sha256")
+    parser.add_argument(
+        "--runtime-open-discovery-watch-root",
+        action="append",
+        default=[],
+    )
+    parser.add_argument(
+        "--runtime-open-discovery-mutable-root",
+        action="append",
+        default=[],
+    )
+    parser.add_argument("--runtime-open-discovery-sqlite-delta-contract-sha256")
 
 
 def _lease_options(parser: argparse.ArgumentParser) -> None:

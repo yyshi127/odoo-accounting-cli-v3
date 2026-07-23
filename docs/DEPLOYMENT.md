@@ -357,6 +357,12 @@ allowed to produce its non-approval review directory. Use the same
 `--verifier-fragment`, and `--output-inventory`; the merger refuses identity
 drift and incorrect target order, and the resulting full inventory remains
 non-approval input.
+On the target host, collect the suite fragment through
+`run_read_evidence.py launch` with the runtime-open discovery options instead
+of bypassing the supervisor. In that mode
+`--expected-runtime-open-index-sha256` is intentionally absent, the output is
+`runtime-open-discovery-evidence.v1`, and no normal verifier/publisher success
+anchor is created.
 Install the externally reviewed, release-specific policy and index only with
 `deployment/dev29/runtime_open_policy_source.py` using the canonical
 `deployment/dev29/runtime_open_policy_source.template.json`, then build the
