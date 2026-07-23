@@ -939,7 +939,7 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
             type(wrapper_execution) is not dict
             or canonical_json(wrapper_execution) + b"\n" != bytes(gate_payload[1:])
             or wrapper_execution.get("method")
-            != "path-exec-ptrace-gated-worker-with-pinned-fds-v1"
+            != "path-exec-ptrace-gated-worker-with-pinned-release-script-v1"
             or wrapper_execution.get("worker_pid") != os.getpid()
             or wrapper_execution.get("parent_death_signal") != "SIGKILL"
             or wrapper_execution.get("pidfd_monitoring") is not True
@@ -953,7 +953,7 @@ def _await_worker_gate(arguments: argparse.Namespace, *, root: Path) -> None:
             or wrapper_execution.get("script") != script_identity
             or not isinstance(wrapper_execution.get("argv"), list)
             or len(wrapper_execution["argv"]) < 4
-            or wrapper_execution["argv"][3] != f"/proc/self/fd/{script_fd}"
+            or wrapper_execution["argv"][3] != str(script_path)
         ):
             raise SupervisorError("worker arm proof is invalid")
     finally:
@@ -1902,7 +1902,7 @@ def _spawn_pinned_worker(
             str(SYSTEM_PYTHON),
             "-I",
             "-S",
-            f"/proc/self/fd/{script_fd}",
+            str(script),
             worker_action,
             *_forward_options(arguments, COMMON_OPTIONS),
             *_forward_options(arguments, DISCOVERY_OPTIONS),
@@ -1940,13 +1940,13 @@ def _spawn_pinned_worker(
             )
         )
         expected_parent_pid = os.getpid()
-        for descriptor in (python_fd, script_fd, read_gate):
+        for descriptor in (read_gate,):
             os.set_inheritable(descriptor, True)
         try:
             process = subprocess.Popen(
                 worker_argv,
                 executable=str(SYSTEM_PYTHON),
-                pass_fds=(python_fd, script_fd, read_gate),
+                pass_fds=(read_gate,),
                 preexec_fn=lambda: _ptrace_traceme_with_parent_death(
                     expected_parent_pid
                 ),
@@ -1956,7 +1956,7 @@ def _spawn_pinned_worker(
                 env=dict(OUTER_ENVIRONMENT),
             )
         finally:
-            for descriptor in (python_fd, script_fd, read_gate):
+            for descriptor in (read_gate,):
                 os.set_inheritable(descriptor, False)
         traced = True
         os.close(read_gate)
@@ -1976,8 +1976,6 @@ def _spawn_pinned_worker(
         _ptrace_set_exitkill(process.pid)
         try:
             executed = Path(f"/proc/{process.pid}/exe").stat()
-            inherited_python = Path(f"/proc/{process.pid}/fd/{python_fd}").stat()
-            inherited_script = Path(f"/proc/{process.pid}/fd/{script_fd}").stat()
         except OSError as exc:
             try:
                 child_fds = sorted(os.listdir(f"/proc/{process.pid}/fd"))
@@ -1990,10 +1988,6 @@ def _spawn_pinned_worker(
             ) from exc
         if (
             (executed.st_dev, executed.st_ino) != python_identity[:2]
-            or (inherited_python.st_dev, inherited_python.st_ino)
-            != python_identity[:2]
-            or (inherited_script.st_dev, inherited_script.st_ino)
-            != script_identity[:2]
         ):
             raise SupervisorError("unit worker executed unpinned bytes")
         _ptrace_detach(process.pid)
@@ -2004,7 +1998,7 @@ def _spawn_pinned_worker(
         script_fd = None
         result = {
             "schema_version": 1,
-            "method": "path-exec-ptrace-gated-worker-with-pinned-fds-v1",
+            "method": "path-exec-ptrace-gated-worker-with-pinned-release-script-v1",
             "worker_pid": process.pid,
             "argv": worker_argv,
             "argv_sha256": hashlib.sha256(canonical_json(worker_argv)).hexdigest(),
