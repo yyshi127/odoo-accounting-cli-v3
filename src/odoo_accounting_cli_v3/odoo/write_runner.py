@@ -452,7 +452,7 @@ def _run_odoo_write_action(
                 payload_fd=payload_fd,
                 timeout_seconds=remaining(),
                 cwd=str(base.release_root),
-                env=_safe_environment(),
+                env=_safe_environment(base),
             )
         if completed.returncode != 0:
             raise OdooRunnerError(

@@ -30,6 +30,7 @@ from odoo_accounting_cli_v3.odoo.runner import (
     _record_verified_read_audit,
     _require_immutable_dependency_mounts,
     _run_child_process,
+    _safe_environment,
     _validate_child_environment,
     _validate_child_home,
     _verify_child_release,
@@ -119,6 +120,66 @@ def test_child_environment_rejects_mutation_before_spawn(
                 env=mutated,
             )
     spawn.assert_not_called()
+
+
+def test_child_environment_accepts_private_runtime_gcov_directory(tmp_path: Path) -> None:
+    gcov = tmp_path / "state" / "gcov"
+    gcov.mkdir(parents=True, mode=0o700)
+    gcov.chmod(0o700)
+    environment = dict(FIXED_CHILD_ENVIRONMENT)
+    environment.update(
+        {
+            "GCOV_ERROR_FILE": str(gcov / "gcov-error.log"),
+            "GCOV_EXIT_AT_ERROR": "0",
+            "GCOV_PREFIX": str(gcov),
+            "GCOV_PREFIX_STRIP": "0",
+        }
+    )
+
+    with patch("odoo_accounting_cli_v3.odoo.runner._validate_child_home") as home:
+        _validate_child_environment(environment)
+    home.assert_called_once_with(FIXED_CHILD_ENVIRONMENT["HOME"])
+
+    environment["GCOV_PREFIX_STRIP"] = "1"
+    with pytest.raises(OdooRunnerError, match="gcov environment is invalid"):
+        _validate_child_environment(environment)
+
+
+def test_safe_environment_can_pin_gcov_to_runtime_state(tmp_path: Path) -> None:
+    config = RuntimeConfig(
+        instance_id="odoo19@test",
+        environment="test",
+        capability_channel="staged",
+        database_name="odoo_test",
+        database_uuid=DATABASE_UUID,
+        odoo_python=tmp_path / "bin" / "python",
+        odoo_python_sha256="1" * 64,
+        odoo_bin=tmp_path / "bin" / "odoo-bin",
+        odoo_bin_sha256="2" * 64,
+        odoo_config=tmp_path / "etc" / "odoo.conf",
+        odoo_config_sha256="3" * 64,
+        release_root=tmp_path / "releases" / "0.1.0.dev84-123456789abc",
+        canonical_package_path=tmp_path / "packages" / "pkg.tar.gz",
+        canonical_package_sha256="4" * 64,
+        auth_state_path=tmp_path / "state" / "auth.sqlite3",
+        receipt_state_path=tmp_path / "state" / "receipt.sqlite3",
+        auth_key_id="auth-v1",
+        receipt_key_id="receipt-v1",
+        auth_secret_path=tmp_path / "secrets" / "auth.hmac",
+        receipt_secret_path=tmp_path / "secrets" / "receipt.hmac",
+    )
+    config.auth_state_path.parent.mkdir(parents=True)
+
+    environment = _safe_environment(config)
+
+    assert environment["GCOV_PREFIX"] == str(config.auth_state_path.parent / "gcov")
+    assert environment["GCOV_ERROR_FILE"] == str(
+        config.auth_state_path.parent / "gcov" / "gcov-error.log"
+    )
+    assert environment["GCOV_EXIT_AT_ERROR"] == "0"
+    assert environment["GCOV_PREFIX_STRIP"] == "0"
+    with patch("odoo_accounting_cli_v3.odoo.runner._validate_child_home"):
+        _validate_child_environment(environment)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX mount flags required")
@@ -619,7 +680,16 @@ class OdooRunnerTest(unittest.TestCase):
             ],
         )
         self.assertEqual(options["timeout_seconds"], 17.0)
-        self.assertEqual(options["env"], FIXED_CHILD_ENVIRONMENT)
+        expected_environment = {
+            **FIXED_CHILD_ENVIRONMENT,
+            "GCOV_ERROR_FILE": str(
+                self.config.auth_state_path.parent / "gcov" / "gcov-error.log"
+            ),
+            "GCOV_EXIT_AT_ERROR": "0",
+            "GCOV_PREFIX": str(self.config.auth_state_path.parent / "gcov"),
+            "GCOV_PREFIX_STRIP": "0",
+        }
+        self.assertEqual(options["env"], expected_environment)
         self.assertNotIn("PGPASSWORD", options["env"])
         self.assertNotIn("DATABASE_URL", options["env"])
         self.assertNotIn("AUTH_SECRET", options["env"])

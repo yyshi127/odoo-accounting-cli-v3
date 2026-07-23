@@ -25,6 +25,7 @@ RELEASE_DIGEST = "a" * 64
 def runtime_config(tmp_path: Path) -> RuntimeConfig:
     release_root = tmp_path / "releases" / "0.1.0.dev29-123456789abc"
     package = tmp_path / "packages" / f"odoo-accounting-cli-v3-{release_root.name}.tar.gz"
+    (tmp_path / "state").mkdir()
     return RuntimeConfig(
         instance_id="odoo19@test",
         environment="test",
@@ -131,10 +132,12 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
 ):
     config = runtime_config(tmp_path)
     observed_payload: dict = {}
+    observed_environment: dict = {}
 
-    def child_process(argv, *, source, payload_fd, **_kwargs):
+    def child_process(argv, *, source, payload_fd, env, **_kwargs):
         os.lseek(payload_fd, 0, os.SEEK_SET)
         observed_payload.update(json.loads(os.read(payload_fd, 65536)))
+        observed_environment.update(env)
         marker = source.rsplit("_evidence_child_main(env, ", 1)[1].split(", ", 1)[1]
         marker = marker.split(")", 1)[0].strip().strip("'\"")
         stdout = marker + canonical_json(response(config)).decode("utf-8") + "\n"
@@ -176,6 +179,12 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
         "release_root",
         "runtime",
     }
+    assert observed_environment["GCOV_PREFIX"] == str(
+        config.auth_state_path.parent / "gcov"
+    )
+    assert observed_environment["GCOV_ERROR_FILE"] == str(
+        config.auth_state_path.parent / "gcov" / "gcov-error.log"
+    )
     assert not any("auth" in key or "receipt" in key or "state" in key for key in observed_payload)
 
 

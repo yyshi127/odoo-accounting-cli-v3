@@ -122,6 +122,9 @@ FIXED_CHILD_ENVIRONMENT = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "TZ": "UTC",
 }
+GCOV_CHILD_ENVIRONMENT_KEYS = frozenset(
+    {"GCOV_ERROR_FILE", "GCOV_EXIT_AT_ERROR", "GCOV_PREFIX", "GCOV_PREFIX_STRIP"}
+)
 DATABASE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 MARKER = re.compile(r"__ODOO_ACCOUNTING_CLI_V3_RESULT_[0-9a-f]{48}__:")
@@ -760,8 +763,43 @@ def load_runtime_secrets(config: RuntimeConfig) -> tuple[bytes, bytes]:
     return auth_secret, receipt_secret
 
 
-def _safe_environment() -> dict[str, str]:
-    return dict(FIXED_CHILD_ENVIRONMENT)
+def _runtime_gcov_directory(config: RuntimeConfig) -> Path:
+    prefix = config.auth_state_path.parent / "gcov"
+    try:
+        prefix.mkdir(mode=0o700, parents=False, exist_ok=True)
+        metadata = prefix.lstat()
+        parent = prefix.parent.resolve(strict=True)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or prefix.is_symlink()
+            or prefix.resolve(strict=True) != prefix
+            or prefix.parent.resolve(strict=True) != parent
+        ):
+            raise OdooRunnerError("the fixed Odoo gcov directory is not trustworthy")
+        if os.name == "posix" and (
+            metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077
+        ):
+            raise OdooRunnerError("the fixed Odoo gcov directory is not private")
+    except OdooRunnerError:
+        raise
+    except OSError as exc:
+        raise OdooRunnerError("the fixed Odoo gcov directory cannot be prepared") from exc
+    return prefix
+
+
+def _safe_environment(config: RuntimeConfig | None = None) -> dict[str, str]:
+    environment = dict(FIXED_CHILD_ENVIRONMENT)
+    if config is not None:
+        prefix = _runtime_gcov_directory(config)
+        environment.update(
+            {
+                "GCOV_ERROR_FILE": str(prefix / "gcov-error.log"),
+                "GCOV_EXIT_AT_ERROR": "0",
+                "GCOV_PREFIX": str(prefix),
+                "GCOV_PREFIX_STRIP": "0",
+            }
+        )
+    return environment
 
 
 def _validate_child_home(value: str) -> None:
@@ -824,8 +862,51 @@ def _validate_child_home(value: str) -> None:
 def _validate_child_environment(env: Mapping[str, str]) -> None:
     """Reject any environment drift and validate HOME before child creation."""
 
-    if not isinstance(env, dict) or env != FIXED_CHILD_ENVIRONMENT:
+    if not isinstance(env, dict):
         raise OdooRunnerError("the fixed Odoo child environment is invalid")
+    if env == FIXED_CHILD_ENVIRONMENT:
+        _validate_child_home(env["HOME"])
+        return
+    fixed = {key: value for key, value in env.items() if key not in GCOV_CHILD_ENVIRONMENT_KEYS}
+    gcov = {key: value for key, value in env.items() if key in GCOV_CHILD_ENVIRONMENT_KEYS}
+    if fixed != FIXED_CHILD_ENVIRONMENT or set(gcov) != GCOV_CHILD_ENVIRONMENT_KEYS:
+        raise OdooRunnerError("the fixed Odoo child environment is invalid")
+    prefix = gcov.get("GCOV_PREFIX")
+    error_file = gcov.get("GCOV_ERROR_FILE")
+    if (
+        not isinstance(prefix, str)
+        or not isinstance(error_file, str)
+        or gcov.get("GCOV_PREFIX_STRIP") != "0"
+        or gcov.get("GCOV_EXIT_AT_ERROR") != "0"
+        or "\x00" in prefix
+        or "\x00" in error_file
+    ):
+        raise OdooRunnerError("the fixed Odoo gcov environment is invalid")
+    prefix_path = Path(prefix)
+    error_path = Path(error_file)
+    if (
+        not prefix_path.is_absolute()
+        or not error_path.is_absolute()
+        or error_path.parent != prefix_path
+        or error_path.name != "gcov-error.log"
+    ):
+        raise OdooRunnerError("the fixed Odoo gcov environment is invalid")
+    try:
+        metadata = prefix_path.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or prefix_path.is_symlink()
+            or prefix_path.resolve(strict=True) != prefix_path
+        ):
+            raise OdooRunnerError("the fixed Odoo gcov directory is not trustworthy")
+        if os.name == "posix" and (
+            metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077
+        ):
+            raise OdooRunnerError("the fixed Odoo gcov directory is not private")
+    except OdooRunnerError:
+        raise
+    except OSError as exc:
+        raise OdooRunnerError("the fixed Odoo gcov directory cannot be verified") from exc
     _validate_child_home(env["HOME"])
 
 
@@ -1423,7 +1504,7 @@ def run_odoo_shell(
             payload_fd=payload_fd,
             timeout_seconds=float(timeout_seconds),
             cwd=str(config.release_root),
-            env=_safe_environment(),
+            env=_safe_environment(config),
         )
     if completed.returncode != 0:
         raise OdooRunnerError(f"Odoo shell exited with status {completed.returncode}")
@@ -1492,7 +1573,7 @@ def run_read_boundary_evidence(
             payload_fd=payload_fd,
             timeout_seconds=float(timeout_seconds),
             cwd=str(config.release_root),
-            env=_safe_environment(),
+            env=_safe_environment(config),
         )
     if completed.returncode != 0:
         raise OdooRunnerError(f"Odoo shell exited with status {completed.returncode}")
