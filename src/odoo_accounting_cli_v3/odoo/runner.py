@@ -1610,7 +1610,7 @@ def run_read_boundary_evidence(
             payload_fd=payload_fd,
             timeout_seconds=float(timeout_seconds),
             cwd=str(config.release_root),
-            env=_safe_environment(config),
+            env=_safe_environment(),
         )
     if completed.returncode != 0:
         raise OdooRunnerError(f"Odoo shell exited with status {completed.returncode}")

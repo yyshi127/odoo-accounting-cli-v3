@@ -181,12 +181,7 @@ def test_runner_verifies_exact_release_and_uses_payload_without_auth_or_receipt_
         "release_root",
         "runtime",
     }
-    assert observed_environment["GCOV_PREFIX"] == str(
-        config.auth_state_path.parent / "gcov"
-    )
-    assert observed_environment["GCOV_ERROR_FILE"] == str(
-        config.auth_state_path.parent / "gcov" / "gcov-error.log"
-    )
+    assert not any(key.startswith("GCOV_") for key in observed_environment)
     assert observed_argv[:2] == [str(config.odoo_python), "-c"]
     assert "shell" not in observed_argv
     assert "Registry.new" in observed_argv[2]
