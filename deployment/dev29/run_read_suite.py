@@ -2013,6 +2013,7 @@ def validate_closure_document(
         "systemd",
         "security",
         "activation",
+        "lifecycle",
     } or not _schema_version_is_one(
         document.get("schema_version")
     ) or document.get("status") != "active_verified":

@@ -280,6 +280,11 @@ def closure_document() -> dict:
             "direct_child_fork_exec_required": True,
             "systemd_run_forbidden": True,
         },
+        "lifecycle": {
+            "lock_held_until_cleanup": True,
+            "same_supervisor_namespace": True,
+            "cleanup_required_before_success_anchor": True,
+        },
         "security": dict(suite.CLOSURE_SECURITY_EXPECTED),
     }
 
