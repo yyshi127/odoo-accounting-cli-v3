@@ -266,11 +266,14 @@ def expected_runtime_trace_targets() -> tuple[str, ...]:
     targets = ["release-identity", "witness-pre", "boundary-probe"]
     for name in POSITIVE_NAMES:
         targets.extend((f"positive-{name}-signer", f"positive-{name}-read"))
+        if name == "trial_balance":
+            targets.append("negative-replay-read")
         if name in FINANCIAL_NAMES:
             targets.append(f"positive-{name}-oracle")
     for name in NEGATIVE_NAMES:
-        if name != "replay":
-            targets.append(f"negative-{name}-signer")
+        if name == "replay":
+            continue
+        targets.append(f"negative-{name}-signer")
         targets.append(f"negative-{name}-read")
     targets.extend(("witness-post", "independent-verifier"))
     return tuple(targets)

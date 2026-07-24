@@ -245,6 +245,18 @@ def test_replay_negative_runs_immediately_after_positive_receipt() -> None:
     assert skip_index < continue_index
 
 
+def test_runtime_trace_targets_match_immediate_replay_execution_order() -> None:
+    targets = list(suite.suite_runtime_trace_targets())
+
+    trial_read = targets.index("positive-trial_balance-read")
+    replay_read = targets.index("negative-replay-read")
+    trial_oracle = targets.index("positive-trial_balance-oracle")
+    acl_signer = targets.index("negative-acl_deny-signer")
+    assert trial_read < replay_read < trial_oracle < acl_signer
+    assert targets.count("negative-replay-read") == 1
+    assert "negative-replay-signer" not in targets
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,
