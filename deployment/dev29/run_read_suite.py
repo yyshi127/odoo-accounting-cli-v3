@@ -6005,6 +6005,72 @@ def run_suite(
             raise ReadSuiteError("pre-run audit head is invalid")
 
         cases = {item["name"]: item for item in plan["cases"]}
+        negatives = {item["name"]: item for item in plan["negative_cases"]}
+
+        def run_replay_negative() -> None:
+            name = "replay"
+            negative = negatives[name]
+            directory = evidence / "negative" / name
+            request = requests[negative["base_case"]]
+            write_json(
+                directory / "request-source.json",
+                {
+                    "kind": "replay_exact_request",
+                    "positive_case": negative["base_case"],
+                    "byte_identical": True,
+                    "timing": "immediate_after_positive_receipt",
+                },
+            )
+            requests[name] = request
+            request_bytes = canonical_json(request) + b"\n"
+            write_private(directory / "request.json", request_bytes)
+            write_json(
+                directory / "expected.json",
+                {
+                    "logical_error": negative["expected_error"],
+                    "mutation": negative["mutation"],
+                    "business_result_forbidden": True,
+                    "receipt_forbidden": True,
+                    "within_original_ttl": True,
+                },
+            )
+            read_process = _run_odoo_isolated(
+                [
+                    runtime["odoo_python"],
+                    "-I",
+                    "-B",
+                    str(paths["launcher"]),
+                    "read",
+                    "--runtime-config",
+                    str(configured_runtime),
+                    "--timeout-seconds",
+                    "120",
+                ],
+                trace_target_id=f"negative-{name}-read",
+                trace_gate=trace_gate,
+                stdin=request_bytes,
+                runtime=runtime,
+                expected=expected,
+                closure=closure,
+                timeout=150,
+            )
+            _write_completed(directory, "read", read_process)
+            failure = _strict_negative(
+                read_process,
+                label=f"negative read {name}",
+                expected_rejection_code=negative["expected_error"],
+            )
+            negative_reports[name] = {
+                "logical_error": negative["expected_error"],
+                "cli_error": failure["error"]["code"],
+                "rejection_code": failure["error"]["rejection_code"],
+                "exit_code": read_process.returncode,
+                "stdout_empty": True,
+                "receipt_absent": True,
+                "business_result_absent": True,
+                "within_original_ttl": True,
+            }
+
         for name in POSITIVE_NAMES:
             case = cases[name]
             directory = evidence / "positive" / name
@@ -6069,6 +6135,8 @@ def run_suite(
                 _validate_registry_result(case, result)
             receipts[name] = receipt
             write_json(directory / "receipt.json", receipt)
+            if name == "trial_balance":
+                run_replay_negative()
             if name in FINANCIAL_NAMES:
                 oracle_process = run_oracle_verify(
                     paths,
@@ -6098,53 +6166,43 @@ def run_suite(
                 oracle_reports[name] = oracle
             guard.assert_clean()
 
-        negatives = {item["name"]: item for item in plan["negative_cases"]}
         for name in NEGATIVE_NAMES:
+            if name == "replay":
+                continue
             negative = negatives[name]
             base = cases[negative["base_case"]]
             directory = evidence / "negative" / name
-            if negative["mutation"]["kind"] == "replay_exact_request":
-                request = requests[negative["base_case"]]
-                write_json(
-                    directory / "request-source.json",
-                    {
-                        "kind": "replay_exact_request",
-                        "positive_case": negative["base_case"],
-                        "byte_identical": True,
-                    },
-                )
-            else:
-                signer_process = _run_signer(
-                    [
-                        CLOSURE_PYTHON,
-                        "-I",
-                        "-B",
-                        "-S",
-                        str(paths["signer"]),
-                        "--negative",
-                        name,
-                        "--runtime-config",
-                        str(configured_runtime),
-                    ],
-                    trace_target_id=f"negative-{name}-signer",
-                    trace_gate=trace_gate,
-                    stdin=b"",
-                    runtime=runtime,
-                    expected=expected,
-                    closure=closure,
-                    timeout=60,
-                )
-                _write_completed(directory, "signer", signer_process)
-                request = _strict_success(
-                    signer_process, label=f"negative signer {name}"
-                )
-                _validate_signed_selection(
-                    request,
-                    base_case=base,
-                    selected_identity=negative,
-                    runtime=runtime,
-                    mutation=negative["mutation"],
-                )
+            signer_process = _run_signer(
+                [
+                    CLOSURE_PYTHON,
+                    "-I",
+                    "-B",
+                    "-S",
+                    str(paths["signer"]),
+                    "--negative",
+                    name,
+                    "--runtime-config",
+                    str(configured_runtime),
+                ],
+                trace_target_id=f"negative-{name}-signer",
+                trace_gate=trace_gate,
+                stdin=b"",
+                runtime=runtime,
+                expected=expected,
+                closure=closure,
+                timeout=60,
+            )
+            _write_completed(directory, "signer", signer_process)
+            request = _strict_success(
+                signer_process, label=f"negative signer {name}"
+            )
+            _validate_signed_selection(
+                request,
+                base_case=base,
+                selected_identity=negative,
+                runtime=runtime,
+                mutation=negative["mutation"],
+            )
             requests[name] = request
             request_bytes = canonical_json(request) + b"\n"
             write_private(directory / "request.json", request_bytes)

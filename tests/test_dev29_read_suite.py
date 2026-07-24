@@ -229,6 +229,22 @@ def test_runtime_open_traces_stage_under_private_sidecar() -> None:
     assert "parent=self.private_sidecar / \".trace-staging\"" in source
 
 
+def test_replay_negative_runs_immediately_after_positive_receipt() -> None:
+    source = (ROOT / "deployment" / "dev29" / "run_read_suite.py").read_text("utf-8")
+
+    assert "def run_replay_negative() -> None:" in source
+    assert '"timing": "immediate_after_positive_receipt"' in source
+    assert '"within_original_ttl": True' in source
+    receipt_index = source.index('write_json(directory / "receipt.json", receipt)')
+    replay_index = source.index('run_replay_negative()', receipt_index)
+    oracle_index = source.index("if name in FINANCIAL_NAMES:", receipt_index)
+    negative_loop_index = source.index("for name in NEGATIVE_NAMES:", replay_index)
+    skip_index = source.index('if name == "replay":', negative_loop_index)
+    continue_index = source.index("continue", skip_index)
+    assert receipt_index < replay_index < oracle_index
+    assert skip_index < continue_index
+
+
 def expected_identity():
     return suite.ExpectedIdentity(
         release=RELEASE,
