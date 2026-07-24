@@ -144,6 +144,7 @@ def raw_trace(target_id: str, trace_path: Path, *, exit_code: int = 0) -> None:
         f'410 stat("{RELEASE_ROOT}", {{st_mode=S_IFDIR|0555}}, 0) = 0',
         '410 stat("/opt", {st_mode=S_IFDIR|0755}, 0) = 0',
         '410 openat(AT_FDCWD, "/proc/sys/kernel/cap_last_cap", O_RDONLY|O_CLOEXEC) = 6</proc/sys/kernel/cap_last_cap>',
+        '410 openat(AT_FDCWD, "/proc/sys/crypto/fips_enabled", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)',
         '410 readlink("/proc/self/exe", "/usr/bin/python3.12", 4096) = 19',
         f'410 openat2(AT_FDCWD, "runtime.json", {{flags=O_RDONLY, resolve=RESOLVE_BENEATH}}, 24) = 5<{RELEASE_ROOT}/runtime.json>',
         f'410 execve("/usr/bin/python3.12", {argv_text(final_argv(target_id))}, 0x7fff) = 0',
@@ -217,6 +218,15 @@ def test_discovery_builds_nonapproval_review_manifests(tmp_path: Path) -> None:
         if item["path"] == "/proc/sys/kernel/cap_last_cap"
     )
     assert cap_policy["classification"] == "process-view"
+    fips_policy = next(
+        item
+        for item in first["path_access_policy"]
+        if item["path"] == "/proc/sys/crypto/fips_enabled"
+    )
+    assert fips_policy["classification"] == "process-view"
+    assert fips_policy["allow_success"] is False
+    assert fips_policy["allowed_errnos"] == ["ENOENT"]
+    assert fips_policy["failure_guard"] == runtime_trace.PROCESS_VIEW_FAILURE_GUARD
     parent_policy = next(
         item for item in first["path_access_policy"] if item["path"] == "/opt"
     )

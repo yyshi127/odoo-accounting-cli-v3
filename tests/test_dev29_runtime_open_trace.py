@@ -1099,6 +1099,38 @@ def test_manifest_rejects_unsafe_process_view_policy(mutation: dict[str, object]
         trace.validate_manifest_document(document, request(VALID_WATCH_ROOTS))
 
 
+def test_manifest_accepts_guarded_readonly_process_view_failure() -> None:
+    document = manifest_document()
+    path = "/proc/sys/crypto/fips_enabled"
+    document["allowed_paths"] = sorted([*document["allowed_paths"], path])  # type: ignore[index]
+    document["path_access_policy"] = sorted(  # type: ignore[index]
+        [
+            *document["path_access_policy"],  # type: ignore[index]
+            {
+                "path": path,
+                "role": "signer",
+                "classification": "process-view",
+                "allowed_access": ["read"],
+                "create_suffixes": [],
+                "delta_verifier": None,
+                "delta_contract_sha256": None,
+                "allow_success": False,
+                "allowed_errnos": ["ENOENT"],
+                "failure_guard": trace.PROCESS_VIEW_FAILURE_GUARD,
+            },
+        ],
+        key=lambda item: item["path"],
+    )
+
+    loaded = trace.validate_manifest_document(document, request(VALID_WATCH_ROOTS))
+    policy = next(item for item in loaded.path_access_policy if item.path == path)
+
+    assert policy.classification == "process-view"
+    assert policy.allow_success is False
+    assert policy.allowed_errnos == ("ENOENT",)
+    assert policy.failure_guard == trace.PROCESS_VIEW_FAILURE_GUARD
+
+
 def test_manifest_rejects_watched_process_view() -> None:
     watches = tuple(sorted((*VALID_WATCH_ROOTS, "/proc/self")))
     document = manifest_document()

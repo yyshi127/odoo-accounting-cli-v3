@@ -361,7 +361,7 @@ def _policy_for_path(
             ),
         }
     if classification == "process-view":
-        if _covered(path, watch_roots) or errnos or not success:
+        if _covered(path, watch_roots):
             raise DiscoveryError("process-view discovery policy is unsafe")
         return {
             "path": path,
@@ -371,9 +371,11 @@ def _policy_for_path(
             "create_suffixes": [],
             "delta_verifier": None,
             "delta_contract_sha256": None,
-            "allow_success": True,
-            "allowed_errnos": [],
-            "failure_guard": None,
+            "allow_success": success,
+            "allowed_errnos": list(errnos),
+            "failure_guard": (
+                runtime_trace.PROCESS_VIEW_FAILURE_GUARD if errnos else None
+            ),
         }
     if classification == "unix-socket":
         if _covered(path, watch_roots) or errnos or not success:
