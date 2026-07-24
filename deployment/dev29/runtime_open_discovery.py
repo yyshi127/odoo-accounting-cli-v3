@@ -58,6 +58,19 @@ runtime_trace = _load_sibling("_dev29_runtime_open_discovery_trace", TRACE_RELAT
 policy_source = _load_sibling(
     "_dev29_runtime_open_discovery_source", SOURCE_RELATIVE
 )
+NON_POLICY_TARGET_REASONS = {
+    "boundary-probe": (
+        "read-boundary evidence intentionally exercises the controlled Odoo-shell "
+        "subprocess boundary and is not eligible for single-leader runtime-open "
+        "path-policy approval"
+    )
+}
+
+
+def discovery_targets() -> tuple[str, ...]:
+    targets = list(policy_source.expected_targets())
+    targets.insert(2, "boundary-probe")
+    return tuple(targets)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -238,7 +251,7 @@ def merge_fragments(
     ):
         if suite[key] != verifier[key]:
             raise DiscoveryError("discovery fragments do not share one identity")
-    expected = policy_source.expected_targets()
+    expected = discovery_targets()
     suite_targets = suite["targets"]
     verifier_targets = verifier["targets"]
     if _target_order(suite_targets) != expected[:-1]:
@@ -606,14 +619,26 @@ def build_review(
     if type(targets) is not list:
         raise DiscoveryError("discovery target set is invalid")
     ordered = [item.get("target_id") if type(item) is dict else None for item in targets]
-    if tuple(ordered) != policy_source.expected_targets():
+    if tuple(ordered) != discovery_targets():
         raise DiscoveryError("discovery target order is incomplete")
     if output_directory.exists() or output_directory.is_symlink():
         raise DiscoveryError("discovery output directory already exists")
     output_directory.mkdir(mode=0o700)
     reviews: list[dict[str, Any]] = []
+    excluded_reviews: list[dict[str, Any]] = []
     try:
         for entry in targets:
+            target_id = entry.get("target_id") if type(entry) is dict else None
+            if target_id in NON_POLICY_TARGET_REASONS:
+                excluded_reviews.append(
+                    {
+                        "target_id": target_id,
+                        "reason": NON_POLICY_TARGET_REASONS[target_id],
+                        "candidate_is_approval": False,
+                        "production_promotion_allowed": False,
+                    }
+                )
+                continue
             manifest, review = _manifest_from_entry(
                 entry,
                 release=release,
@@ -631,8 +656,10 @@ def build_review(
             "scope": REVIEW_SCOPE,
             "release": release,
             "target_order": list(policy_source.expected_targets()),
+            "discovery_target_order": list(discovery_targets()),
             "manifest_directory": str(output_directory),
             "reviews": reviews,
+            "excluded_reviews": excluded_reviews,
             "candidate_is_approval": False,
             "production_promotion_allowed": False,
         }
@@ -648,6 +675,8 @@ def build_review(
         "review_path": str(output_directory / "DISCOVERY-REVIEW.json"),
         "manifest_directory": str(output_directory),
         "target_count": len(reviews),
+        "discovery_target_count": len(targets),
+        "excluded_target_count": len(excluded_reviews),
         "review_sha256": hashlib.sha256(review_payload).hexdigest(),
         "candidate_is_approval": False,
         "production_promotion_allowed": False,

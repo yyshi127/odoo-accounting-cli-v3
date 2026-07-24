@@ -157,7 +157,7 @@ def inventory(tmp_path: Path, *, output_traces: bool = True) -> dict[str, object
     trace_dir = tmp_path / "traces"
     trace_dir.mkdir()
     targets = []
-    for target_id in discovery.policy_source.expected_targets():
+    for target_id in discovery.discovery_targets():
         path = trace_dir / f"{target_id}.strace"
         if output_traces:
             raw_trace(target_id, path)
@@ -188,14 +188,26 @@ def inventory(tmp_path: Path, *, output_traces: bool = True) -> dict[str, object
 def test_discovery_builds_nonapproval_review_manifests(tmp_path: Path) -> None:
     output = tmp_path / "review"
     result = discovery.build_review(inventory(tmp_path), output_directory=output)
-    assert result["target_count"] == 32
+    assert result["target_count"] == 31
+    assert result["discovery_target_count"] == 32
+    assert result["excluded_target_count"] == 1
     assert result["candidate_is_approval"] is False
     assert result["production_promotion_allowed"] is False
 
     review = json.loads((output / "DISCOVERY-REVIEW.json").read_bytes())
     assert review["candidate_is_approval"] is False
     assert tuple(review["target_order"]) == discovery.policy_source.expected_targets()
-    assert len(review["reviews"]) == 32
+    assert tuple(review["discovery_target_order"]) == discovery.discovery_targets()
+    assert len(review["reviews"]) == 31
+    assert review["excluded_reviews"] == [
+        {
+            "target_id": "boundary-probe",
+            "reason": discovery.NON_POLICY_TARGET_REASONS["boundary-probe"],
+            "candidate_is_approval": False,
+            "production_promotion_allowed": False,
+        }
+    ]
+    assert not (output / "boundary-probe.json").exists()
     assert (output / "INDEX.json").exists() is False
 
     first = json.loads(
@@ -245,7 +257,7 @@ def fragments(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
     full = inventory(tmp_path)
     suite_fragment = json.loads(json.dumps(full))
     verifier_fragment = json.loads(json.dumps(full))
-    expected = discovery.policy_source.expected_targets()
+    expected = discovery.discovery_targets()
     suite_fragment["scope"] = discovery.SUITE_FRAGMENT_SCOPE
     suite_fragment["targets"] = suite_fragment["targets"][:-1]
     assert [item["target_id"] for item in suite_fragment["targets"]] == list(
@@ -271,7 +283,7 @@ def test_discovery_merges_suite_and_verifier_fragments(tmp_path: Path) -> None:
     assert result["production_promotion_allowed"] is False
     assert merged["scope"] == discovery.DISCOVERY_SCOPE
     assert tuple(item["target_id"] for item in merged["targets"]) == (
-        discovery.policy_source.expected_targets()
+        discovery.discovery_targets()
     )
     assert result["inventory_sha256"] == hashlib.sha256(
         discovery.canonical_json(merged) + b"\n"

@@ -58,7 +58,12 @@ def test_expected_targets_match_immediate_replay_execution_order() -> None:
     replay_read = targets.index("negative-replay-read")
     trial_oracle = targets.index("positive-trial_balance-oracle")
     acl_signer = targets.index("negative-acl_deny-signer")
-    assert tuple(targets[:-1]) == read_suite.suite_runtime_trace_targets()
+    assert tuple(targets[:-1]) == tuple(
+        target
+        for target in read_suite.suite_runtime_trace_targets()
+        if target != "boundary-probe"
+    )
+    assert "boundary-probe" not in targets
     assert trial_read < replay_read < trial_oracle < acl_signer
     assert targets.count("negative-replay-read") == 1
     assert "negative-replay-signer" not in targets
@@ -376,7 +381,7 @@ def test_full_32_target_candidate_uses_real_validator_and_fresh_index(
         install_parent=install_parent,
         enforce_root=False,
     )
-    assert result["target_count"] == 32
+    assert result["target_count"] == len(source_tool.expected_targets())
     index_path = install_parent / release / "INDEX.json"
     index_sha256 = hashlib.sha256(index_path.read_bytes()).hexdigest()
     monkeypatch.setattr(read_suite, "TRACE_INDEX_PARENT", install_parent)
@@ -601,12 +606,12 @@ def test_real_root_full_policy_cli_installs_canonical_fresh_release(
             == 0
         )
         build_result = json.loads(capsys.readouterr().out)
-        assert build_result["target_count"] == 32
+        assert build_result["target_count"] == len(source_tool.expected_targets())
         destination_metadata = destination.lstat()
         assert (destination_metadata.st_uid, destination_metadata.st_gid) == (0, 0)
         assert stat.S_IMODE(destination_metadata.st_mode) == 0o555
         installed_members = tuple(destination.iterdir())
-        assert len(installed_members) == 33
+        assert len(installed_members) == len(source_tool.expected_targets()) + 1
         for installed_member in installed_members:
             metadata = installed_member.lstat()
             assert (metadata.st_uid, metadata.st_gid) == (0, 0)

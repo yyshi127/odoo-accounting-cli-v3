@@ -65,7 +65,7 @@ def expected_targets() -> tuple[str, ...]:
         "tamper_parameters",
         "replay",
     )
-    targets = ["release-identity", "witness-pre", "boundary-probe"]
+    targets = ["release-identity", "witness-pre"]
     for name in positive:
         targets.extend((f"positive-{name}-signer", f"positive-{name}-read"))
         if name == "trial_balance":

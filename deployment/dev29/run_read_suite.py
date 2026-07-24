@@ -279,6 +279,14 @@ def expected_runtime_trace_targets() -> tuple[str, ...]:
     return tuple(targets)
 
 
+def runtime_open_policy_targets() -> tuple[str, ...]:
+    return tuple(
+        target
+        for target in expected_runtime_trace_targets()
+        if target != "boundary-probe"
+    )
+
+
 def suite_runtime_trace_targets() -> tuple[str, ...]:
     return tuple(
         target
@@ -626,7 +634,7 @@ def load_runtime_trace_index(
             raise ReadSuiteError("runtime-open trace index target is invalid")
         ordered.append(item["target_id"])
         targets[item["target_id"]] = dict(item)
-    if tuple(ordered) != expected_runtime_trace_targets():
+    if tuple(ordered) != runtime_open_policy_targets():
         raise ReadSuiteError("runtime-open trace target set or order is incomplete")
     _verify_runtime_trace_policy_source(
         expected,
@@ -651,7 +659,7 @@ def _verify_runtime_trace_policy_source(
         _safe_root_chain(parent, final_modes=frozenset({0o555}))
     elif parent.is_symlink() or not parent.is_dir():
         raise ReadSuiteError("runtime-open trace policy directory is unsafe")
-    ordered = expected_runtime_trace_targets()
+    ordered = runtime_open_policy_targets()
     expected_names = {TRACE_INDEX_NAME, *(f"{target_id}.json" for target_id in ordered)}
     try:
         observed_before = {entry.name for entry in os.scandir(parent)}
@@ -4591,6 +4599,33 @@ def _run_direct_child(
         )
     bootstrap.extend(("--", *command_values))
     environment = _direct_child_environment(role)
+    if isinstance(trace_gate, RuntimeTraceGate) and trace_target_id == "boundary-probe":
+        process: subprocess.Popen[bytes] | None = None
+        try:
+            process = subprocess.Popen(
+                bootstrap,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(paths["root"]),
+                env=environment,
+                close_fds=True,
+                pass_fds=tuple(inherited_fds),
+            )
+            value = callback(process)
+            _attested_child_environment_sha256(
+                value,
+                hashlib.sha256(canonical_json(environment)).hexdigest(),
+            )
+            return value
+        except BaseException:
+            if process is not None and process.poll() is None:
+                process.kill()
+                try:
+                    process.communicate(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            raise
     try:
         return trace_gate.execute(
             trace_target_id,
@@ -6389,9 +6424,9 @@ def run_suite(
         )
         return evidence, hashlib.sha256(payload).hexdigest()
     runtime_trace_private = trace_gate.seal_private_manifest(
-        suite_runtime_trace_targets()
+        runtime_open_policy_targets()
     )
-    runtime_trace_receipt = trace_gate.document(suite_runtime_trace_targets())
+    runtime_trace_receipt = trace_gate.document(runtime_open_policy_targets())
     runtime_trace_receipt["private_sidecar"] = runtime_trace_private
     write_json(evidence / "runtime-open-trace.json", runtime_trace_receipt)
     runtime_open_trace_sha256 = hashlib.sha256(
