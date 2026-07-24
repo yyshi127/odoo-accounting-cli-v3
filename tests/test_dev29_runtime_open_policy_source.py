@@ -51,6 +51,19 @@ read_suite = _load(
 )
 
 
+def test_expected_targets_match_immediate_replay_execution_order() -> None:
+    targets = list(source_tool.expected_targets())
+
+    trial_read = targets.index("positive-trial_balance-read")
+    replay_read = targets.index("negative-replay-read")
+    trial_oracle = targets.index("positive-trial_balance-oracle")
+    acl_signer = targets.index("negative-acl_deny-signer")
+    assert tuple(targets[:-1]) == read_suite.suite_runtime_trace_targets()
+    assert trial_read < replay_read < trial_oracle < acl_signer
+    assert targets.count("negative-replay-read") == 1
+    assert "negative-replay-signer" not in targets
+
+
 def _manifests(parent: Path) -> None:
     parent.mkdir()
     environment = {"HOME": "/fixed-home", "PATH": "/usr/bin:/bin"}
@@ -116,6 +129,7 @@ def _full_manifests(
         final = [
             "/usr/bin/python3.12",
             "-I",
+            "-B",
             *(["-S"] if no_site else []),
             script,
             "--fixed-test-target",
@@ -124,6 +138,7 @@ def _full_manifests(
         bootstrap = [
             "/usr/bin/python3.12",
             "-I",
+            "-B",
             *(["-S"] if no_site else []),
             f"{release_root}/deployment/dev29/direct_child.py",
             "--role",
