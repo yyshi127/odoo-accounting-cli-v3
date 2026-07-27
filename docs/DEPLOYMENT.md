@@ -194,6 +194,15 @@ Bridge files/routes, Odoo add-ons/configuration, or any service; it never
 starts, stops, reloads, or restarts a process. A successfully side-loaded
 release remains unrouted.
 
+If a later authorized route change points `/opt/odoo-accounting-cli-v3/current`
+at the new release, replace the symlink itself, not a directory reached through
+the existing symlink. On GNU/Linux use `ln -sfnT <release-dir>
+/opt/odoo-accounting-cli-v3/current`; do not use plain `ln -sfn`, because it can
+leave `current` pointing at the previous release when the destination is treated
+as a directory. Immediately run `release identity` from `current` and compare
+the reported commit, version, manifest SHA-256, package SHA-256, and registry
+digest with the intended release before reporting the route changed.
+
 The numbered controls below are the installer's required verification and
 publication contract, not permission to replace it with ad hoc extraction.
 
