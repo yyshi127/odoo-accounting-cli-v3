@@ -17,6 +17,8 @@ from test_odoo_read_boundary_evidence_runner import (
 )
 from test_verify_sandbox_write_evidence import _document as sandbox_write_document
 from test_verify_sandbox_write_evidence import _input_manifest as sandbox_write_input_manifest
+from test_write_runtime import _make_runtime as make_write_runtime
+from test_write_runtime import _write_json as write_runtime_json
 
 
 def identity(config) -> dict:
@@ -378,3 +380,125 @@ def test_evidence_verify_sandbox_write_requires_exactly_one_input(tmp_path: Path
     assert both.exit_code == 2
     assert '"code":"sandbox_write_evidence_input_required"' in missing.output
     assert '"code":"sandbox_write_evidence_input_required"' in both.output
+
+
+def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
+    tmp_path: Path,
+):
+    runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
+    evidence_root = tmp_path / "evidence-root"
+    evidence_root.mkdir()
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev163",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch("odoo_accounting_cli_v3.cli._assert_runtime_release"):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-write-preflight",
+                "--write-runtime-config",
+                str(runtime_path),
+                "--evidence-root",
+                str(evidence_root),
+                "--min-free-bytes",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-write-preflight"
+    assert payload["ok"] is True
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["database_name"] == "odoo_v3_sandbox"
+    assert payload["data"]["sandbox_write_evidence_collection_admissible"] is True
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+
+
+def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
+    tmp_path: Path,
+):
+    runtime_path, _document, base = make_write_runtime(tmp_path / "runtime")
+    base["database_name"] = "codex_cn_m31_demo_01"
+    write_runtime_json(Path(_document["base_runtime_config_path"]), base)
+    evidence_root = tmp_path / "evidence-root"
+    evidence_root.mkdir()
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "d" * 64,
+            "package_sha256": "4" * 64,
+            "registry_digest": "b" * 64,
+            "release": "release",
+            "verified": True,
+            "version": "0.1.0.dev163",
+        },
+    ), patch("odoo_accounting_cli_v3.cli._assert_runtime_release"):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-write-preflight",
+                "--write-runtime-config",
+                str(runtime_path),
+                "--evidence-root",
+                str(evidence_root),
+                "--min-free-bytes",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 5
+    assert '"code":"sandbox_write_scope_rejected"' in result.output
+
+
+def test_evidence_sandbox_write_preflight_rejects_release_internal_evidence_root(
+    tmp_path: Path,
+):
+    runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
+    release_root = Path(_base["release_root"])
+    evidence_root = release_root / "write-evidence"
+    evidence_root.mkdir(parents=True)
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "d" * 64,
+            "package_sha256": "4" * 64,
+            "registry_digest": "b" * 64,
+            "release": "release",
+            "verified": True,
+            "version": "0.1.0.dev163",
+        },
+    ), patch("odoo_accounting_cli_v3.cli._assert_runtime_release"):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-write-preflight",
+                "--write-runtime-config",
+                str(runtime_path),
+                "--evidence-root",
+                str(evidence_root),
+                "--min-free-bytes",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 5
+    assert '"code":"sandbox_write_evidence_root_rejected"' in result.output

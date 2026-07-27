@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sys
 from datetime import datetime, timezone
 from importlib import resources, util
@@ -33,6 +35,7 @@ from .receipts import ReceiptError, verify_read_receipt
 from .registry import Capability, load_registry, registry_digest, validate_registry
 from .release import ReleaseError, verify_manifest
 from .write_api import WriteApiError, parse_write_api_request
+from .write_runtime import WriteRuntimeError, load_write_runtime_config
 
 
 def _json(value: Any) -> str:
@@ -375,6 +378,77 @@ def _load_sandbox_write_evidence_verifier() -> Any:
     return module
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_sandbox_write_evidence_root(
+    path: Path,
+    *,
+    release_root: Path,
+    minimum_free_bytes: int,
+) -> dict[str, Any]:
+    if not path.is_absolute():
+        raise CliFailure(
+            command="evidence.sandbox-write-preflight",
+            code="sandbox_write_evidence_root_rejected",
+            message="The sandbox write evidence root must be absolute.",
+            exit_code=5,
+        )
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.lstat()
+    except OSError as exc:
+        raise CliFailure(
+            command="evidence.sandbox-write-preflight",
+            code="sandbox_write_evidence_root_rejected",
+            message="The sandbox write evidence root is unavailable.",
+            exit_code=5,
+        ) from exc
+    if not resolved.is_dir() or path.is_symlink():
+        raise CliFailure(
+            command="evidence.sandbox-write-preflight",
+            code="sandbox_write_evidence_root_rejected",
+            message="The sandbox write evidence root must be a real directory.",
+            exit_code=5,
+        )
+    if _is_within(resolved, release_root):
+        raise CliFailure(
+            command="evidence.sandbox-write-preflight",
+            code="sandbox_write_evidence_root_rejected",
+            message="The sandbox write evidence root must not be inside the immutable release.",
+            exit_code=5,
+        )
+    if os.name == "posix":
+        import stat
+
+        if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise CliFailure(
+                command="evidence.sandbox-write-preflight",
+                code="sandbox_write_evidence_root_rejected",
+                message="The sandbox write evidence root must be root-owned and not group/world writable.",
+                exit_code=5,
+            )
+    usage = shutil.disk_usage(resolved)
+    free_bytes = usage.free
+    if free_bytes < minimum_free_bytes:
+        raise CliFailure(
+            command="evidence.sandbox-write-preflight",
+            code="sandbox_write_capacity_rejected",
+            message="The sandbox write evidence filesystem does not have enough free bytes.",
+            exit_code=5,
+        )
+    return {
+        "path": str(resolved),
+        "available_bytes": free_bytes,
+        "minimum_free_bytes": minimum_free_bytes,
+    }
+
+
 def _write_cli_failure(
     *,
     command: str,
@@ -693,6 +767,78 @@ def evidence_verify_sandbox_write(
         {
             "evidence": evidence,
             "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("sandbox-write-preflight")
+@click.option(
+    "--write-runtime-config",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Root-managed write runtime configuration for a staged sandbox.",
+)
+@click.option(
+    "--evidence-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Existing root-owned directory for retained sandbox write evidence.",
+)
+@click.option(
+    "--min-free-bytes",
+    type=click.IntRange(min=1),
+    default=8 * 1024 * 1024 * 1024,
+    show_default=True,
+    help="Minimum free bytes required before starting sandbox write evidence collection.",
+)
+def evidence_sandbox_write_preflight(
+    write_runtime_config: Path,
+    evidence_root: Path,
+    min_free_bytes: int,
+) -> None:
+    """Read-only gate before any real sandbox accounting write drill."""
+
+    command = "evidence.sandbox-write-preflight"
+    try:
+        config = load_write_runtime_config(write_runtime_config)
+    except WriteRuntimeError as exc:
+        raise CliFailure(
+            command=command,
+            code="write_runtime_rejected",
+            message="The write runtime is not a valid staged sandbox configuration.",
+            exit_code=5,
+        ) from exc
+    identity = _load_release_identity(config.base_runtime.release_root, command=command)
+    _assert_runtime_release(config.base_runtime, identity, command=command)
+    database_name = config.base_runtime.database_name
+    if (
+        config.write_execution_mode != "sandbox_staged"
+        or config.base_runtime.environment != "sandbox"
+        or config.base_runtime.capability_channel != "staged"
+        or re.search(r"(^|[_-])sandbox([_-]|$)", database_name) is None
+    ):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_scope_rejected",
+            message="The write runtime is not bound to a clearly named staged sandbox database.",
+            exit_code=5,
+        )
+    evidence_root_status = _validate_sandbox_write_evidence_root(
+        evidence_root,
+        release_root=config.base_runtime.release_root,
+        minimum_free_bytes=min_free_bytes,
+    )
+    _success(
+        command,
+        {
+            "database_name": database_name,
+            "evidence_root": evidence_root_status,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "release_identity": identity,
+            "runtime": config.runtime_identity,
+            "sandbox_write_evidence_collection_admissible": True,
         },
         business_succeeded=False,
     )
