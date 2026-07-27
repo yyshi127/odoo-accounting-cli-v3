@@ -952,6 +952,81 @@ def release_identity() -> None:
     _success("release.identity", _load_release_identity())
 
 
+@release_group.command("current-route")
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to inspect.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def release_current_route(
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Verify that the current route points at the intended immutable release."""
+
+    command = "release.current-route"
+    blockers: list[str] = []
+    resolved: Path | None = None
+    identity: dict[str, Any] | None = None
+    if not current_path.is_absolute():
+        blockers.append("current path must be absolute")
+    try:
+        current_path.lstat()
+        if not current_path.is_symlink():
+            blockers.append("current path must be a symlink")
+        resolved = current_path.resolve(strict=True)
+        if not resolved.is_dir():
+            blockers.append("current symlink target must be a directory")
+        if resolved.parent.name != "releases":
+            blockers.append("current symlink target must be inside a releases directory")
+        identity = _load_release_identity(resolved, command=command)
+    except CliFailure:
+        raise
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="current_route_unavailable",
+            message="The current release route is unavailable.",
+            exit_code=5,
+        ) from exc
+    expected_pairs = {
+        "commit": expected_commit,
+        "manifest_sha256": expected_manifest_sha256,
+        "package_sha256": expected_package_sha256,
+        "registry_digest": expected_registry_digest,
+        "release": expected_release,
+    }
+    if identity is not None:
+        for field, expected in expected_pairs.items():
+            if expected is not None and identity[field] != expected:
+                blockers.append(f"current route {field} does not match expected value")
+    data = {
+        "blockers": sorted(set(blockers)),
+        "current_path": str(current_path),
+        "current_route_ready": not blockers,
+        "expected": {
+            field: expected
+            for field, expected in expected_pairs.items()
+            if expected is not None
+        },
+        "real_odoo_write_performed": False,
+        "resolved_release_path": str(resolved) if resolved is not None else None,
+        "route_identity": identity,
+    }
+    _success(command, data)
+
+
 @main.group("evidence")
 def evidence_group() -> None:
     """Run exact-release internal safety evidence probes."""

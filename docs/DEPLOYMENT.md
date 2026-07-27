@@ -202,6 +202,16 @@ leave `current` pointing at the previous release when the destination is treated
 as a directory. Immediately run `release identity` from `current` and compare
 the reported commit, version, manifest SHA-256, package SHA-256, and registry
 digest with the intended release before reporting the route changed.
+For machine-checkable evidence, run the exact current CLI route verifier:
+
+```bash
+odoo-accounting-cli-v3 release current-route \
+  --expected-release <version-commit12> \
+  --expected-commit <full-commit> \
+  --expected-manifest-sha256 <manifest-sha256> \
+  --expected-package-sha256 <package-sha256> \
+  --expected-registry-digest <registry-digest>
+```
 
 The numbered controls below are the installer's required verification and
 publication contract, not permission to replace it with ad hoc extraction.
