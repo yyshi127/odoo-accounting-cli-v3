@@ -83,6 +83,8 @@ PREFLIGHT_FIELDS = frozenset(
         "environment",
         "evidence_root",
         "production_promotion_allowed",
+        "readiness_report",
+        "readiness_report_sha256",
         "real_odoo_write_performed",
         "registry_digest",
         "release_identity",
@@ -274,6 +276,20 @@ def _load_json_path(path: Path, label: str) -> dict[str, Any]:
         raise SandboxWriteEvidenceError(f"{label} JSON is invalid") from exc
 
 
+def _json_digest(value: Any) -> str:
+    try:
+        payload = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise SandboxWriteEvidenceError("readiness_report is not canonical JSON") from exc
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _validate_preflight_manifest(
     preflight: Any,
     *,
@@ -294,6 +310,22 @@ def _validate_preflight_manifest(
         raise SandboxWriteEvidenceError("preflight_manifest must not be a write receipt")
     if document["write_execution_mode"] != "sandbox_staged":
         raise SandboxWriteEvidenceError("preflight_manifest write mode is invalid")
+    readiness = _require_object(
+        document["readiness_report"], "preflight_manifest.readiness_report"
+    )
+    if document["readiness_report_sha256"] != _json_digest(readiness):
+        raise SandboxWriteEvidenceError("preflight_manifest readiness_report_sha256 mismatch")
+    if readiness.get("sandbox_drill_admissible") is not True:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness is not admissible")
+    capability = _require_object(
+        readiness.get("capability"), "preflight_manifest.readiness_report.capability"
+    )
+    if capability.get("id") != document["capability_id"]:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness capability mismatch")
+    if readiness.get("production_promotion_allowed") is not False:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness must not authorize production")
+    if readiness.get("real_odoo_write_performed") is not False:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness must be static")
     if document["capability_id"] != metadata["capability_id"]:
         raise SandboxWriteEvidenceError("preflight_manifest capability_id mismatch")
     if document["company_id"] != metadata["company_id"]:

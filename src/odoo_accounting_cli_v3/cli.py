@@ -1072,6 +1072,21 @@ def evidence_sandbox_write_preflight(
             message="The sandbox write preflight must target one registered write capability.",
             exit_code=5,
         )
+    odoo_write_capabilities, allowed_models_by_capability = (
+        _load_write_capability_implementation(command)
+    )
+    readiness_report = _write_capability_readiness_report(
+        capability,
+        allowed_models_by_capability=allowed_models_by_capability,
+        odoo_write_capabilities=odoo_write_capabilities,
+    )
+    if readiness_report["sandbox_drill_admissible"] is not True:
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_readiness_rejected",
+            message="The write capability is not statically admissible for sandbox drill collection.",
+            exit_code=5,
+        )
     try:
         config = load_write_runtime_config(write_runtime_config)
     except WriteRuntimeError as exc:
@@ -1111,6 +1126,8 @@ def evidence_sandbox_write_preflight(
         "environment": config.base_runtime.environment,
         "evidence_root": evidence_root_status,
         "production_promotion_allowed": False,
+        "readiness_report": readiness_report,
+        "readiness_report_sha256": _sha256_json(readiness_report),
         "real_odoo_write_performed": False,
         "registry_digest": identity["registry_digest"],
         "release_identity": {

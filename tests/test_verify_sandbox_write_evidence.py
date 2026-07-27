@@ -170,6 +170,35 @@ def _write_lifecycle_artifacts(tmp_path: Path) -> dict[str, str]:
 
 def _write_preflight_manifest(tmp_path: Path) -> str:
     path = tmp_path / "preflight_manifest.json"
+    readiness_report = {
+        "allowed_models": ["account.move", "account.move.line"],
+        "capability": {
+            "access": "write",
+            "approval": {"policy": "invoice_write", "required": True, "ttl_seconds": 900},
+            "company_scope": "explicit_single_company",
+            "enabled_environments": [],
+            "evidence_level": "declared",
+            "id": "acct.invoice.customer_create.v1",
+            "idempotency": {"required": True, "scope": "company_capability"},
+            "recovery": {
+                "method": "manual_escalation_until_exact_invoice_compensation_is_sandbox_verified"
+            },
+            "risk_level": "high",
+        },
+        "checks": {
+            "approval_policy_present": True,
+            "idempotency_policy_present": True,
+            "odoo_handler_supported": True,
+            "production_not_enabled": True,
+            "recovery_method_present": True,
+            "service_allowed_models_present": True,
+            "strict_input_schema": True,
+            "strict_output_schema": True,
+        },
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "sandbox_drill_admissible": True,
+    }
     path.write_text(
         json.dumps(
             {
@@ -186,6 +215,16 @@ def _write_preflight_manifest(tmp_path: Path) -> str:
                     "path": str(tmp_path),
                 },
                 "production_promotion_allowed": False,
+                "readiness_report": readiness_report,
+                "readiness_report_sha256": hashlib.sha256(
+                    json.dumps(
+                        readiness_report,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
                 "real_odoo_write_performed": False,
                 "registry_digest": "b" * 64,
                 "release_identity": {
@@ -352,7 +391,7 @@ def test_builder_rejects_missing_standard_artifacts(tmp_path):
             lambda preflight: preflight.__setitem__(
                 "capability_id", "acct.bill.vendor_create.v1"
             ),
-            "capability_id mismatch",
+            "readiness capability mismatch",
         ),
         (
             lambda preflight: preflight.__setitem__("company_id", 8),
@@ -379,6 +418,32 @@ def test_builder_rejects_missing_standard_artifacts(tmp_path):
                 "real_odoo_write_performed", True
             ),
             "must not be a write receipt",
+        ),
+        (
+            lambda preflight: preflight.__setitem__(
+                "readiness_report_sha256", "f" * 64
+            ),
+            "readiness_report_sha256 mismatch",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"].__setitem__(
+                    "sandbox_drill_admissible", False
+                ),
+                preflight.__setitem__(
+                    "readiness_report_sha256",
+                    hashlib.sha256(
+                        json.dumps(
+                            preflight["readiness_report"],
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                ),
+            ),
+            "readiness is not admissible",
         ),
     ),
 )

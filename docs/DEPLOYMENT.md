@@ -681,7 +681,10 @@ Then run the read-only
 gate for the exact registered write capability and Odoo company under test,
 then retain its `preflight_manifest` as a file inside the evidence root. The
 preflight command rejects non-write capabilities; one generic preflight cannot
-be reused as evidence for a different capability or company. The
+be reused as evidence for a different capability or company. The preflight
+manifest embeds the exact static readiness report and its SHA-256 so later
+evidence assembly proves the drill started from an admissible write capability.
+The
 evidence root should keep the standard artifact filenames used by the exact
 release (`preflight_manifest.json`, `approval_digest.json`,
 `failure_case_digest.json`, `idempotency_replay_digest.json`,
@@ -708,9 +711,10 @@ binding is rejected before promotion review. The assembler also validates the
 retained preflight manifest's `capability_id`, `company_id`, `database_uuid`,
 `environment`, `registry_digest`, release identity, `write_execution_mode`, and
 runtime identity against the metadata before it computes the final evidence
-document. Mixing a preflight file from one capability, company, sandbox,
-release, or registry with another metadata set is rejected. The preflight
-manifest is not an Odoo write receipt and always reports
+document. It also recomputes the embedded readiness report digest and rejects a
+preflight whose readiness is not admissible. Mixing a preflight file from one
+capability, company, sandbox, release, or registry with another metadata set is
+rejected. The preflight manifest is not an Odoo write receipt and always reports
 `real_odoo_write_performed:false`; it only proves that the release, staged
 sandbox runtime, evidence root, and capacity checks were admissible before
 collection began.
