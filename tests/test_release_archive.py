@@ -893,11 +893,36 @@ class ReleaseArchiveTest(unittest.TestCase):
                         "manifest_sha256",
                         "package",
                         "package_sha256",
+                        "trusted_artifact",
+                        "trusted_artifact_sha256",
                     },
                 )
                 payload = Path(identity["package"]).read_bytes()
                 self.assertEqual(
                     identity["package_sha256"], hashlib.sha256(payload).hexdigest()
+                )
+                trusted_artifact_path = Path(identity["trusted_artifact"])
+                trusted_artifact_payload = trusted_artifact_path.read_bytes()
+                self.assertEqual(
+                    identity["trusted_artifact_sha256"],
+                    hashlib.sha256(trusted_artifact_payload).hexdigest(),
+                )
+                trusted_artifact = json.loads(trusted_artifact_payload)
+                self.assertEqual(
+                    set(trusted_artifact),
+                    {"commit", "manifest_sha256", "package_sha256", "release"},
+                )
+                self.assertEqual(
+                    trusted_artifact["manifest_sha256"],
+                    identity["manifest_sha256"],
+                )
+                self.assertEqual(
+                    trusted_artifact["package_sha256"],
+                    identity["package_sha256"],
+                )
+                self.assertEqual(
+                    trusted_artifact_path.name,
+                    f"{trusted_artifact['release']}.trusted-artifact.json",
                 )
                 return identity, payload
 
@@ -909,6 +934,10 @@ class ReleaseArchiveTest(unittest.TestCase):
             with tarfile.open(fileobj=io.BytesIO(first_payload), mode="r:gz") as archive:
                 members = archive.getmembers()
                 member_names = {member.name for member in members}
+                self.assertNotIn(
+                    Path(first_identity["trusted_artifact"]).name,
+                    member_names,
+                )
                 expected = set(
                     subprocess.run(
                         ["git", "ls-files"],

@@ -83,10 +83,13 @@ python tools/build_release.py
 ```
 
 Build the same clean commit twice and retain both command results. The archive
-SHA-256, semantic `manifest_sha256`, and raw `manifest_file_sha256` must all be
-identical. Refuse a dirty worktree, untracked release input, version/commit
-mismatch, non-ASCII release path, installer-incompatible size/member limit, or
-non-deterministic output.
+SHA-256, semantic `manifest_sha256`, raw `manifest_file_sha256`, and generated
+`trusted_artifact_sha256` must all be identical. The build also writes a package
+sidecar named `<version>-<commit12>.trusted-artifact.json`; it is not included
+inside the tar archive, and it is the only approved source for the root-managed
+`trusted-artifacts/<version>-<commit12>.json` deployment anchor. Refuse a dirty
+worktree, untracked release input, version/commit mismatch, non-ASCII release
+path, installer-incompatible size/member limit, or non-deterministic output.
 The build must also reject every tracked importable source outside
 `src/odoo_accounting_cli_v3` and every tracked `.pyc`, `.pyo`, `.pyw`, native
 extension, or `__pycache__` member below `src`; otherwise an approved import
@@ -96,10 +99,11 @@ Odoo write runner, all isolated effect-finalizer modules, the Dev27 external
 runtime gate, deployment units, and every file in the V3 control add-on;
 equality with an incomplete Git file list is not sufficient.
 
-Before transfer, record the archive name, byte size, archive SHA-256, manifest
-SHA-256, registry digest, version, commit, builder, and UTC time. Transfer to a
-temporary server path and recompute the archive SHA-256 on the server before
-extracting it.
+Before transfer, record the archive name, sidecar trusted-artifact name, byte
+sizes, archive SHA-256, trusted-artifact SHA-256, manifest SHA-256, registry
+digest, version, commit, builder, and UTC time. Transfer both files to temporary
+server paths and recompute both SHA-256 values on the server before extracting
+the archive or installing the anchor.
 
 ## Side-by-side installation
 
@@ -245,9 +249,11 @@ publication contract, not permission to replace it with ad hoc extraction.
    service identities.
 6. Atomically rename the completed temporary directory to
    `<version>-<commit12>`. Refuse to overwrite an existing release.
-7. Create the matching external anchor under `trusted-artifacts/` as a
-   root-owned, non-group/world-writable JSON file with exactly `commit`,
-   `manifest_sha256`, `package_sha256`, and `release`.
+7. Install the exact build-generated sidecar trusted artifact under
+   `trusted-artifacts/<version>-<commit12>.json` as a root-owned,
+   non-group/world-writable JSON file with exactly `commit`, `manifest_sha256`,
+   `package_sha256`, and `release`. Do not hand-write these fields during
+   deployment.
 8. From that exact anchored release, run
    `deployment/dev9/render-systemd-service.py` as documented in
    `deployment/dev9/README.md`. The renderer independently rejects a release

@@ -381,13 +381,36 @@ def build() -> Path:
                 info.uname = info.gname = "root"
                 info.mtime = 0
                 archive.addfile(info, io.BytesIO(manifest_bytes))
+    package_sha256 = sha256_file(output)
+    release_name = f"{identity.version}-{identity.commit[:12]}"
+    trusted_artifact = {
+        "commit": identity.commit,
+        "manifest_sha256": manifest["manifest_sha256"],
+        "package_sha256": package_sha256,
+        "release": release_name,
+    }
+    trusted_artifact_path = dist / f"{release_name}.trusted-artifact.json"
+    trusted_artifact_bytes = (
+        json.dumps(
+            trusted_artifact,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    trusted_artifact_path.write_bytes(trusted_artifact_bytes)
     print(
         json.dumps(
             {
                 "manifest_file_sha256": manifest_file_sha256,
                 "manifest_sha256": manifest["manifest_sha256"],
                 "package": str(output),
-                "package_sha256": sha256_file(output),
+                "package_sha256": package_sha256,
+                "trusted_artifact": str(trusted_artifact_path),
+                "trusted_artifact_sha256": hashlib.sha256(
+                    trusted_artifact_bytes
+                ).hexdigest(),
             },
             sort_keys=True,
         )
