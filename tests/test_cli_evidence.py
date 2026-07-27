@@ -1276,6 +1276,13 @@ def test_evidence_write_capability_readiness_accepts_registered_write():
     assert payload["command"] == "evidence.write-capability-readiness"
     assert payload["business_succeeded"] is False
     assert payload["data"]["sandbox_drill_admissible"] is True
+    assert payload["data"]["sandbox_staging_promotion_ready"] is False
+    assert payload["data"]["registry_evidence_level"] == "declared"
+    assert payload["data"]["registry_receipt_count"] == 0
+    assert payload["data"]["sandbox_staging_promotion_blockers"] == [
+        "registry evidence level is not sandbox_verified",
+        "registry has no retained sandbox write evidence receipts",
+    ]
     assert payload["data"]["real_odoo_write_performed"] is False
     assert payload["data"]["production_promotion_allowed"] is False
     assert payload["data"]["capability"]["id"] == "acct.invoice.customer_create.v1"
@@ -1355,6 +1362,10 @@ def test_evidence_write_capabilities_readiness_reports_all_registered_writes():
     assert payload["data"]["real_odoo_write_performed"] is False
     assert payload["data"]["production_promotion_allowed"] is False
     assert payload["data"]["sandbox_drill_admissible"] is True
+    assert all(
+        item["sandbox_staging_promotion_ready"] is False
+        for item in payload["data"]["capabilities"]
+    )
     assert payload["data"]["total_write_capabilities"] == 14
     assert payload["data"]["admissible_count"] == 14
     reported = [item["capability"]["id"] for item in payload["data"]["capabilities"]]

@@ -106,7 +106,11 @@ READINESS_FIELDS = frozenset(
         "checks",
         "production_promotion_allowed",
         "real_odoo_write_performed",
+        "registry_evidence_level",
+        "registry_receipt_count",
         "sandbox_drill_admissible",
+        "sandbox_staging_promotion_blockers",
+        "sandbox_staging_promotion_ready",
     }
 )
 READINESS_CAPABILITY_FIELDS = frozenset(
@@ -787,6 +791,28 @@ def _validate_preflight_manifest(
         raise SandboxWriteEvidenceError("preflight_manifest readiness_report fields are invalid")
     if readiness.get("sandbox_drill_admissible") is not True:
         raise SandboxWriteEvidenceError("preflight_manifest readiness is not admissible")
+    if readiness.get("sandbox_staging_promotion_ready") is not False:
+        raise SandboxWriteEvidenceError(
+            "preflight_manifest readiness must not claim staging promotion readiness"
+        )
+    if readiness.get("registry_evidence_level") != "declared":
+        raise SandboxWriteEvidenceError(
+            "preflight_manifest readiness registry evidence level is invalid"
+        )
+    if readiness.get("registry_receipt_count") != 0:
+        raise SandboxWriteEvidenceError(
+            "preflight_manifest readiness registry receipt count must be zero"
+        )
+    blockers = readiness.get("sandbox_staging_promotion_blockers")
+    if (
+        not isinstance(blockers, list)
+        or not blockers
+        or any(not isinstance(blocker, str) or not blocker for blocker in blockers)
+        or blockers != sorted(set(blockers))
+    ):
+        raise SandboxWriteEvidenceError(
+            "preflight_manifest readiness promotion blockers are invalid"
+        )
     allowed_models = readiness["allowed_models"]
     if (
         not isinstance(allowed_models, list)

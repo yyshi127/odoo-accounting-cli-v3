@@ -670,6 +670,11 @@ strict schemas, approval, idempotency, recovery metadata, service model
 allowlist, and Odoo write-handler support. A passing report only admits the
 capability to sandbox drill planning; it still reports
 `business_succeeded:false` and never authorizes production.
+`sandbox_drill_admissible:true` is not a sandbox-staging or production
+admission. Until exact-release real-Odoo pipeline evidence is retained and
+reviewed, the same report must keep `sandbox_staging_promotion_ready:false` and
+list blockers such as declared-only registry evidence and missing retained
+sandbox write receipts.
 Before planning a batch of sandbox drills, run
 `odoo-accounting-cli-v3 evidence write-capabilities-readiness` to report the
 same static readiness checks for every registered write capability in the exact

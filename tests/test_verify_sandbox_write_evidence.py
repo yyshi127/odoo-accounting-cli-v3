@@ -377,7 +377,14 @@ def _write_preflight_manifest(tmp_path: Path) -> str:
         },
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
+        "registry_evidence_level": "declared",
+        "registry_receipt_count": 0,
         "sandbox_drill_admissible": True,
+        "sandbox_staging_promotion_blockers": [
+            "registry evidence level is not sandbox_verified",
+            "registry has no retained sandbox write evidence receipts",
+        ],
+        "sandbox_staging_promotion_ready": False,
     }
     path.write_text(
         json.dumps(
@@ -867,6 +874,42 @@ def test_builder_rejects_missing_standard_artifacts(tmp_path):
                 _refresh_preflight_readiness_digest(preflight),
             ),
             "readiness is not admissible",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"].__setitem__(
+                    "sandbox_staging_promotion_ready", True
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "must not claim staging promotion readiness",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"].__setitem__(
+                    "registry_evidence_level", "sandbox_verified"
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "registry evidence level is invalid",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"].__setitem__(
+                    "registry_receipt_count", 1
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "registry receipt count must be zero",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"].__setitem__(
+                    "sandbox_staging_promotion_blockers", []
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "promotion blockers are invalid",
         ),
         (
             lambda preflight: (

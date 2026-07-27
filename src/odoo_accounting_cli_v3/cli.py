@@ -1183,6 +1183,26 @@ def _write_capability_readiness_report(
 
     data = capability.data
     allowed_models = sorted(allowed_models_by_capability.get(capability_id, ()))
+    evidence = data["evidence"]
+    evidence_receipts = evidence.get("receipts", [])
+    evidence_level = evidence.get("level")
+    sandbox_staging_promotion_blockers: list[str] = []
+    if evidence_level != "sandbox_verified":
+        sandbox_staging_promotion_blockers.append(
+            "registry evidence level is not sandbox_verified"
+        )
+    if not isinstance(evidence_receipts, list) or not evidence_receipts:
+        sandbox_staging_promotion_blockers.append(
+            "registry has no retained sandbox write evidence receipts"
+        )
+    if data["enabled_environments"]:
+        sandbox_staging_promotion_blockers.append(
+            "write capability is already enabled before sandbox evidence review"
+        )
+    if data.get("staged_environments", []):
+        sandbox_staging_promotion_blockers.append(
+            "write capability is already staged before exact evidence review"
+        )
     checks = {
         "approval_policy_present": (
             data["approval"].get("required") is True
@@ -1222,7 +1242,7 @@ def _write_capability_readiness_report(
             "approval": data["approval"],
             "company_scope": data["company_scope"],
             "enabled_environments": data["enabled_environments"],
-            "evidence_level": data["evidence"]["level"],
+            "evidence_level": evidence_level,
             "id": capability_id,
             "idempotency": data["idempotency"],
             "recovery": data["recovery"],
@@ -1233,6 +1253,14 @@ def _write_capability_readiness_report(
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
         "sandbox_drill_admissible": sandbox_drill_admissible,
+        "sandbox_staging_promotion_blockers": sandbox_staging_promotion_blockers,
+        "sandbox_staging_promotion_ready": (
+            sandbox_drill_admissible and not sandbox_staging_promotion_blockers
+        ),
+        "registry_evidence_level": evidence_level,
+        "registry_receipt_count": (
+            len(evidence_receipts) if isinstance(evidence_receipts, list) else 0
+        ),
     }
 
 
