@@ -213,6 +213,11 @@ odoo-accounting-cli-v3 release current-route \
   --expected-registry-digest <registry-digest>
 ```
 
+Populate the expected values from retained build JSON or a verified
+`release identity` response. Do not hand-copy partial hashes. The route verifier
+rejects malformed expected commits or SHA-256 values, including hidden CR/LF
+characters, before treating the route as ready.
+
 The numbered controls below are the installer's required verification and
 publication contract, not permission to replace it with ad hoc extraction.
 

@@ -133,6 +133,36 @@ class CliReleaseIdentityTest(unittest.TestCase):
                 ["current route commit does not match expected value"],
             )
 
+    def test_current_route_reports_malformed_expected_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root, _manifest, _registry_path = _installed_release(base)
+            current = base / "current"
+            try:
+                current.symlink_to(root, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "release",
+                    "current-route",
+                    "--current-path",
+                    str(current),
+                    "--expected-registry-digest",
+                    f"{'a' * 64}\r",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertFalse(payload["data"]["current_route_ready"])
+            self.assertIn(
+                "expected registry_digest must be a 64-character lowercase hex SHA-256",
+                payload["data"]["blockers"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

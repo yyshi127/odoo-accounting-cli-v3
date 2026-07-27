@@ -1007,6 +1007,17 @@ def release_current_route(
         "registry_digest": expected_registry_digest,
         "release": expected_release,
     }
+    if expected_commit is not None and re.fullmatch(r"[0-9a-f]{40}", expected_commit) is None:
+        blockers.append("expected commit must be a 40-character lowercase hex SHA-1")
+    for field, expected in (
+        ("manifest_sha256", expected_manifest_sha256),
+        ("package_sha256", expected_package_sha256),
+        ("registry_digest", expected_registry_digest),
+    ):
+        if expected is not None and re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+            blockers.append(f"expected {field} must be a 64-character lowercase hex SHA-256")
+    if expected_release is not None and not expected_release:
+        blockers.append("expected release must be non-empty when supplied")
     if identity is not None:
         for field, expected in expected_pairs.items():
             if expected is not None and identity[field] != expected:
