@@ -15,6 +15,7 @@ from test_odoo_read_boundary_evidence_runner import (
     runtime_config,
     valid_evidence,
 )
+from test_verify_sandbox_write_evidence import _document as sandbox_write_document
 
 
 def identity(config) -> dict:
@@ -211,3 +212,102 @@ def test_evidence_read_boundary_rejects_non_staged_test_runtime_before_release_o
     assert '"code":"evidence_scope_rejected"' in result.output
     identity_loader.assert_not_called()
     collector.assert_not_called()
+
+
+def test_evidence_verify_sandbox_write_returns_exact_release_admission(tmp_path: Path):
+    document = sandbox_write_document()
+    path = tmp_path / "sandbox-write-evidence.json"
+    path.write_text(__import__("json").dumps(document), encoding="utf-8")
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "c" * 64,
+        "package_sha256": "e" * 64,
+        "registry_digest": "b" * 64,
+        "release": "0.1.0.dev160-test",
+        "verified": True,
+        "version": "0.1.0.dev160",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "verify-sandbox-write",
+                "--evidence-json",
+                str(path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.verify-sandbox-write"
+    assert payload["ok"] is True
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["release_identity"] == expected_identity
+    assert payload["data"]["evidence"]["verified"] is True
+    assert payload["data"]["evidence"]["registry_receipt_count"] == 7
+
+
+def test_evidence_verify_sandbox_write_rejects_release_mismatch(tmp_path: Path):
+    document = sandbox_write_document()
+    path = tmp_path / "sandbox-write-evidence.json"
+    path.write_text(__import__("json").dumps(document), encoding="utf-8")
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "f" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev160-test",
+            "verified": True,
+            "version": "0.1.0.dev160",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "verify-sandbox-write",
+                "--evidence-json",
+                str(path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"sandbox_write_evidence_release_mismatch"' in result.output
+
+
+def test_evidence_verify_sandbox_write_rejects_invalid_bundle(tmp_path: Path):
+    path = tmp_path / "sandbox-write-evidence.json"
+    path.write_text('{"schema_version":1}', encoding="utf-8")
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "c" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev160-test",
+            "verified": True,
+            "version": "0.1.0.dev160",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "verify-sandbox-write",
+                "--evidence-json",
+                str(path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"sandbox_write_evidence_rejected"' in result.output

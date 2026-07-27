@@ -6,7 +6,7 @@ import json
 import re
 import sys
 from datetime import datetime, timezone
-from importlib import resources
+from importlib import resources, util
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -349,6 +349,32 @@ def _reject_non_finite_json(value: str) -> NoReturn:
     raise ValueError(f"non-finite JSON number: {value}")
 
 
+def _load_sandbox_write_evidence_verifier() -> Any:
+    path = Path(__file__).resolve().parents[2] / "tools" / "verify_sandbox_write_evidence.py"
+    spec = util.spec_from_file_location(
+        "odoo_accounting_cli_v3_release_sandbox_write_evidence_verifier",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise CliFailure(
+            command="evidence.verify-sandbox-write",
+            code="sandbox_write_evidence_verifier_unavailable",
+            message="The exact-release sandbox write evidence verifier is unavailable.",
+            exit_code=5,
+        )
+    module = util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except OSError as exc:
+        raise CliFailure(
+            command="evidence.verify-sandbox-write",
+            code="sandbox_write_evidence_verifier_unavailable",
+            message="The exact-release sandbox write evidence verifier is unavailable.",
+            exit_code=5,
+        ) from exc
+    return module
+
+
 def _write_cli_failure(
     *,
     command: str,
@@ -607,6 +633,50 @@ def evidence_read_boundary(
             "release_identity": identity,
             "runtime": config.runtime_identity,
         },
+    )
+
+
+@evidence_group.command("verify-sandbox-write")
+@click.option(
+    "--evidence-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained sandbox write evidence JSON bundle to verify.",
+)
+def evidence_verify_sandbox_write(evidence_json: Path) -> None:
+    """Verify a retained sandbox write evidence bundle without authorizing production."""
+
+    command = "evidence.verify-sandbox-write"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        evidence = verifier.verify_path(evidence_json)
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="sandbox_write_evidence_rejected",
+                message="The sandbox write evidence bundle failed promotion-admission checks.",
+                exit_code=6,
+            ) from exc
+        raise
+    if (
+        evidence.get("release_sha256") != identity["manifest_sha256"]
+        or evidence.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_evidence_release_mismatch",
+            message="The sandbox write evidence bundle is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "evidence": evidence,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
     )
 
 
