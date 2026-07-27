@@ -194,6 +194,11 @@ REVIEWED_SUBSCRIPT_MUTATIONS = frozenset(
             "_operation_state_digest",
             "state",
         ),
+        (
+            "odoo_accounting_cli_v3.registry",
+            "validate_registry",
+            "evidence_receipt_ids",
+        ),
     }
 )
 REVIEWED_COPY_CALLS = frozenset(

@@ -379,6 +379,7 @@ def validate_registry(document: Any) -> tuple[Capability, ...]:
         raise RegistryError("registry.capabilities must be an array")
 
     seen: set[str] = set()
+    evidence_receipt_ids: dict[str, str] = {}
     capabilities: list[Capability] = []
     for index, raw in enumerate(entries):
         location = f"capabilities[{index}]"
@@ -427,6 +428,15 @@ def validate_registry(document: Any) -> tuple[Capability, ...]:
             raise RegistryError(f"{location}.staged_environments is invalid")
         _validate_policy_metadata(item, location)
         _validate_evidence(item, location)
+        for receipt in item["evidence"]["receipts"]:
+            receipt_id = receipt["id"]
+            previous_capability_id = evidence_receipt_ids.get(receipt_id)
+            if previous_capability_id is not None:
+                raise RegistryError(
+                    "duplicate evidence receipt id across capabilities: "
+                    f"{receipt_id} used by {previous_capability_id} and {capability_id}"
+                )
+            evidence_receipt_ids[receipt_id] = capability_id
         capabilities.append(Capability.from_dict(item))
     return tuple(capabilities)
 

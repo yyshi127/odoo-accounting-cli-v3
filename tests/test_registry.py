@@ -407,6 +407,39 @@ class RegistryTest(unittest.TestCase):
         ):
             validate_registry(invalid)
 
+    def test_evidence_receipt_ids_are_unique_across_capabilities(self) -> None:
+        invalid = copy.deepcopy(self.document)
+        customer = next(
+            item
+            for item in invalid["capabilities"]
+            if item["id"] == "acct.invoice.customer_create.v1"
+        )
+        vendor = next(
+            item
+            for item in invalid["capabilities"]
+            if item["id"] == "acct.bill.vendor_create.v1"
+        )
+        for write in (customer, vendor):
+            write["enabled_environments"] = ["sandbox"]
+            write["evidence"]["level"] = "sandbox_verified"
+            write["evidence"]["receipts"] = [
+                _evidence_receipt(kind, capability_id=write["id"])
+                for kind in (
+                    "accounting_oracle",
+                    "live_odoo",
+                    "pi_e2e",
+                    "release_identity",
+                    "recovery",
+                    "sandbox_write_lifecycle",
+                    "security_negative",
+                )
+            ]
+
+        with self.assertRaisesRegex(
+            RegistryError, "duplicate evidence receipt id across capabilities"
+        ):
+            validate_registry(invalid)
+
     def test_write_approval_ttl_is_bounded(self) -> None:
         invalid = copy.deepcopy(self.document)
         write = next(item for item in invalid["capabilities"] if item["access"] == "write")
