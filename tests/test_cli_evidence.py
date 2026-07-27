@@ -1891,6 +1891,72 @@ def test_evidence_sandbox_database_provision_plan_rejects_unsafe_name_and_filter
     ]
 
 
+def test_evidence_target_capacity_plan_reports_ready_v3_owned_candidates(tmp_path):
+    retained = (
+        tmp_path
+        / "opt/odoo-accounting-cli-v3/packages/odoo-accounting-cli-v3-0.1.0.dev198-keep.tar.gz"
+    )
+    retained.parent.mkdir(parents=True, exist_ok=True)
+    retained.write_bytes(b"x" * 20)
+    candidate = tmp_path / "opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"x" * 10)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-plan",
+            "--root",
+            str(tmp_path),
+            "--required-free-bytes",
+            "1",
+            "--keep-release",
+            "0.1.0.dev198-keep",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.target-capacity-plan"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["cleanup_executed"] is False
+    assert payload["data"]["authorization_required_before_cleanup"] is True
+    assert payload["data"]["sandbox_write_capacity_ready"] is True
+    assert payload["data"]["blockers"] == []
+    assert payload["data"]["plan"]["cleanup_executed"] is False
+    assert payload["data"]["plan"]["keep_releases"] == ["0.1.0.dev198-keep"]
+    assert (
+        payload["data"]["plan"]["candidates"][0]["category"]
+        == "uploaded_release_source"
+    )
+
+
+def test_evidence_target_capacity_plan_reports_shortfall_without_cleanup(tmp_path):
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-plan",
+            "--root",
+            str(tmp_path),
+            "--required-free-bytes",
+            str(1024**5),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_write_capacity_ready"] is False
+    assert payload["data"]["cleanup_executed"] is False
+    assert payload["data"]["blockers"] == [
+        "reviewable V3-owned cleanup candidates cannot cover the capacity shortfall",
+        "target filesystem free space is below the configured floor",
+    ]
+    assert payload["data"]["plan"]["shortfall_bytes"] > 0
+
+
 def _write_runtime_plan_args(
     *,
     base_runtime_path: Path,

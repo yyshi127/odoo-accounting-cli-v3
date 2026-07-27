@@ -481,12 +481,11 @@ build a closure, or claim a real Odoo result until a fresh pre-install capacity
 probe and the sustained service-continuity gate both pass.
 
 When the Dev29 closure builder reports insufficient space, an operator may run
-the release member `tools/target_capacity_plan.py` to produce a read-only cleanup
-plan:
+the release CLI to produce a read-only cleanup plan:
 
 ```bash
-/opt/odoo-accounting-cli-v3/releases/<release>/bin/python \
-  /opt/odoo-accounting-cli-v3/releases/<release>/tools/target_capacity_plan.py \
+odoo-accounting-cli-v3 evidence target-capacity-plan \
+  --required-free-bytes 8589934592 \
   --keep-release <current-release> \
   --keep-release <last-known-good-release>
 ```
@@ -496,6 +495,8 @@ dependency images, uploaded source tarballs, and stale dependency-build staging.
 It never deletes anything and always reports
 `authorization_required_before_cleanup=true`. The plan is not cleanup authority,
 not an E00a receipt, not closure evidence, and not a sandbox-write permission.
+Use the release member `tools/target_capacity_plan.py` only as a lower-level
+diagnostic when the CLI entry point itself is unavailable.
 
 The write runtime configuration schema is version 2. Its
 `write_execution_mode` starts as `disabled`. A sandbox candidate may use

@@ -943,6 +943,68 @@ def evidence_group() -> None:
     """Run exact-release internal safety evidence probes."""
 
 
+@evidence_group.command("target-capacity-plan")
+@click.option(
+    "--root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=Path("/"),
+    show_default=True,
+    help="Filesystem root to inspect. Defaults to the target host root.",
+)
+@click.option(
+    "--required-free-bytes",
+    type=click.IntRange(min=1),
+    default=8 * 1024 * 1024 * 1024,
+    show_default=True,
+    help="Minimum ordinary free bytes required before sandbox write evidence.",
+)
+@click.option(
+    "--keep-release",
+    multiple=True,
+    help="Release name that must not be listed as cleanup candidate.",
+)
+def evidence_target_capacity_plan(
+    root: Path,
+    required_free_bytes: int,
+    keep_release: tuple[str, ...],
+) -> None:
+    """Plan V3-owned capacity remediation without deleting or mutating files."""
+
+    from tools import target_capacity_plan
+
+    command = "evidence.target-capacity-plan"
+    try:
+        plan = target_capacity_plan.build_plan(
+            root=root,
+            required_free_bytes=required_free_bytes,
+            keep_releases=target_capacity_plan._validate_keep_releases(keep_release),
+        )
+    except target_capacity_plan.CapacityPlanError as exc:
+        raise CliFailure(
+            command=command,
+            code="target_capacity_plan_rejected",
+            message="The target capacity plan inputs are invalid.",
+            exit_code=5,
+        ) from exc
+    blockers: list[str] = []
+    if int(plan["shortfall_bytes"]) > 0:
+        blockers.append("target filesystem free space is below the configured floor")
+    if int(plan["shortfall_bytes"]) > int(plan["candidate_reclaimable_bytes"]):
+        blockers.append(
+            "reviewable V3-owned cleanup candidates cannot cover the capacity shortfall"
+        )
+    data = {
+        "authorization_required_before_cleanup": True,
+        "blockers": sorted(set(blockers)),
+        "cleanup_executed": False,
+        "plan": plan,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "sandbox_write_capacity_ready": not blockers,
+    }
+    _success(command, data, business_succeeded=False)
+
+
 @evidence_group.command("read-boundary")
 @click.option(
     "--runtime-config",
