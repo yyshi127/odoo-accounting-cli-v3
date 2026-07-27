@@ -847,9 +847,11 @@ to one capability is never reusable for a different capability. No sandbox
 result authorizes a production write.
 
 Before a sandbox write evidence bundle can be collected for registry promotion,
-first run the read-only environment audit:
+first retain the passing JSON output from
+`evidence sandbox-onboarding-readiness` as the onboarding receipt, then run the
+read-only environment audit:
 
-`odoo-accounting-cli-v3 evidence sandbox-write-environment-audit --write-runtime-config ... --evidence-root ...`
+`odoo-accounting-cli-v3 evidence sandbox-write-environment-audit --write-runtime-config ... --evidence-root ... --onboarding-receipt ...`
 
 Use `--summary-only` for Pi Bridge preflight dashboards and operator checks that
 only need the environment verdict, runtime/evidence-root status, write-capability
@@ -859,8 +861,10 @@ when retaining the full per-capability readiness detail as review evidence.
 This command does not execute Odoo and does not create evidence. It reports
 whether the write runtime exists, is bound to `sandbox_staged`, names a clearly
 sandbox database, has a staged sandbox base runtime, whether the evidence root
-is usable and has enough free space, and how many registered write capabilities
-are statically admissible. A missing runtime or evidence root must keep
+is usable and has enough free space, whether onboarding proved the current
+route, capacity, dedicated sandbox database observation, and provisioning
+authorization, and how many registered write capabilities are statically
+admissible. A missing runtime, evidence root, or onboarding receipt must keep
 `environment_ready_for_sandbox_write_drills:false`.
 
 Then run the read-only static readiness gate for the target capability:
@@ -882,13 +886,15 @@ release. Treat any non-admissible capability as closed until its registry,
 service allowlist, or Odoo handler gap is fixed and retested.
 
 Then run the read-only
-`odoo-accounting-cli-v3 evidence sandbox-write-preflight --capability-id ... --company-id ...`
+`odoo-accounting-cli-v3 evidence sandbox-write-preflight --capability-id ... --company-id ... --write-runtime-config ... --evidence-root ... --onboarding-receipt ...`
 gate for the exact registered write capability and Odoo company under test,
 then retain its `preflight_manifest` as a file inside the evidence root. The
 preflight command rejects non-write capabilities; one generic preflight cannot
 be reused as evidence for a different capability or company. The preflight
-manifest embeds the exact static readiness report and its SHA-256 so later
-evidence assembly proves the drill started from an admissible write capability.
+manifest embeds the exact onboarding receipt summary, static readiness report,
+and their SHA-256 values so later evidence assembly proves the drill started
+from the same routed release, a ready sandbox onboarding gate, and an admissible
+write capability.
 The
 evidence root should keep the standard artifact filenames used by the exact
 release (`preflight_manifest.json`, `approval_digest.json`,

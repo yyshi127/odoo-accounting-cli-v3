@@ -68,6 +68,10 @@ def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
 def _looks_like_placeholder_sha256(value: str) -> bool:
     return (
         len(value) == 64
@@ -87,6 +91,101 @@ def _database_name_looks_transient(name: str) -> bool:
         or re.search(r"(^|[_-])(demo|debug|runtime|candidate|upgrade|test)([_-]|$)", lowered)
         is not None
     )
+
+
+def _sandbox_onboarding_receipt_report(
+    onboarding_receipt: Path | None,
+    *,
+    command: str,
+    expected_database_name: str | None = None,
+    expected_release_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    digest: str | None = None
+    payload: dict[str, Any] | None = None
+    if onboarding_receipt is None:
+        blockers.append("sandbox onboarding readiness receipt was not supplied")
+    else:
+        try:
+            raw = onboarding_receipt.read_bytes()
+            digest = _sha256_bytes(raw)
+            loaded = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CliFailure(
+                command=command,
+                code="sandbox_onboarding_receipt_rejected",
+                message="The sandbox onboarding readiness receipt is unavailable or invalid JSON.",
+                exit_code=5,
+            ) from exc
+        if not isinstance(loaded, dict):
+            blockers.append("sandbox onboarding readiness receipt is not a JSON object")
+        else:
+            payload = loaded
+            data = loaded.get("data")
+            if loaded.get("ok") is not True:
+                blockers.append("sandbox onboarding readiness receipt is not successful")
+            if loaded.get("command") != "evidence.sandbox-onboarding-readiness":
+                blockers.append("sandbox onboarding readiness receipt has the wrong command")
+            if not isinstance(data, dict):
+                blockers.append("sandbox onboarding readiness receipt data is invalid")
+            else:
+                route = data.get("route")
+                capacity = data.get("capacity")
+                database = data.get("database")
+                authorization = data.get("authorization")
+                if data.get("sandbox_onboarding_ready") is not True:
+                    blockers.append("sandbox onboarding readiness receipt is not ready")
+                if data.get("real_odoo_write_performed") is not False:
+                    blockers.append("sandbox onboarding receipt must be read-only")
+                if data.get("postgresql_write_performed") is not False:
+                    blockers.append("sandbox onboarding receipt must not perform PostgreSQL writes")
+                if not isinstance(route, dict) or route.get("current_route_ready") is not True:
+                    blockers.append("sandbox onboarding current route is not ready")
+                if not isinstance(capacity, dict) or capacity.get("sandbox_write_capacity_ready") is not True:
+                    blockers.append("sandbox onboarding capacity gate is not ready")
+                if not isinstance(database, dict) or database.get("sandbox_database_observed") is not True:
+                    blockers.append("sandbox onboarding database gate is not ready")
+                if (
+                    not isinstance(authorization, dict)
+                    or authorization.get("authorization_record_ready") is not True
+                ):
+                    blockers.append("sandbox onboarding authorization gate is not ready")
+                if (
+                    expected_database_name is not None
+                    and isinstance(database, dict)
+                    and database.get("sandbox_database_name") != expected_database_name
+                ):
+                    blockers.append("sandbox onboarding database does not match write runtime")
+                if expected_release_identity is not None and isinstance(route, dict):
+                    route_identity = route.get("route_identity")
+                    if not isinstance(route_identity, dict):
+                        blockers.append("sandbox onboarding route identity is invalid")
+                    else:
+                        expected_pairs = {
+                            "commit": expected_release_identity.get("commit"),
+                            "manifest_sha256": expected_release_identity.get("manifest_sha256"),
+                            "package_sha256": expected_release_identity.get("package_sha256"),
+                            "registry_digest": expected_release_identity.get("registry_digest"),
+                            "release": expected_release_identity.get("release"),
+                        }
+                        for field, expected in expected_pairs.items():
+                            if route_identity.get(field) != expected:
+                                blockers.append(
+                                    f"sandbox onboarding route {field} does not match write runtime release"
+                                )
+    data = None if payload is None else payload.get("data")
+    route = data.get("route") if isinstance(data, dict) else None
+    database = data.get("database") if isinstance(data, dict) else None
+    return {
+        "blockers": sorted(set(blockers)),
+        "path": str(onboarding_receipt) if onboarding_receipt is not None else None,
+        "ready": not blockers,
+        "receipt_sha256": digest,
+        "route_identity": route.get("route_identity") if isinstance(route, dict) else None,
+        "sandbox_database_name": (
+            database.get("sandbox_database_name") if isinstance(database, dict) else None
+        ),
+    }
 
 
 def _database_name_looks_production(name: str) -> bool:
@@ -3103,6 +3202,11 @@ def evidence_write_runtime_config_plan(
     help="Optional existing root-owned directory intended for retained sandbox write evidence.",
 )
 @click.option(
+    "--onboarding-receipt",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Optional retained evidence.sandbox-onboarding-readiness JSON receipt to bind before write drills.",
+)
+@click.option(
     "--min-free-bytes",
     type=click.IntRange(min=1),
     default=8 * 1024 * 1024 * 1024,
@@ -3117,6 +3221,7 @@ def evidence_write_runtime_config_plan(
 def evidence_sandbox_write_environment_audit(
     write_runtime_config: Path,
     evidence_root: Path | None,
+    onboarding_receipt: Path | None,
     min_free_bytes: int,
     summary_only: bool,
 ) -> None:
@@ -3160,6 +3265,7 @@ def evidence_sandbox_write_environment_audit(
     )
     runtime_report: dict[str, Any]
     evidence_root_report: dict[str, Any]
+    onboarding_report: dict[str, Any]
     runtime_ready = False
     try:
         config = load_write_runtime_config(write_runtime_config)
@@ -3178,6 +3284,10 @@ def evidence_sandbox_write_environment_audit(
             evidence_root,
             release_root=Path(__file__).resolve().parents[2],
             minimum_free_bytes=min_free_bytes,
+        )
+        onboarding_report = _sandbox_onboarding_receipt_report(
+            onboarding_receipt,
+            command=command,
         )
     else:
         blockers: list[str] = []
@@ -3211,6 +3321,12 @@ def evidence_sandbox_write_environment_audit(
             release_root=config.base_runtime.release_root,
             minimum_free_bytes=min_free_bytes,
         )
+        onboarding_report = _sandbox_onboarding_receipt_report(
+            onboarding_receipt,
+            command=command,
+            expected_database_name=database_name,
+            expected_release_identity=identity,
+        )
     data = {
         "capability_summary": {
             "not_staging_ready_capability_ids": not_staging_ready_capability_ids,
@@ -3225,9 +3341,11 @@ def evidence_sandbox_write_environment_audit(
         "environment_ready_for_sandbox_write_drills": (
             runtime_ready
             and evidence_root_report["ready"]
+            and onboarding_report["ready"]
             and sandbox_drill_admissible_count == len(capability_reports)
         ),
         "evidence_root": evidence_root_report,
+        "onboarding": onboarding_report,
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
         "release_identity": identity,
@@ -3266,6 +3384,12 @@ def evidence_sandbox_write_environment_audit(
     help="Existing root-owned directory for retained sandbox write evidence.",
 )
 @click.option(
+    "--onboarding-receipt",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained evidence.sandbox-onboarding-readiness JSON receipt that is ready and bound to this release/runtime.",
+)
+@click.option(
     "--min-free-bytes",
     type=click.IntRange(min=1),
     default=8 * 1024 * 1024 * 1024,
@@ -3277,6 +3401,7 @@ def evidence_sandbox_write_preflight(
     company_id: int,
     write_runtime_config: Path,
     evidence_root: Path,
+    onboarding_receipt: Path,
     min_free_bytes: int,
 ) -> None:
     """Read-only gate before any real sandbox accounting write drill."""
@@ -3332,6 +3457,19 @@ def evidence_sandbox_write_preflight(
             message="The write runtime is not bound to a clearly named staged sandbox database.",
             exit_code=5,
         )
+    onboarding_report = _sandbox_onboarding_receipt_report(
+        onboarding_receipt,
+        command=command,
+        expected_database_name=database_name,
+        expected_release_identity=identity,
+    )
+    if onboarding_report["ready"] is not True:
+        raise CliFailure(
+            command=command,
+            code="sandbox_onboarding_receipt_rejected",
+            message="The sandbox write preflight requires a ready onboarding receipt bound to this release and sandbox runtime.",
+            exit_code=5,
+        )
     evidence_root_status = _validate_sandbox_write_evidence_root(
         evidence_root,
         release_root=config.base_runtime.release_root,
@@ -3346,6 +3484,8 @@ def evidence_sandbox_write_preflight(
         "database_uuid": config.base_runtime.database_uuid,
         "environment": config.base_runtime.environment,
         "evidence_root": evidence_root_status,
+        "onboarding_receipt": onboarding_report,
+        "onboarding_receipt_sha256": onboarding_report["receipt_sha256"],
         "production_promotion_allowed": False,
         "readiness_report": readiness_report,
         "readiness_report_sha256": _sha256_json(readiness_report),
@@ -3367,6 +3507,7 @@ def evidence_sandbox_write_preflight(
             "company_id": company_id,
             "database_name": database_name,
             "evidence_root": evidence_root_status,
+            "onboarding": onboarding_report,
             "preflight_manifest": preflight_manifest,
             "preflight_manifest_sha256": _sha256_json(preflight_manifest),
             "production_promotion_allowed": False,

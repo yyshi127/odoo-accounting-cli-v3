@@ -47,6 +47,64 @@ READY_CURRENT_ROUTE = {
 }
 
 
+def _ready_onboarding_receipt(
+    tmp_path: Path,
+    *,
+    database_name: str = "odoo_v3_sandbox",
+    release_identity: dict | None = None,
+) -> Path:
+    identity = release_identity or {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev191",
+    }
+    route = {
+        **READY_CURRENT_ROUTE,
+        "route_identity": {
+            "commit": identity["commit"],
+            "manifest_sha256": identity["manifest_sha256"],
+            "package_sha256": identity["package_sha256"],
+            "registry_digest": identity["registry_digest"],
+            "release": identity["release"],
+            "verified": True,
+            "version": identity["version"],
+        },
+    }
+    receipt = {
+        "business_succeeded": False,
+        "command": "evidence.sandbox-onboarding-readiness",
+        "data": {
+            "authorization": {"authorization_record_ready": True, "blockers": []},
+            "blockers": [],
+            "capacity": {
+                "blockers": [],
+                "real_odoo_write_performed": False,
+                "sandbox_write_capacity_ready": True,
+            },
+            "database": {
+                "sandbox_database_name": database_name,
+                "sandbox_database_observed": True,
+                "source_database_name": "odoo_sg",
+            },
+            "postgresql_write_performed": False,
+            "real_odoo_write_performed": False,
+            "route": route,
+            "sandbox_onboarding_ready": True,
+        },
+        "ok": True,
+    }
+    path = tmp_path / "sandbox-onboarding-readiness.json"
+    path.write_text(
+        __import__("json").dumps(receipt, sort_keys=True),
+        encoding="utf-8",
+    )
+    return path
+
+
 def identity(config) -> dict:
     return {
         "commit": "1" * 40,
@@ -1197,6 +1255,10 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
         "verified": True,
         "version": "0.1.0.dev163",
     }
+    onboarding_receipt = _ready_onboarding_receipt(
+        tmp_path,
+        release_identity=expected_identity,
+    )
 
     with patch(
         "odoo_accounting_cli_v3.cli._load_release_identity",
@@ -1215,6 +1277,8 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
                 str(runtime_path),
                 "--evidence-root",
                 str(evidence_root),
+                "--onboarding-receipt",
+                str(onboarding_receipt),
                 "--min-free-bytes",
                 "1",
             ],
@@ -1234,6 +1298,11 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
     assert payload["data"]["preflight_manifest"]["company_id"] == 7
     assert payload["data"]["preflight_manifest"]["scope"] == (
         "odoo-accounting-cli-v3.sandbox-write-preflight.v1"
+    )
+    assert payload["data"]["onboarding"]["ready"] is True
+    assert payload["data"]["preflight_manifest"]["onboarding_receipt"]["ready"] is True
+    assert payload["data"]["preflight_manifest"]["onboarding_receipt_sha256"] == (
+        payload["data"]["onboarding"]["receipt_sha256"]
     )
     assert payload["data"]["preflight_manifest"]["readiness_report"][
         "sandbox_drill_admissible"
@@ -1270,6 +1339,55 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
     assert payload["data"]["production_promotion_allowed"] is False
 
 
+def test_evidence_sandbox_write_preflight_rejects_unready_onboarding_receipt(
+    tmp_path: Path,
+):
+    runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
+    evidence_root = tmp_path / "evidence-root"
+    evidence_root.mkdir()
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev163",
+    }
+    onboarding_receipt = _ready_onboarding_receipt(
+        tmp_path,
+        database_name="wrong_sandbox",
+        release_identity=expected_identity,
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch("odoo_accounting_cli_v3.cli._assert_runtime_release"):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-write-preflight",
+                "--capability-id",
+                "acct.invoice.customer_create.v1",
+                "--company-id",
+                "7",
+                "--write-runtime-config",
+                str(runtime_path),
+                "--evidence-root",
+                str(evidence_root),
+                "--onboarding-receipt",
+                str(onboarding_receipt),
+                "--min-free-bytes",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 5, result.output
+    assert '"code":"sandbox_onboarding_receipt_rejected"' in result.output
+
+
 def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
     tmp_path: Path,
 ):
@@ -1285,6 +1403,10 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
         "verified": True,
         "version": "0.1.0.dev191",
     }
+    onboarding_receipt = _ready_onboarding_receipt(
+        tmp_path,
+        release_identity=expected_identity,
+    )
 
     with patch(
         "odoo_accounting_cli_v3.cli._load_release_identity",
@@ -1299,6 +1421,8 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
                 str(runtime_path),
                 "--evidence-root",
                 str(evidence_root),
+                "--onboarding-receipt",
+                str(onboarding_receipt),
                 "--min-free-bytes",
                 "1",
             ],
@@ -1314,6 +1438,7 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
     assert payload["data"]["runtime"]["write_execution_mode"] == "sandbox_staged"
     assert payload["data"]["runtime"]["database_name"] == "odoo_v3_sandbox"
     assert payload["data"]["evidence_root"]["ready"] is True
+    assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
     assert len(payload["data"]["capabilities"]) == 14
     assert payload["data"]["capability_summary"]["total_write_capabilities"] == 14
@@ -1346,6 +1471,10 @@ def test_evidence_sandbox_write_environment_audit_summary_omits_capability_detai
         "verified": True,
         "version": "0.1.0.dev191",
     }
+    onboarding_receipt = _ready_onboarding_receipt(
+        tmp_path,
+        release_identity=expected_identity,
+    )
 
     with patch(
         "odoo_accounting_cli_v3.cli._load_release_identity",
@@ -1360,6 +1489,8 @@ def test_evidence_sandbox_write_environment_audit_summary_omits_capability_detai
                 str(runtime_path),
                 "--evidence-root",
                 str(evidence_root),
+                "--onboarding-receipt",
+                str(onboarding_receipt),
                 "--min-free-bytes",
                 "1",
                 "--summary-only",
@@ -1369,6 +1500,7 @@ def test_evidence_sandbox_write_environment_audit_summary_omits_capability_detai
     assert result.exit_code == 0, result.output
     payload = __import__("json").loads(result.output)
     assert "capabilities" not in payload["data"]
+    assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
     assert payload["data"]["capability_summary"]["total_write_capabilities"] == 14
     assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 14
@@ -1423,6 +1555,10 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
     assert payload["data"]["evidence_root"]["status"] == "missing"
     assert payload["data"]["evidence_root"]["blockers"] == [
         "sandbox write evidence root was not supplied"
+    ]
+    assert payload["data"]["onboarding"]["ready"] is False
+    assert payload["data"]["onboarding"]["blockers"] == [
+        "sandbox onboarding readiness receipt was not supplied"
     ]
     assert payload["data"]["capability_summary"]["total_write_capabilities"] == 14
     assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 14
@@ -2794,18 +2930,24 @@ def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
     write_runtime_json(Path(_document["base_runtime_config_path"]), base)
     evidence_root = tmp_path / "evidence-root"
     evidence_root.mkdir()
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev163",
+    }
+    onboarding_receipt = _ready_onboarding_receipt(
+        tmp_path,
+        database_name="codex_cn_m31_demo_01",
+        release_identity=expected_identity,
+    )
 
     with patch(
         "odoo_accounting_cli_v3.cli._load_release_identity",
-        return_value={
-            "commit": "1" * 40,
-            "manifest_sha256": "d" * 64,
-            "package_sha256": "4" * 64,
-            "registry_digest": "b" * 64,
-            "release": "release",
-            "verified": True,
-            "version": "0.1.0.dev163",
-        },
+        return_value=expected_identity,
     ), patch("odoo_accounting_cli_v3.cli._assert_runtime_release"):
         result = CliRunner().invoke(
             main,
@@ -2820,6 +2962,8 @@ def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
                 str(runtime_path),
                 "--evidence-root",
                 str(evidence_root),
+                "--onboarding-receipt",
+                str(onboarding_receipt),
                 "--min-free-bytes",
                 "1",
             ],
@@ -2835,6 +2979,7 @@ def test_evidence_sandbox_write_preflight_rejects_non_write_capability(
     runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
     evidence_root = tmp_path / "evidence-root"
     evidence_root.mkdir()
+    onboarding_receipt = _ready_onboarding_receipt(tmp_path)
 
     result = CliRunner().invoke(
         main,
@@ -2849,6 +2994,8 @@ def test_evidence_sandbox_write_preflight_rejects_non_write_capability(
             str(runtime_path),
             "--evidence-root",
             str(evidence_root),
+            "--onboarding-receipt",
+            str(onboarding_receipt),
             "--min-free-bytes",
             "1",
         ],
@@ -2865,18 +3012,23 @@ def test_evidence_sandbox_write_preflight_rejects_release_internal_evidence_root
     release_root = Path(_base["release_root"])
     evidence_root = release_root / "write-evidence"
     evidence_root.mkdir(parents=True)
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev163",
+    }
+    onboarding_receipt = _ready_onboarding_receipt(
+        tmp_path,
+        release_identity=expected_identity,
+    )
 
     with patch(
         "odoo_accounting_cli_v3.cli._load_release_identity",
-        return_value={
-            "commit": "1" * 40,
-            "manifest_sha256": "d" * 64,
-            "package_sha256": "4" * 64,
-            "registry_digest": "b" * 64,
-            "release": "release",
-            "verified": True,
-            "version": "0.1.0.dev163",
-        },
+        return_value=expected_identity,
     ), patch("odoo_accounting_cli_v3.cli._assert_runtime_release"):
         result = CliRunner().invoke(
             main,
@@ -2891,6 +3043,8 @@ def test_evidence_sandbox_write_preflight_rejects_release_internal_evidence_root
                 str(runtime_path),
                 "--evidence-root",
                 str(evidence_root),
+                "--onboarding-receipt",
+                str(onboarding_receipt),
                 "--min-free-bytes",
                 "1",
             ],
