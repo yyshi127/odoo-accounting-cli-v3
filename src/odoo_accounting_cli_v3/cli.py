@@ -76,6 +76,14 @@ def _looks_like_placeholder_sha256(value: str) -> bool:
     )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _success(
     command: str,
     data: dict[str, Any],
@@ -1688,15 +1696,15 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
 )
-@click.option("--odoo-python-sha256", required=True)
+@click.option("--odoo-python-sha256")
 @click.option("--odoo-bin", type=click.Path(path_type=Path, dir_okay=False), required=True)
-@click.option("--odoo-bin-sha256", required=True)
+@click.option("--odoo-bin-sha256")
 @click.option(
     "--odoo-config",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
 )
-@click.option("--odoo-config-sha256", required=True)
+@click.option("--odoo-config-sha256")
 @click.option(
     "--runtime-config-path",
     type=click.Path(path_type=Path, dir_okay=False),
@@ -1717,6 +1725,11 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
 )
 @click.option("--canonical-package-sha256")
 @click.option(
+    "--measure-existing-files",
+    is_flag=True,
+    help="Measure SHA-256 from the supplied local filesystem paths when possible.",
+)
+@click.option(
     "--read-state-root",
     type=click.Path(path_type=Path, file_okay=False),
     default=DEFAULT_SANDBOX_READ_STATE_ROOT,
@@ -1735,15 +1748,16 @@ def evidence_sandbox_read_runtime_config_plan(
     database_name: str,
     database_uuid: str,
     odoo_python: Path,
-    odoo_python_sha256: str,
+    odoo_python_sha256: str | None,
     odoo_bin: Path,
-    odoo_bin_sha256: str,
+    odoo_bin_sha256: str | None,
     odoo_config: Path,
-    odoo_config_sha256: str,
+    odoo_config_sha256: str | None,
     runtime_config_path: Path,
     release_root: Path,
     canonical_package_path: Path,
     canonical_package_sha256: str | None,
+    measure_existing_files: bool,
     read_state_root: Path,
     secret_root: Path,
     auth_key_id: str,
@@ -1764,7 +1778,54 @@ def evidence_sandbox_read_runtime_config_plan(
         "--secret-root": secret_root,
     }.items():
         _require_absolute_plan_path(path, command=command, option=option)
-    package_sha256 = canonical_package_sha256 or str(identity["package_sha256"])
+    blockers: list[str] = []
+    measurements: dict[str, dict[str, Any]] = {}
+
+    def resolve_digest(field: str, path: Path, supplied: str | None) -> str:
+        measured: str | None = None
+        if measure_existing_files:
+            try:
+                measured = _sha256_file(path)
+            except OSError:
+                blockers.append(f"{field} source file cannot be measured")
+            else:
+                measurements[field] = {
+                    "measured_sha256": measured,
+                    "path": str(path),
+                    "supplied_sha256": supplied,
+                }
+                if supplied is not None and supplied != measured:
+                    blockers.append(f"{field} does not match measured file digest")
+        if supplied is None:
+            if measured is None:
+                blockers.append(f"{field} is required unless it is measured")
+                return "0" * 64
+            return measured
+        return supplied
+
+    resolved_odoo_python_sha256 = resolve_digest(
+        "odoo_python_sha256",
+        odoo_python,
+        odoo_python_sha256,
+    )
+    resolved_odoo_bin_sha256 = resolve_digest(
+        "odoo_bin_sha256",
+        odoo_bin,
+        odoo_bin_sha256,
+    )
+    resolved_odoo_config_sha256 = resolve_digest(
+        "odoo_config_sha256",
+        odoo_config,
+        odoo_config_sha256,
+    )
+    if canonical_package_sha256 is None and not measure_existing_files:
+        package_sha256 = str(identity["package_sha256"])
+    else:
+        package_sha256 = resolve_digest(
+            "canonical_package_sha256",
+            canonical_package_path,
+            canonical_package_sha256,
+        )
     try:
         normalized_database_uuid = str(uuid.UUID(database_uuid))
         document = _read_runtime_plan_document(
@@ -1774,11 +1835,11 @@ def evidence_sandbox_read_runtime_config_plan(
             database_name=database_name,
             database_uuid=normalized_database_uuid,
             odoo_python=odoo_python,
-            odoo_python_sha256=odoo_python_sha256,
+            odoo_python_sha256=resolved_odoo_python_sha256,
             odoo_bin=odoo_bin,
-            odoo_bin_sha256=odoo_bin_sha256,
+            odoo_bin_sha256=resolved_odoo_bin_sha256,
             odoo_config=odoo_config,
-            odoo_config_sha256=odoo_config_sha256,
+            odoo_config_sha256=resolved_odoo_config_sha256,
             release_root=release_root,
             canonical_package_path=canonical_package_path,
             canonical_package_sha256=package_sha256,
@@ -1796,7 +1857,6 @@ def evidence_sandbox_read_runtime_config_plan(
             code="read_runtime_plan_rejected",
             message="The sandbox read runtime plan inputs are invalid.",
         ) from exc
-    blockers: list[str] = []
     if re.search(r"(^|[_-])sandbox([_-]|$)", database_name) is None:
         blockers.append("sandbox read runtime database name is not clearly sandbox")
     if document["auth_state_path"] == document["receipt_state_path"]:
@@ -1828,6 +1888,7 @@ def evidence_sandbox_read_runtime_config_plan(
             "release_identity": identity,
             "runtime_config_path": str(runtime_config_path),
             "sandbox_read_runtime_configurable": not blockers,
+            "source_measurements": measurements,
             "secret_values_included": False,
         },
         business_succeeded=False,

@@ -301,12 +301,10 @@ odoo-accounting-cli-v3 evidence sandbox-read-runtime-config-plan \
   --database-name <SANDBOX_DATABASE_NAME> \
   --database-uuid <SANDBOX_DATABASE_UUID> \
   --odoo-python <RESOLVED_ODOO_PYTHON> \
-  --odoo-python-sha256 <SHA256> \
   --odoo-bin <RESOLVED_ODOO_BIN> \
-  --odoo-bin-sha256 <SHA256> \
   --odoo-config <RESOLVED_ODOO_CONFIG> \
-  --odoo-config-sha256 <SHA256> \
-  --canonical-package-path <RELEASE_TARBALL>
+  --canonical-package-path <RELEASE_TARBALL> \
+  --measure-existing-files
 ```
 
 The command always renders `environment:sandbox` and
@@ -315,6 +313,10 @@ root-managed install actions, and keeps `business_succeeded:false`. It does not
 create secrets, write `/etc`, open Odoo, or prove a real read result. A
 generated plan becomes usable only after the installed file is reloaded by the
 exact release and the read evidence gates below pass.
+When `--measure-existing-files` is used, the command computes SHA-256 digests
+from the supplied local paths. If an operator also supplies a digest and it does
+not match the measured file, the plan remains non-configurable and reports a
+mismatch blocker.
 Obvious placeholder SHA-256 values, such as one repeated hexadecimal character,
 must keep the plan non-configurable; use only measured digests from the target
 host.
