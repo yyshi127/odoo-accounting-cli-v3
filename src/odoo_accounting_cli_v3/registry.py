@@ -153,6 +153,7 @@ def _validate_evidence(item: dict[str, Any], location: str) -> None:
         raise RegistryError(f"{location}.evidence.receipts must be an array")
     receipt_fields = {
         "artifact_sha256",
+        "capability_id",
         "company_id",
         "database_uuid",
         "environment",
@@ -177,6 +178,10 @@ def _validate_evidence(item: dict[str, Any], location: str) -> None:
         if receipt_id in receipt_ids:
             raise RegistryError(f"{location}.evidence contains duplicate receipt id")
         receipt_ids.add(receipt_id)
+        if receipt["capability_id"] != item["id"]:
+            raise RegistryError(
+                f"{receipt_location}.capability_id does not match capability"
+            )
         kind = receipt["kind"]
         if kind not in EVIDENCE_KINDS:
             raise RegistryError(f"{receipt_location}.kind is invalid")

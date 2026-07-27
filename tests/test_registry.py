@@ -9,9 +9,15 @@ from odoo_accounting_cli_v3.registry import RegistryError, load_registry, regist
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
 
 
-def _evidence_receipt(kind: str, *, environment: str = "sandbox") -> dict[str, object]:
+def _evidence_receipt(
+    kind: str,
+    *,
+    capability_id: str = "acct.invoice.customer_create.v1",
+    environment: str = "sandbox",
+) -> dict[str, object]:
     return {
         "artifact_sha256": "a" * 64,
+        "capability_id": capability_id,
         "company_id": 7,
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "environment": environment,
@@ -370,6 +376,36 @@ class RegistryTest(unittest.TestCase):
             )
         ]
         validate_registry(complete)
+
+    def test_evidence_receipts_must_match_their_capability(self) -> None:
+        invalid = copy.deepcopy(self.document)
+        write = next(
+            item
+            for item in invalid["capabilities"]
+            if item["id"] == "acct.bill.vendor_create.v1"
+        )
+        write["enabled_environments"] = ["sandbox"]
+        write["evidence"]["level"] = "sandbox_verified"
+        write["evidence"]["receipts"] = [
+            _evidence_receipt(
+                kind,
+                capability_id="acct.invoice.customer_create.v1",
+            )
+            for kind in (
+                "accounting_oracle",
+                "live_odoo",
+                "pi_e2e",
+                "release_identity",
+                "recovery",
+                "sandbox_write_lifecycle",
+                "security_negative",
+            )
+        ]
+
+        with self.assertRaisesRegex(
+            RegistryError, "capability_id does not match capability"
+        ):
+            validate_registry(invalid)
 
     def test_write_approval_ttl_is_bounded(self) -> None:
         invalid = copy.deepcopy(self.document)

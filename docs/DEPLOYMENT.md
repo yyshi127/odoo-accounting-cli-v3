@@ -657,8 +657,10 @@ JSON request over standard input. For every staged write capability retain:
 No command-existence, mocked handler, local test, exit code, or unsigned Odoo
 record is sandbox evidence. Without a release-bound passing verification and
 durable signed final receipt, the capability remains closed. Passing one
-capability does not stage or enable another, and no sandbox result authorizes a
-production write.
+capability does not stage or enable another. Registry evidence receipts must
+carry the exact registered `capability_id` they are promoting; a receipt bound
+to one capability is never reusable for a different capability. No sandbox
+result authorizes a production write.
 
 Dev21 canonicalizes the installed-module graph under a transaction-scoped
 `LOCK TABLE ir_module_module IN SHARE MODE` before execution and again before
