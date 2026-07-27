@@ -211,9 +211,13 @@ def verify_document(document: Any) -> dict[str, Any]:
     lifecycle = _require_object(root["lifecycle"], "evidence.lifecycle")
     if set(lifecycle) != LIFECYCLE_FIELDS:
         raise SandboxWriteEvidenceError("lifecycle fields are invalid")
+    lifecycle_receipt_ids: set[str] = set()
     for field, value in lifecycle.items():
         if field.endswith("_id"):
-            _require_text(value, f"lifecycle.{field}")
+            receipt_id = _require_text(value, f"lifecycle.{field}")
+            if receipt_id in lifecycle_receipt_ids:
+                raise SandboxWriteEvidenceError("lifecycle receipt ids must be unique")
+            lifecycle_receipt_ids.add(receipt_id)
         else:
             _require_hex64(value, f"lifecycle.{field}")
 
@@ -230,6 +234,10 @@ def verify_document(document: Any) -> dict[str, Any]:
         receipt_id = _require_text(receipt["id"], f"{location}.id")
         if receipt_id in seen_ids:
             raise SandboxWriteEvidenceError("registry receipt ids must be unique")
+        if receipt_id in lifecycle_receipt_ids:
+            raise SandboxWriteEvidenceError(
+                "registry receipt ids must be distinct from lifecycle receipt ids"
+            )
         seen_ids.add(receipt_id)
         kind = receipt["kind"]
         if kind not in REQUIRED_KINDS:

@@ -135,6 +135,19 @@ def test_complete_sandbox_write_evidence_is_accepted():
             "lifecycle fields are invalid",
         ),
         (
+            lambda document: document["lifecycle"].__setitem__(
+                "verification_receipt_id",
+                document["lifecycle"]["execution_receipt_id"],
+            ),
+            "lifecycle receipt ids must be unique",
+        ),
+        (
+            lambda document: document["registry_receipts"][0].__setitem__(
+                "id", document["lifecycle"]["final_audit_receipt_id"]
+            ),
+            "distinct from lifecycle receipt ids",
+        ),
+        (
             lambda document: document.__setitem__("preflight_manifest_sha256", "X"),
             "preflight_manifest_sha256 must be lowercase SHA-256",
         ),
