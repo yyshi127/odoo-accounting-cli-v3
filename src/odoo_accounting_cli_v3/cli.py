@@ -1314,6 +1314,96 @@ def evidence_write_capabilities_readiness() -> None:
     )
 
 
+@evidence_group.command("write-pipeline-readiness")
+@click.option(
+    "--evidence-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Root containing one <capability_id>/metadata.json retained sandbox evidence directory per write capability.",
+)
+def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
+    """Report which write capabilities have exact-release sandbox pipeline evidence."""
+
+    command = "evidence.write-pipeline-readiness"
+    identity = _load_release_identity(command=command)
+    if not evidence_root.is_dir():
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_pipeline_root_rejected",
+            message="The sandbox write pipeline evidence root is unavailable.",
+            exit_code=6,
+        )
+    capabilities = _load_capabilities()
+    write_capabilities = sorted(
+        (item for item in capabilities if item.data["access"] == "write"),
+        key=lambda item: item.id,
+    )
+    odoo_write_capabilities, allowed_models_by_capability = (
+        _load_write_capability_implementation(command)
+    )
+    verifier = _load_sandbox_write_evidence_verifier()
+    reports: list[dict[str, Any]] = []
+    for capability in write_capabilities:
+        static_report = _write_capability_readiness_report(
+            capability,
+            allowed_models_by_capability=allowed_models_by_capability,
+            odoo_write_capabilities=odoo_write_capabilities,
+        )
+        metadata_path = evidence_root / capability.id / "metadata.json"
+        pipeline: dict[str, Any] | None = None
+        rejection: str | None = None
+        status = "missing"
+        if metadata_path.is_file():
+            try:
+                pipeline = verifier.inspect_pipeline_path(metadata_path)
+                if (
+                    pipeline.get("capability_id") != capability.id
+                    or pipeline.get("release_sha256") != identity["manifest_sha256"]
+                    or pipeline.get("registry_digest") != identity["registry_digest"]
+                ):
+                    status = "rejected"
+                    rejection = "pipeline is not bound to this exact release and capability"
+                    pipeline = None
+                else:
+                    status = "verified"
+            except Exception as exc:
+                if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+                    status = "rejected"
+                    rejection = str(exc)
+                else:
+                    raise
+        reports.append(
+            {
+                "capability_id": capability.id,
+                "metadata_path": str(metadata_path),
+                "pipeline": pipeline,
+                "pipeline_ready": status == "verified",
+                "rejection": rejection,
+                "static_readiness": static_report,
+                "status": status,
+            }
+        )
+    verified_count = sum(1 for report in reports if report["status"] == "verified")
+    missing_count = sum(1 for report in reports if report["status"] == "missing")
+    rejected_count = sum(1 for report in reports if report["status"] == "rejected")
+    _success(
+        command,
+        {
+            "capabilities": reports,
+            "evidence_root": str(evidence_root),
+            "missing_count": missing_count,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "rejected_count": rejected_count,
+            "release_identity": identity,
+            "sandbox_pipeline_ready": verified_count == len(reports),
+            "total_write_capabilities": len(reports),
+            "verified_count": verified_count,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("sandbox-write-preflight")
 @click.option(
     "--capability-id",

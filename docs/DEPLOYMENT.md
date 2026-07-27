@@ -725,6 +725,13 @@ non-authorizing sandbox/staged promotion candidate, and emits a step-by-step
 hash chain for preflight, metadata, lifecycle artifacts, input manifest,
 evidence, and promotion candidate. Treat that pipeline report as the minimum
 review packet before any registry-staging discussion.
+For a batch migration view across every registered write capability, arrange
+retained evidence as `<evidence-root>/<capability_id>/metadata.json` and run
+`odoo-accounting-cli-v3 evidence write-pipeline-readiness --evidence-root ...`.
+The command validates each capability's pipeline against the current release
+and reports `verified`, `missing`, or `rejected` per capability. It is
+non-authorizing, reports `business_succeeded:false`, and must show every write
+capability as `verified` before a registry-wide sandbox-staging review.
 
 The `--assemble-from` input manifest references the retained
 `preflight_manifest` file; the exact release computes
