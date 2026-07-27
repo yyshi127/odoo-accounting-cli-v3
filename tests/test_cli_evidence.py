@@ -674,7 +674,11 @@ def test_evidence_write_capability_readiness_accepts_registered_write():
         "service_allowed_models_present": True,
         "strict_input_schema": True,
         "strict_output_schema": True,
+        "write_not_enabled": True,
+        "write_not_staged": True,
     }
+    assert payload["data"]["capability"]["enabled_environments"] == []
+    assert payload["data"]["capability"]["staged_environments"] == []
     assert "account.move" in payload["data"]["allowed_models"]
 
 

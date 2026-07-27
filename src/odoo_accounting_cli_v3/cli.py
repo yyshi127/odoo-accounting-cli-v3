@@ -907,6 +907,8 @@ def _write_capability_readiness_report(
         ),
         "odoo_handler_supported": capability_id in odoo_write_capabilities,
         "production_not_enabled": "production" not in data["enabled_environments"],
+        "write_not_enabled": data["enabled_environments"] == [],
+        "write_not_staged": data.get("staged_environments", []) == [],
         "recovery_method_present": (
             isinstance(data["recovery"].get("method"), str)
             and bool(data["recovery"]["method"].strip())
@@ -934,6 +936,7 @@ def _write_capability_readiness_report(
             "idempotency": data["idempotency"],
             "recovery": data["recovery"],
             "risk_level": data["risk_level"],
+            "staged_environments": data.get("staged_environments", []),
         },
         "checks": checks,
         "production_promotion_allowed": False,

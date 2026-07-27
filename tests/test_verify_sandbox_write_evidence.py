@@ -197,6 +197,7 @@ def _write_preflight_manifest(tmp_path: Path) -> str:
                 "method": "manual_escalation_until_exact_invoice_compensation_is_sandbox_verified"
             },
             "risk_level": "high",
+            "staged_environments": [],
         },
         "checks": {
             "approval_policy_present": True,
@@ -207,6 +208,8 @@ def _write_preflight_manifest(tmp_path: Path) -> str:
             "service_allowed_models_present": True,
             "strict_input_schema": True,
             "strict_output_schema": True,
+            "write_not_enabled": True,
+            "write_not_staged": True,
         },
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
@@ -488,6 +491,33 @@ def test_builder_rejects_missing_standard_artifacts(tmp_path):
                 _refresh_preflight_readiness_digest(preflight),
             ),
             "readiness capability fields are invalid",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"]["capability"].__setitem__(
+                    "enabled_environments", ["sandbox"]
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "readiness capability is enabled",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"]["capability"].__setitem__(
+                    "staged_environments", ["sandbox"]
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "readiness capability is staged",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"]["checks"].__setitem__(
+                    "write_not_staged", False
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "readiness checks are not all true",
         ),
     ),
 )

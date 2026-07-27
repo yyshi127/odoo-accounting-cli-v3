@@ -115,6 +115,7 @@ READINESS_CAPABILITY_FIELDS = frozenset(
         "idempotency",
         "recovery",
         "risk_level",
+        "staged_environments",
     }
 )
 READINESS_CHECK_FIELDS = frozenset(
@@ -127,6 +128,8 @@ READINESS_CHECK_FIELDS = frozenset(
         "service_allowed_models_present",
         "strict_input_schema",
         "strict_output_schema",
+        "write_not_enabled",
+        "write_not_staged",
     }
 )
 
@@ -392,6 +395,10 @@ def _validate_preflight_manifest(
         raise SandboxWriteEvidenceError("preflight_manifest readiness capability mismatch")
     if capability.get("access") != "write":
         raise SandboxWriteEvidenceError("preflight_manifest readiness capability is not write")
+    if capability.get("enabled_environments") != []:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness capability is enabled")
+    if capability.get("staged_environments") != []:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness capability is staged")
     approval = _require_object(
         capability.get("approval"), "preflight_manifest.readiness_report.capability.approval"
     )
