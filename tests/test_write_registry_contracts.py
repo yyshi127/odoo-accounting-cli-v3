@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from odoo_accounting_cli_v3.contracts import ContractError, validate_value
+from odoo_accounting_cli_v3.odoo.write_handlers import _CAPABILITIES as ODOO_WRITE_CAPABILITIES
 from odoo_accounting_cli_v3.registry import load_registry
+from odoo_accounting_cli_v3.write_service import _ALLOWED_MODELS
 
 
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
@@ -869,3 +871,18 @@ def test_schema_boundaries_allow_zero_unit_price_and_failed_verification_but_not
 def test_registry_loader_accepts_the_hardened_write_contracts():
     capabilities = load_registry(REGISTRY_PATH)
     assert {item.id for item in capabilities if item.data["access"] == "write"} == set(WRITE_IDS)
+
+
+def test_registered_write_capabilities_are_bound_to_control_and_odoo_layers():
+    registered_write_ids = {
+        item.id
+        for item in load_registry(REGISTRY_PATH)
+        if item.data["access"] == "write"
+    }
+
+    assert registered_write_ids == set(WRITE_IDS)
+    assert set(_ALLOWED_MODELS) == registered_write_ids
+    assert ODOO_WRITE_CAPABILITIES == registered_write_ids
+    for capability_id, models in _ALLOWED_MODELS.items():
+        assert models, f"{capability_id} has no auditable Odoo model allowlist"
+        assert all(model.startswith("account.") for model in models)
