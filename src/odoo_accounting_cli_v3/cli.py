@@ -1038,6 +1038,34 @@ def release_current_route(
     _success(command, data)
 
 
+def _target_capacity_recheck_report(
+    probe_path: Path,
+    *,
+    required_free_bytes: int,
+) -> dict[str, Any]:
+    resolved = probe_path.resolve(strict=True)
+    usage = shutil.disk_usage(resolved)
+    blockers: list[str] = []
+    if usage.free < required_free_bytes:
+        blockers.append("target filesystem free space is below the configured floor")
+    return {
+        "available_bytes": usage.free,
+        "blockers": sorted(set(blockers)),
+        "cleanup_executed": False,
+        "filesystem": {
+            "available_bytes": usage.free,
+            "probe_path": str(resolved),
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+        },
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "required_free_bytes": required_free_bytes,
+        "sandbox_write_capacity_ready": not blockers,
+        "shortfall_bytes": max(0, required_free_bytes - usage.free),
+    }
+
+
 @main.group("evidence")
 def evidence_group() -> None:
     """Run exact-release internal safety evidence probes."""
@@ -1151,8 +1179,10 @@ def evidence_target_capacity_recheck(
 
     command = "evidence.target-capacity-recheck"
     try:
-        resolved = probe_path.resolve(strict=True)
-        usage = shutil.disk_usage(resolved)
+        data = _target_capacity_recheck_report(
+            probe_path,
+            required_free_bytes=required_free_bytes,
+        )
     except OSError as exc:
         raise CliFailure(
             command=command,
@@ -1160,25 +1190,6 @@ def evidence_target_capacity_recheck(
             message="The target capacity probe path is unavailable.",
             exit_code=5,
         ) from exc
-    blockers: list[str] = []
-    if usage.free < required_free_bytes:
-        blockers.append("target filesystem free space is below the configured floor")
-    data = {
-        "available_bytes": usage.free,
-        "blockers": blockers,
-        "cleanup_executed": False,
-        "filesystem": {
-            "available_bytes": usage.free,
-            "probe_path": str(resolved),
-            "total_bytes": usage.total,
-            "used_bytes": usage.used,
-        },
-        "production_promotion_allowed": False,
-        "real_odoo_write_performed": False,
-        "required_free_bytes": required_free_bytes,
-        "sandbox_write_capacity_ready": not blockers,
-        "shortfall_bytes": max(0, required_free_bytes - usage.free),
-    }
     _success(command, data, business_succeeded=False)
 
 
@@ -2267,6 +2278,163 @@ def evidence_sandbox_database_candidates(
     _success(command, data, business_succeeded=False)
 
 
+@evidence_group.command("sandbox-onboarding-readiness")
+@click.option(
+    "--sandbox-database-name",
+    required=True,
+    help="Dedicated sandbox database expected for write onboarding.",
+)
+@click.option(
+    "--source-database-name",
+    required=True,
+    help="Authorized source database expected for sandbox provisioning.",
+)
+@click.option(
+    "--observed-database-name",
+    multiple=True,
+    help="Database name observed from PostgreSQL catalog; may be repeated.",
+)
+@click.option(
+    "--protected-database-name",
+    multiple=True,
+    help="Known production or otherwise protected database name.",
+)
+@click.option(
+    "--authorization-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Optional sandbox provision authorization JSON to validate.",
+)
+@click.option(
+    "--expected-company",
+    multiple=True,
+    help="Company scope entry that the authorization must include.",
+)
+@click.option(
+    "--capacity-path",
+    type=click.Path(path_type=Path),
+    default=Path("/"),
+    show_default=True,
+    help="Path whose filesystem capacity should be checked.",
+)
+@click.option(
+    "--required-free-bytes",
+    type=click.IntRange(min=1),
+    default=8 * 1024 * 1024 * 1024,
+    show_default=True,
+)
+@click.option(
+    "--now",
+    help="UTC timestamp used for deterministic authorization validation.",
+)
+def evidence_sandbox_onboarding_readiness(
+    sandbox_database_name: str,
+    source_database_name: str,
+    observed_database_name: tuple[str, ...],
+    protected_database_name: tuple[str, ...],
+    authorization_file: Path | None,
+    expected_company: tuple[str, ...],
+    capacity_path: Path,
+    required_free_bytes: int,
+    now: str | None,
+) -> None:
+    """Summarize read-only gates before sandbox write onboarding can continue."""
+
+    command = "evidence.sandbox-onboarding-readiness"
+    blockers: list[str] = []
+    protected_names = frozenset(protected_database_name)
+    observed_names = sorted(set(observed_database_name))
+    database_report = _sandbox_database_candidate_report(
+        sandbox_database_name,
+        protected_names=protected_names,
+        selected_name=sandbox_database_name,
+    )
+    database_observed = sandbox_database_name in observed_names
+    if database_report["blockers"]:
+        blockers.append("sandbox database name is not eligible")
+    if not database_observed:
+        blockers.append("sandbox database was not observed in the PostgreSQL catalog")
+    try:
+        capacity_report = _target_capacity_recheck_report(
+            capacity_path,
+            required_free_bytes=required_free_bytes,
+        )
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="sandbox_onboarding_readiness_rejected",
+            message="The sandbox onboarding capacity path is unavailable.",
+            exit_code=5,
+        ) from exc
+    if not capacity_report["sandbox_write_capacity_ready"]:
+        blockers.append("sandbox write capacity gate is not ready")
+    authorization_report: dict[str, Any]
+    if authorization_file is None:
+        blockers.append("sandbox provision authorization file was not supplied")
+        authorization_report = {
+            "authorization_file": None,
+            "authorization_record_ready": False,
+            "blockers": ["sandbox provision authorization file was not supplied"],
+        }
+    else:
+        try:
+            document = json.loads(authorization_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            blockers.append("sandbox provision authorization file is unavailable or invalid JSON")
+            authorization_report = {
+                "authorization_file": str(authorization_file),
+                "authorization_record_ready": False,
+                "blockers": [
+                    "sandbox provision authorization file is unavailable or invalid JSON"
+                ],
+            }
+        else:
+            authorization_report = _sandbox_provision_authorization_report(
+                document,
+                authorization_file=authorization_file,
+                expected_sandbox_database_name=sandbox_database_name,
+                expected_source_database_name=source_database_name,
+                expected_company=expected_company,
+                now=now,
+            )
+            if not authorization_report["authorization_record_ready"]:
+                blockers.append("sandbox provision authorization record is not ready")
+    data = {
+        "authorization": authorization_report,
+        "blockers": sorted(set(blockers)),
+        "capacity": capacity_report,
+        "database": {
+            "observed_database_names_count": len(observed_names),
+            "sandbox_database_name": sandbox_database_name,
+            "sandbox_database_observed": database_observed,
+            "sandbox_database_report": database_report,
+            "source_database_name": source_database_name,
+        },
+        "next_required_actions": [
+            action
+            for condition, action in (
+                (
+                    not capacity_report["sandbox_write_capacity_ready"],
+                    "free or add disk capacity and rerun evidence target-capacity-recheck",
+                ),
+                (
+                    not database_observed,
+                    "create or select the dedicated sandbox database and rerun sandbox-database-candidates",
+                ),
+                (
+                    not authorization_report["authorization_record_ready"],
+                    "save a valid sandbox provision authorization JSON and rerun sandbox-provision-authorization-check",
+                ),
+            )
+            if condition
+        ],
+        "postgresql_write_performed": False,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "sandbox_onboarding_ready": not blockers,
+    }
+    _success(command, data, business_succeeded=False)
+
+
 @evidence_group.command("sandbox-database-provision-plan")
 @click.option(
     "--sandbox-database-name",
@@ -2497,51 +2665,15 @@ def evidence_sandbox_provision_authorization_template(
     _success(command, data, business_succeeded=False)
 
 
-@evidence_group.command("sandbox-provision-authorization-check")
-@click.option(
-    "--authorization-file",
-    type=click.Path(path_type=Path, dir_okay=False),
-    required=True,
-    help="JSON authorization record to validate before sandbox database provisioning.",
-)
-@click.option(
-    "--expected-sandbox-database-name",
-    required=True,
-    help="Sandbox database name the authorization must bind.",
-)
-@click.option(
-    "--expected-source-database-name",
-    required=True,
-    help="Source database name the authorization must bind.",
-)
-@click.option(
-    "--expected-company",
-    multiple=True,
-    help="Company scope entry that must be present; repeat for every expected company.",
-)
-@click.option(
-    "--now",
-    help="UTC timestamp used for deterministic validation tests; defaults to current UTC time.",
-)
-def evidence_sandbox_provision_authorization_check(
+def _sandbox_provision_authorization_report(
+    document: Any,
+    *,
     authorization_file: Path,
     expected_sandbox_database_name: str,
     expected_source_database_name: str,
     expected_company: tuple[str, ...],
     now: str | None,
-) -> None:
-    """Validate a sandbox provisioning authorization record without provisioning."""
-
-    command = "evidence.sandbox-provision-authorization-check"
-    try:
-        document = json.loads(authorization_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CliFailure(
-            command=command,
-            code="sandbox_provision_authorization_rejected",
-            message="The sandbox provisioning authorization record is unavailable or invalid JSON.",
-            exit_code=5,
-        ) from exc
+) -> dict[str, Any]:
     blockers: list[str] = []
     warnings: list[str] = []
     if not isinstance(document, dict):
@@ -2620,7 +2752,7 @@ def evidence_sandbox_provision_authorization_check(
         blockers.append("authorization TTL must not exceed 86400 seconds")
     if summary.get("retention_until") is None:
         warnings.append("retention_until is not recorded in immutable_summary")
-    data = {
+    return {
         "authorization_file": str(authorization_file),
         "authorization_record_ready": not blockers,
         "blockers": sorted(set(blockers)),
@@ -2635,6 +2767,61 @@ def evidence_sandbox_provision_authorization_check(
         "source_database_name": expected_source_database_name,
         "warnings": sorted(set(warnings)),
     }
+
+
+@evidence_group.command("sandbox-provision-authorization-check")
+@click.option(
+    "--authorization-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="JSON authorization record to validate before sandbox database provisioning.",
+)
+@click.option(
+    "--expected-sandbox-database-name",
+    required=True,
+    help="Sandbox database name the authorization must bind.",
+)
+@click.option(
+    "--expected-source-database-name",
+    required=True,
+    help="Source database name the authorization must bind.",
+)
+@click.option(
+    "--expected-company",
+    multiple=True,
+    help="Company scope entry that must be present; repeat for every expected company.",
+)
+@click.option(
+    "--now",
+    help="UTC timestamp used for deterministic validation tests; defaults to current UTC time.",
+)
+def evidence_sandbox_provision_authorization_check(
+    authorization_file: Path,
+    expected_sandbox_database_name: str,
+    expected_source_database_name: str,
+    expected_company: tuple[str, ...],
+    now: str | None,
+) -> None:
+    """Validate a sandbox provisioning authorization record without provisioning."""
+
+    command = "evidence.sandbox-provision-authorization-check"
+    try:
+        document = json.loads(authorization_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CliFailure(
+            command=command,
+            code="sandbox_provision_authorization_rejected",
+            message="The sandbox provisioning authorization record is unavailable or invalid JSON.",
+            exit_code=5,
+        ) from exc
+    data = _sandbox_provision_authorization_report(
+        document,
+        authorization_file=authorization_file,
+        expected_sandbox_database_name=expected_sandbox_database_name,
+        expected_source_database_name=expected_source_database_name,
+        expected_company=expected_company,
+        now=now,
+    )
     _success(command, data, business_succeeded=False)
 
 

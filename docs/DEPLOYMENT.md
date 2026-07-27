@@ -410,6 +410,25 @@ The template command is only a drafting aid. It does not save the authorization
 record, does not prove the operator accepted it, and must not be treated as
 permission until the saved JSON passes the check command above.
 
+Before configuring sandbox read or write runtime files, run the aggregate
+onboarding gate so Pi and operators see one fail-closed verdict for route,
+capacity, database selection, and authorization state:
+
+```bash
+odoo-accounting-cli-v3 evidence sandbox-onboarding-readiness \
+  --sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
+  --source-database-name <AUTHORIZED_SOURCE_DATABASE> \
+  --observed-database-name <OBSERVED_DATABASE> \
+  --protected-database-name <PRODUCTION_DATABASE> \
+  --authorization-file <AUTHORIZATION_JSON> \
+  --expected-company <AUTHORIZED_COMPANY> \
+  --required-free-bytes 8589934592
+```
+
+This command is read-only. It does not query PostgreSQL itself, create a
+database, write an authorization file, or perform an Odoo action; callers must
+feed it the observed catalog names from the separate catalog audit.
+
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,
 explicitly become `READ ONLY`/`REPEATABLE READ` before any V3 ORM access, retain

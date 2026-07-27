@@ -2121,6 +2121,82 @@ def test_evidence_sandbox_provision_authorization_check_rejects_cross_company(
     ]
 
 
+def test_evidence_sandbox_onboarding_readiness_reports_ready(tmp_path):
+    authorization = tmp_path / "authorization.json"
+    authorization.write_text(
+        __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-onboarding-readiness",
+            "--sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--source-database-name",
+            "odoo_sg",
+            "--observed-database-name",
+            "odoo_v3_sandbox",
+            "--authorization-file",
+            str(authorization),
+            "--expected-company",
+            "SG Company",
+            "--capacity-path",
+            str(tmp_path),
+            "--required-free-bytes",
+            "1",
+            "--now",
+            "2026-07-27T12:30:00Z",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-onboarding-readiness"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["sandbox_onboarding_ready"] is True
+    assert payload["data"]["blockers"] == []
+    assert payload["data"]["capacity"]["sandbox_write_capacity_ready"] is True
+    assert payload["data"]["database"]["sandbox_database_observed"] is True
+    assert payload["data"]["authorization"]["authorization_record_ready"] is True
+    assert payload["data"]["postgresql_write_performed"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+
+
+def test_evidence_sandbox_onboarding_readiness_reports_missing_gates(tmp_path):
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-onboarding-readiness",
+            "--sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--source-database-name",
+            "odoo_sg",
+            "--capacity-path",
+            str(tmp_path),
+            "--required-free-bytes",
+            str(1024**5),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_onboarding_ready"] is False
+    assert payload["data"]["blockers"] == [
+        "sandbox database was not observed in the PostgreSQL catalog",
+        "sandbox provision authorization file was not supplied",
+        "sandbox write capacity gate is not ready",
+    ]
+    assert payload["data"]["next_required_actions"] == [
+        "free or add disk capacity and rerun evidence target-capacity-recheck",
+        "create or select the dedicated sandbox database and rerun sandbox-database-candidates",
+        "save a valid sandbox provision authorization JSON and rerun sandbox-provision-authorization-check",
+    ]
+
+
 def test_evidence_target_capacity_plan_reports_ready_v3_owned_candidates(tmp_path):
     retained = (
         tmp_path
