@@ -250,6 +250,38 @@ class RegistryTest(unittest.TestCase):
             self.assertIs(item["input_schema"]["additionalProperties"], False)
             self.assertIs(item["output_schema"]["additionalProperties"], False)
 
+    def test_no_registered_contract_contains_empty_object_placeholders(self) -> None:
+        def walk_schema(node: object, path: str) -> list[str]:
+            failures: list[str] = []
+            if isinstance(node, dict):
+                if (
+                    node.get("type") == "object"
+                    and node.get("additionalProperties") is False
+                    and node.get("properties") == {}
+                    and node.get("required") == []
+                ):
+                    failures.append(path)
+                for key in ("properties", "$defs", "definitions"):
+                    for name, child in node.get(key, {}).items():
+                        failures.extend(walk_schema(child, f"{path}.{key}.{name}"))
+                if "items" in node:
+                    failures.extend(walk_schema(node["items"], f"{path}.items"))
+                for key in ("oneOf", "anyOf", "allOf"):
+                    for index, child in enumerate(node.get(key, [])):
+                        failures.extend(walk_schema(child, f"{path}.{key}[{index}]"))
+            return failures
+
+        failures: list[str] = []
+        for item in self.document["capabilities"]:
+            failures.extend(
+                walk_schema(item["input_schema"], f"{item['id']}.input_schema")
+            )
+            failures.extend(
+                walk_schema(item["output_schema"], f"{item['id']}.output_schema")
+            )
+
+        self.assertEqual(failures, [])
+
     def test_unverified_write_cannot_be_enabled_in_production(self) -> None:
         invalid = copy.deepcopy(self.document)
         write = next(item for item in invalid["capabilities"] if item["access"] == "write")

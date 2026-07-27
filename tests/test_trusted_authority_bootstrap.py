@@ -150,6 +150,7 @@ def _runtime_documents(
         "release_root": str(tmp_path / "release"),
         "canonical_package_path": str(tmp_path / "package.tar.gz"),
         "canonical_package_sha256": "4" * 64,
+        "gcov_state_path": str(tmp_path / "gcov.sqlite3"),
         "auth_state_path": str(tmp_path / "read-auth.sqlite3"),
         "receipt_state_path": str(tmp_path / "read-receipt.sqlite3"),
         "auth_key_id": "base-read-auth-v1",
