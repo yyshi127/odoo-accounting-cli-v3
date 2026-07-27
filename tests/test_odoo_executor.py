@@ -83,6 +83,35 @@ class MissingCompany:
         return 0
 
 
+class SimpleRecord:
+    def __init__(self, **values):
+        self.__dict__.update(values)
+        self.access_checks = []
+
+    def exists(self):
+        return self
+
+    def __bool__(self):
+        return True
+
+    def __len__(self):
+        return 1
+
+    def check_access_rights(self, operation):
+        self.access_checks.append(("rights", operation))
+
+    def check_access_rule(self, operation):
+        self.access_checks.append(("rule", operation))
+
+
+class RecordModel:
+    def __init__(self, records):
+        self._records = records
+
+    def browse(self, record_id):
+        return self._records.get(record_id, MissingCompany())
+
+
 class Environment:
     uid = 42
     su = False
@@ -96,6 +125,61 @@ class Environment:
         if name != "res.company":
             raise AssertionError(f"unexpected model: {name}")
         return self.company
+
+
+class DraftCancelEnvironment(Environment):
+    def __init__(self, *, move=None, groups=None):
+        super().__init__(groups=groups)
+        self.move = move or pristine_draft_move(self.company)
+
+    def __getitem__(self, name):
+        if name == "res.company":
+            return self.company
+        if name == "account.move":
+            return RecordModel({self.move.id: self.move})
+        raise AssertionError(f"unexpected model: {name}")
+
+
+def pristine_draft_move(company, *, move_type="out_invoice", state="draft", **overrides):
+    move_id = overrides.pop("id", 1101)
+    journal_type = "purchase" if move_type == "in_invoice" else "sale"
+    journal = SimpleRecord(id=2201, company_id=company, type=journal_type, active=True)
+    currency = SimpleRecord(id=12)
+    line = SimpleRecord(
+        id=3301,
+        move_id=SimpleRecord(id=move_id),
+        company_id=company,
+        parent_state=state,
+        reconciled=False,
+    )
+    values = {
+        "id": move_id,
+        "company_id": company,
+        "move_type": move_type,
+        "state": state,
+        "name": "/",
+        "posted_before": False,
+        "auto_post": "no",
+        "auto_post_until": False,
+        "sequence_prefix": False,
+        "sequence_number": False,
+        "made_sequence_gap": False,
+        "checked": False,
+        "journal_id": journal,
+        "currency_id": currency,
+        "payment_state": "not_paid",
+        "amount_residual": "100.00",
+        "amount_total": "100.00",
+        "secure_sequence_number": 0,
+        "inalterable_hash": False,
+        "need_cancel_request": False,
+        "is_manually_modified": False,
+        "line_ids": [line],
+        "odoo_cli_v3_document_binding": "a" * 64,
+        "odoo_cli_v3_business_binding": "b" * 64,
+    }
+    values.update(overrides)
+    return SimpleRecord(**values)
 
 
 class Backend:
@@ -381,6 +465,7 @@ class OdooReadExecutorTest(unittest.TestCase):
                 "acct.ar.open_items.v1",
                 "acct.ap.open_items.v1",
                 "acct.multicurrency.balance_read.v1",
+                "acct.move.draft_cancel_eligibility.v1",
             }
         )
         executor = self.executor()
@@ -523,6 +608,116 @@ class OdooReadExecutorTest(unittest.TestCase):
         executor.verify(
             context(), registry_capability, requested, result, "c" * 64, "d" * 64
         )
+
+    def test_draft_cancel_eligibility_returns_exact_bound_write_parameters(self) -> None:
+        env = DraftCancelEnvironment()
+        executor = self.executor(env=env)
+        requested = {
+            "company_id": 7,
+            "move_id": 1101,
+            "expected_move_type": "out_invoice",
+        }
+        cap = capability("acct.move.draft_cancel_eligibility.v1")
+
+        result = executor(context(), cap, requested, "c" * 64, "d" * 64)
+
+        self.assertIs(result["eligible"], True)
+        self.assertEqual(result["eligibility_failures"], [])
+        self.assertEqual(result["failed_line_ids"], [])
+        self.assertEqual(
+            result["write_parameters"],
+            {
+                "company_id": 7,
+                "move_id": 1101,
+                "expected_move_type": "out_invoice",
+                "expected_document_binding": "a" * 64,
+                "expected_business_binding": "b" * 64,
+            },
+        )
+        self.assertEqual(
+            result["target"],
+            {
+                "company_id": 7,
+                "move_id": 1101,
+                "move_type": "out_invoice",
+                "state": "draft",
+                "payment_state": "not_paid",
+                "journal_id": 2201,
+                "currency_id": 12,
+                "line_ids": [3301],
+                "document_binding": "a" * 64,
+                "business_binding": "b" * 64,
+            },
+        )
+        self.assertEqual(result["receipt"]["record_count"], 1)
+        self.assertEqual(env.company.access_checks, [("rights", "read"), ("rule", "read")])
+        self.assertEqual(env.move.access_checks, [("rights", "read"), ("rule", "read")])
+        self.assertEqual(
+            env.move.line_ids[0].access_checks, [("rights", "read"), ("rule", "read")]
+        )
+        executor.verify(context(), cap, requested, result, "c" * 64, "d" * 64)
+
+    def test_draft_cancel_eligibility_returns_signed_ineligible_reasons(self) -> None:
+        company = Company()
+        line = SimpleRecord(
+            id=3301,
+            move_id=SimpleRecord(id=1101),
+            company_id=company,
+            parent_state="posted",
+            reconciled=True,
+        )
+        move = pristine_draft_move(
+            company,
+            state="posted",
+            posted_before=True,
+            payment_state="paid",
+            amount_residual="0.00",
+            line_ids=[line],
+        )
+        env = DraftCancelEnvironment(move=move)
+        executor = self.executor(env=env)
+        requested = {
+            "company_id": 7,
+            "move_id": 1101,
+            "expected_move_type": "out_invoice",
+        }
+        cap = capability("acct.move.draft_cancel_eligibility.v1")
+
+        result = executor(context(), cap, requested, "c" * 64, "d" * 64)
+
+        self.assertIs(result["eligible"], False)
+        self.assertIsNone(result["write_parameters"])
+        self.assertIn("move_is_not_draft", result["eligibility_failures"])
+        self.assertIn("posted_before_not_false", result["eligibility_failures"])
+        self.assertIn("payment_state_not_not_paid", result["eligibility_failures"])
+        self.assertIn("line_reconciliation_or_external_effect_present", result["eligibility_failures"])
+        self.assertEqual(result["failed_line_ids"], [3301])
+        executor.verify(context(), cap, requested, result, "c" * 64, "d" * 64)
+
+    def test_draft_cancel_eligibility_rejects_cross_company_without_receipt(self) -> None:
+        other_company = SimpleRecord(id=8)
+        move = pristine_draft_move(other_company)
+        env = DraftCancelEnvironment(move=move)
+        executor = self.executor(env=env)
+        cap = capability("acct.move.draft_cancel_eligibility.v1")
+
+        with mock.patch(
+            "odoo_accounting_cli_v3.odoo.executor.create_read_receipt"
+        ) as create_receipt:
+            with self.assertRaisesRegex(OdooExecutionError, "outside the bound company"):
+                executor(
+                    context(),
+                    cap,
+                    {
+                        "company_id": 7,
+                        "move_id": 1101,
+                        "expected_move_type": "out_invoice",
+                    },
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+        create_receipt.assert_not_called()
 
     def test_registry_list_omits_capabilities_missing_any_required_group(self) -> None:
         document = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))

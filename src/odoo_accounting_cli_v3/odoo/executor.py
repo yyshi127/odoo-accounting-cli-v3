@@ -6,6 +6,7 @@ import hashlib
 import json
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Iterable
 
 from ..domain.ap_open_items import ApOpenItemsBackend, read_ap_open_items
@@ -28,8 +29,134 @@ from .multicurrency_balance import OdooMulticurrencyBalanceBackend
 from .trial_balance import OdooTrialBalanceBackend
 
 
+SHA256_HEX = frozenset("0123456789abcdef")
+
+
 class OdooExecutionError(ValueError):
     pass
+
+
+def _record_id(value: Any) -> int | None:
+    if value in (False, None):
+        return None
+    raw = getattr(value, "id", value)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        return None
+    return raw
+
+
+def _ids(value: Any) -> list[int]:
+    if value in (False, None):
+        return []
+    raw = getattr(value, "ids", None)
+    if raw is None:
+        raw = value
+    if isinstance(raw, (list, tuple, set, frozenset)):
+        result = []
+        for item in raw:
+            record_id = _record_id(item)
+            if record_id is not None:
+                result.append(record_id)
+        return sorted(set(result))
+    record_id = _record_id(raw)
+    return [] if record_id is None else [record_id]
+
+
+def _valid_sha_binding(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in SHA256_HEX for character in value)
+    )
+
+
+def _decimal(value: Any) -> Decimal | None:
+    if value in (False, None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _amounts_equal_abs(left: Any, right: Any) -> bool:
+    left_decimal = _decimal(left)
+    right_decimal = _decimal(right)
+    if left_decimal is None or right_decimal is None:
+        return False
+    return abs(left_decimal) == abs(right_decimal)
+
+
+def _iter_records(value: Any) -> list[Any]:
+    if value in (False, None):
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
+
+
+def _check_read_acl(record: Any) -> None:
+    if hasattr(record, "check_access_rights"):
+        record.check_access_rights("read")
+    if hasattr(record, "check_access_rule"):
+        record.check_access_rule("read")
+
+
+def _has_draft_cancel_singular_effect_link(move: Any) -> bool:
+    return any(
+        (
+            _record_id(getattr(move, "auto_post_origin_id", None)) is not None,
+            _record_id(getattr(move, "origin_payment_id", None)) is not None,
+            _record_id(getattr(move, "statement_line_id", None)) is not None,
+            _record_id(getattr(move, "statement_id", None)) is not None,
+            _record_id(getattr(move, "tax_cash_basis_rec_id", None)) is not None,
+            _record_id(getattr(move, "tax_cash_basis_origin_move_id", None)) is not None,
+            _record_id(getattr(move, "reversed_entry_id", None)) is not None,
+            _record_id(getattr(move, "asset_id", None)) is not None,
+            _record_id(getattr(move, "closing_return_id", None)) is not None,
+            _record_id(getattr(move, "transfer_model_id", None)) is not None,
+            _record_id(getattr(move, "purchase_id", None)) is not None,
+            _record_id(getattr(move, "debit_origin_id", None)) is not None,
+            _record_id(getattr(move, "invoice_pdf_report_id", None)) is not None,
+            _record_id(getattr(move, "invoice_vendor_bill_id", None)) is not None,
+            _record_id(getattr(move, "purchase_vendor_bill_id", None)) is not None,
+            _record_id(getattr(move, "ubl_cii_xml_id", None)) is not None,
+            _record_id(getattr(move, "l10n_es_edi_facturae_xml_id", None)) is not None,
+            _record_id(getattr(move, "signing_user", None)) is not None,
+            _record_id(getattr(move, "message_main_attachment_id", None)) is not None,
+        )
+    )
+
+
+def _has_draft_cancel_plural_effect_link(move: Any) -> bool:
+    return any(
+        (
+            _ids(getattr(move, "payment_ids", [])),
+            _ids(getattr(move, "matched_payment_ids", [])),
+            _ids(getattr(move, "reconciled_payment_ids", [])),
+            _ids(getattr(move, "tax_cash_basis_created_move_ids", [])),
+            _ids(getattr(move, "reversal_move_ids", [])),
+            _ids(getattr(move, "adjusting_entry_origin_move_ids", [])),
+            _ids(getattr(move, "adjusting_entries_move_ids", [])),
+            _ids(getattr(move, "exchange_diff_partial_ids", [])),
+            _ids(getattr(move, "deferred_move_ids", [])),
+            _ids(getattr(move, "deferred_original_move_ids", [])),
+            _ids(getattr(move, "edi_document_ids", [])),
+            _ids(getattr(move, "expense_ids", [])),
+            _ids(getattr(move, "pos_order_ids", [])),
+            _ids(getattr(move, "statement_line_ids", [])),
+            _ids(getattr(move, "transaction_ids", [])),
+            _ids(getattr(move, "authorized_transaction_ids", [])),
+            _ids(getattr(move, "asset_ids", [])),
+            _ids(getattr(move, "stock_move_ids", [])),
+            _ids(getattr(move, "landed_costs_ids", [])),
+            _ids(getattr(move, "debit_note_ids", [])),
+            _ids(getattr(move, "attachment_ids", [])),
+        )
+    )
 
 
 class OdooReadExecutor:
@@ -232,6 +359,196 @@ class OdooReadExecutor:
         )
         return read_multicurrency_balance(backend, parameters)
 
+    def _read_draft_cancel_eligibility(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        company_id = parameters["company_id"]
+        move_id = parameters["move_id"]
+        expected_move_type = parameters["expected_move_type"]
+        if company_id != context.company_id or company_id not in context.allowed_company_ids:
+            raise OdooExecutionError("draft cancellation company is outside the signed binding")
+
+        company = self._env["res.company"].browse(company_id).exists()
+        if not company or len(company) != 1:
+            raise OdooExecutionError("draft cancellation company does not exist or is not visible")
+        _check_read_acl(company)
+
+        move = self._env["account.move"].browse(move_id).exists()
+        if not move or len(move) != 1:
+            raise OdooExecutionError("draft cancellation move does not exist or is not visible")
+        _check_read_acl(move)
+        if _record_id(getattr(move, "company_id", None)) != company_id:
+            raise OdooExecutionError("draft cancellation move is outside the bound company")
+
+        lines = _iter_records(getattr(move, "line_ids", []))
+        for line in lines:
+            _check_read_acl(line)
+
+        move_type = str(getattr(move, "move_type", "") or "")
+        state = str(getattr(move, "state", "") or "")
+        document_binding = str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
+        business_binding = str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
+        vendor = expected_move_type == "in_invoice"
+        journal = getattr(move, "journal_id", None)
+        currency = getattr(move, "currency_id", None)
+        line_ids = _ids(getattr(move, "line_ids", []))
+        failures: list[str] = []
+
+        if expected_move_type not in {"out_invoice", "in_invoice"}:
+            failures.append("expected_move_type_not_allowlisted")
+        if move_type != expected_move_type:
+            failures.append("move_type_mismatch")
+        if state != "draft":
+            failures.append("move_is_not_draft")
+        if getattr(move, "name", None) not in {False, "/"}:
+            failures.append("non_pristine_name_or_sequence")
+        if getattr(move, "posted_before", None) is not False:
+            failures.append("posted_before_not_false")
+        if str(getattr(move, "auto_post", "") or "") != "no":
+            failures.append("auto_post_not_disabled")
+        if getattr(move, "auto_post_until", None) not in {False, None}:
+            failures.append("auto_post_until_present")
+        if getattr(move, "sequence_prefix", None) not in {False, None, ""}:
+            failures.append("sequence_prefix_present")
+        if getattr(move, "sequence_number", None) not in {False, 0}:
+            failures.append("sequence_number_present")
+        if getattr(move, "made_sequence_gap", None) is not False:
+            failures.append("sequence_gap_flag_present")
+        if getattr(move, "checked", None) is not False:
+            failures.append("checked_flag_present")
+        if (
+            _record_id(journal) is None
+            or _record_id(getattr(journal, "company_id", None)) != company_id
+            or str(getattr(journal, "type", "") or "") != ("purchase" if vendor else "sale")
+            or getattr(journal, "active", True) is False
+        ):
+            failures.append("journal_not_active_expected_type")
+        if not _valid_sha_binding(document_binding):
+            failures.append("document_binding_missing_or_invalid")
+        if not _valid_sha_binding(business_binding):
+            failures.append("business_binding_missing_or_invalid")
+        if _record_id(currency) is None:
+            failures.append("currency_missing")
+        if str(getattr(move, "payment_state", "") or "") != "not_paid":
+            failures.append("payment_state_not_not_paid")
+        if not _amounts_equal_abs(
+            getattr(move, "amount_residual", None), getattr(move, "amount_total", None)
+        ):
+            failures.append("residual_total_mismatch")
+        if (
+            getattr(move, "secure_sequence_number", 0) not in {False, 0}
+            or bool(getattr(move, "inalterable_hash", False))
+            or bool(getattr(move, "need_cancel_request", False))
+            or bool(getattr(move, "is_manually_modified", False))
+        ):
+            failures.append("posting_hash_edi_or_manual_mutation_evidence")
+
+        if _has_draft_cancel_singular_effect_link(move):
+            failures.append("singular_external_effect_link_present")
+        if _has_draft_cancel_plural_effect_link(move):
+            failures.append("plural_external_effect_link_present")
+        if (
+            bool(getattr(move, "signature", False))
+            or bool(getattr(move, "is_move_sent", False))
+            or getattr(move, "sending_data", False) not in (False, None, {})
+            or bool(getattr(move, "is_being_sent", False))
+            or getattr(move, "invoice_source_email", False) not in (False, None, "")
+        ):
+            failures.append("invoice_sending_signature_or_attachment_effect_present")
+        if not line_ids:
+            failures.append("line_graph_empty")
+        if set(line_ids) != {_record_id(line) for line in lines}:
+            failures.append("line_graph_not_complete")
+
+        line_failures = []
+        for line in lines:
+            line_id = _record_id(line)
+            if (
+                _record_id(getattr(line, "move_id", None)) != move_id
+                or _record_id(getattr(line, "company_id", None)) != company_id
+                or str(getattr(line, "parent_state", "") or "") != "draft"
+                or bool(getattr(line, "reconciled", False))
+                or _record_id(getattr(line, "full_reconcile_id", None)) is not None
+                or _ids(getattr(line, "matched_debit_ids", []))
+                or _ids(getattr(line, "matched_credit_ids", []))
+                or _record_id(getattr(line, "statement_line_id", None)) is not None
+                or _record_id(getattr(line, "payment_id", None)) is not None
+                or _record_id(getattr(line, "statement_id", None)) is not None
+                or _record_id(getattr(line, "purchase_order_id", None)) is not None
+                or _record_id(getattr(line, "reconcile_model_id", None)) is not None
+                or _ids(getattr(line, "asset_ids", []))
+                or _ids(getattr(line, "sale_line_ids", []))
+                or _ids(getattr(line, "distribution_analytic_account_ids", []))
+                or _ids(getattr(line, "reconciled_lines_ids", []))
+                or _ids(getattr(line, "reconciled_lines_excluding_exchange_diff_ids", []))
+                or _record_id(getattr(line, "purchase_line_id", None)) is not None
+                or _record_id(getattr(line, "expense_id", None)) is not None
+                or _record_id(getattr(line, "cogs_origin_id", None)) is not None
+                or bool(getattr(line, "is_landed_costs_line", False))
+                or _ids(getattr(line, "move_attachment_ids", []))
+                or bool(getattr(line, "is_imported", False))
+                or bool(getattr(line, "is_downpayment", False))
+                or getattr(line, "analytic_distribution", False) not in (False, None, {})
+                or _ids(getattr(line, "analytic_line_ids", []))
+                or getattr(line, "deferred_start_date", None) not in {None, False}
+                or getattr(line, "deferred_end_date", None) not in {None, False}
+                or str(getattr(line, "display_type", "") or "") == "cogs"
+            ):
+                line_failures.append(line_id or 0)
+        if line_failures:
+            failures.append("line_reconciliation_or_external_effect_present")
+
+        checks = [
+            "bound_company_read_acl",
+            "single_visible_move",
+            "expected_move_type_allowlist",
+            "pristine_draft_state_and_sequence",
+            "immutable_v3_document_bindings_present",
+            "active_sale_or_purchase_journal",
+            "fully_unpaid_residual_matches_total",
+            "no_payment_reconciliation_tax_asset_or_edi_links",
+            "complete_line_guard_graph",
+        ]
+        eligible = not failures
+        write_parameters = (
+            {
+                "company_id": company_id,
+                "move_id": move_id,
+                "expected_move_type": expected_move_type,
+                "expected_document_binding": document_binding,
+                "expected_business_binding": business_binding,
+            }
+            if eligible
+            else None
+        )
+        return {
+            "candidate_write_capability_id": "acct.move.draft_cancel.v1",
+            "basis": "odoo_pristine_v3_draft_cancel_eligibility_read",
+            "filters": {
+                "company_id": company_id,
+                "move_id": move_id,
+                "expected_move_type": expected_move_type,
+            },
+            "target": {
+                "company_id": company_id,
+                "move_id": move_id,
+                "move_type": move_type,
+                "state": state,
+                "payment_state": str(getattr(move, "payment_state", "") or ""),
+                "journal_id": _record_id(journal),
+                "currency_id": _record_id(currency),
+                "line_ids": line_ids,
+                "document_binding": document_binding,
+                "business_binding": business_binding,
+            },
+            "eligible": eligible,
+            "eligibility_failures": sorted(set(failures)),
+            "failed_line_ids": sorted(set(line_failures)),
+            "checks": checks,
+            "write_parameters": write_parameters,
+            "page": {"count": 1, "total_count": 1},
+        }
+
     def _read_handlers(
         self,
     ) -> dict[str, Callable[[RequestContext, dict[str, Any]], dict[str, Any]]]:
@@ -241,6 +558,7 @@ class OdooReadExecutor:
             "acct.ar.open_items.v1": self._read_ar_open_items,
             "acct.ap.open_items.v1": self._read_ap_open_items,
             "acct.multicurrency.balance_read.v1": self._read_multicurrency_balance,
+            "acct.move.draft_cancel_eligibility.v1": self._read_draft_cancel_eligibility,
         }
 
     def __call__(

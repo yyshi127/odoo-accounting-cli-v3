@@ -332,6 +332,19 @@
       }
     },
     {
+      "id": "pi-v1-draft-cancel-eligibility-read",
+      "category": "ordinary",
+      "input": "先不要取消单据。请只读取主公司这张客户草稿发票是否符合 V3 安全取消条件，核对公司、草稿单据 ID、out_invoice、绑定值和完整行图，返回可审计回执。",
+      "expected": {
+        "capability_id": "acct.move.draft_cancel_eligibility.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "move_id": {"$fixture": "draft_customer_invoice_id"},
+          "expected_move_type": "out_invoice"
+        }
+      }
+    },
+    {
       "id": "pi-v1-customer-draft-cancel",
       "category": "ordinary",
       "input": "取消主公司这张由可信候选读取核对过、从未过账的客户草稿发票。候选读取已返回草稿单据 ID、out_invoice、单据绑定和业务绑定；取消原因是客户撤回订单。请先展示完整七项参数和业务预览，待我审批后再执行，不得直接写入。",

@@ -475,11 +475,12 @@ source is the exact V3-created `account.move` record's
 `odoo_cli_v3_document_binding` and `odoo_cli_v3_business_binding`, read under the
 bound user, company, ACL, database, release, and Odoo receipt identity. Runtime
 configuration must not supply defaults for either value. Before enabling this
-write in any sandbox, register and evidence a candidate-read path that returns
-the exact company, move ID, `out_invoice`/`in_invoice` type, both bindings, and
-pristine-draft eligibility. The read must pass strict output-schema, ACL,
-cross-company, tamper, Pi parameter-transit, and real-Odoo receipt gates. That
-read evidence does not yet exist, so the write remains disabled.
+write in any sandbox, `acct.move.draft_cancel_eligibility.v1` must return the
+exact company, move ID, `out_invoice`/`in_invoice` type, both bindings, and
+pristine-draft eligibility. The contract is registered for test staging only and
+has strict output-schema, ACL, cross-company, and Pi parameter-transit coverage;
+it still lacks retained real-sandbox Odoo receipt evidence, so the write remains
+disabled.
 Staging also requires a reviewed target-module graph and a database automation
 inventory proving that `account.move.write` has no active override, server
 action, base automation, webhook, mail, or queue side effect outside the

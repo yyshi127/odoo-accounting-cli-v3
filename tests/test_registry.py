@@ -35,7 +35,7 @@ class RegistryTest(unittest.TestCase):
                 self.assertIs(item["approval"]["required"], True)
                 self.assertIs(item["idempotency"]["required"], True)
 
-    def test_only_five_contract_tested_reads_are_staged_in_test(self) -> None:
+    def test_only_contract_tested_reads_are_staged_in_test(self) -> None:
         staged = [
             item
             for item in self.document["capabilities"]
@@ -49,6 +49,7 @@ class RegistryTest(unittest.TestCase):
                 "acct.ar.open_items.v1",
                 "acct.ap.open_items.v1",
                 "acct.multicurrency.balance_read.v1",
+                "acct.move.draft_cancel_eligibility.v1",
             ],
         )
         for item in staged:
@@ -135,6 +136,43 @@ class RegistryTest(unittest.TestCase):
         )
         self.assertEqual(item["staged_environments"], ["test"])
         self.assertEqual(item["enabled_environments"], [])
+
+    def test_draft_cancel_eligibility_contract_is_strict_and_not_enabled(self) -> None:
+        item = next(
+            item
+            for item in self.document["capabilities"]
+            if item["id"] == "acct.move.draft_cancel_eligibility.v1"
+        )
+        self.assertEqual(
+            item["input_schema"]["required"],
+            ["company_id", "move_id", "expected_move_type"],
+        )
+        self.assertIs(item["input_schema"]["additionalProperties"], False)
+        self.assertEqual(item["access"], "read")
+        self.assertEqual(item["risk_level"], "medium")
+        self.assertEqual(item["odoo_permissions"], ["account.group_account_invoice"])
+        self.assertEqual(item["company_scope"], "explicit_single_company")
+        self.assertEqual(item["evidence"], {"level": "contract_tested", "receipts": []})
+        self.assertEqual(item["staged_environments"], ["test"])
+        self.assertEqual(item["enabled_environments"], [])
+        output = item["output_schema"]
+        self.assertEqual(
+            output["required"],
+            [
+                "candidate_write_capability_id",
+                "basis",
+                "filters",
+                "target",
+                "eligible",
+                "eligibility_failures",
+                "failed_line_ids",
+                "checks",
+                "write_parameters",
+                "page",
+                "receipt",
+            ],
+        )
+        self.assertIn("oneOf", output["properties"]["write_parameters"])
 
     def test_ap_open_items_contract_matches_strict_historical_open_item_shape(self) -> None:
         item = next(

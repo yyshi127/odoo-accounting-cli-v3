@@ -275,6 +275,7 @@ class GatewayTest(unittest.TestCase):
                 "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
                 "acct.gl.trial_balance.v1",
+                "acct.move.draft_cancel_eligibility.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
             ],
