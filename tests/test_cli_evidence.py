@@ -422,6 +422,23 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
     assert payload["ok"] is True
     assert payload["business_succeeded"] is False
     assert payload["data"]["database_name"] == "odoo_v3_sandbox"
+    assert payload["data"]["preflight_manifest"]["scope"] == (
+        "odoo-accounting-cli-v3.sandbox-write-preflight.v1"
+    )
+    assert payload["data"]["preflight_manifest"]["real_odoo_write_performed"] is False
+    assert payload["data"]["preflight_manifest_sha256"] == __import__(
+        "hashlib"
+    ).sha256(
+        __import__("json")
+        .dumps(
+            payload["data"]["preflight_manifest"],
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        .encode("utf-8")
+    ).hexdigest()
     assert payload["data"]["sandbox_write_evidence_collection_admissible"] is True
     assert payload["data"]["real_odoo_write_performed"] is False
     assert payload["data"]["production_promotion_allowed"] is False

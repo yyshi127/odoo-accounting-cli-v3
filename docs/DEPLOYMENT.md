@@ -662,7 +662,18 @@ carry the exact registered `capability_id` they are promoting; a receipt bound
 to one capability is never reusable for a different capability. No sandbox
 result authorizes a production write.
 
-Before a sandbox write evidence bundle can be reviewed for registry promotion,
+Before a sandbox write evidence bundle can be collected for registry promotion,
+first run the read-only
+`odoo-accounting-cli-v3 evidence sandbox-write-preflight ...` gate and retain
+its `preflight_manifest` plus `preflight_manifest_sha256`. The final sandbox
+write evidence bundle must carry that `preflight_manifest_sha256`; evidence
+without a preflight binding is rejected before promotion review. The preflight
+manifest is not an Odoo write receipt and always reports
+`real_odoo_write_performed:false`; it only proves that the release, staged
+sandbox runtime, evidence root, and capacity checks were admissible before
+collection began.
+
+After collection, and before the bundle can be reviewed for registry promotion,
 validate its retained JSON bundle with the exact release's
 `odoo-accounting-cli-v3 evidence verify-sandbox-write --evidence-json ...`.
 When the retained phase artifacts have not yet been assembled into the final

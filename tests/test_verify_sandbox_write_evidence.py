@@ -54,6 +54,7 @@ def _document():
         "company_id": 7,
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "environment": "sandbox",
+        "preflight_manifest_sha256": "9" * 64,
         "production_promotion_allowed": False,
         "release_identity": {
             "commit": "abc123",
@@ -90,6 +91,7 @@ def test_complete_sandbox_write_evidence_is_accepted():
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "environment": "sandbox",
         "production_promotion_allowed": False,
+        "preflight_manifest_sha256": "9" * 64,
         "registry_digest": "b" * 64,
         "registry_receipt_count": 7,
         "release_sha256": "c" * 64,
@@ -132,6 +134,10 @@ def test_complete_sandbox_write_evidence_is_accepted():
             lambda document: document["lifecycle"].pop("recovery_case_digest"),
             "lifecycle fields are invalid",
         ),
+        (
+            lambda document: document.__setitem__("preflight_manifest_sha256", "X"),
+            "preflight_manifest_sha256 must be lowercase SHA-256",
+        ),
     ),
 )
 def test_sandbox_write_evidence_rejects_non_promotable_bundles(mutate, match):
@@ -170,6 +176,7 @@ def _input_manifest(tmp_path: Path):
         "company_id": 7,
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "environment": "sandbox",
+        "preflight_manifest_sha256": "9" * 64,
         "production_promotion_allowed": False,
         "release_identity": {
             "commit": "abc123",
@@ -195,6 +202,7 @@ def test_assembler_builds_verified_evidence_from_retained_artifact_files(tmp_pat
     document = verifier.assemble_document(manifest, base_dir=tmp_path)
 
     assert verifier.verify_document(document)["verified"] is True
+    assert document["preflight_manifest_sha256"] == "9" * 64
     for field, relative_path in manifest["lifecycle_artifacts"].items():
         artifact = tmp_path / relative_path
         assert document["lifecycle"][field] == hashlib.sha256(

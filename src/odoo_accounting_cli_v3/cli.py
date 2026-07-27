@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import shutil
@@ -46,6 +47,10 @@ def _json(value: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
 def _success(
@@ -829,11 +834,32 @@ def evidence_sandbox_write_preflight(
         release_root=config.base_runtime.release_root,
         minimum_free_bytes=min_free_bytes,
     )
+    preflight_manifest = {
+        "schema_version": 1,
+        "scope": "odoo-accounting-cli-v3.sandbox-write-preflight.v1",
+        "database_name": database_name,
+        "database_uuid": config.base_runtime.database_uuid,
+        "environment": config.base_runtime.environment,
+        "evidence_root": evidence_root_status,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "registry_digest": identity["registry_digest"],
+        "release_identity": {
+            "commit": identity["commit"],
+            "manifest_sha256": identity["manifest_sha256"],
+            "package_sha256": identity["package_sha256"],
+            "release": identity["release"],
+        },
+        "runtime": config.runtime_identity,
+        "write_execution_mode": config.write_execution_mode,
+    }
     _success(
         command,
         {
             "database_name": database_name,
             "evidence_root": evidence_root_status,
+            "preflight_manifest": preflight_manifest,
+            "preflight_manifest_sha256": _sha256_json(preflight_manifest),
             "production_promotion_allowed": False,
             "real_odoo_write_performed": False,
             "release_identity": identity,

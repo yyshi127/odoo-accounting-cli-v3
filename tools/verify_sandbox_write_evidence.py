@@ -107,6 +107,7 @@ def verify_document(document: Any) -> dict[str, Any]:
         "database_uuid",
         "environment",
         "lifecycle",
+        "preflight_manifest_sha256",
         "production_promotion_allowed",
         "registry_receipts",
         "release_identity",
@@ -129,6 +130,9 @@ def verify_document(document: Any) -> dict[str, Any]:
         raise SandboxWriteEvidenceError("evidence.capability_id is invalid")
     company_id = _require_positive_int(root["company_id"], "evidence.company_id")
     database_uuid = _require_text(root["database_uuid"], "evidence.database_uuid")
+    preflight_manifest_sha256 = _require_hex64(
+        root["preflight_manifest_sha256"], "evidence.preflight_manifest_sha256"
+    )
 
     release = _require_object(root["release_identity"], "evidence.release_identity")
     if set(release) != {"commit", "manifest_sha256", "package_sha256", "registry_digest", "release"}:
@@ -200,6 +204,7 @@ def verify_document(document: Any) -> dict[str, Any]:
         "database_uuid": database_uuid,
         "environment": "sandbox",
         "production_promotion_allowed": False,
+        "preflight_manifest_sha256": preflight_manifest_sha256,
         "registry_digest": registry_digest,
         "registry_receipt_count": len(receipts),
         "release_sha256": manifest_sha256,
@@ -247,6 +252,7 @@ def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
         "environment",
         "lifecycle_artifacts",
         "lifecycle_receipt_ids",
+        "preflight_manifest_sha256",
         "production_promotion_allowed",
         "registry_receipts",
         "release_identity",
@@ -288,6 +294,7 @@ def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
         "company_id": root["company_id"],
         "database_uuid": root["database_uuid"],
         "environment": root["environment"],
+        "preflight_manifest_sha256": root["preflight_manifest_sha256"],
         "production_promotion_allowed": False,
         "release_identity": root["release_identity"],
         "lifecycle": lifecycle,
