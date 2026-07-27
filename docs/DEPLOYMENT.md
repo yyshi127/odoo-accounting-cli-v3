@@ -678,6 +678,11 @@ registry receipts in a metadata JSON with scope
 The command builds the `--assemble-from` input manifest from the retained files,
 checks that it is bound to the currently anchored release and registry, and
 prevents hand-listed artifact paths from drifting.
+For an audit-friendly completeness report, run
+`odoo-accounting-cli-v3 evidence inspect-sandbox-write-root --metadata-json ...`.
+That command recomputes the retained metadata, preflight manifest, and lifecycle
+artifact SHA-256 values, verifies that the directory can still assemble into a
+valid sandbox evidence bundle, and still reports `business_succeeded:false`.
 
 The `--assemble-from` input manifest references the retained
 `preflight_manifest` file; the exact release computes

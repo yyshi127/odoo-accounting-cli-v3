@@ -431,6 +431,87 @@ def test_evidence_build_sandbox_write_input_rejects_release_mismatch(
     assert '"code":"sandbox_write_evidence_release_mismatch"' in result.output
 
 
+def test_evidence_inspect_sandbox_write_root_reports_bound_hashes(
+    tmp_path: Path,
+):
+    path = tmp_path / "sandbox-write-metadata.json"
+    path.write_text(
+        __import__("json").dumps(sandbox_write_metadata(tmp_path)),
+        encoding="utf-8",
+    )
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "c" * 64,
+        "package_sha256": "e" * 64,
+        "registry_digest": "b" * 64,
+        "release": "0.1.0.dev167-test",
+        "verified": True,
+        "version": "0.1.0.dev167",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "inspect-sandbox-write-root",
+                "--metadata-json",
+                str(path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.inspect-sandbox-write-root"
+    assert payload["business_succeeded"] is False
+    report = payload["data"]["root_report"]
+    assert report["verified"] is True
+    assert report["metadata_sha256"] == __import__("hashlib").sha256(
+        path.read_bytes()
+    ).hexdigest()
+    assert report["artifact_sha256"]["preview_digest"] == __import__(
+        "hashlib"
+    ).sha256((tmp_path / "preview_digest.json").read_bytes()).hexdigest()
+
+
+def test_evidence_inspect_sandbox_write_root_rejects_release_mismatch(
+    tmp_path: Path,
+):
+    path = tmp_path / "sandbox-write-metadata.json"
+    path.write_text(
+        __import__("json").dumps(sandbox_write_metadata(tmp_path)),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "f" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev167-test",
+            "verified": True,
+            "version": "0.1.0.dev167",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "inspect-sandbox-write-root",
+                "--metadata-json",
+                str(path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"sandbox_write_evidence_release_mismatch"' in result.output
+
+
 def test_evidence_verify_sandbox_write_requires_exactly_one_input(tmp_path: Path):
     document = sandbox_write_document()
     evidence = tmp_path / "evidence.json"

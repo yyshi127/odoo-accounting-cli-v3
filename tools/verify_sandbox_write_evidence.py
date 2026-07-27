@@ -371,6 +371,43 @@ def build_input_manifest_path(path: Path) -> dict[str, Any]:
     return build_input_manifest(metadata, base_dir=path.parent)
 
 
+def inspect_retained_root(metadata: Any, *, base_dir: Path) -> dict[str, Any]:
+    manifest = build_input_manifest(metadata, base_dir=base_dir)
+    document = assemble_document(manifest, base_dir=base_dir)
+    evidence = verify_document(document)
+    return {
+        "artifact_sha256": {
+            field: _sha256_file(
+                _source_path(
+                    base_dir,
+                    manifest["lifecycle_artifacts"][field],
+                    f"lifecycle_artifacts.{field}",
+                )
+            )
+            for field in sorted(DIGEST_LIFECYCLE_FIELDS)
+        },
+        "database_uuid": evidence["database_uuid"],
+        "environment": evidence["environment"],
+        "input_manifest": manifest,
+        "preflight_manifest_sha256": document["preflight_manifest_sha256"],
+        "production_promotion_allowed": False,
+        "registry_digest": evidence["registry_digest"],
+        "registry_receipt_count": evidence["registry_receipt_count"],
+        "release_sha256": evidence["release_sha256"],
+        "verified": True,
+    }
+
+
+def inspect_retained_root_path(path: Path) -> dict[str, Any]:
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("metadata JSON is invalid") from exc
+    result = inspect_retained_root(metadata, base_dir=path.parent)
+    result["metadata_sha256"] = _sha256_file(path)
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence_json", nargs="?", type=Path)
@@ -384,17 +421,29 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Build a sandbox-write evidence input manifest from standard retained artifacts and metadata.",
     )
+    parser.add_argument(
+        "--inspect-root",
+        type=Path,
+        help="Inspect standard retained sandbox-write artifacts and print their verified completeness report.",
+    )
     args = parser.parse_args(argv)
     try:
         selected = sum(
             item is not None
-            for item in (args.evidence_json, args.assemble_from, args.build_input_from)
+            for item in (
+                args.evidence_json,
+                args.assemble_from,
+                args.build_input_from,
+                args.inspect_root,
+            )
         )
         if selected != 1:
             parser.error(
-                "provide exactly one of evidence_json, --assemble-from, or --build-input-from"
+                "provide exactly one of evidence_json, --assemble-from, --build-input-from, or --inspect-root"
             )
-        if args.build_input_from is not None:
+        if args.inspect_root is not None:
+            result = inspect_retained_root_path(args.inspect_root)
+        elif args.build_input_from is not None:
             result = build_input_manifest_path(args.build_input_from)
         elif args.assemble_from is not None:
             result = assemble_path(args.assemble_from)

@@ -824,6 +824,50 @@ def evidence_build_sandbox_write_input(metadata_json: Path) -> None:
     )
 
 
+@evidence_group.command("inspect-sandbox-write-root")
+@click.option(
+    "--metadata-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Metadata JSON beside standard retained sandbox-write artifacts.",
+)
+def evidence_inspect_sandbox_write_root(metadata_json: Path) -> None:
+    """Inspect a retained sandbox-write evidence root without authorizing production."""
+
+    command = "evidence.inspect-sandbox-write-root"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        report = verifier.inspect_retained_root_path(metadata_json)
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="sandbox_write_evidence_root_rejected",
+                message="The retained sandbox write evidence root is incomplete or unsafe.",
+                exit_code=6,
+            ) from exc
+        raise
+    if (
+        report.get("release_sha256") != identity["manifest_sha256"]
+        or report.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_evidence_release_mismatch",
+            message="The retained sandbox write evidence root is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "release_identity": identity,
+            "root_report": report,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("sandbox-write-preflight")
 @click.option(
     "--write-runtime-config",

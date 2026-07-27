@@ -280,6 +280,39 @@ def test_builder_cli_prints_verified_input_manifest(tmp_path, capsys):
     )["verified"] is True
 
 
+def test_inspector_reports_standard_root_hashes(tmp_path):
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(_metadata(tmp_path)), encoding="utf-8")
+
+    report = verifier.inspect_retained_root_path(path)
+
+    assert report["verified"] is True
+    assert report["metadata_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert report["preflight_manifest_sha256"] == hashlib.sha256(
+        (tmp_path / "preflight_manifest.json").read_bytes()
+    ).hexdigest()
+    assert set(report["artifact_sha256"]) == verifier.DIGEST_LIFECYCLE_FIELDS
+    assert report["artifact_sha256"]["preview_digest"] == hashlib.sha256(
+        (tmp_path / "preview_digest.json").read_bytes()
+    ).hexdigest()
+    assert report["input_manifest"]["lifecycle_artifacts"] == (
+        verifier.DEFAULT_LIFECYCLE_ARTIFACTS
+    )
+
+
+def test_inspector_cli_prints_completeness_report(tmp_path, capsys):
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(_metadata(tmp_path)), encoding="utf-8")
+
+    assert verifier.main(["--inspect-root", str(path)]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["verified"] is True
+    assert output["registry_receipt_count"] == 7
+    assert output["artifact_sha256"]["approval_digest"] == hashlib.sha256(
+        (tmp_path / "approval_digest.json").read_bytes()
+    ).hexdigest()
+
+
 def test_builder_rejects_missing_standard_artifacts(tmp_path):
     metadata = _metadata(tmp_path)
     (tmp_path / "preview_digest.json").unlink()
