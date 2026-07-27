@@ -65,6 +65,7 @@ RECEIPT_FIELDS = frozenset(
 INPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-input.v1"
 METADATA_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1"
 OUTPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence.v1"
+PREFLIGHT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-preflight.v1"
 DIGEST_LIFECYCLE_FIELDS = frozenset(
     field for field in LIFECYCLE_FIELDS if not field.endswith("_id")
 )
@@ -73,6 +74,22 @@ DEFAULT_PREFLIGHT_MANIFEST = "preflight_manifest.json"
 DEFAULT_LIFECYCLE_ARTIFACTS = {
     field: f"{field}.json" for field in sorted(DIGEST_LIFECYCLE_FIELDS)
 }
+PREFLIGHT_FIELDS = frozenset(
+    {
+        "database_name",
+        "database_uuid",
+        "environment",
+        "evidence_root",
+        "production_promotion_allowed",
+        "real_odoo_write_performed",
+        "registry_digest",
+        "release_identity",
+        "runtime",
+        "schema_version",
+        "scope",
+        "write_execution_mode",
+    }
+)
 
 
 class SandboxWriteEvidenceError(ValueError):
@@ -248,6 +265,56 @@ def _source_path(base: Path, value: Any, label: str) -> Path:
     return resolved
 
 
+def _load_json_path(path: Path, label: str) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError(f"{label} JSON is invalid") from exc
+
+
+def _validate_preflight_manifest(
+    preflight: Any,
+    *,
+    metadata: dict[str, Any],
+) -> None:
+    document = _require_object(preflight, "preflight_manifest")
+    if set(document) != PREFLIGHT_FIELDS:
+        raise SandboxWriteEvidenceError("preflight_manifest fields are invalid")
+    if document["schema_version"] != 1:
+        raise SandboxWriteEvidenceError("preflight_manifest.schema_version must be 1")
+    if document["scope"] != PREFLIGHT_SCOPE:
+        raise SandboxWriteEvidenceError("preflight_manifest.scope is invalid")
+    if document["environment"] != "sandbox":
+        raise SandboxWriteEvidenceError("preflight_manifest must target sandbox")
+    if document["production_promotion_allowed"] is not False:
+        raise SandboxWriteEvidenceError("preflight_manifest must not authorize production")
+    if document["real_odoo_write_performed"] is not False:
+        raise SandboxWriteEvidenceError("preflight_manifest must not be a write receipt")
+    if document["write_execution_mode"] != "sandbox_staged":
+        raise SandboxWriteEvidenceError("preflight_manifest write mode is invalid")
+    if document["database_uuid"] != metadata["database_uuid"]:
+        raise SandboxWriteEvidenceError("preflight_manifest database_uuid mismatch")
+    if document["environment"] != metadata["environment"]:
+        raise SandboxWriteEvidenceError("preflight_manifest environment mismatch")
+    if document["registry_digest"] != metadata["release_identity"]["registry_digest"]:
+        raise SandboxWriteEvidenceError("preflight_manifest registry_digest mismatch")
+    release = _require_object(
+        document["release_identity"], "preflight_manifest.release_identity"
+    )
+    if set(release) != {"commit", "manifest_sha256", "package_sha256", "release"}:
+        raise SandboxWriteEvidenceError("preflight_manifest release identity fields are invalid")
+    expected_release = metadata["release_identity"]
+    for field in ("commit", "manifest_sha256", "package_sha256", "release"):
+        if release[field] != expected_release[field]:
+            raise SandboxWriteEvidenceError(
+                f"preflight_manifest release_identity.{field} mismatch"
+            )
+    runtime = _require_object(document["runtime"], "preflight_manifest.runtime")
+    for field in ("database_uuid", "environment", "write_execution_mode"):
+        if runtime.get(field) != document[field]:
+            raise SandboxWriteEvidenceError(f"preflight_manifest runtime.{field} mismatch")
+
+
 def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
     root = _require_object(manifest, "input")
     expected_root = {
@@ -283,9 +350,14 @@ def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
         raise SandboxWriteEvidenceError("lifecycle artifact fields are invalid")
     if set(receipt_ids) != ID_LIFECYCLE_FIELDS:
         raise SandboxWriteEvidenceError("lifecycle receipt id fields are invalid")
-    preflight_manifest_sha256 = _sha256_file(
-        _source_path(base_dir, root["preflight_manifest"], "input.preflight_manifest")
+    preflight_path = _source_path(
+        base_dir, root["preflight_manifest"], "input.preflight_manifest"
     )
+    _validate_preflight_manifest(
+        _load_json_path(preflight_path, "preflight_manifest"),
+        metadata=root,
+    )
+    preflight_manifest_sha256 = _sha256_file(preflight_path)
 
     lifecycle: dict[str, str] = {}
     for field in sorted(DIGEST_LIFECYCLE_FIELDS):

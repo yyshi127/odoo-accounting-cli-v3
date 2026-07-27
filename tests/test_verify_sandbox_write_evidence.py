@@ -173,9 +173,31 @@ def _write_preflight_manifest(tmp_path: Path) -> str:
     path.write_text(
         json.dumps(
             {
-                "scope": "odoo-accounting-cli-v3.sandbox-write-preflight.v1",
+                "schema_version": 1,
+                "scope": verifier.PREFLIGHT_SCOPE,
+                "database_name": "odoo_v3_sandbox",
                 "database_uuid": "11111111-1111-4111-8111-111111111111",
-                "release": "0.1.0.dev165-abc123",
+                "environment": "sandbox",
+                "evidence_root": {
+                    "available_bytes": 9_000_000_000,
+                    "minimum_free_bytes": 8_589_934_592,
+                    "path": str(tmp_path),
+                },
+                "production_promotion_allowed": False,
+                "real_odoo_write_performed": False,
+                "registry_digest": "b" * 64,
+                "release_identity": {
+                    "commit": "abc123",
+                    "manifest_sha256": "c" * 64,
+                    "package_sha256": "e" * 64,
+                    "release": "0.1.0.dev162-abc123",
+                },
+                "runtime": {
+                    "database_uuid": "11111111-1111-4111-8111-111111111111",
+                    "environment": "sandbox",
+                    "write_execution_mode": "sandbox_staged",
+                },
+                "write_execution_mode": "sandbox_staged",
             },
             sort_keys=True,
         ),
@@ -318,6 +340,46 @@ def test_builder_rejects_missing_standard_artifacts(tmp_path):
     (tmp_path / "preview_digest.json").unlink()
 
     with pytest.raises(verifier.SandboxWriteEvidenceError, match="file is absent"):
+        verifier.build_input_manifest(metadata, base_dir=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (
+            lambda preflight: preflight.__setitem__(
+                "database_uuid", "22222222-2222-4222-8222-222222222222"
+            ),
+            "database_uuid mismatch",
+        ),
+        (
+            lambda preflight: preflight.__setitem__("registry_digest", "f" * 64),
+            "registry_digest mismatch",
+        ),
+        (
+            lambda preflight: preflight["release_identity"].__setitem__(
+                "manifest_sha256", "f" * 64
+            ),
+            "release_identity.manifest_sha256 mismatch",
+        ),
+        (
+            lambda preflight: preflight.__setitem__(
+                "real_odoo_write_performed", True
+            ),
+            "must not be a write receipt",
+        ),
+    ),
+)
+def test_builder_rejects_preflight_manifest_scope_mismatches(
+    tmp_path, mutate, match
+):
+    metadata = _metadata(tmp_path)
+    path = tmp_path / "preflight_manifest.json"
+    preflight = json.loads(path.read_text(encoding="utf-8"))
+    mutate(preflight)
+    path.write_text(json.dumps(preflight, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match=match):
         verifier.build_input_manifest(metadata, base_dir=tmp_path)
 
 

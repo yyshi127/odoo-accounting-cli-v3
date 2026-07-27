@@ -688,8 +688,13 @@ The `--assemble-from` input manifest references the retained
 `preflight_manifest` file; the exact release computes
 `preflight_manifest_sha256` from the retained bytes and copies only the digest
 into the final evidence bundle. Evidence without this computed preflight
-binding is rejected before promotion review. The preflight manifest is not an
-Odoo write receipt and always reports
+binding is rejected before promotion review. The assembler also validates the
+retained preflight manifest's `database_uuid`, `environment`,
+`registry_digest`, release identity, `write_execution_mode`, and runtime
+identity against the metadata before it computes the final evidence document.
+Mixing a preflight file from one sandbox, release, or registry with another
+metadata set is rejected. The preflight manifest is not an Odoo write receipt
+and always reports
 `real_odoo_write_performed:false`; it only proves that the release, staged
 sandbox runtime, evidence root, and capacity checks were admissible before
 collection began.
