@@ -669,7 +669,18 @@ to one capability is never reusable for a different capability. No sandbox
 result authorizes a production write.
 
 Before a sandbox write evidence bundle can be collected for registry promotion,
-first run the read-only static readiness gate
+first run the read-only environment audit:
+
+`odoo-accounting-cli-v3 evidence sandbox-write-environment-audit --write-runtime-config ... --evidence-root ...`
+
+This command does not execute Odoo and does not create evidence. It reports
+whether the write runtime exists, is bound to `sandbox_staged`, names a clearly
+sandbox database, has a staged sandbox base runtime, whether the evidence root
+is usable and has enough free space, and how many registered write capabilities
+are statically admissible. A missing runtime or evidence root must keep
+`environment_ready_for_sandbox_write_drills:false`.
+
+Then run the read-only static readiness gate for the target capability:
 `odoo-accounting-cli-v3 evidence write-capability-readiness --capability-id ...`.
 It checks that the exact release's registry entry is a write capability with
 strict schemas, approval, idempotency, recovery metadata, service model

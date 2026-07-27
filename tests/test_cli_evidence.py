@@ -1246,6 +1246,98 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
     assert payload["data"]["production_promotion_allowed"] is False
 
 
+def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
+    tmp_path: Path,
+):
+    runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
+    evidence_root = tmp_path / "evidence-root"
+    evidence_root.mkdir()
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev190",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-write-environment-audit",
+                "--write-runtime-config",
+                str(runtime_path),
+                "--evidence-root",
+                str(evidence_root),
+                "--min-free-bytes",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-write-environment-audit"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert payload["data"]["runtime"]["ready"] is True
+    assert payload["data"]["runtime"]["write_execution_mode"] == "sandbox_staged"
+    assert payload["data"]["runtime"]["database_name"] == "odoo_v3_sandbox"
+    assert payload["data"]["evidence_root"]["ready"] is True
+    assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
+    assert payload["data"]["total_write_capabilities"] == 14
+    assert payload["data"]["sandbox_drill_admissible_count"] == 14
+    assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
+
+
+def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev190",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-write-environment-audit",
+                "--write-runtime-config",
+                str(tmp_path / "missing-write-runtime.json"),
+                "--min-free-bytes",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["environment_ready_for_sandbox_write_drills"] is False
+    assert payload["data"]["runtime"]["ready"] is False
+    assert payload["data"]["runtime"]["status"] == "missing"
+    assert payload["data"]["evidence_root"]["ready"] is False
+    assert payload["data"]["evidence_root"]["status"] == "missing"
+    assert payload["data"]["evidence_root"]["blockers"] == [
+        "sandbox write evidence root was not supplied"
+    ]
+    assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
+
+
 def test_evidence_write_capability_readiness_accepts_registered_write():
     expected_identity = {
         "commit": "1" * 40,

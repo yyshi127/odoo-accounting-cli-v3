@@ -39,6 +39,9 @@ from .write_api import WriteApiError, parse_write_api_request
 from .write_runtime import WriteRuntimeError, load_write_runtime_config
 
 
+DEFAULT_WRITE_RUNTIME_CONFIG = Path("/etc/odoo-accounting-cli-v3/write-runtime.json")
+
+
 def _json(value: Any) -> str:
     return json.dumps(
         value,
@@ -451,6 +454,68 @@ def _validate_sandbox_write_evidence_root(
         "path": str(resolved),
         "available_bytes": free_bytes,
         "minimum_free_bytes": minimum_free_bytes,
+    }
+
+
+def _audit_sandbox_write_evidence_root(
+    path: Path | None,
+    *,
+    release_root: Path,
+    minimum_free_bytes: int,
+) -> dict[str, Any]:
+    if path is None:
+        return {
+            "available_bytes": None,
+            "blockers": ["sandbox write evidence root was not supplied"],
+            "minimum_free_bytes": minimum_free_bytes,
+            "path": None,
+            "ready": False,
+            "status": "missing",
+        }
+    blockers: list[str] = []
+    resolved: Path | None = None
+    available_bytes: int | None = None
+    status = "valid"
+    if not path.is_absolute():
+        blockers.append("sandbox write evidence root must be absolute")
+        status = "invalid"
+    try:
+        resolved = path.resolve(strict=True)
+        metadata = resolved.lstat()
+    except OSError:
+        blockers.append("sandbox write evidence root is unavailable")
+        status = "missing"
+        metadata = None
+    if resolved is not None:
+        if not resolved.is_dir() or path.is_symlink():
+            blockers.append("sandbox write evidence root must be a real directory")
+            status = "invalid"
+        if _is_within(resolved, release_root):
+            blockers.append("sandbox write evidence root must not be inside the immutable release")
+            status = "invalid"
+        if os.name == "posix" and metadata is not None:
+            import stat
+
+            if metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+                blockers.append(
+                    "sandbox write evidence root must be root-owned and not group/world writable"
+                )
+                status = "invalid"
+        try:
+            available_bytes = shutil.disk_usage(resolved).free
+        except OSError:
+            blockers.append("sandbox write evidence root filesystem is unavailable")
+            status = "invalid"
+        if available_bytes is not None and available_bytes < minimum_free_bytes:
+            blockers.append("sandbox write evidence filesystem free space is below the configured floor")
+            status = "capacity_rejected"
+    return {
+        "available_bytes": available_bytes,
+        "blockers": sorted(set(blockers)),
+        "minimum_free_bytes": minimum_free_bytes,
+        "path": str(resolved) if resolved is not None else str(path),
+        "ready": not blockers,
+        "status": status if blockers else "valid",
     }
 
 
@@ -1427,6 +1492,134 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
             "sandbox_pipeline_ready": verified_count == len(reports),
             "total_write_capabilities": len(reports),
             "verified_count": verified_count,
+        },
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("sandbox-write-environment-audit")
+@click.option(
+    "--write-runtime-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=DEFAULT_WRITE_RUNTIME_CONFIG,
+    show_default=True,
+    help="Root-managed write runtime configuration to inspect without executing writes.",
+)
+@click.option(
+    "--evidence-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Optional existing root-owned directory intended for retained sandbox write evidence.",
+)
+@click.option(
+    "--min-free-bytes",
+    type=click.IntRange(min=1),
+    default=8 * 1024 * 1024 * 1024,
+    show_default=True,
+    help="Minimum free bytes required before starting sandbox write evidence collection.",
+)
+def evidence_sandbox_write_environment_audit(
+    write_runtime_config: Path,
+    evidence_root: Path | None,
+    min_free_bytes: int,
+) -> None:
+    """Read-only inventory before planning real sandbox write drills."""
+
+    command = "evidence.sandbox-write-environment-audit"
+    identity = _load_release_identity(command=command)
+    capabilities = _load_capabilities()
+    write_capabilities = sorted(
+        (item for item in capabilities if item.data["access"] == "write"),
+        key=lambda item: item.id,
+    )
+    odoo_write_capabilities, allowed_models_by_capability = (
+        _load_write_capability_implementation(command)
+    )
+    capability_reports = [
+        _write_capability_readiness_report(
+            capability,
+            allowed_models_by_capability=allowed_models_by_capability,
+            odoo_write_capabilities=odoo_write_capabilities,
+        )
+        for capability in write_capabilities
+    ]
+    sandbox_drill_admissible_count = sum(
+        1 for report in capability_reports if report["sandbox_drill_admissible"]
+    )
+    sandbox_staging_promotion_ready_count = sum(
+        1 for report in capability_reports if report["sandbox_staging_promotion_ready"]
+    )
+    runtime_report: dict[str, Any]
+    evidence_root_report: dict[str, Any]
+    runtime_ready = False
+    try:
+        config = load_write_runtime_config(write_runtime_config)
+    except WriteRuntimeError as exc:
+        runtime_report = {
+            "blockers": [str(exc)],
+            "database_name": None,
+            "database_uuid": None,
+            "path": str(write_runtime_config),
+            "ready": False,
+            "runtime_identity": None,
+            "status": "invalid" if write_runtime_config.exists() else "missing",
+            "write_execution_mode": None,
+        }
+        evidence_root_report = _audit_sandbox_write_evidence_root(
+            evidence_root,
+            release_root=Path(__file__).resolve().parents[2],
+            minimum_free_bytes=min_free_bytes,
+        )
+    else:
+        blockers: list[str] = []
+        database_name = config.base_runtime.database_name
+        if config.write_execution_mode != "sandbox_staged":
+            blockers.append("write runtime execution mode is not sandbox_staged")
+        if config.base_runtime.environment != "sandbox":
+            blockers.append("write runtime base environment is not sandbox")
+        if config.base_runtime.capability_channel != "staged":
+            blockers.append("write runtime capability channel is not staged")
+        if re.search(r"(^|[_-])sandbox([_-]|$)", database_name) is None:
+            blockers.append("write runtime database name is not clearly sandbox")
+        try:
+            runtime_identity = config.runtime_identity
+        except Exception:
+            runtime_identity = None
+            blockers.append("write runtime identity is unavailable")
+        runtime_ready = not blockers
+        runtime_report = {
+            "blockers": sorted(set(blockers)),
+            "database_name": database_name,
+            "database_uuid": config.base_runtime.database_uuid,
+            "path": str(write_runtime_config),
+            "ready": runtime_ready,
+            "runtime_identity": runtime_identity,
+            "status": "valid" if runtime_ready else "scope_rejected",
+            "write_execution_mode": config.write_execution_mode,
+        }
+        evidence_root_report = _audit_sandbox_write_evidence_root(
+            evidence_root,
+            release_root=config.base_runtime.release_root,
+            minimum_free_bytes=min_free_bytes,
+        )
+    _success(
+        command,
+        {
+            "capabilities": capability_reports,
+            "environment_ready_for_sandbox_write_drills": (
+                runtime_ready
+                and evidence_root_report["ready"]
+                and sandbox_drill_admissible_count == len(capability_reports)
+            ),
+            "evidence_root": evidence_root_report,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "release_identity": identity,
+            "runtime": runtime_report,
+            "sandbox_drill_admissible_count": sandbox_drill_admissible_count,
+            "sandbox_staging_promotion_ready_count": (
+                sandbox_staging_promotion_ready_count
+            ),
+            "total_write_capabilities": len(capability_reports),
         },
         business_succeeded=False,
     )
