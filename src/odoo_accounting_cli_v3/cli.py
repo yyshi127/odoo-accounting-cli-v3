@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from datetime import datetime, timezone
 from importlib import resources, util
 from pathlib import Path
@@ -49,6 +50,8 @@ DEFAULT_SANDBOX_SECRET_ROOT = Path("/etc/odoo-accounting-cli-v3/secrets/sandbox"
 DEFAULT_SANDBOX_WRITE_STATE = Path(
     "/var/lib/odoo-accounting-cli-v3/sandbox/write.sqlite3"
 )
+DEFAULT_SANDBOX_READ_STATE_ROOT = Path("/var/lib/odoo-accounting-cli-v3/sandbox/read")
+DEFAULT_SANDBOX_READ_SECRET_ROOT = Path("/etc/odoo-accounting-cli-v3/secrets/sandbox")
 
 
 def _json(value: Any) -> str:
@@ -611,6 +614,78 @@ def _write_runtime_plan_document(
             key_id_prefix=key_id_prefix,
             issuer_prefix=issuer_prefix,
         ),
+    }
+
+
+def _read_runtime_plan_document(
+    *,
+    instance_id: str,
+    environment: str,
+    capability_channel: str,
+    database_name: str,
+    database_uuid: str,
+    odoo_python: Path,
+    odoo_python_sha256: str,
+    odoo_bin: Path,
+    odoo_bin_sha256: str,
+    odoo_config: Path,
+    odoo_config_sha256: str,
+    release_root: Path,
+    canonical_package_path: Path,
+    canonical_package_sha256: str,
+    auth_state_path: Path,
+    receipt_state_path: Path,
+    gcov_state_path: Path,
+    auth_key_id: str,
+    receipt_key_id: str,
+    auth_secret_path: Path,
+    receipt_secret_path: Path,
+) -> dict[str, Any]:
+    runtime = RuntimeConfig(
+        instance_id=instance_id,
+        environment=environment,
+        capability_channel=capability_channel,
+        database_name=database_name,
+        database_uuid=database_uuid,
+        odoo_python=odoo_python,
+        odoo_python_sha256=odoo_python_sha256,
+        odoo_bin=odoo_bin,
+        odoo_bin_sha256=odoo_bin_sha256,
+        odoo_config=odoo_config,
+        odoo_config_sha256=odoo_config_sha256,
+        release_root=release_root,
+        canonical_package_path=canonical_package_path,
+        canonical_package_sha256=canonical_package_sha256,
+        auth_state_path=auth_state_path,
+        receipt_state_path=receipt_state_path,
+        gcov_state_path=gcov_state_path,
+        auth_key_id=auth_key_id,
+        receipt_key_id=receipt_key_id,
+        auth_secret_path=auth_secret_path,
+        receipt_secret_path=receipt_secret_path,
+    )
+    return {
+        "instance_id": runtime.instance_id,
+        "environment": runtime.environment,
+        "capability_channel": runtime.capability_channel,
+        "database_name": runtime.database_name,
+        "database_uuid": runtime.database_uuid,
+        "odoo_python": str(runtime.odoo_python),
+        "odoo_python_sha256": runtime.odoo_python_sha256,
+        "odoo_bin": str(runtime.odoo_bin),
+        "odoo_bin_sha256": runtime.odoo_bin_sha256,
+        "odoo_config": str(runtime.odoo_config),
+        "odoo_config_sha256": runtime.odoo_config_sha256,
+        "release_root": str(runtime.release_root),
+        "canonical_package_path": str(runtime.canonical_package_path),
+        "canonical_package_sha256": runtime.canonical_package_sha256,
+        "auth_state_path": str(runtime.auth_state_path),
+        "receipt_state_path": str(runtime.receipt_state_path),
+        "gcov_state_path": str(runtime.gcov_state_path),
+        "auth_key_id": runtime.auth_key_id,
+        "receipt_key_id": runtime.receipt_key_id,
+        "auth_secret_path": str(runtime.auth_secret_path),
+        "receipt_secret_path": str(runtime.receipt_secret_path),
     }
 
 
@@ -1587,6 +1662,157 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
             "sandbox_pipeline_ready": verified_count == len(reports),
             "total_write_capabilities": len(reports),
             "verified_count": verified_count,
+        },
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("sandbox-read-runtime-config-plan")
+@click.option("--instance-id", required=True, help="Stable Odoo instance identifier.")
+@click.option(
+    "--database-name",
+    required=True,
+    help="Dedicated sandbox database name to bind to the read runtime.",
+)
+@click.option("--database-uuid", required=True, help="Canonical sandbox database UUID.")
+@click.option(
+    "--odoo-python",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+)
+@click.option("--odoo-python-sha256", required=True)
+@click.option("--odoo-bin", type=click.Path(path_type=Path, dir_okay=False), required=True)
+@click.option("--odoo-bin-sha256", required=True)
+@click.option(
+    "--odoo-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+)
+@click.option("--odoo-config-sha256", required=True)
+@click.option(
+    "--runtime-config-path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=Path("/etc/odoo-accounting-cli-v3/runtime-sandbox.json"),
+    show_default=True,
+    help="Canonical read runtime config path the operator will install.",
+)
+@click.option(
+    "--release-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+)
+@click.option(
+    "--canonical-package-path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+)
+@click.option("--canonical-package-sha256")
+@click.option(
+    "--read-state-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=DEFAULT_SANDBOX_READ_STATE_ROOT,
+    show_default=True,
+)
+@click.option(
+    "--secret-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=DEFAULT_SANDBOX_READ_SECRET_ROOT,
+    show_default=True,
+)
+@click.option("--auth-key-id", default="sandbox-read-auth-v1", show_default=True)
+@click.option("--receipt-key-id", default="sandbox-read-receipt-v1", show_default=True)
+def evidence_sandbox_read_runtime_config_plan(
+    instance_id: str,
+    database_name: str,
+    database_uuid: str,
+    odoo_python: Path,
+    odoo_python_sha256: str,
+    odoo_bin: Path,
+    odoo_bin_sha256: str,
+    odoo_config: Path,
+    odoo_config_sha256: str,
+    runtime_config_path: Path,
+    release_root: Path,
+    canonical_package_path: Path,
+    canonical_package_sha256: str | None,
+    read_state_root: Path,
+    secret_root: Path,
+    auth_key_id: str,
+    receipt_key_id: str,
+) -> None:
+    """Render a secret-free sandbox/staged read runtime installation plan."""
+
+    command = "evidence.sandbox-read-runtime-config-plan"
+    identity = _load_release_identity(command=command)
+    for option, path in {
+        "--odoo-python": odoo_python,
+        "--odoo-bin": odoo_bin,
+        "--odoo-config": odoo_config,
+        "--runtime-config-path": runtime_config_path,
+        "--release-root": release_root,
+        "--canonical-package-path": canonical_package_path,
+        "--read-state-root": read_state_root,
+        "--secret-root": secret_root,
+    }.items():
+        _require_absolute_plan_path(path, command=command, option=option)
+    package_sha256 = canonical_package_sha256 or str(identity["package_sha256"])
+    try:
+        normalized_database_uuid = str(uuid.UUID(database_uuid))
+        document = _read_runtime_plan_document(
+            instance_id=instance_id,
+            environment="sandbox",
+            capability_channel="staged",
+            database_name=database_name,
+            database_uuid=normalized_database_uuid,
+            odoo_python=odoo_python,
+            odoo_python_sha256=odoo_python_sha256,
+            odoo_bin=odoo_bin,
+            odoo_bin_sha256=odoo_bin_sha256,
+            odoo_config=odoo_config,
+            odoo_config_sha256=odoo_config_sha256,
+            release_root=release_root,
+            canonical_package_path=canonical_package_path,
+            canonical_package_sha256=package_sha256,
+            auth_state_path=read_state_root / "auth.sqlite3",
+            receipt_state_path=read_state_root / "receipt.sqlite3",
+            gcov_state_path=read_state_root / "gcov",
+            auth_key_id=auth_key_id,
+            receipt_key_id=receipt_key_id,
+            auth_secret_path=secret_root / "read_auth.hmac",
+            receipt_secret_path=secret_root / "read_receipt.hmac",
+        )
+    except (OdooRunnerError, ValueError) as exc:
+        raise CliFailure(
+            command=command,
+            code="read_runtime_plan_rejected",
+            message="The sandbox read runtime plan inputs are invalid.",
+        ) from exc
+    blockers: list[str] = []
+    if re.search(r"(^|[_-])sandbox([_-]|$)", database_name) is None:
+        blockers.append("sandbox read runtime database name is not clearly sandbox")
+    if document["auth_state_path"] == document["receipt_state_path"]:
+        blockers.append("read auth and receipt state paths must differ")
+    _success(
+        command,
+        {
+            "blockers": sorted(set(blockers)),
+            "document": document,
+            "document_sha256": _sha256_json(document),
+            "install_actions": [
+                "confirm the database is a dedicated sandbox clone and not production",
+                f"create {secret_root} as a canonical root-owned directory, not group/world writable",
+                "generate two distinct random read role secrets of at least 32 bytes without printing them",
+                f"create {read_state_root} as a private service-owned state directory",
+                f"install the reviewed JSON document at {runtime_config_path} with root-managed ownership and restrictive mode",
+                "load the installed read runtime with the exact release before using it as a write-runtime base",
+            ],
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "release_identity": identity,
+            "runtime_config_path": str(runtime_config_path),
+            "sandbox_read_runtime_configurable": not blockers,
+            "secret_values_included": False,
         },
         business_succeeded=False,
     )

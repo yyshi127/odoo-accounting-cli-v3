@@ -1405,6 +1405,137 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
+def _read_runtime_plan_args(
+    *,
+    tmp_path: Path,
+    database_name: str = "odoo_v3_sandbox",
+) -> list[str]:
+    return [
+        "evidence",
+        "sandbox-read-runtime-config-plan",
+        "--instance-id",
+        "odoo19@sandbox",
+        "--database-name",
+        database_name,
+        "--database-uuid",
+        "11111111-1111-4111-8111-111111111111",
+        "--odoo-python",
+        str(tmp_path / "odoo-venv" / "bin" / "python"),
+        "--odoo-python-sha256",
+        "1" * 64,
+        "--odoo-bin",
+        str(tmp_path / "odoo-server" / "odoo-bin"),
+        "--odoo-bin-sha256",
+        "2" * 64,
+        "--odoo-config",
+        str(tmp_path / "odoo.conf"),
+        "--odoo-config-sha256",
+        "3" * 64,
+        "--runtime-config-path",
+        str(tmp_path / "runtime-sandbox.json"),
+        "--release-root",
+        str(tmp_path / "release"),
+        "--canonical-package-path",
+        str(tmp_path / "packages" / "release.tar.gz"),
+        "--canonical-package-sha256",
+        "4" * 64,
+        "--read-state-root",
+        str(tmp_path / "read-state"),
+        "--secret-root",
+        str(tmp_path / "secrets"),
+    ]
+
+
+def test_evidence_sandbox_read_runtime_config_plan_renders_current_schema(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev193",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _read_runtime_plan_args(tmp_path=tmp_path),
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    planned = payload["data"]["document"]
+    assert payload["command"] == "evidence.sandbox-read-runtime-config-plan"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert payload["data"]["secret_values_included"] is False
+    assert payload["data"]["sandbox_read_runtime_configurable"] is True
+    assert payload["data"]["blockers"] == []
+    assert planned["environment"] == "sandbox"
+    assert planned["capability_channel"] == "staged"
+    assert planned["database_name"] == "odoo_v3_sandbox"
+    assert planned["database_uuid"] == "11111111-1111-4111-8111-111111111111"
+    assert Path(planned["auth_state_path"]) == tmp_path / "read-state" / "auth.sqlite3"
+    assert Path(planned["receipt_state_path"]) == (
+        tmp_path / "read-state" / "receipt.sqlite3"
+    )
+    assert Path(planned["auth_secret_path"]) == tmp_path / "secrets" / "read_auth.hmac"
+    assert Path(planned["receipt_secret_path"]) == (
+        tmp_path / "secrets" / "read_receipt.hmac"
+    )
+    assert payload["data"]["document_sha256"] == __import__("hashlib").sha256(
+        __import__("json")
+        .dumps(
+            planned,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        .encode("utf-8")
+    ).hexdigest()
+
+
+def test_evidence_sandbox_read_runtime_config_plan_flags_unclear_database_name(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev193",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _read_runtime_plan_args(
+                tmp_path=tmp_path,
+                database_name="odoo_prod",
+            ),
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_read_runtime_configurable"] is False
+    assert payload["data"]["blockers"] == [
+        "sandbox read runtime database name is not clearly sandbox"
+    ]
+
+
 def _write_runtime_plan_args(
     *,
     base_runtime_path: Path,

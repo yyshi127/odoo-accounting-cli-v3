@@ -292,6 +292,29 @@ Create the strict root-managed read and write runtime files described in
 well as the SHA-256 of the resolved Odoo Python interpreter, `odoo-bin`, and
 Odoo configuration. The fixed write path is
 `/etc/odoo-accounting-cli-v3/write-runtime.json`; callers cannot override it.
+For the dedicated sandbox read runtime, first render a secret-free current
+schema candidate with:
+
+```bash
+odoo-accounting-cli-v3 evidence sandbox-read-runtime-config-plan \
+  --instance-id odoo19@sandbox \
+  --database-name <SANDBOX_DATABASE_NAME> \
+  --database-uuid <SANDBOX_DATABASE_UUID> \
+  --odoo-python <RESOLVED_ODOO_PYTHON> \
+  --odoo-python-sha256 <SHA256> \
+  --odoo-bin <RESOLVED_ODOO_BIN> \
+  --odoo-bin-sha256 <SHA256> \
+  --odoo-config <RESOLVED_ODOO_CONFIG> \
+  --odoo-config-sha256 <SHA256> \
+  --canonical-package-path <RELEASE_TARBALL>
+```
+
+The command always renders `environment:sandbox` and
+`capability_channel:staged`, hashes the document, lists the remaining
+root-managed install actions, and keeps `business_succeeded:false`. It does not
+create secrets, write `/etc`, open Odoo, or prove a real read result. A
+generated plan becomes usable only after the installed file is reloaded by the
+exact release and the read evidence gates below pass.
 
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,
