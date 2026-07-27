@@ -1683,6 +1683,69 @@ def test_evidence_sandbox_read_runtime_config_plan_flags_digest_mismatch(
     ]["blockers"]
 
 
+def test_evidence_sandbox_database_candidates_selects_clear_sandbox():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-database-candidates",
+            "--database-name",
+            "odoo_sg",
+            "--database-name",
+            "codex_cn_m31_demo_01",
+            "--database-name",
+            "odoo_v3_sandbox",
+            "--protected-database-name",
+            "odoo_sg",
+            "--selected-database-name",
+            "odoo_v3_sandbox",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-database-candidates"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert payload["data"]["sandbox_database_selection_ready"] is True
+    assert payload["data"]["eligible_database_names"] == ["odoo_v3_sandbox"]
+    assert payload["data"]["selected_database_eligible"] is True
+    by_name = {item["name"]: item for item in payload["data"]["candidates"]}
+    assert by_name["odoo_sg"]["blockers"] == [
+        "database name is explicitly protected",
+        "database name is not clearly sandbox",
+        "database name looks production-like",
+    ]
+    assert by_name["codex_cn_m31_demo_01"]["blockers"] == [
+        "database name is not clearly sandbox",
+        "database name looks transient or test-generated",
+    ]
+
+
+def test_evidence_sandbox_database_candidates_rejects_missing_or_bad_selection():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-database-candidates",
+            "--database-name",
+            "codex_cn_m31_demo_01",
+            "--selected-database-name",
+            "odoo_v3_sandbox",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_database_selection_ready"] is False
+    assert payload["data"]["selected_database_eligible"] is False
+    assert payload["data"]["blockers"] == [
+        "no eligible clearly named dedicated sandbox database was observed",
+        "selected database was not observed in the PostgreSQL catalog",
+    ]
+
+
 def _write_runtime_plan_args(
     *,
     base_runtime_path: Path,

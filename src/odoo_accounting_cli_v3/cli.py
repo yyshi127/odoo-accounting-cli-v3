@@ -76,6 +76,52 @@ def _looks_like_placeholder_sha256(value: str) -> bool:
     )
 
 
+def _database_name_is_clear_sandbox(name: str) -> bool:
+    return re.search(r"(^|[_-])sandbox([_-]|$)", name) is not None
+
+
+def _database_name_looks_transient(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        lowered.startswith("codex_")
+        or re.search(r"(^|[_-])(demo|debug|runtime|candidate|upgrade|test)([_-]|$)", lowered)
+        is not None
+    )
+
+
+def _database_name_looks_production(name: str) -> bool:
+    lowered = name.lower()
+    return re.search(r"(^|[_-])(prod|production|live|sg)([_-]|$)", lowered) is not None
+
+
+def _sandbox_database_candidate_report(
+    name: str,
+    *,
+    protected_names: frozenset[str],
+    selected_name: str | None,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not name:
+        blockers.append("database name is empty")
+    if name in protected_names:
+        blockers.append("database name is explicitly protected")
+    if not _database_name_is_clear_sandbox(name):
+        blockers.append("database name is not clearly sandbox")
+    if _database_name_looks_production(name):
+        blockers.append("database name looks production-like")
+    if _database_name_looks_transient(name):
+        blockers.append("database name looks transient or test-generated")
+    if selected_name is not None and name == selected_name:
+        warnings.append("selected by operator input")
+    return {
+        "blockers": sorted(set(blockers)),
+        "eligible_for_sandbox_runtime_plan": not blockers,
+        "name": name,
+        "warnings": sorted(set(warnings)),
+    }
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -1890,6 +1936,75 @@ def evidence_sandbox_read_runtime_config_plan(
             "sandbox_read_runtime_configurable": not blockers,
             "source_measurements": measurements,
             "secret_values_included": False,
+        },
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("sandbox-database-candidates")
+@click.option(
+    "--database-name",
+    multiple=True,
+    help="Database name observed from PostgreSQL catalog; may be provided repeatedly.",
+)
+@click.option(
+    "--protected-database-name",
+    multiple=True,
+    help="Known production or otherwise protected database name to reject explicitly.",
+)
+@click.option(
+    "--selected-database-name",
+    help="Optional operator-selected sandbox candidate to check against the observed catalog.",
+)
+def evidence_sandbox_database_candidates(
+    database_name: tuple[str, ...],
+    protected_database_name: tuple[str, ...],
+    selected_database_name: str | None,
+) -> None:
+    """Classify observed PostgreSQL databases before choosing a sandbox runtime base."""
+
+    command = "evidence.sandbox-database-candidates"
+    observed_names = sorted(set(database_name))
+    protected_names = frozenset(protected_database_name)
+    candidates = [
+        _sandbox_database_candidate_report(
+            name,
+            protected_names=protected_names,
+            selected_name=selected_database_name,
+        )
+        for name in observed_names
+    ]
+    eligible = [
+        item["name"] for item in candidates if item["eligible_for_sandbox_runtime_plan"]
+    ]
+    blockers: list[str] = []
+    if not observed_names:
+        blockers.append("database catalog is empty or was not supplied")
+    if selected_database_name is not None and selected_database_name not in observed_names:
+        blockers.append("selected database was not observed in the PostgreSQL catalog")
+    if selected_database_name is not None:
+        selected = next(
+            (item for item in candidates if item["name"] == selected_database_name),
+            None,
+        )
+        if selected is not None and selected["blockers"]:
+            blockers.append("selected database is not eligible for sandbox runtime plan")
+    if not eligible:
+        blockers.append("no eligible clearly named dedicated sandbox database was observed")
+    _success(
+        command,
+        {
+            "blockers": sorted(set(blockers)),
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+            "eligible_database_names": eligible,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "selected_database_name": selected_database_name,
+            "selected_database_eligible": (
+                selected_database_name in eligible if selected_database_name else None
+            ),
+            "sandbox_database_selection_ready": not blockers,
         },
         business_succeeded=False,
     )
