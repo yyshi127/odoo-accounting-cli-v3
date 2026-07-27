@@ -340,6 +340,25 @@ Use `--summary-only` when feeding a large PostgreSQL catalog to Pi Bridge or an
 operator dashboard; it omits the per-database list while keeping candidate
 counts, blocker counts, eligible names, and the selected database verdict.
 
+If the selected sandbox database is not present, produce a read-only provision
+plan before any operator creates or clones PostgreSQL data:
+
+```bash
+odoo-accounting-cli-v3 evidence sandbox-database-provision-plan \
+  --sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
+  --source-database-name <AUTHORIZED_SOURCE_DATABASE> \
+  --protected-database-name <PRODUCTION_DATABASE>
+```
+
+This command never executes SQL, never creates a database, and never copies an
+Odoo filestore. It records whether explicit authorization has been captured,
+requires the sandbox name to be clearly sandbox-only, requires the Odoo
+`db-filter` to match the exact sandbox database name, and emits the follow-up
+evidence actions needed before a read or write runtime can be configured. Only
+use `--authorization-recorded` after the authorization record exists and names
+the sandbox database, source database, company scope, retention window, and
+operator.
+
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,
 explicitly become `READ ONLY`/`REPEATABLE READ` before any V3 ORM access, retain

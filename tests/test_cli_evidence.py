@@ -1798,6 +1798,99 @@ def test_evidence_sandbox_database_candidates_summary_omits_candidate_details():
     ]
 
 
+def test_evidence_sandbox_database_provision_plan_requires_authorization():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-database-provision-plan",
+            "--sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--source-database-name",
+            "odoo_sg",
+            "--protected-database-name",
+            "odoo_sg",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-database-provision-plan"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["postgresql_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert payload["data"]["sandbox_database_provision_ready"] is False
+    assert payload["data"]["expected_database_filter"] == "^odoo_v3_sandbox$"
+    assert payload["data"]["blockers"] == [
+        "explicit authorization to create or clone the sandbox database has not been recorded"
+    ]
+    assert payload["data"]["warnings"] == [
+        "source database is explicitly protected; clone only from an authorized read-only snapshot"
+    ]
+
+
+def test_evidence_sandbox_database_provision_plan_accepts_authorized_safe_plan():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-database-provision-plan",
+            "--sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--source-database-name",
+            "odoo_template_clean",
+            "--authorization-recorded",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_database_provision_ready"] is True
+    assert payload["data"]["authorization_required_before_database_creation"] is True
+    assert payload["data"]["plan"] == {
+        "database_filter": "^odoo_v3_sandbox$",
+        "sandbox_database_name": "odoo_v3_sandbox",
+        "source_database_name": "odoo_template_clean",
+    }
+    assert payload["data"]["operator_actions"][0].startswith(
+        "record explicit authorization"
+    )
+
+
+def test_evidence_sandbox_database_provision_plan_rejects_unsafe_name_and_filter():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-database-provision-plan",
+            "--sandbox-database-name",
+            "odoo_sg",
+            "--source-database-name",
+            "odoo_sg",
+            "--protected-database-name",
+            "odoo_sg",
+            "--expected-database-filter",
+            "^.*$",
+            "--authorization-recorded",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_database_provision_ready"] is False
+    assert payload["data"]["blockers"] == [
+        "expected database filter must match the exact sandbox database name",
+        "sandbox database name is not eligible for provisioning",
+        "sandbox database name must differ from source database name",
+    ]
+    assert payload["data"]["sandbox_database_report"]["blockers"] == [
+        "database name is explicitly protected",
+        "database name is not clearly sandbox",
+        "database name looks production-like",
+    ]
+
+
 def _write_runtime_plan_args(
     *,
     base_runtime_path: Path,

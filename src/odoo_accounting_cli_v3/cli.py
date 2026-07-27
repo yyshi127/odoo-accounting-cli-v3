@@ -122,6 +122,10 @@ def _sandbox_database_candidate_report(
     }
 
 
+def _expected_sandbox_database_filter(database_name: str) -> str:
+    return f"^{re.escape(database_name)}$"
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -2021,6 +2025,107 @@ def evidence_sandbox_database_candidates(
     }
     if not summary_only:
         data["candidates"] = candidates
+    _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("sandbox-database-provision-plan")
+@click.option(
+    "--sandbox-database-name",
+    required=True,
+    help="Proposed dedicated sandbox database name to create or clone outside this CLI.",
+)
+@click.option(
+    "--source-database-name",
+    required=True,
+    help="Existing database proposed as the clone source.",
+)
+@click.option(
+    "--protected-database-name",
+    multiple=True,
+    help="Known production or otherwise protected database name.",
+)
+@click.option(
+    "--expected-database-filter",
+    help="Expected Odoo db-filter for the sandbox service; defaults to the exact sandbox name.",
+)
+@click.option(
+    "--authorization-recorded",
+    is_flag=True,
+    help="Declare that explicit operator authorization for sandbox provisioning has been recorded.",
+)
+def evidence_sandbox_database_provision_plan(
+    sandbox_database_name: str,
+    source_database_name: str,
+    protected_database_name: tuple[str, ...],
+    expected_database_filter: str | None,
+    authorization_recorded: bool,
+) -> None:
+    """Plan, but never execute, creation of a dedicated Odoo write sandbox database."""
+
+    command = "evidence.sandbox-database-provision-plan"
+    protected_names = frozenset(protected_database_name)
+    expected_filter = (
+        expected_database_filter
+        if expected_database_filter is not None
+        else _expected_sandbox_database_filter(sandbox_database_name)
+    )
+    required_filter = _expected_sandbox_database_filter(sandbox_database_name)
+    sandbox_report = _sandbox_database_candidate_report(
+        sandbox_database_name,
+        protected_names=protected_names,
+        selected_name=sandbox_database_name,
+    )
+    source_report = _sandbox_database_candidate_report(
+        source_database_name,
+        protected_names=protected_names,
+        selected_name=None,
+    )
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not authorization_recorded:
+        blockers.append(
+            "explicit authorization to create or clone the sandbox database has not been recorded"
+        )
+    if sandbox_report["blockers"]:
+        blockers.append("sandbox database name is not eligible for provisioning")
+    if sandbox_database_name == source_database_name:
+        blockers.append("sandbox database name must differ from source database name")
+    if expected_filter != required_filter:
+        blockers.append("expected database filter must match the exact sandbox database name")
+    if source_database_name in protected_names:
+        warnings.append(
+            "source database is explicitly protected; clone only from an authorized read-only snapshot"
+        )
+    if _database_name_looks_transient(source_database_name):
+        warnings.append("source database looks transient or test-generated")
+    data: dict[str, Any] = {
+        "authorization_recorded": authorization_recorded,
+        "authorization_required_before_database_creation": True,
+        "blockers": sorted(set(blockers)),
+        "expected_database_filter": expected_filter,
+        "operator_actions": [
+            "record explicit authorization naming the sandbox database, source database, company scope, and retention window",
+            "verify the source database identity, database UUID, company scope, addons path, and filestore before cloning",
+            "create or clone the PostgreSQL sandbox database outside this CLI using the approved runbook",
+            "create an isolated sandbox filestore outside this CLI; do not share mutable production filestore paths",
+            f"start the sandbox Odoo service with db-filter {required_filter}",
+            "measure Odoo python, odoo-bin, config, release package, and database UUID after the sandbox service starts",
+            "rerun evidence sandbox-database-candidates against the real PostgreSQL catalog",
+            "generate the read runtime plan with evidence sandbox-read-runtime-config-plan --measure-existing-files",
+        ],
+        "plan": {
+            "database_filter": required_filter,
+            "sandbox_database_name": sandbox_database_name,
+            "source_database_name": source_database_name,
+        },
+        "postgresql_write_performed": False,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "sandbox_database_provision_ready": not blockers,
+        "sandbox_database_report": sandbox_report,
+        "source_database_report": source_report,
+        "warnings": sorted(set(warnings)),
+    }
     _success(command, data, business_succeeded=False)
 
 
