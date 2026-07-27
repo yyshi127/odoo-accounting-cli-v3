@@ -58,7 +58,7 @@ runtime_trace = _load_sibling("_dev29_runtime_open_discovery_trace", TRACE_RELAT
 policy_source = _load_sibling(
     "_dev29_runtime_open_discovery_source", SOURCE_RELATIVE
 )
-NON_POLICY_TARGET_REASONS = {
+FIXED_NON_POLICY_TARGET_REASONS = {
     "boundary-probe": (
         "read-boundary evidence intentionally exercises the controlled Odoo-shell "
         "subprocess boundary and is not eligible for single-leader runtime-open "
@@ -67,9 +67,39 @@ NON_POLICY_TARGET_REASONS = {
 }
 
 
+def non_policy_target_reason(target_id: str) -> str | None:
+    if target_id in FIXED_NON_POLICY_TARGET_REASONS:
+        return FIXED_NON_POLICY_TARGET_REASONS[target_id]
+    if target_id.endswith("-read"):
+        return (
+            "Odoo read evidence intentionally exercises the controlled Odoo-shell "
+            "subprocess boundary and mutable staged runtime state; it remains "
+            "required suite evidence but is not eligible for single-leader "
+            "runtime-open path-policy approval"
+        )
+    return None
+
+
 def discovery_targets() -> tuple[str, ...]:
-    targets = list(policy_source.expected_targets())
-    targets.insert(2, "boundary-probe")
+    positive = ("registry", "trial_balance", "ar_open_items", "ap_open_items", "multicurrency")
+    financial = set(positive[1:])
+    negative = (
+        "acl_deny", "cross_company", "mixed_company", "wrong_database_uuid",
+        "expired", "tamper_parameters", "replay",
+    )
+    targets = ["release-identity", "witness-pre", "boundary-probe"]
+    for name in positive:
+        targets.extend((f"positive-{name}-signer", f"positive-{name}-read"))
+        if name == "trial_balance":
+            targets.append("negative-replay-read")
+        if name in financial:
+            targets.append(f"positive-{name}-oracle")
+    for name in negative:
+        if name == "replay":
+            continue
+        targets.append(f"negative-{name}-signer")
+        targets.append(f"negative-{name}-read")
+    targets.extend(("witness-post", "independent-verifier"))
     return tuple(targets)
 
 
@@ -629,11 +659,12 @@ def build_review(
     try:
         for entry in targets:
             target_id = entry.get("target_id") if type(entry) is dict else None
-            if target_id in NON_POLICY_TARGET_REASONS:
+            reason = non_policy_target_reason(target_id) if isinstance(target_id, str) else None
+            if reason is not None:
                 excluded_reviews.append(
                     {
                         "target_id": target_id,
-                        "reason": NON_POLICY_TARGET_REASONS[target_id],
+                        "reason": reason,
                         "candidate_is_approval": False,
                         "production_promotion_allowed": False,
                     }

@@ -188,9 +188,9 @@ def inventory(tmp_path: Path, *, output_traces: bool = True) -> dict[str, object
 def test_discovery_builds_nonapproval_review_manifests(tmp_path: Path) -> None:
     output = tmp_path / "review"
     result = discovery.build_review(inventory(tmp_path), output_directory=output)
-    assert result["target_count"] == 31
+    assert result["target_count"] == 19
     assert result["discovery_target_count"] == 32
-    assert result["excluded_target_count"] == 1
+    assert result["excluded_target_count"] == 13
     assert result["candidate_is_approval"] is False
     assert result["production_promotion_allowed"] is False
 
@@ -198,16 +198,19 @@ def test_discovery_builds_nonapproval_review_manifests(tmp_path: Path) -> None:
     assert review["candidate_is_approval"] is False
     assert tuple(review["target_order"]) == discovery.policy_source.expected_targets()
     assert tuple(review["discovery_target_order"]) == discovery.discovery_targets()
-    assert len(review["reviews"]) == 31
-    assert review["excluded_reviews"] == [
-        {
-            "target_id": "boundary-probe",
-            "reason": discovery.NON_POLICY_TARGET_REASONS["boundary-probe"],
-            "candidate_is_approval": False,
-            "production_promotion_allowed": False,
-        }
-    ]
+    assert len(review["reviews"]) == 19
+    assert len(review["excluded_reviews"]) == 13
+    excluded = {item["target_id"]: item for item in review["excluded_reviews"]}
+    assert excluded["boundary-probe"] == {
+        "target_id": "boundary-probe",
+        "reason": discovery.FIXED_NON_POLICY_TARGET_REASONS["boundary-probe"],
+        "candidate_is_approval": False,
+        "production_promotion_allowed": False,
+    }
+    assert "positive-registry-read" in excluded
+    assert "negative-replay-read" in excluded
     assert not (output / "boundary-probe.json").exists()
+    assert not (output / "positive-registry-read.json").exists()
     assert (output / "INDEX.json").exists() is False
 
     first = json.loads(

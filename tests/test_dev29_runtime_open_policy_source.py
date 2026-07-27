@@ -54,18 +54,18 @@ read_suite = _load(
 def test_expected_targets_match_immediate_replay_execution_order() -> None:
     targets = list(source_tool.expected_targets())
 
-    trial_read = targets.index("positive-trial_balance-read")
-    replay_read = targets.index("negative-replay-read")
+    trial_signer = targets.index("positive-trial_balance-signer")
     trial_oracle = targets.index("positive-trial_balance-oracle")
     acl_signer = targets.index("negative-acl_deny-signer")
     assert tuple(targets[:-1]) == tuple(
         target
         for target in read_suite.suite_runtime_trace_targets()
-        if target != "boundary-probe"
+        if target != "boundary-probe" and not target.endswith("-read")
     )
     assert "boundary-probe" not in targets
-    assert trial_read < replay_read < trial_oracle < acl_signer
-    assert targets.count("negative-replay-read") == 1
+    assert not any(target.endswith("-read") for target in targets)
+    assert trial_signer < trial_oracle < acl_signer
+    assert "negative-replay-read" not in targets
     assert "negative-replay-signer" not in targets
 
 

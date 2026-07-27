@@ -283,7 +283,7 @@ def runtime_open_policy_targets() -> tuple[str, ...]:
     return tuple(
         target
         for target in expected_runtime_trace_targets()
-        if target != "boundary-probe"
+        if target != "boundary-probe" and not target.endswith("-read")
     )
 
 

@@ -96,16 +96,13 @@ def expected_targets() -> tuple[str, ...]:
     )
     targets = ["release-identity", "witness-pre"]
     for name in positive:
-        targets.extend((f"positive-{name}-signer", f"positive-{name}-read"))
-        if name == "trial_balance":
-            targets.append("negative-replay-read")
+        targets.append(f"positive-{name}-signer")
         if name in financial:
             targets.append(f"positive-{name}-oracle")
     for name in negative:
         if name == "replay":
             continue
         targets.append(f"negative-{name}-signer")
-        targets.append(f"negative-{name}-read")
     targets.extend(("witness-post", "independent-verifier"))
     return tuple(targets)
 
