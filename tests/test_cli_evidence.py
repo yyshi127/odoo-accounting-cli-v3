@@ -1957,6 +1957,63 @@ def test_evidence_target_capacity_plan_reports_shortfall_without_cleanup(tmp_pat
     assert payload["data"]["plan"]["shortfall_bytes"] > 0
 
 
+def test_evidence_target_capacity_plan_summary_omits_candidates(tmp_path):
+    candidate = tmp_path / "opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"x" * 10)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-plan",
+            "--root",
+            str(tmp_path),
+            "--required-free-bytes",
+            "1",
+            "--summary-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert "candidates" not in payload["data"]["plan"]
+    assert payload["data"]["plan"]["candidate_count"] == 1
+    assert payload["data"]["plan"]["retained_candidate_count"] == 0
+    assert payload["data"]["plan"]["candidates_truncated"] is True
+
+
+def test_evidence_target_capacity_plan_limits_candidates(tmp_path):
+    for index in range(3):
+        candidate = (
+            tmp_path
+            / f"opt/odoo-accounting-cli-v3/upload-sources/source-{index}.tar.gz"
+        )
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_bytes(b"x" * (10 + index))
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-plan",
+            "--root",
+            str(tmp_path),
+            "--required-free-bytes",
+            "1",
+            "--max-candidates",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert len(payload["data"]["plan"]["candidates"]) == 2
+    assert payload["data"]["plan"]["candidate_count"] == 3
+    assert payload["data"]["plan"]["retained_candidate_count"] == 2
+    assert payload["data"]["plan"]["candidates_truncated"] is True
+
+
 def _write_runtime_plan_args(
     *,
     base_runtime_path: Path,

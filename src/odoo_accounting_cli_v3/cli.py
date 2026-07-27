@@ -963,10 +963,22 @@ def evidence_group() -> None:
     multiple=True,
     help="Release name that must not be listed as cleanup candidate.",
 )
+@click.option(
+    "--summary-only",
+    is_flag=True,
+    help="Omit the per-path candidate list while retaining capacity totals and blockers.",
+)
+@click.option(
+    "--max-candidates",
+    type=click.IntRange(min=0),
+    help="Limit the retained candidate list for bounded Pi/operator output.",
+)
 def evidence_target_capacity_plan(
     root: Path,
     required_free_bytes: int,
     keep_release: tuple[str, ...],
+    summary_only: bool,
+    max_candidates: int | None,
 ) -> None:
     """Plan V3-owned capacity remediation without deleting or mutating files."""
 
@@ -986,6 +998,16 @@ def evidence_target_capacity_plan(
             message="The target capacity plan inputs are invalid.",
             exit_code=5,
         ) from exc
+    retained_candidate_count = int(plan["candidate_count"])
+    if summary_only:
+        retained_candidate_count = 0
+        plan.pop("candidates", None)
+    elif max_candidates is not None:
+        candidates = list(plan["candidates"])
+        retained_candidate_count = min(len(candidates), max_candidates)
+        plan["candidates"] = candidates[:max_candidates]
+    plan["candidates_truncated"] = retained_candidate_count < int(plan["candidate_count"])
+    plan["retained_candidate_count"] = retained_candidate_count
     blockers: list[str] = []
     if int(plan["shortfall_bytes"]) > 0:
         blockers.append("target filesystem free space is below the configured floor")

@@ -487,7 +487,8 @@ the release CLI to produce a read-only cleanup plan:
 odoo-accounting-cli-v3 evidence target-capacity-plan \
   --required-free-bytes 8589934592 \
   --keep-release <current-release> \
-  --keep-release <last-known-good-release>
+  --keep-release <last-known-good-release> \
+  --summary-only
 ```
 
 The plan lists V3-owned candidates such as private runtime-open traces, old
@@ -497,6 +498,8 @@ It never deletes anything and always reports
 not an E00a receipt, not closure evidence, and not a sandbox-write permission.
 Use the release member `tools/target_capacity_plan.py` only as a lower-level
 diagnostic when the CLI entry point itself is unavailable.
+Use `--max-candidates <N>` instead of `--summary-only` when an operator needs a
+bounded top-N review list without returning every candidate path to Pi.
 
 The write runtime configuration schema is version 2. Its
 `write_execution_mode` starts as `disabled`. A sandbox candidate may use
