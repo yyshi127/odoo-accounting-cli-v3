@@ -662,6 +662,14 @@ carry the exact registered `capability_id` they are promoting; a receipt bound
 to one capability is never reusable for a different capability. No sandbox
 result authorizes a production write.
 
+Before a sandbox write evidence bundle can be reviewed for registry promotion,
+validate its retained JSON bundle with the exact release's
+`tools/verify_sandbox_write_evidence.py`. The verifier checks the single
+capability/company/database/release binding, all seven registry evidence kinds,
+and the prepare/preview/approval/execution/verification/repeat/failure/recovery
+and Pi E2E lifecycle digests. A passing verifier report is an admission check
+for human review only; it is not a production authorization.
+
 Dev21 canonicalizes the installed-module graph under a transaction-scoped
 `LOCK TABLE ir_module_module IN SHARE MODE` before execution and again before
 post-commit verification. The execution transaction commits before
