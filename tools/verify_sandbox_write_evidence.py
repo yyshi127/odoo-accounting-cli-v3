@@ -94,6 +94,41 @@ PREFLIGHT_FIELDS = frozenset(
         "write_execution_mode",
     }
 )
+READINESS_FIELDS = frozenset(
+    {
+        "allowed_models",
+        "capability",
+        "checks",
+        "production_promotion_allowed",
+        "real_odoo_write_performed",
+        "sandbox_drill_admissible",
+    }
+)
+READINESS_CAPABILITY_FIELDS = frozenset(
+    {
+        "access",
+        "approval",
+        "company_scope",
+        "enabled_environments",
+        "evidence_level",
+        "id",
+        "idempotency",
+        "recovery",
+        "risk_level",
+    }
+)
+READINESS_CHECK_FIELDS = frozenset(
+    {
+        "approval_policy_present",
+        "idempotency_policy_present",
+        "odoo_handler_supported",
+        "production_not_enabled",
+        "recovery_method_present",
+        "service_allowed_models_present",
+        "strict_input_schema",
+        "strict_output_schema",
+    }
+)
 
 
 class SandboxWriteEvidenceError(ValueError):
@@ -315,13 +350,55 @@ def _validate_preflight_manifest(
     )
     if document["readiness_report_sha256"] != _json_digest(readiness):
         raise SandboxWriteEvidenceError("preflight_manifest readiness_report_sha256 mismatch")
+    if set(readiness) != READINESS_FIELDS:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness_report fields are invalid")
     if readiness.get("sandbox_drill_admissible") is not True:
         raise SandboxWriteEvidenceError("preflight_manifest readiness is not admissible")
+    allowed_models = readiness["allowed_models"]
+    if (
+        not isinstance(allowed_models, list)
+        or not allowed_models
+        or any(not isinstance(model, str) or not model for model in allowed_models)
+        or allowed_models != sorted(set(allowed_models))
+    ):
+        raise SandboxWriteEvidenceError(
+            "preflight_manifest readiness allowed_models are invalid"
+        )
+    checks = _require_object(
+        readiness["checks"], "preflight_manifest.readiness_report.checks"
+    )
+    if set(checks) != READINESS_CHECK_FIELDS:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness checks are invalid")
+    if any(value is not True for value in checks.values()):
+        raise SandboxWriteEvidenceError(
+            "preflight_manifest readiness checks are not all true"
+        )
     capability = _require_object(
         readiness.get("capability"), "preflight_manifest.readiness_report.capability"
     )
+    if set(capability) != READINESS_CAPABILITY_FIELDS:
+        raise SandboxWriteEvidenceError(
+            "preflight_manifest readiness capability fields are invalid"
+        )
     if capability.get("id") != document["capability_id"]:
         raise SandboxWriteEvidenceError("preflight_manifest readiness capability mismatch")
+    if capability.get("access") != "write":
+        raise SandboxWriteEvidenceError("preflight_manifest readiness capability is not write")
+    approval = _require_object(
+        capability.get("approval"), "preflight_manifest.readiness_report.capability.approval"
+    )
+    if approval.get("required") is not True:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness approval is not required")
+    idempotency = _require_object(
+        capability.get("idempotency"),
+        "preflight_manifest.readiness_report.capability.idempotency",
+    )
+    if idempotency.get("required") is not True:
+        raise SandboxWriteEvidenceError("preflight_manifest readiness idempotency is not required")
+    recovery = _require_object(
+        capability.get("recovery"), "preflight_manifest.readiness_report.capability.recovery"
+    )
+    _require_text(recovery.get("method"), "preflight_manifest readiness recovery.method")
     if readiness.get("production_promotion_allowed") is not False:
         raise SandboxWriteEvidenceError("preflight_manifest readiness must not authorize production")
     if readiness.get("real_odoo_write_performed") is not False:

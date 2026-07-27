@@ -247,6 +247,18 @@ def _write_preflight_manifest(tmp_path: Path) -> str:
     return path.name
 
 
+def _refresh_preflight_readiness_digest(preflight: dict) -> None:
+    preflight["readiness_report_sha256"] = hashlib.sha256(
+        json.dumps(
+            preflight["readiness_report"],
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _input_manifest(tmp_path: Path):
     return {
         "schema_version": 1,
@@ -430,20 +442,39 @@ def test_builder_rejects_missing_standard_artifacts(tmp_path):
                 preflight["readiness_report"].__setitem__(
                     "sandbox_drill_admissible", False
                 ),
-                preflight.__setitem__(
-                    "readiness_report_sha256",
-                    hashlib.sha256(
-                        json.dumps(
-                            preflight["readiness_report"],
-                            ensure_ascii=False,
-                            allow_nan=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                    ).hexdigest(),
-                ),
+                _refresh_preflight_readiness_digest(preflight),
             ),
             "readiness is not admissible",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"].pop("allowed_models"),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "readiness_report fields are invalid",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"]["allowed_models"].append("account.move"),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "readiness allowed_models are invalid",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"]["checks"].__setitem__(
+                    "odoo_handler_supported", False
+                ),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "readiness checks are not all true",
+        ),
+        (
+            lambda preflight: (
+                preflight["readiness_report"]["capability"].pop("approval"),
+                _refresh_preflight_readiness_digest(preflight),
+            ),
+            "readiness capability fields are invalid",
         ),
     ),
 )
