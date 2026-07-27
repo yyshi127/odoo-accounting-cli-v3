@@ -500,6 +500,18 @@ Use the release member `tools/target_capacity_plan.py` only as a lower-level
 diagnostic when the CLI entry point itself is unavailable.
 Use `--max-candidates <N>` instead of `--summary-only` when an operator needs a
 bounded top-N review list without returning every candidate path to Pi.
+After an authorized cleanup, disk expansion, or relocation, rerun the immutable
+release's recheck command before continuing to sandbox runtime setup:
+
+```bash
+odoo-accounting-cli-v3 evidence target-capacity-recheck \
+  --path / \
+  --required-free-bytes 8589934592
+```
+
+The recheck is read-only and does not inspect cleanup candidates. It is the
+post-remediation capacity receipt for the current filesystem only; it is not an
+Odoo receipt, not a sandbox database receipt, and not write authorization.
 
 The write runtime configuration schema is version 2. Its
 `write_execution_mode` starts as `disabled`. A sandbox candidate may use

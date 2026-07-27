@@ -2014,6 +2014,53 @@ def test_evidence_target_capacity_plan_limits_candidates(tmp_path):
     assert payload["data"]["plan"]["candidates_truncated"] is True
 
 
+def test_evidence_target_capacity_recheck_reports_ready(tmp_path):
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-recheck",
+            "--path",
+            str(tmp_path),
+            "--required-free-bytes",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.target-capacity-recheck"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["cleanup_executed"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["sandbox_write_capacity_ready"] is True
+    assert payload["data"]["shortfall_bytes"] == 0
+    assert payload["data"]["filesystem"]["available_bytes"] >= 1
+
+
+def test_evidence_target_capacity_recheck_reports_shortfall(tmp_path):
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-recheck",
+            "--path",
+            str(tmp_path),
+            "--required-free-bytes",
+            str(1024**5),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["cleanup_executed"] is False
+    assert payload["data"]["sandbox_write_capacity_ready"] is False
+    assert payload["data"]["blockers"] == [
+        "target filesystem free space is below the configured floor"
+    ]
+    assert payload["data"]["shortfall_bytes"] > 0
+
+
 def _write_runtime_plan_args(
     *,
     base_runtime_path: Path,

@@ -1027,6 +1027,61 @@ def evidence_target_capacity_plan(
     _success(command, data, business_succeeded=False)
 
 
+@evidence_group.command("target-capacity-recheck")
+@click.option(
+    "--path",
+    "probe_path",
+    type=click.Path(path_type=Path),
+    default=Path("/"),
+    show_default=True,
+    help="Path whose filesystem capacity should be rechecked.",
+)
+@click.option(
+    "--required-free-bytes",
+    type=click.IntRange(min=1),
+    default=8 * 1024 * 1024 * 1024,
+    show_default=True,
+    help="Minimum ordinary free bytes required before sandbox write evidence.",
+)
+def evidence_target_capacity_recheck(
+    probe_path: Path,
+    required_free_bytes: int,
+) -> None:
+    """Recheck the current target capacity gate without cleanup or mutation."""
+
+    command = "evidence.target-capacity-recheck"
+    try:
+        resolved = probe_path.resolve(strict=True)
+        usage = shutil.disk_usage(resolved)
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="target_capacity_recheck_rejected",
+            message="The target capacity probe path is unavailable.",
+            exit_code=5,
+        ) from exc
+    blockers: list[str] = []
+    if usage.free < required_free_bytes:
+        blockers.append("target filesystem free space is below the configured floor")
+    data = {
+        "available_bytes": usage.free,
+        "blockers": blockers,
+        "cleanup_executed": False,
+        "filesystem": {
+            "available_bytes": usage.free,
+            "probe_path": str(resolved),
+            "total_bytes": usage.total,
+            "used_bytes": usage.used,
+        },
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "required_free_bytes": required_free_bytes,
+        "sandbox_write_capacity_ready": not blockers,
+        "shortfall_bytes": max(0, required_free_bytes - usage.free),
+    }
+    _success(command, data, business_succeeded=False)
+
+
 @evidence_group.command("read-boundary")
 @click.option(
     "--runtime-config",
