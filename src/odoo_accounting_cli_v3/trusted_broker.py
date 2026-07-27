@@ -756,9 +756,8 @@ def _bound_precheck_preview(
         )
 
     core_fields = {"capability_id", "company_id", "parameters_digest"}
-    present_core = set(evidence).intersection(core_fields)
-    if present_core and (
-        present_core != core_fields
+    if (
+        not core_fields.issubset(evidence)
         or evidence["capability_id"] != operation["capability_id"]
         or evidence["company_id"] != operation["company_id"]
         or evidence["parameters_digest"] != operation["parameters_digest"]
@@ -767,31 +766,28 @@ def _bound_precheck_preview(
             "broker_approval_precheck_rejected", status_code=500
         )
     release_fields = {"release_digest", "registry_digest"}
-    present_release = set(evidence).intersection(release_fields)
-    if present_release and (
-        present_release != release_fields
+    if (
+        not release_fields.issubset(evidence)
         or evidence["release_digest"] != operation["release_digest"]
         or evidence["registry_digest"] != operation["registry_digest"]
     ):
         raise TrustedBrokerError(
             "broker_approval_precheck_rejected", status_code=500
         )
-    if "runtime_binding" in evidence:
-        runtime = evidence["runtime_binding"]
-        expected_runtime = {
-            "user_id": operation["user_id"],
-            "odoo_instance_id": operation["odoo_instance_id"],
-            "database_name": operation["database_name"],
-            "database_uuid": operation["database_uuid"],
-            "environment": operation["environment"],
-        }
-        if not isinstance(runtime, dict) or any(
-            runtime.get(field) != expected
-            for field, expected in expected_runtime.items()
-        ):
-            raise TrustedBrokerError(
-                "broker_approval_precheck_rejected", status_code=500
-            )
+    runtime = evidence.get("runtime_binding")
+    expected_runtime = {
+        "user_id": operation["user_id"],
+        "odoo_instance_id": operation["odoo_instance_id"],
+        "database_name": operation["database_name"],
+        "database_uuid": operation["database_uuid"],
+        "environment": operation["environment"],
+    }
+    if not isinstance(runtime, dict) or any(
+        runtime.get(field) != expected for field, expected in expected_runtime.items()
+    ):
+        raise TrustedBrokerError(
+            "broker_approval_precheck_rejected", status_code=500
+        )
 
     preview = {
         "operation_id": operation["operation_id"],

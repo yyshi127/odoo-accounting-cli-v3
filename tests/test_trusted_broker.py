@@ -1470,6 +1470,11 @@ def test_approval_inspect_fails_closed_on_precheck_record_drift(
     [
         lambda evidence: {**evidence, "capability_id": "acct.bill.vendor_create.v1"},
         lambda evidence: {
+            key: value
+            for key, value in evidence.items()
+            if key not in {"capability_id", "company_id", "parameters_digest"}
+        },
+        lambda evidence: {
             key: value for key, value in evidence.items() if key != "company_id"
         },
         lambda evidence: {**evidence, "parameters_digest": "f" * 64},
@@ -1481,6 +1486,9 @@ def test_approval_inspect_fails_closed_on_precheck_record_drift(
             },
         },
         lambda evidence: {
+            key: value for key, value in evidence.items() if key != "runtime_binding"
+        },
+        lambda evidence: {
             **evidence,
             "runtime_binding": {
                 key: value
@@ -1489,6 +1497,11 @@ def test_approval_inspect_fails_closed_on_precheck_record_drift(
             },
         },
         lambda evidence: {**evidence, "release_digest": "f" * 64},
+        lambda evidence: {
+            key: value
+            for key, value in evidence.items()
+            if key not in {"release_digest", "registry_digest"}
+        },
         lambda evidence: {
             key: value for key, value in evidence.items() if key != "registry_digest"
         },
