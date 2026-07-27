@@ -36,10 +36,19 @@ from .receipts import ReceiptError, verify_read_receipt
 from .registry import Capability, load_registry, registry_digest, validate_registry
 from .release import ReleaseError, verify_manifest
 from .write_api import WriteApiError, parse_write_api_request
-from .write_runtime import WriteRuntimeError, load_write_runtime_config
+from .write_runtime import (
+    WRITE_ROLE_NAMES,
+    WRITE_RUNTIME_SCHEMA_VERSION,
+    WriteRuntimeError,
+    load_write_runtime_config,
+)
 
 
 DEFAULT_WRITE_RUNTIME_CONFIG = Path("/etc/odoo-accounting-cli-v3/write-runtime.json")
+DEFAULT_SANDBOX_SECRET_ROOT = Path("/etc/odoo-accounting-cli-v3/secrets/sandbox")
+DEFAULT_SANDBOX_WRITE_STATE = Path(
+    "/var/lib/odoo-accounting-cli-v3/sandbox/write.sqlite3"
+)
 
 
 def _json(value: Any) -> str:
@@ -516,6 +525,92 @@ def _audit_sandbox_write_evidence_root(
         "path": str(resolved) if resolved is not None else str(path),
         "ready": not blockers,
         "status": status if blockers else "valid",
+    }
+
+
+def _require_absolute_plan_path(
+    value: Path,
+    *,
+    command: str,
+    option: str,
+) -> Path:
+    if not value.is_absolute():
+        raise CliFailure(
+            command=command,
+            code="write_runtime_plan_rejected",
+            message=f"{option} must be an absolute path.",
+        )
+    return value
+
+
+def _write_runtime_role_plan(
+    *,
+    secret_root: Path,
+    key_id_prefix: str,
+    issuer_prefix: str,
+) -> dict[str, dict[str, str]]:
+    roles: dict[str, dict[str, str]] = {}
+    for role in WRITE_ROLE_NAMES:
+        role_key = role.replace("_", "-")
+        document = {
+            "key_id": f"{key_id_prefix}-{role_key}-v1",
+            "secret_path": str(secret_root / f"{role}.hmac"),
+        }
+        if role in {"execution", "verification", "recovery"}:
+            document["issuer"] = f"{issuer_prefix}-{role_key}"
+        roles[role] = document
+    return roles
+
+
+def _write_runtime_plan_document(
+    *,
+    base_runtime_config: Path,
+    write_state_path: Path,
+    secret_root: Path,
+    write_execution_mode: str,
+    key_id_prefix: str,
+    issuer_prefix: str,
+    socket_path: str,
+    socket_owner_uid: int,
+    socket_group_gid: int,
+    socket_mode: int,
+    finalizer_service_uid: int,
+    finalizer_service_gid: int,
+    finalizer_systemd_unit: str,
+    attestation_key_id: str,
+    guard_installation_id: str,
+    database_oid: int,
+    handoff_idle_timeout_seconds: float,
+    request_io_timeout_seconds: float,
+    max_request_bytes: int,
+    max_response_bytes: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": WRITE_RUNTIME_SCHEMA_VERSION,
+        "write_execution_mode": write_execution_mode,
+        "base_runtime_config_path": str(base_runtime_config),
+        "write_state_path": str(write_state_path),
+        "effect_finalizer": {
+            "socket_path": socket_path,
+            "socket_owner_uid": socket_owner_uid,
+            "socket_group_gid": socket_group_gid,
+            "socket_mode": socket_mode,
+            "finalizer_service_uid": finalizer_service_uid,
+            "finalizer_service_gid": finalizer_service_gid,
+            "finalizer_systemd_unit": finalizer_systemd_unit,
+            "attestation_key_id": attestation_key_id,
+            "guard_installation_id": guard_installation_id,
+            "database_oid": database_oid,
+            "handoff_idle_timeout_seconds": handoff_idle_timeout_seconds,
+            "request_io_timeout_seconds": request_io_timeout_seconds,
+            "max_request_bytes": max_request_bytes,
+            "max_response_bytes": max_response_bytes,
+        },
+        **_write_runtime_role_plan(
+            secret_root=secret_root,
+            key_id_prefix=key_id_prefix,
+            issuer_prefix=issuer_prefix,
+        ),
     }
 
 
@@ -1492,6 +1587,215 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
             "sandbox_pipeline_ready": verified_count == len(reports),
             "total_write_capabilities": len(reports),
             "verified_count": verified_count,
+        },
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("write-runtime-config-plan")
+@click.option(
+    "--base-runtime-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Existing read runtime config that the write runtime will bind to.",
+)
+@click.option(
+    "--write-runtime-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=DEFAULT_WRITE_RUNTIME_CONFIG,
+    show_default=True,
+    help="Canonical write runtime config path the operator will install.",
+)
+@click.option(
+    "--write-state-path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=DEFAULT_SANDBOX_WRITE_STATE,
+    show_default=True,
+    help="Dedicated write operation SQLite state path.",
+)
+@click.option(
+    "--secret-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=DEFAULT_SANDBOX_SECRET_ROOT,
+    show_default=True,
+    help="Directory where six write role secrets will be generated by the operator.",
+)
+@click.option(
+    "--write-execution-mode",
+    type=click.Choice(["disabled", "sandbox_staged", "enabled"]),
+    default="sandbox_staged",
+    show_default=True,
+)
+@click.option("--key-id-prefix", default="sandbox", show_default=True)
+@click.option("--issuer-prefix", default="odoo-v3-sandbox", show_default=True)
+@click.option(
+    "--socket-path",
+    default="/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+    show_default=True,
+)
+@click.option("--socket-owner-uid", type=int, default=0, show_default=True)
+@click.option("--socket-group-gid", type=click.IntRange(min=1), required=True)
+@click.option("--socket-mode", type=click.IntRange(min=0, max=0o777), default=0o660)
+@click.option("--finalizer-service-uid", type=click.IntRange(min=1), required=True)
+@click.option("--finalizer-service-gid", type=click.IntRange(min=1), required=True)
+@click.option(
+    "--finalizer-systemd-unit",
+    default="odoo-accounting-cli-v3-effect-finalizer.service",
+    show_default=True,
+)
+@click.option("--attestation-key-id", required=True)
+@click.option("--guard-installation-id", required=True)
+@click.option("--database-oid", type=click.IntRange(min=1), required=True)
+@click.option(
+    "--handoff-idle-timeout-seconds",
+    type=click.FloatRange(min=90.0, max=120.0),
+    default=100.0,
+    show_default=True,
+)
+@click.option(
+    "--request-io-timeout-seconds",
+    type=click.FloatRange(min=0.05, max=30.0),
+    default=5.0,
+    show_default=True,
+)
+@click.option(
+    "--max-request-bytes",
+    type=click.IntRange(min=1024, max=65536),
+    default=16384,
+    show_default=True,
+)
+@click.option(
+    "--max-response-bytes",
+    type=click.IntRange(min=1024, max=65536),
+    default=16384,
+    show_default=True,
+)
+@click.option(
+    "--require-root-owner/--allow-non-root-owner",
+    default=True,
+    show_default=True,
+    help="Require root-managed base runtime files; disable only for local dry-run tests.",
+)
+def evidence_write_runtime_config_plan(
+    base_runtime_config: Path,
+    write_runtime_config: Path,
+    write_state_path: Path,
+    secret_root: Path,
+    write_execution_mode: str,
+    key_id_prefix: str,
+    issuer_prefix: str,
+    socket_path: str,
+    socket_owner_uid: int,
+    socket_group_gid: int,
+    socket_mode: int,
+    finalizer_service_uid: int,
+    finalizer_service_gid: int,
+    finalizer_systemd_unit: str,
+    attestation_key_id: str,
+    guard_installation_id: str,
+    database_oid: int,
+    handoff_idle_timeout_seconds: float,
+    request_io_timeout_seconds: float,
+    max_request_bytes: int,
+    max_response_bytes: int,
+    require_root_owner: bool,
+) -> None:
+    """Render a secret-free schema-v2 write runtime installation plan."""
+
+    command = "evidence.write-runtime-config-plan"
+    base_runtime_config = _require_absolute_plan_path(
+        base_runtime_config,
+        command=command,
+        option="--base-runtime-config",
+    )
+    write_runtime_config = _require_absolute_plan_path(
+        write_runtime_config,
+        command=command,
+        option="--write-runtime-config",
+    )
+    write_state_path = _require_absolute_plan_path(
+        write_state_path,
+        command=command,
+        option="--write-state-path",
+    )
+    secret_root = _require_absolute_plan_path(
+        secret_root,
+        command=command,
+        option="--secret-root",
+    )
+    try:
+        base_runtime = load_runtime_config(
+            base_runtime_config,
+            require_root_owner=require_root_owner,
+        )
+    except OdooRunnerError as exc:
+        raise CliFailure(
+            command=command,
+            code="base_runtime_rejected",
+            message="The base read runtime configuration is not loadable.",
+        ) from exc
+
+    blockers: list[str] = []
+    if write_execution_mode == "sandbox_staged" and (
+        base_runtime.environment != "sandbox"
+        or base_runtime.capability_channel != "staged"
+    ):
+        blockers.append("sandbox_staged write runtime requires a staged sandbox base runtime")
+    if (
+        write_execution_mode == "enabled"
+        and base_runtime.capability_channel != "enabled"
+    ):
+        blockers.append("enabled write runtime requires an enabled base runtime")
+    if write_runtime_config == base_runtime_config:
+        blockers.append("write runtime config path must differ from base runtime config")
+    if write_state_path in {
+        base_runtime.auth_state_path,
+        base_runtime.receipt_state_path,
+    }:
+        blockers.append("write state path must differ from read state paths")
+    document = _write_runtime_plan_document(
+        base_runtime_config=base_runtime_config,
+        write_state_path=write_state_path,
+        secret_root=secret_root,
+        write_execution_mode=write_execution_mode,
+        key_id_prefix=key_id_prefix,
+        issuer_prefix=issuer_prefix,
+        socket_path=socket_path,
+        socket_owner_uid=socket_owner_uid,
+        socket_group_gid=socket_group_gid,
+        socket_mode=socket_mode,
+        finalizer_service_uid=finalizer_service_uid,
+        finalizer_service_gid=finalizer_service_gid,
+        finalizer_systemd_unit=finalizer_systemd_unit,
+        attestation_key_id=attestation_key_id,
+        guard_installation_id=guard_installation_id,
+        database_oid=database_oid,
+        handoff_idle_timeout_seconds=handoff_idle_timeout_seconds,
+        request_io_timeout_seconds=request_io_timeout_seconds,
+        max_request_bytes=max_request_bytes,
+        max_response_bytes=max_response_bytes,
+    )
+    _success(
+        command,
+        {
+            "base_runtime_identity": base_runtime.runtime_identity,
+            "blockers": sorted(set(blockers)),
+            "document": document,
+            "document_sha256": _sha256_json(document),
+            "install_actions": [
+                "review and confirm the dedicated sandbox database, service UID/GID, finalizer socket, guard installation ID, and database OID",
+                f"create {secret_root} as a canonical root-owned directory, not group/world writable",
+                "generate six distinct random write role secrets of at least 32 bytes without printing them",
+                f"create {write_state_path.parent} as a private service-owned state directory",
+                f"install the reviewed JSON document at {write_runtime_config} with root-managed ownership and restrictive mode",
+                "rerun evidence sandbox-write-environment-audit with the canonical write runtime config and retained evidence root",
+            ],
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "schema_version": WRITE_RUNTIME_SCHEMA_VERSION,
+            "secret_values_included": False,
+            "write_runtime_config_path": str(write_runtime_config),
+            "write_runtime_configurable": not blockers,
         },
         business_succeeded=False,
     )

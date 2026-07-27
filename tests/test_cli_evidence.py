@@ -1405,6 +1405,111 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
+def _write_runtime_plan_args(
+    *,
+    base_runtime_path: Path,
+    tmp_path: Path,
+) -> list[str]:
+    return [
+        "evidence",
+        "write-runtime-config-plan",
+        "--base-runtime-config",
+        str(base_runtime_path),
+        "--write-runtime-config",
+        str(tmp_path / "write-runtime.json"),
+        "--write-state-path",
+        str(tmp_path / "write-state" / "write.sqlite3"),
+        "--secret-root",
+        str(tmp_path / "write-secrets"),
+        "--socket-group-gid",
+        "991",
+        "--finalizer-service-uid",
+        "992",
+        "--finalizer-service-gid",
+        "992",
+        "--attestation-key-id",
+        "effect-finalizer-v1",
+        "--guard-installation-id",
+        "22222222-2222-4222-8222-222222222222",
+        "--database-oid",
+        "16384",
+        "--allow-non-root-owner",
+    ]
+
+
+def test_evidence_write_runtime_config_plan_renders_secret_free_schema_v2(
+    tmp_path: Path,
+):
+    _runtime_path, document, _base = make_write_runtime(tmp_path / "runtime")
+    base_runtime_path = Path(document["base_runtime_config_path"])
+
+    result = CliRunner().invoke(
+        main,
+        _write_runtime_plan_args(
+            base_runtime_path=base_runtime_path,
+            tmp_path=tmp_path,
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    planned = payload["data"]["document"]
+    assert payload["command"] == "evidence.write-runtime-config-plan"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert payload["data"]["secret_values_included"] is False
+    assert payload["data"]["write_runtime_configurable"] is True
+    assert payload["data"]["blockers"] == []
+    assert planned["schema_version"] == 2
+    assert planned["write_execution_mode"] == "sandbox_staged"
+    assert planned["base_runtime_config_path"] == str(base_runtime_path)
+    assert planned["effect_finalizer"]["guard_installation_id"] == (
+        "22222222-2222-4222-8222-222222222222"
+    )
+    assert planned["execution"]["issuer"] == "odoo-v3-sandbox-execution"
+    assert planned["verification"]["issuer"] == "odoo-v3-sandbox-verification"
+    assert planned["recovery"]["issuer"] == "odoo-v3-sandbox-recovery"
+    assert "issuer" not in planned["write_auth"]
+    assert planned["write_auth"]["secret_path"].endswith("write_auth.hmac")
+    assert payload["data"]["document_sha256"] == __import__("hashlib").sha256(
+        __import__("json")
+        .dumps(
+            planned,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        .encode("utf-8")
+    ).hexdigest()
+
+
+def test_evidence_write_runtime_config_plan_reports_base_runtime_scope_blocker(
+    tmp_path: Path,
+):
+    _runtime_path, document, base = make_write_runtime(tmp_path / "runtime")
+    base_runtime_path = Path(document["base_runtime_config_path"])
+    base["environment"] = "production"
+    base["capability_channel"] = "enabled"
+    write_runtime_json(base_runtime_path, base)
+
+    result = CliRunner().invoke(
+        main,
+        _write_runtime_plan_args(
+            base_runtime_path=base_runtime_path,
+            tmp_path=tmp_path,
+        ),
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["write_runtime_configurable"] is False
+    assert payload["data"]["blockers"] == [
+        "sandbox_staged write runtime requires a staged sandbox base runtime"
+    ]
+
+
 def test_evidence_write_capability_readiness_accepts_registered_write():
     expected_identity = {
         "commit": "1" * 40,

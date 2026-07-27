@@ -431,11 +431,29 @@ It never deletes anything and always reports
 `authorization_required_before_cleanup=true`. The plan is not cleanup authority,
 not an E00a receipt, not closure evidence, and not a sandbox-write permission.
 
-The write runtime configuration schema is version 1. Its
+The write runtime configuration schema is version 2. Its
 `write_execution_mode` starts as `disabled`. A sandbox candidate may use
 `sandbox_staged` only when its base runtime is both environment `sandbox` and
 channel `staged`. Mode `enabled` requires an enabled base-runtime channel but
 does not override registry availability or production authorization.
+Before rendering the root-managed JSON by hand, run the release's read-only
+planning command:
+
+```bash
+odoo-accounting-cli-v3 evidence write-runtime-config-plan \
+  --base-runtime-config /etc/odoo-accounting-cli-v3/runtime-sandbox.json \
+  --socket-group-gid <BROKER_GROUP_GID> \
+  --finalizer-service-uid <FINALIZER_UID> \
+  --finalizer-service-gid <FINALIZER_GID> \
+  --attestation-key-id <FINALIZER_ATTESTATION_KEY_ID> \
+  --guard-installation-id <SANDBOX_GUARD_INSTALLATION_UUID> \
+  --database-oid <SANDBOX_DATABASE_OID>
+```
+
+The plan renders the schema-v2, secret-free `write-runtime.json` document,
+hashes it, reports whether the base runtime scope is admissible, and lists the
+operator actions still required. It never creates secrets, writes `/etc`, opens
+Odoo, or authorizes production.
 
 Generate eight independent secrets without printing them: the two read roles
 plus write-authentication, approval, execution, verification, recovery, and

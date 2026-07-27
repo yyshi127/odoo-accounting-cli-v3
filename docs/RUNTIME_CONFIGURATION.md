@@ -107,26 +107,43 @@ and match an independent read-only SQL witness and the capability's financial
 standard answer. Local fake-ORM or CI PostgreSQL results do not replace that
 Odoo-bound signed receipt.
 
-## Write runtime configuration schema v1
+## Write runtime configuration schema v2
 
 The six write-lifecycle actions use the fixed root-managed path
 `/etc/odoo-accounting-cli-v3/write-runtime.json`. Pi and other callers cannot
 select this path, a state database, an Odoo executable, or a key through request
-parameters. The write runtime document has schema version `1`; this is separate
+parameters. The write runtime document has schema version `2`; this is separate
 from the SQLite persistence schema, which is version `4`.
 
-The following is an illustrative disabled configuration. It contains key IDs
-and secret file paths only, never secret values:
+The following is an illustrative disabled configuration. It contains key IDs,
+secret file paths, and the secret-free effect-finalizer client binding only,
+never secret values:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "write_execution_mode": "disabled",
   "base_runtime_config_path": "/etc/odoo-accounting-cli-v3/runtime-sandbox.json",
   "write_state_path": "/var/lib/odoo-accounting-cli-v3/sandbox/candidates/<release>/write.sqlite3",
+  "effect_finalizer": {
+    "socket_path": "/run/odoo-accounting-cli-v3/effect-finalizer.sock",
+    "socket_owner_uid": 0,
+    "socket_group_gid": 991,
+    "socket_mode": 432,
+    "finalizer_service_uid": 992,
+    "finalizer_service_gid": 992,
+    "finalizer_systemd_unit": "odoo-accounting-cli-v3-effect-finalizer.service",
+    "attestation_key_id": "sandbox-effect-finalizer-2026-07",
+    "guard_installation_id": "<SANDBOX_GUARD_INSTALLATION_UUID>",
+    "database_oid": 16384,
+    "handoff_idle_timeout_seconds": 100.0,
+    "request_io_timeout_seconds": 5.0,
+    "max_request_bytes": 16384,
+    "max_response_bytes": 16384
+  },
   "write_auth": {
     "key_id": "sandbox-write-auth-2026-07",
-    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/write-auth.hmac"
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/write_auth.hmac"
   },
   "approval": {
     "key_id": "sandbox-approval-2026-07",
@@ -149,7 +166,7 @@ and secret file paths only, never secret values:
   },
   "write_receipt": {
     "key_id": "sandbox-write-receipt-2026-07",
-    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/write-receipt.hmac"
+    "secret_path": "/etc/odoo-accounting-cli-v3/secrets/sandbox/write_receipt.hmac"
   }
 }
 ```
@@ -162,6 +179,9 @@ bytes in a canonical root-owned regular file, normally mode `0640`, with no
 world access and no group/world write. The recovery role is reserved and
 validated by the runtime boundary; its presence must not be represented as
 evidence that every recovery outcome is currently signed by that role.
+The `effect_finalizer` section binds the broker to the isolated finalizer
+socket and finalizer identity; it references no finalizer HMAC, pgpass, Odoo
+configuration, or database LOGIN secret.
 
 The write state parent is service-owned mode `0700`. The SQLite database and
 its `-wal` and `-shm` companions must remain service-owned mode `0600`, and must
