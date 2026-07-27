@@ -663,7 +663,15 @@ to one capability is never reusable for a different capability. No sandbox
 result authorizes a production write.
 
 Before a sandbox write evidence bundle can be collected for registry promotion,
-first run the read-only
+first run the read-only static readiness gate
+`odoo-accounting-cli-v3 evidence write-capability-readiness --capability-id ...`.
+It checks that the exact release's registry entry is a write capability with
+strict schemas, approval, idempotency, recovery metadata, service model
+allowlist, and Odoo write-handler support. A passing report only admits the
+capability to sandbox drill planning; it still reports
+`business_succeeded:false` and never authorizes production.
+
+Then run the read-only
 `odoo-accounting-cli-v3 evidence sandbox-write-preflight --capability-id ... --company-id ...`
 gate for the exact registered write capability and Odoo company under test,
 then retain its `preflight_manifest` as a file inside the evidence root. The

@@ -614,6 +614,81 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
     assert payload["data"]["production_promotion_allowed"] is False
 
 
+def test_evidence_write_capability_readiness_accepts_registered_write():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev170",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "write-capability-readiness",
+                "--capability-id",
+                "acct.invoice.customer_create.v1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.write-capability-readiness"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["sandbox_drill_admissible"] is True
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert payload["data"]["capability"]["id"] == "acct.invoice.customer_create.v1"
+    assert payload["data"]["capability"]["approval"]["required"] is True
+    assert payload["data"]["capability"]["idempotency"]["required"] is True
+    assert payload["data"]["checks"] == {
+        "approval_policy_present": True,
+        "idempotency_policy_present": True,
+        "odoo_handler_supported": True,
+        "production_not_enabled": True,
+        "recovery_method_present": True,
+        "service_allowed_models_present": True,
+        "strict_input_schema": True,
+        "strict_output_schema": True,
+    }
+    assert "account.move" in payload["data"]["allowed_models"]
+
+
+def test_evidence_write_capability_readiness_rejects_read_capability():
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "d" * 64,
+            "package_sha256": "4" * 64,
+            "registry_digest": "b" * 64,
+            "release": "release",
+            "verified": True,
+            "version": "0.1.0.dev170",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "write-capability-readiness",
+                "--capability-id",
+                "acct.registry.list.v1",
+            ],
+        )
+
+    assert result.exit_code == 5
+    assert '"code":"write_capability_rejected"' in result.output
+
+
 def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
     tmp_path: Path,
 ):

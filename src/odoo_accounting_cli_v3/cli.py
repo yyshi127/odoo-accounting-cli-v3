@@ -868,6 +868,94 @@ def evidence_inspect_sandbox_write_root(metadata_json: Path) -> None:
     )
 
 
+@evidence_group.command("write-capability-readiness")
+@click.option(
+    "--capability-id",
+    required=True,
+    help="Exact registered write capability to check before sandbox drill collection.",
+)
+def evidence_write_capability_readiness(capability_id: str) -> None:
+    """Check static readiness before a real sandbox write evidence drill."""
+
+    command = "evidence.write-capability-readiness"
+    identity = _load_release_identity(command=command)
+    capabilities = _load_capabilities()
+    capability = next((item for item in capabilities if item.id == capability_id), None)
+    if capability is None or capability.data["access"] != "write":
+        raise CliFailure(
+            command=command,
+            code="write_capability_rejected",
+            message="The readiness gate must target one registered write capability.",
+            exit_code=5,
+        )
+    try:
+        from .odoo.write_handlers import _CAPABILITIES as odoo_write_capabilities
+        from .write_service import _ALLOWED_MODELS as allowed_models_by_capability
+    except Exception as exc:
+        raise CliFailure(
+            command=command,
+            code="write_capability_runtime_unavailable",
+            message="The write capability implementation allowlists are unavailable.",
+            exit_code=5,
+        ) from exc
+
+    data = capability.data
+    allowed_models = sorted(allowed_models_by_capability.get(capability_id, ()))
+    checks = {
+        "approval_policy_present": (
+            data["approval"].get("required") is True
+            and isinstance(data["approval"].get("policy"), str)
+            and bool(data["approval"]["policy"].strip())
+            and isinstance(data["approval"].get("ttl_seconds"), int)
+            and 1 <= data["approval"]["ttl_seconds"] <= 900
+        ),
+        "idempotency_policy_present": (
+            data["idempotency"].get("required") is True
+            and isinstance(data["idempotency"].get("scope"), str)
+            and bool(data["idempotency"]["scope"].strip())
+        ),
+        "odoo_handler_supported": capability_id in odoo_write_capabilities,
+        "production_not_enabled": "production" not in data["enabled_environments"],
+        "recovery_method_present": (
+            isinstance(data["recovery"].get("method"), str)
+            and bool(data["recovery"]["method"].strip())
+        ),
+        "service_allowed_models_present": bool(allowed_models),
+        "strict_input_schema": (
+            data["input_schema"].get("type") == "object"
+            and data["input_schema"].get("additionalProperties") is False
+        ),
+        "strict_output_schema": (
+            data["output_schema"].get("type") == "object"
+            and data["output_schema"].get("additionalProperties") is False
+        ),
+    }
+    sandbox_drill_admissible = all(checks.values())
+    _success(
+        command,
+        {
+            "allowed_models": allowed_models,
+            "capability": {
+                "access": data["access"],
+                "approval": data["approval"],
+                "company_scope": data["company_scope"],
+                "enabled_environments": data["enabled_environments"],
+                "evidence_level": data["evidence"]["level"],
+                "id": capability_id,
+                "idempotency": data["idempotency"],
+                "recovery": data["recovery"],
+                "risk_level": data["risk_level"],
+            },
+            "checks": checks,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "release_identity": identity,
+            "sandbox_drill_admissible": sandbox_drill_admissible,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("sandbox-write-preflight")
 @click.option(
     "--capability-id",
