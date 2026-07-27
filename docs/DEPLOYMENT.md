@@ -759,9 +759,12 @@ The command checks the single capability/company/database/release binding, all
 seven registry evidence kinds, and the
 prepare/preview/approval/execution/verification/repeat/failure/recovery and Pi
 E2E lifecycle digests. It also verifies that the evidence bundle's registry and
-release digests match the currently anchored CLI release. A passing verifier
-report is an admission check for human review only; it is not a production
-authorization.
+release digests match the currently anchored CLI release. The verifier rejects
+obvious placeholder evidence values, including any retained preflight,
+lifecycle artifact, registry artifact, or registry signature hash that is a
+single repeated hexadecimal character such as `000...`, `999...`, or `aaa...`.
+A passing verifier report is an admission check for human review only; it is
+not a production authorization.
 
 For the next non-authorizing registry-promotion review step, build the
 candidate from the verified exact-release evidence instead of hand-writing it:

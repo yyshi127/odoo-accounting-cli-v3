@@ -28,11 +28,24 @@ KINDS = (
     "sandbox_write_lifecycle",
     "security_negative",
 )
+ARTIFACT_SHA256 = hashlib.sha256(b"registry artifact").hexdigest()
+PREFLIGHT_MANIFEST_SHA256 = hashlib.sha256(b"preflight manifest").hexdigest()
+SIGNATURE_SHA256 = hashlib.sha256(b"registry signature").hexdigest()
+LIFECYCLE_DIGESTS = {
+    "approval_digest": hashlib.sha256(b"approval").hexdigest(),
+    "failure_case_digest": hashlib.sha256(b"failure case").hexdigest(),
+    "idempotency_replay_digest": hashlib.sha256(b"idempotency replay").hexdigest(),
+    "parameter_roundtrip_sha256": hashlib.sha256(b"parameter roundtrip").hexdigest(),
+    "pi_e2e_digest": hashlib.sha256(b"pi e2e").hexdigest(),
+    "preview_digest": hashlib.sha256(b"preview").hexdigest(),
+    "recovery_case_digest": hashlib.sha256(b"recovery case").hexdigest(),
+    "security_negative_digest": hashlib.sha256(b"security negative").hexdigest(),
+}
 
 
 def _receipt(kind: str, *, capability_id: str = "acct.invoice.customer_create.v1"):
     return {
-        "artifact_sha256": "a" * 64,
+        "artifact_sha256": ARTIFACT_SHA256,
         "capability_id": capability_id,
         "company_id": 7,
         "database_uuid": "11111111-1111-4111-8111-111111111111",
@@ -41,7 +54,7 @@ def _receipt(kind: str, *, capability_id: str = "acct.invoice.customer_create.v1
         "kind": kind,
         "registry_sha256": "b" * 64,
         "release_sha256": "c" * 64,
-        "signature": "d" * 64,
+        "signature": SIGNATURE_SHA256,
         "verified_at": "2026-07-27T00:00:00Z",
     }
 
@@ -54,7 +67,7 @@ def _document():
         "company_id": 7,
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "environment": "sandbox",
-        "preflight_manifest_sha256": "9" * 64,
+        "preflight_manifest_sha256": PREFLIGHT_MANIFEST_SHA256,
         "production_promotion_allowed": False,
         "release_identity": {
             "commit": "abc123",
@@ -64,18 +77,18 @@ def _document():
             "release": "0.1.0.dev160-abc123",
         },
         "lifecycle": {
-            "approval_digest": "1" * 64,
+            "approval_digest": LIFECYCLE_DIGESTS["approval_digest"],
             "execution_receipt_id": "execution-receipt",
-            "failure_case_digest": "2" * 64,
+            "failure_case_digest": LIFECYCLE_DIGESTS["failure_case_digest"],
             "final_audit_receipt_id": "audit-receipt",
-            "idempotency_replay_digest": "3" * 64,
+            "idempotency_replay_digest": LIFECYCLE_DIGESTS["idempotency_replay_digest"],
             "odoo_record_receipt_id": "odoo-record-receipt",
-            "parameter_roundtrip_sha256": "4" * 64,
-            "pi_e2e_digest": "5" * 64,
+            "parameter_roundtrip_sha256": LIFECYCLE_DIGESTS["parameter_roundtrip_sha256"],
+            "pi_e2e_digest": LIFECYCLE_DIGESTS["pi_e2e_digest"],
             "prepare_receipt_id": "prepare-receipt",
-            "preview_digest": "6" * 64,
-            "recovery_case_digest": "7" * 64,
-            "security_negative_digest": "8" * 64,
+            "preview_digest": LIFECYCLE_DIGESTS["preview_digest"],
+            "recovery_case_digest": LIFECYCLE_DIGESTS["recovery_case_digest"],
+            "security_negative_digest": LIFECYCLE_DIGESTS["security_negative_digest"],
             "verification_receipt_id": "verification-receipt",
         },
         "registry_receipts": [_receipt(kind) for kind in KINDS],
@@ -108,7 +121,7 @@ def test_complete_sandbox_write_evidence_is_accepted():
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "environment": "sandbox",
         "production_promotion_allowed": False,
-        "preflight_manifest_sha256": "9" * 64,
+        "preflight_manifest_sha256": PREFLIGHT_MANIFEST_SHA256,
         "registry_digest": "b" * 64,
         "registry_receipt_count": 7,
         "release_sha256": "c" * 64,
@@ -264,6 +277,26 @@ def test_promotion_review_rejects_unsafe_or_unbound_candidates(mutate, match):
         (
             lambda document: document.__setitem__("preflight_manifest_sha256", "X"),
             "preflight_manifest_sha256 must be lowercase SHA-256",
+        ),
+        (
+            lambda document: document.__setitem__("preflight_manifest_sha256", "9" * 64),
+            "preflight_manifest_sha256 must not be a placeholder SHA-256",
+        ),
+        (
+            lambda document: document["lifecycle"].__setitem__("approval_digest", "1" * 64),
+            "lifecycle.approval_digest must not be a placeholder SHA-256",
+        ),
+        (
+            lambda document: document["registry_receipts"][0].__setitem__(
+                "artifact_sha256", "a" * 64
+            ),
+            "registry_receipts\\[0\\].artifact_sha256 must not be a placeholder SHA-256",
+        ),
+        (
+            lambda document: document["registry_receipts"][0].__setitem__(
+                "signature", "d" * 64
+            ),
+            "registry_receipts\\[0\\].signature must not be a placeholder SHA-256",
         ),
     ),
 )

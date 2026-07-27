@@ -19,6 +19,7 @@ from typing import Any
 
 CAPABILITY_ID = re.compile(r"^acct\.[a-z0-9_]+\.[a-z0-9_]+\.v[1-9][0-9]*$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
+PLACEHOLDER_HEX64_VALUES = frozenset(character * 64 for character in "0123456789abcdef")
 REQUIRED_KINDS = frozenset(
     {
         "accounting_oracle",
@@ -188,74 +189,41 @@ def _require_hex64(value: Any, label: str) -> str:
     return text
 
 
+def _require_non_placeholder_hex64(value: Any, label: str) -> str:
+    text = _require_hex64(value, label)
+    if text in PLACEHOLDER_HEX64_VALUES:
+        raise SandboxWriteEvidenceError(f"{label} must not be a placeholder SHA-256")
+    return text
+
+
 def _require_positive_int(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise SandboxWriteEvidenceError(f"{label} must be a positive integer")
     return value
 
 
-def verify_document(document: Any) -> dict[str, Any]:
-    root = _require_object(document, "evidence")
-    expected_root = {
-        "capability_id",
-        "company_id",
-        "database_uuid",
-        "environment",
-        "lifecycle",
-        "preflight_manifest_sha256",
-        "production_promotion_allowed",
-        "registry_receipts",
-        "release_identity",
-        "schema_version",
-        "scope",
-    }
-    if set(root) != expected_root:
-        raise SandboxWriteEvidenceError("evidence fields are invalid")
-    if root["schema_version"] != 1:
-        raise SandboxWriteEvidenceError("evidence.schema_version must be 1")
-    if root["scope"] != OUTPUT_SCOPE:
-        raise SandboxWriteEvidenceError("evidence.scope is invalid")
-    if root["environment"] != "sandbox":
-        raise SandboxWriteEvidenceError("sandbox write evidence must target sandbox")
-    if root["production_promotion_allowed"] is not False:
-        raise SandboxWriteEvidenceError("sandbox evidence must not authorize production")
-
-    capability_id = _require_text(root["capability_id"], "evidence.capability_id")
-    if CAPABILITY_ID.fullmatch(capability_id) is None:
-        raise SandboxWriteEvidenceError("evidence.capability_id is invalid")
-    company_id = _require_positive_int(root["company_id"], "evidence.company_id")
-    database_uuid = _require_text(root["database_uuid"], "evidence.database_uuid")
-    preflight_manifest_sha256 = _require_hex64(
-        root["preflight_manifest_sha256"], "evidence.preflight_manifest_sha256"
-    )
-
-    release = _require_object(root["release_identity"], "evidence.release_identity")
-    if set(release) != {"commit", "manifest_sha256", "package_sha256", "registry_digest", "release"}:
-        raise SandboxWriteEvidenceError("release identity fields are invalid")
-    _require_text(release["commit"], "release_identity.commit")
-    _require_text(release["release"], "release_identity.release")
-    manifest_sha256 = _require_hex64(
-        release["manifest_sha256"], "release_identity.manifest_sha256"
-    )
-    registry_digest = _require_hex64(
-        release["registry_digest"], "release_identity.registry_digest"
-    )
-    _require_hex64(release["package_sha256"], "release_identity.package_sha256")
-
-    lifecycle = _require_object(root["lifecycle"], "evidence.lifecycle")
-    if set(lifecycle) != LIFECYCLE_FIELDS:
-        raise SandboxWriteEvidenceError("lifecycle fields are invalid")
+def _validate_lifecycle_receipt_ids(values: Any) -> set[str]:
+    if not isinstance(values, dict) or set(values) != ID_LIFECYCLE_FIELDS:
+        raise SandboxWriteEvidenceError("lifecycle receipt id fields are invalid")
     lifecycle_receipt_ids: set[str] = set()
-    for field, value in lifecycle.items():
-        if field.endswith("_id"):
-            receipt_id = _require_text(value, f"lifecycle.{field}")
-            if receipt_id in lifecycle_receipt_ids:
-                raise SandboxWriteEvidenceError("lifecycle receipt ids must be unique")
-            lifecycle_receipt_ids.add(receipt_id)
-        else:
-            _require_hex64(value, f"lifecycle.{field}")
+    for field in sorted(ID_LIFECYCLE_FIELDS):
+        receipt_id = _require_text(values[field], f"lifecycle_receipt_ids.{field}")
+        if receipt_id in lifecycle_receipt_ids:
+            raise SandboxWriteEvidenceError("lifecycle receipt ids must be unique")
+        lifecycle_receipt_ids.add(receipt_id)
+    return lifecycle_receipt_ids
 
-    receipts = root["registry_receipts"]
+
+def _validate_registry_receipts(
+    receipts: Any,
+    *,
+    capability_id: str,
+    company_id: int,
+    database_uuid: str,
+    lifecycle_receipt_ids: set[str],
+    manifest_sha256: str,
+    registry_digest: str,
+) -> int:
     if not isinstance(receipts, list):
         raise SandboxWriteEvidenceError("registry_receipts must be an array")
     seen_ids: set[str] = set()
@@ -291,8 +259,10 @@ def verify_document(document: Any) -> dict[str, Any]:
             raise SandboxWriteEvidenceError(f"{location}.registry_sha256 mismatch")
         if receipt["release_sha256"] != manifest_sha256:
             raise SandboxWriteEvidenceError(f"{location}.release_sha256 mismatch")
-        _require_hex64(receipt["artifact_sha256"], f"{location}.artifact_sha256")
-        _require_hex64(receipt["signature"], f"{location}.signature")
+        _require_non_placeholder_hex64(
+            receipt["artifact_sha256"], f"{location}.artifact_sha256"
+        )
+        _require_non_placeholder_hex64(receipt["signature"], f"{location}.signature")
         _require_text(receipt["verified_at"], f"{location}.verified_at")
 
     missing = REQUIRED_KINDS - seen_kinds
@@ -300,6 +270,78 @@ def verify_document(document: Any) -> dict[str, Any]:
         raise SandboxWriteEvidenceError(
             f"registry evidence kinds are incomplete: {sorted(missing)}"
         )
+    return len(receipts)
+
+
+def verify_document(document: Any) -> dict[str, Any]:
+    root = _require_object(document, "evidence")
+    expected_root = {
+        "capability_id",
+        "company_id",
+        "database_uuid",
+        "environment",
+        "lifecycle",
+        "preflight_manifest_sha256",
+        "production_promotion_allowed",
+        "registry_receipts",
+        "release_identity",
+        "schema_version",
+        "scope",
+    }
+    if set(root) != expected_root:
+        raise SandboxWriteEvidenceError("evidence fields are invalid")
+    if root["schema_version"] != 1:
+        raise SandboxWriteEvidenceError("evidence.schema_version must be 1")
+    if root["scope"] != OUTPUT_SCOPE:
+        raise SandboxWriteEvidenceError("evidence.scope is invalid")
+    if root["environment"] != "sandbox":
+        raise SandboxWriteEvidenceError("sandbox write evidence must target sandbox")
+    if root["production_promotion_allowed"] is not False:
+        raise SandboxWriteEvidenceError("sandbox evidence must not authorize production")
+
+    capability_id = _require_text(root["capability_id"], "evidence.capability_id")
+    if CAPABILITY_ID.fullmatch(capability_id) is None:
+        raise SandboxWriteEvidenceError("evidence.capability_id is invalid")
+    company_id = _require_positive_int(root["company_id"], "evidence.company_id")
+    database_uuid = _require_text(root["database_uuid"], "evidence.database_uuid")
+    preflight_manifest_sha256 = _require_non_placeholder_hex64(
+        root["preflight_manifest_sha256"], "evidence.preflight_manifest_sha256"
+    )
+
+    release = _require_object(root["release_identity"], "evidence.release_identity")
+    if set(release) != {"commit", "manifest_sha256", "package_sha256", "registry_digest", "release"}:
+        raise SandboxWriteEvidenceError("release identity fields are invalid")
+    _require_text(release["commit"], "release_identity.commit")
+    _require_text(release["release"], "release_identity.release")
+    manifest_sha256 = _require_hex64(
+        release["manifest_sha256"], "release_identity.manifest_sha256"
+    )
+    registry_digest = _require_hex64(
+        release["registry_digest"], "release_identity.registry_digest"
+    )
+    _require_hex64(release["package_sha256"], "release_identity.package_sha256")
+
+    lifecycle = _require_object(root["lifecycle"], "evidence.lifecycle")
+    if set(lifecycle) != LIFECYCLE_FIELDS:
+        raise SandboxWriteEvidenceError("lifecycle fields are invalid")
+    lifecycle_receipt_ids: set[str] = set()
+    for field, value in lifecycle.items():
+        if field.endswith("_id"):
+            receipt_id = _require_text(value, f"lifecycle.{field}")
+            if receipt_id in lifecycle_receipt_ids:
+                raise SandboxWriteEvidenceError("lifecycle receipt ids must be unique")
+            lifecycle_receipt_ids.add(receipt_id)
+        else:
+            _require_non_placeholder_hex64(value, f"lifecycle.{field}")
+    receipt_count = _validate_registry_receipts(
+        root["registry_receipts"],
+        capability_id=capability_id,
+        company_id=company_id,
+        database_uuid=database_uuid,
+        lifecycle_receipt_ids=lifecycle_receipt_ids,
+        manifest_sha256=manifest_sha256,
+        registry_digest=registry_digest,
+    )
 
     return {
         "capability_id": capability_id,
@@ -309,7 +351,7 @@ def verify_document(document: Any) -> dict[str, Any]:
         "production_promotion_allowed": False,
         "preflight_manifest_sha256": preflight_manifest_sha256,
         "registry_digest": registry_digest,
-        "registry_receipt_count": len(receipts),
+        "registry_receipt_count": receipt_count,
         "release_sha256": manifest_sha256,
         "verified": True,
     }
@@ -676,26 +718,17 @@ def build_metadata(
         "registry_receipts": registry_receipts,
     }
     root = _validate_metadata_root(metadata)
-    if not isinstance(lifecycle_receipt_ids, dict) or set(lifecycle_receipt_ids) != ID_LIFECYCLE_FIELDS:
-        raise SandboxWriteEvidenceError("lifecycle receipt id fields are invalid")
+    validated_lifecycle_receipt_ids = _validate_lifecycle_receipt_ids(lifecycle_receipt_ids)
     _validate_preflight_manifest(preflight_root, metadata=root)
-    document = {
-        "schema_version": 1,
-        "scope": OUTPUT_SCOPE,
-        "capability_id": root["capability_id"],
-        "company_id": root["company_id"],
-        "database_uuid": root["database_uuid"],
-        "environment": root["environment"],
-        "preflight_manifest_sha256": "0" * 64,
-        "production_promotion_allowed": False,
-        "release_identity": root["release_identity"],
-        "lifecycle": {
-            **{field: "0" * 64 for field in DIGEST_LIFECYCLE_FIELDS},
-            **lifecycle_receipt_ids,
-        },
-        "registry_receipts": registry_receipts,
-    }
-    verify_document(document)
+    _validate_registry_receipts(
+        registry_receipts,
+        capability_id=root["capability_id"],
+        company_id=root["company_id"],
+        database_uuid=root["database_uuid"],
+        lifecycle_receipt_ids=validated_lifecycle_receipt_ids,
+        manifest_sha256=root["release_identity"]["manifest_sha256"],
+        registry_digest=root["release_identity"]["registry_digest"],
+    )
     return metadata
 
 
