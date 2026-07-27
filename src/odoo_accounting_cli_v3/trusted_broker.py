@@ -40,6 +40,11 @@ from .trusted_authority import (
     TrustedSession,
 )
 from .trusted_session_sqlite import TrustedSessionReconciliationRequiredError
+from .write_receipts import (
+    RECEIPT_FIELDS as WRITE_AUDIT_RECEIPT_FIELDS,
+    WRITE_RECEIPT_PURPOSE,
+    WRITE_SIGNATURE_VERSION,
+)
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -62,6 +67,34 @@ _BUSINESS_FIELDS: dict[str, frozenset[str]] = {
 _WRITE_ACTIONS = frozenset(_BUSINESS_FIELDS) - {"read"}
 _TERMINAL_ACTIONS = frozenset(
     {"operation.approve_execute", "operation.result"}
+)
+_TERMINAL_RECEIPT_DIGEST_FIELDS = frozenset(
+    {
+        "approval_digest",
+        "audit_head",
+        "operation_digest",
+        "registry_digest",
+        "release_digest",
+        "request_digest",
+        "result_digest",
+        "signature",
+        "verification_evidence_digest",
+    }
+)
+_TERMINAL_RECEIPT_TEXT_FIELDS = frozenset(
+    {
+        "capability_id",
+        "database_name",
+        "database_uuid",
+        "environment",
+        "issued_at",
+        "odoo_instance_id",
+        "operation_id",
+        "principal",
+        "receipt_id",
+        "request_id",
+        "signing_key_id",
+    }
 )
 _AUTHORITY_FIELDS = frozenset(
     {
@@ -450,6 +483,50 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
 
 def _context_mapping(context: RequestContext) -> dict[str, Any]:
     return {**context_payload(context), "auth_signature": context.auth_signature}
+
+
+def _validate_terminal_audit_receipt_shape(
+    receipt: dict[str, Any],
+    *,
+    odoo_effect: str,
+) -> None:
+    if set(receipt) != WRITE_AUDIT_RECEIPT_FIELDS:
+        raise TrustedBrokerError(
+            "broker_executor_response_rejected",
+            status_code=502,
+            odoo_effect=odoo_effect,
+        )
+    if any(not _is_digest(receipt[field]) for field in _TERMINAL_RECEIPT_DIGEST_FIELDS):
+        raise TrustedBrokerError(
+            "broker_executor_response_rejected",
+            status_code=502,
+            odoo_effect=odoo_effect,
+        )
+    if any(
+        not isinstance(receipt[field], str) or not receipt[field].strip()
+        for field in _TERMINAL_RECEIPT_TEXT_FIELDS
+    ):
+        raise TrustedBrokerError(
+            "broker_executor_response_rejected",
+            status_code=502,
+            odoo_effect=odoo_effect,
+        )
+    if (
+        type(receipt["signature_version"]) is not int
+        or receipt["signature_version"] != WRITE_SIGNATURE_VERSION
+        or receipt["signature_purpose"] != WRITE_RECEIPT_PURPOSE
+        or type(receipt["user_id"]) is not int
+        or receipt["user_id"] <= 0
+        or type(receipt["approver_user_id"]) is not int
+        or receipt["approver_user_id"] <= 0
+        or type(receipt["company_id"]) is not int
+        or receipt["company_id"] <= 0
+    ):
+        raise TrustedBrokerError(
+            "broker_executor_response_rejected",
+            status_code=502,
+            odoo_effect=odoo_effect,
+        )
 
 
 def _challenge_view(challenge: ApprovalChallenge) -> dict[str, Any]:
@@ -1310,6 +1387,13 @@ class TrustedBroker:
                 raise TrustedBrokerError(
                     "broker_executor_response_rejected",
                     status_code=502,
+                    odoo_effect=(
+                        "unknown" if action == "operation.approve_execute" else "none"
+                    ),
+                )
+            if terminal:
+                _validate_terminal_audit_receipt_shape(
+                    identity,
                     odoo_effect=(
                         "unknown" if action == "operation.approve_execute" else "none"
                     ),

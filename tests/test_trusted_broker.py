@@ -56,6 +56,10 @@ from odoo_accounting_cli_v3.trusted_session_sqlite import (
     TrustedSessionReconciliationRequiredError,
     TrustedSessionStoreError,
 )
+from odoo_accounting_cli_v3.write_receipts import (
+    WRITE_RECEIPT_PURPOSE,
+    WRITE_SIGNATURE_VERSION,
+)
 from odoo_accounting_cli_v3.write_protocol import approval_from_mapping
 
 
@@ -173,10 +177,32 @@ class FakeHistoricalExecutor:
 
     def _terminal(self, action: str, operation: Operation) -> dict:
         identity = {
+            "approval_digest": operation.approval_signature or "5" * 64,
+            "approver_user_id": operation.approver_user_id or 84,
+            "audit_head": "8" * 64,
+            "capability_channel": "staged",
+            "capability_id": operation.capability_id,
+            "company_id": operation.company_id,
+            "database_name": operation.database_name,
+            "database_uuid": operation.database_uuid,
+            "environment": operation.environment,
+            "issued_at": NOW.isoformat().replace("+00:00", "Z"),
+            "odoo_instance_id": operation.odoo_instance_id,
+            "operation_digest": operation.digest,
             "operation_id": operation.operation_id,
-            "release_digest": operation.release_digest,
+            "principal": operation.principal,
+            "receipt_id": f"write-receipt-{operation.operation_id}",
             "registry_digest": operation.registry_digest,
-            "signature": "a" * 64,
+            "release_digest": operation.release_digest,
+            "request_digest": "9" * 64,
+            "request_id": operation.request_id,
+            "result_digest": "a" * 64,
+            "signature": "b" * 64,
+            "signature_purpose": WRITE_RECEIPT_PURPOSE,
+            "signature_version": WRITE_SIGNATURE_VERSION,
+            "signing_key_id": "write-receipt-key",
+            "user_id": operation.user_id,
+            "verification_evidence_digest": "7" * 64,
         }
         if self.tamper_identity:
             identity["release_digest"] = "f" * 64
@@ -2367,6 +2393,54 @@ def test_malformed_approved_envelope_is_retryable_and_reconciles_after_expiry(
         return response
 
     monkeypatch.setattr(harness.executor, "dispatch", malformed)
+    hidden = harness.dispatch(
+        "operation.approve_execute", {"operation_id": operation_id}
+    )
+
+    assert hidden.body["error"]["code"] == "broker_executor_response_rejected"
+    assert hidden.body["error"]["odoo_effect"] == "unknown"
+    assert hidden.body["error"]["retryable"] is True
+    assert harness.executor.execution_effects == 1
+
+    monkeypatch.setattr(harness.executor, "dispatch", dispatch)
+    harness.clock.value = NOW + timedelta(seconds=121)
+    replay = harness.dispatch(
+        "operation.approve_execute", {"operation_id": operation_id}
+    )
+    assert replay.body["ok"] is True
+    assert replay.body["business_succeeded"] is True
+    assert harness.executor.execution_effects == 1
+    assert harness.executor.calls[-1][1]["reconciliation_only"] is True
+
+
+def test_thin_terminal_audit_receipt_is_retryable_and_reconciles_after_expiry(
+    harness: Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation_id = harness.prepare()
+    challenge = harness.preview(operation_id)
+    harness.broker.decide_approval(
+        session_handle="approver-session-0123456789abcdef",
+        challenge_id=challenge["challenge_id"],
+        decision=ApprovalDecision.APPROVE,
+    )
+    dispatch = harness.executor.dispatch
+
+    def thin_receipt(action, request, *, deadline_monotonic=None):
+        response = dispatch(
+            action, request, deadline_monotonic=deadline_monotonic
+        )
+        if action == "operation.approve_execute":
+            receipt = response["data"]["audit_receipt"]
+            response["data"]["audit_receipt"] = {
+                "operation_id": receipt["operation_id"],
+                "registry_digest": receipt["registry_digest"],
+                "release_digest": receipt["release_digest"],
+                "signature": receipt["signature"],
+            }
+        return response
+
+    monkeypatch.setattr(harness.executor, "dispatch", thin_receipt)
     hidden = harness.dispatch(
         "operation.approve_execute", {"operation_id": operation_id}
     )
