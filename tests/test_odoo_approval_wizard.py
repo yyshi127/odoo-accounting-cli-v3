@@ -4,6 +4,7 @@ import ast
 from copy import deepcopy
 import csv
 import importlib.util
+import json
 import sys
 import types
 import xml.etree.ElementTree as ET
@@ -20,6 +21,8 @@ WIZARD = ADDON / "models" / "approval_wizard.py"
 SECURITY = ADDON / "security" / "odoo_accounting_cli_v3_security.xml"
 ACL = ADDON / "security" / "ir.model.access.csv"
 VIEWS = ADDON / "views" / "approval_wizard_views.xml"
+REGISTRY = ROOT / "registry" / "capabilities.json"
+VENDOR_BILL_CAPABILITY_ID = "acct.bill.vendor_create.v1"
 
 
 class FakeTransientModel:
@@ -73,7 +76,7 @@ def _inspection(wizard: types.ModuleType) -> dict[str, Any]:
     }
     parameters_digest = wizard._digest(parameters)
     evidence = {
-        "capability_id": "acct.invoice.vendor_create.v1",
+        "capability_id": VENDOR_BILL_CAPABILITY_ID,
         "company_id": 7,
         "parameters_digest": parameters_digest,
         "registry_digest": "b" * 64,
@@ -97,7 +100,7 @@ def _inspection(wizard: types.ModuleType) -> dict[str, Any]:
     }
     precheck_digest = wizard._digest(evidence)
     operation_core = {
-        "capability_id": "acct.invoice.vendor_create.v1",
+        "capability_id": VENDOR_BILL_CAPABILITY_ID,
         "parameters": parameters,
         "principal": "Odoo requester / accounting tenant",
         "user_id": 42,
@@ -209,6 +212,25 @@ def _class_methods(path: Path, class_name: str) -> dict[str, ast.FunctionDef]:
         for node in model.body
         if isinstance(node, ast.FunctionDef)
     }
+
+
+def test_vendor_bill_approval_fixture_uses_registered_capability_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wizard = _load_wizard(monkeypatch)
+    inspection = _inspection(wizard)
+    registered_ids = {
+        item["id"]
+        for item in json.loads(REGISTRY.read_text(encoding="utf-8"))[
+            "capabilities"
+        ]
+    }
+
+    assert inspection["operation"]["capability_id"] == VENDOR_BILL_CAPABILITY_ID
+    assert inspection["precheck"]["evidence"]["capability_id"] == (
+        VENDOR_BILL_CAPABILITY_ID
+    )
+    assert VENDOR_BILL_CAPABILITY_ID in registered_ids
 
 
 def test_inspection_validator_preserves_complete_business_and_precheck_json(
