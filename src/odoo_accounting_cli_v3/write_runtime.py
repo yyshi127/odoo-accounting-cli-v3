@@ -397,6 +397,7 @@ def _base_runtime_mapping(config: RuntimeConfig) -> dict[str, object]:
         "canonical_package_sha256": config.canonical_package_sha256,
         "auth_state_path": str(config.auth_state_path),
         "receipt_state_path": str(config.receipt_state_path),
+        "gcov_state_path": str(config.gcov_state_path),
         "auth_key_id": config.auth_key_id,
         "receipt_key_id": config.receipt_key_id,
         "auth_secret_path": str(config.auth_secret_path),

@@ -37,11 +37,17 @@ def _make_runtime(tmp_path: Path) -> tuple[Path, dict[str, object], dict[str, ob
     tmp_path.mkdir(parents=True, exist_ok=True)
     secrets_dir = tmp_path / "secrets"
     state_dir = tmp_path / "write-state"
+    read_state_dir = tmp_path / "read-state"
+    gcov_state_dir = tmp_path / "gcov-state"
     secrets_dir.mkdir()
     state_dir.mkdir()
+    read_state_dir.mkdir()
+    gcov_state_dir.mkdir()
     if os.name == "posix":
         secrets_dir.chmod(0o750)
         state_dir.chmod(0o700)
+        read_state_dir.chmod(0o700)
+        gcov_state_dir.chmod(0o700)
 
     secret_values = {
         "base_auth": b"base-auth-secret-material-000000000001",
@@ -77,8 +83,9 @@ def _make_runtime(tmp_path: Path) -> tuple[Path, dict[str, object], dict[str, ob
         "release_root": str(tmp_path / "release"),
         "canonical_package_path": str(tmp_path / "package.tar.gz"),
         "canonical_package_sha256": "4" * 64,
-        "auth_state_path": str(tmp_path / "read-auth.sqlite3"),
-        "receipt_state_path": str(tmp_path / "read-receipt.sqlite3"),
+        "auth_state_path": str(read_state_dir / "auth.sqlite3"),
+        "receipt_state_path": str(read_state_dir / "receipt.sqlite3"),
+        "gcov_state_path": str(gcov_state_dir),
         "auth_key_id": "base-read-auth-v1",
         "receipt_key_id": "base-read-receipt-v1",
         "auth_secret_path": str(secret_paths["base_auth"]),
