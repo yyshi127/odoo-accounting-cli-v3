@@ -639,18 +639,36 @@ def evidence_read_boundary(
 @evidence_group.command("verify-sandbox-write")
 @click.option(
     "--evidence-json",
-    required=True,
     type=click.Path(path_type=Path, dir_okay=False),
     help="Retained sandbox write evidence JSON bundle to verify.",
 )
-def evidence_verify_sandbox_write(evidence_json: Path) -> None:
+@click.option(
+    "--assemble-from",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Input manifest whose retained artifacts will be assembled and verified.",
+)
+def evidence_verify_sandbox_write(
+    evidence_json: Path | None,
+    assemble_from: Path | None,
+) -> None:
     """Verify a retained sandbox write evidence bundle without authorizing production."""
 
     command = "evidence.verify-sandbox-write"
+    if (evidence_json is None) == (assemble_from is None):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_evidence_input_required",
+            message="Provide exactly one of --evidence-json or --assemble-from.",
+            exit_code=2,
+        )
     identity = _load_release_identity(command=command)
     verifier = _load_sandbox_write_evidence_verifier()
     try:
-        evidence = verifier.verify_path(evidence_json)
+        if assemble_from is not None:
+            document = verifier.assemble_path(assemble_from)
+            evidence = verifier.verify_document(document)
+        else:
+            evidence = verifier.verify_path(evidence_json)
     except Exception as exc:
         if exc.__class__.__name__ == "SandboxWriteEvidenceError":
             raise CliFailure(

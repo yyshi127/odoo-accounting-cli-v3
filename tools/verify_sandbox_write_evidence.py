@@ -9,6 +9,7 @@ eligible for human promotion review.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -61,6 +62,12 @@ RECEIPT_FIELDS = frozenset(
         "verified_at",
     }
 )
+INPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-input.v1"
+OUTPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence.v1"
+DIGEST_LIFECYCLE_FIELDS = frozenset(
+    field for field in LIFECYCLE_FIELDS if not field.endswith("_id")
+)
+ID_LIFECYCLE_FIELDS = LIFECYCLE_FIELDS - DIGEST_LIFECYCLE_FIELDS
 
 
 class SandboxWriteEvidenceError(ValueError):
@@ -110,7 +117,7 @@ def verify_document(document: Any) -> dict[str, Any]:
         raise SandboxWriteEvidenceError("evidence fields are invalid")
     if root["schema_version"] != 1:
         raise SandboxWriteEvidenceError("evidence.schema_version must be 1")
-    if root["scope"] != "odoo-accounting-cli-v3.sandbox-write-evidence.v1":
+    if root["scope"] != OUTPUT_SCOPE:
         raise SandboxWriteEvidenceError("evidence.scope is invalid")
     if root["environment"] != "sandbox":
         raise SandboxWriteEvidenceError("sandbox write evidence must target sandbox")
@@ -208,12 +215,112 @@ def verify_path(path: Path) -> dict[str, Any]:
     return verify_document(document)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _source_path(base: Path, value: Any, label: str) -> Path:
+    text = _require_text(value, label)
+    path = Path(text)
+    if not path.is_absolute():
+        path = base / path
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(base.resolve())
+    except ValueError as exc:
+        raise SandboxWriteEvidenceError(f"{label} escapes the evidence root") from exc
+    if not resolved.is_file():
+        raise SandboxWriteEvidenceError(f"{label} file is absent")
+    return resolved
+
+
+def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
+    root = _require_object(manifest, "input")
+    expected_root = {
+        "capability_id",
+        "company_id",
+        "database_uuid",
+        "environment",
+        "lifecycle_artifacts",
+        "lifecycle_receipt_ids",
+        "production_promotion_allowed",
+        "registry_receipts",
+        "release_identity",
+        "schema_version",
+        "scope",
+    }
+    if set(root) != expected_root:
+        raise SandboxWriteEvidenceError("input fields are invalid")
+    if root["schema_version"] != 1:
+        raise SandboxWriteEvidenceError("input.schema_version must be 1")
+    if root["scope"] != INPUT_SCOPE:
+        raise SandboxWriteEvidenceError("input.scope is invalid")
+    if root["environment"] != "sandbox":
+        raise SandboxWriteEvidenceError("input must target sandbox")
+    if root["production_promotion_allowed"] is not False:
+        raise SandboxWriteEvidenceError("input must not authorize production")
+
+    artifacts = _require_object(root["lifecycle_artifacts"], "input.lifecycle_artifacts")
+    receipt_ids = _require_object(
+        root["lifecycle_receipt_ids"], "input.lifecycle_receipt_ids"
+    )
+    if set(artifacts) != DIGEST_LIFECYCLE_FIELDS:
+        raise SandboxWriteEvidenceError("lifecycle artifact fields are invalid")
+    if set(receipt_ids) != ID_LIFECYCLE_FIELDS:
+        raise SandboxWriteEvidenceError("lifecycle receipt id fields are invalid")
+
+    lifecycle: dict[str, str] = {}
+    for field in sorted(DIGEST_LIFECYCLE_FIELDS):
+        lifecycle[field] = _sha256_file(
+            _source_path(base_dir, artifacts[field], f"lifecycle_artifacts.{field}")
+        )
+    for field in sorted(ID_LIFECYCLE_FIELDS):
+        lifecycle[field] = _require_text(receipt_ids[field], f"lifecycle_receipt_ids.{field}")
+
+    document = {
+        "schema_version": 1,
+        "scope": OUTPUT_SCOPE,
+        "capability_id": root["capability_id"],
+        "company_id": root["company_id"],
+        "database_uuid": root["database_uuid"],
+        "environment": root["environment"],
+        "production_promotion_allowed": False,
+        "release_identity": root["release_identity"],
+        "lifecycle": lifecycle,
+        "registry_receipts": root["registry_receipts"],
+    }
+    verify_document(document)
+    return document
+
+
+def assemble_path(path: Path) -> dict[str, Any]:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("input JSON is invalid") from exc
+    return assemble_document(manifest, base_dir=path.parent)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("evidence_json", type=Path)
+    parser.add_argument("evidence_json", nargs="?", type=Path)
+    parser.add_argument(
+        "--assemble-from",
+        type=Path,
+        help="Build and verify a sandbox write evidence JSON from an input manifest.",
+    )
     args = parser.parse_args(argv)
     try:
-        result = verify_path(args.evidence_json)
+        if args.assemble_from is not None:
+            result = assemble_path(args.assemble_from)
+        else:
+            if args.evidence_json is None:
+                parser.error("evidence_json is required unless --assemble-from is used")
+            result = verify_path(args.evidence_json)
     except SandboxWriteEvidenceError as exc:
         print(str(exc), file=sys.stderr)
         return 1

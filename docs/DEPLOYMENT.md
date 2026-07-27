@@ -665,6 +665,9 @@ result authorizes a production write.
 Before a sandbox write evidence bundle can be reviewed for registry promotion,
 validate its retained JSON bundle with the exact release's
 `odoo-accounting-cli-v3 evidence verify-sandbox-write --evidence-json ...`.
+When the retained phase artifacts have not yet been assembled into the final
+bundle, use `--assemble-from ...` with the sandbox-write evidence input
+manifest so the exact release computes each lifecycle artifact digest itself.
 The command checks the single capability/company/database/release binding, all
 seven registry evidence kinds, and the
 prepare/preview/approval/execution/verification/repeat/failure/recovery and Pi

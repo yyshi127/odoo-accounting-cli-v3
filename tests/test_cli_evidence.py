@@ -16,6 +16,7 @@ from test_odoo_read_boundary_evidence_runner import (
     valid_evidence,
 )
 from test_verify_sandbox_write_evidence import _document as sandbox_write_document
+from test_verify_sandbox_write_evidence import _input_manifest as sandbox_write_input_manifest
 
 
 def identity(config) -> dict:
@@ -311,3 +312,69 @@ def test_evidence_verify_sandbox_write_rejects_invalid_bundle(tmp_path: Path):
 
     assert result.exit_code == 6
     assert '"code":"sandbox_write_evidence_rejected"' in result.output
+
+
+def test_evidence_verify_sandbox_write_can_assemble_retained_artifacts(tmp_path: Path):
+    path = tmp_path / "sandbox-write-input.json"
+    path.write_text(
+        __import__("json").dumps(sandbox_write_input_manifest(tmp_path)),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "c" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev162-test",
+            "verified": True,
+            "version": "0.1.0.dev162",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "verify-sandbox-write",
+                "--assemble-from",
+                str(path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["evidence"]["verified"] is True
+    assert payload["data"]["evidence"]["registry_receipt_count"] == 7
+    assert payload["business_succeeded"] is False
+
+
+def test_evidence_verify_sandbox_write_requires_exactly_one_input(tmp_path: Path):
+    document = sandbox_write_document()
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(__import__("json").dumps(document), encoding="utf-8")
+    manifest = tmp_path / "input.json"
+    manifest.write_text(
+        __import__("json").dumps(sandbox_write_input_manifest(tmp_path)),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    missing = runner.invoke(main, ["evidence", "verify-sandbox-write"])
+    both = runner.invoke(
+        main,
+        [
+            "evidence",
+            "verify-sandbox-write",
+            "--evidence-json",
+            str(evidence),
+            "--assemble-from",
+            str(manifest),
+        ],
+    )
+
+    assert missing.exit_code == 2
+    assert both.exit_code == 2
+    assert '"code":"sandbox_write_evidence_input_required"' in missing.output
+    assert '"code":"sandbox_write_evidence_input_required"' in both.output
