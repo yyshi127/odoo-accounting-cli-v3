@@ -895,6 +895,70 @@ def evidence_build_write_promotion_candidate(
     )
 
 
+@evidence_group.command("build-sandbox-write-artifact")
+@click.option(
+    "--metadata-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Sandbox write evidence metadata JSON that binds the artifact envelope.",
+)
+@click.option(
+    "--artifact-kind",
+    required=True,
+    help="Lifecycle artifact kind to build, such as preview_digest or approval_digest.",
+)
+@click.option(
+    "--artifact-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Raw lifecycle artifact payload JSON to wrap.",
+)
+def evidence_build_sandbox_write_artifact(
+    metadata_json: Path,
+    artifact_kind: str,
+    artifact_json: Path,
+) -> None:
+    """Build one release-bound sandbox write lifecycle artifact envelope."""
+
+    command = "evidence.build-sandbox-write-artifact"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        artifact = verifier.build_lifecycle_artifact_paths(
+            metadata_json,
+            artifact_json,
+            artifact_kind=artifact_kind,
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="sandbox_write_artifact_build_rejected",
+                message="The sandbox write lifecycle artifact could not be bound to exact-release metadata.",
+                exit_code=6,
+            ) from exc
+        raise
+    release = artifact["release_identity"]
+    if (
+        release.get("manifest_sha256") != identity["manifest_sha256"]
+        or release.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_artifact_release_mismatch",
+            message="The sandbox write lifecycle artifact is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "lifecycle_artifact": artifact,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("build-sandbox-write-input")
 @click.option(
     "--metadata-json",

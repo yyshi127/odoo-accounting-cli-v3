@@ -510,6 +510,78 @@ def test_assembler_rejects_unbound_lifecycle_artifacts(tmp_path, mutate, match):
         verifier.assemble_document(manifest, base_dir=tmp_path)
 
 
+def test_lifecycle_artifact_builder_wraps_payload_with_metadata_binding(tmp_path):
+    metadata = _metadata(tmp_path)
+
+    artifact = verifier.build_lifecycle_artifact(
+        metadata,
+        artifact_kind="approval_digest",
+        artifact={"approval_id": "approval-1", "approved": True},
+    )
+
+    assert artifact["scope"] == verifier.LIFECYCLE_ARTIFACT_SCOPE
+    assert artifact["artifact_kind"] == "approval_digest"
+    assert artifact["artifact"] == {"approval_id": "approval-1", "approved": True}
+    assert artifact["capability_id"] == metadata["capability_id"]
+    assert artifact["company_id"] == metadata["company_id"]
+    assert artifact["database_uuid"] == metadata["database_uuid"]
+    assert artifact["environment"] == "sandbox"
+    assert artifact["production_promotion_allowed"] is False
+    assert artifact["release_identity"] == {
+        "manifest_sha256": "c" * 64,
+        "registry_digest": "b" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    ("artifact_kind", "artifact", "match"),
+    (
+        ("not_a_phase", {"ok": True}, "artifact_kind is invalid"),
+        ("approval_digest", ["not", "object"], "artifact payload must be an object"),
+    ),
+)
+def test_lifecycle_artifact_builder_rejects_invalid_inputs(
+    tmp_path,
+    artifact_kind,
+    artifact,
+    match,
+):
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match=match):
+        verifier.build_lifecycle_artifact(
+            _metadata(tmp_path),
+            artifact_kind=artifact_kind,
+            artifact=artifact,
+        )
+
+
+def test_lifecycle_artifact_builder_cli_prints_bound_envelope(tmp_path, capsys):
+    metadata_path = tmp_path / "metadata.json"
+    payload_path = tmp_path / "approval-payload.json"
+    metadata_path.write_text(json.dumps(_metadata(tmp_path)), encoding="utf-8")
+    payload_path.write_text(
+        json.dumps({"approval_id": "approval-1"}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    assert (
+        verifier.main(
+            [
+                "--build-artifact-from",
+                str(metadata_path),
+                "--artifact-kind",
+                "approval_digest",
+                "--artifact-json",
+                str(payload_path),
+            ]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["scope"] == verifier.LIFECYCLE_ARTIFACT_SCOPE
+    assert output["artifact_kind"] == "approval_digest"
+    assert output["artifact"] == {"approval_id": "approval-1"}
+
+
 def test_assembler_cli_prints_verified_evidence_document(tmp_path, capsys):
     path = tmp_path / "input.json"
     path.write_text(json.dumps(_input_manifest(tmp_path)), encoding="utf-8")

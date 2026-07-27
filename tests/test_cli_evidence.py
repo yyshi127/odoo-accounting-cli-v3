@@ -644,6 +644,143 @@ def test_evidence_build_sandbox_write_input_from_standard_retained_files(
     assert manifest["lifecycle_artifacts"]["preview_digest"] == "preview_digest.json"
 
 
+def test_evidence_build_sandbox_write_artifact_from_exact_release_metadata(
+    tmp_path: Path,
+):
+    metadata_path = tmp_path / "sandbox-write-metadata.json"
+    payload_path = tmp_path / "approval-payload.json"
+    metadata_path.write_text(
+        __import__("json").dumps(sandbox_write_metadata(tmp_path)),
+        encoding="utf-8",
+    )
+    payload_path.write_text(
+        __import__("json").dumps({"approval_id": "approval-1"}),
+        encoding="utf-8",
+    )
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "c" * 64,
+        "package_sha256": "e" * 64,
+        "registry_digest": "b" * 64,
+        "release": "0.1.0.dev182-test",
+        "verified": True,
+        "version": "0.1.0.dev182",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "build-sandbox-write-artifact",
+                "--metadata-json",
+                str(metadata_path),
+                "--artifact-kind",
+                "approval_digest",
+                "--artifact-json",
+                str(payload_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.build-sandbox-write-artifact"
+    assert payload["business_succeeded"] is False
+    artifact = payload["data"]["lifecycle_artifact"]
+    assert artifact["artifact_kind"] == "approval_digest"
+    assert artifact["artifact"] == {"approval_id": "approval-1"}
+    assert artifact["release_identity"] == {
+        "manifest_sha256": "c" * 64,
+        "registry_digest": "b" * 64,
+    }
+    assert payload["data"]["release_identity"] == expected_identity
+
+
+def test_evidence_build_sandbox_write_artifact_rejects_invalid_kind(
+    tmp_path: Path,
+):
+    metadata_path = tmp_path / "sandbox-write-metadata.json"
+    payload_path = tmp_path / "approval-payload.json"
+    metadata_path.write_text(
+        __import__("json").dumps(sandbox_write_metadata(tmp_path)),
+        encoding="utf-8",
+    )
+    payload_path.write_text('{"approval_id":"approval-1"}', encoding="utf-8")
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "c" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev182-test",
+            "verified": True,
+            "version": "0.1.0.dev182",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "build-sandbox-write-artifact",
+                "--metadata-json",
+                str(metadata_path),
+                "--artifact-kind",
+                "not_a_phase",
+                "--artifact-json",
+                str(payload_path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"sandbox_write_artifact_build_rejected"' in result.output
+
+
+def test_evidence_build_sandbox_write_artifact_rejects_release_mismatch(
+    tmp_path: Path,
+):
+    metadata_path = tmp_path / "sandbox-write-metadata.json"
+    payload_path = tmp_path / "approval-payload.json"
+    metadata_path.write_text(
+        __import__("json").dumps(sandbox_write_metadata(tmp_path)),
+        encoding="utf-8",
+    )
+    payload_path.write_text('{"approval_id":"approval-1"}', encoding="utf-8")
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "f" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev182-test",
+            "verified": True,
+            "version": "0.1.0.dev182",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "build-sandbox-write-artifact",
+                "--metadata-json",
+                str(metadata_path),
+                "--artifact-kind",
+                "approval_digest",
+                "--artifact-json",
+                str(payload_path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"sandbox_write_artifact_release_mismatch"' in result.output
+
+
 def test_evidence_build_sandbox_write_input_rejects_release_mismatch(
     tmp_path: Path,
 ):

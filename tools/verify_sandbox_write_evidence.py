@@ -548,6 +548,101 @@ def _validate_lifecycle_artifact(
         )
 
 
+def _validate_metadata_root(metadata: Any) -> dict[str, Any]:
+    root = _require_object(metadata, "metadata")
+    expected_root = {
+        "capability_id",
+        "company_id",
+        "database_uuid",
+        "environment",
+        "lifecycle_receipt_ids",
+        "production_promotion_allowed",
+        "registry_receipts",
+        "release_identity",
+        "schema_version",
+        "scope",
+    }
+    if set(root) != expected_root:
+        raise SandboxWriteEvidenceError("metadata fields are invalid")
+    if root["schema_version"] != 1:
+        raise SandboxWriteEvidenceError("metadata.schema_version must be 1")
+    if root["scope"] != METADATA_SCOPE:
+        raise SandboxWriteEvidenceError("metadata.scope is invalid")
+    if root["environment"] != "sandbox":
+        raise SandboxWriteEvidenceError("metadata must target sandbox")
+    if root["production_promotion_allowed"] is not False:
+        raise SandboxWriteEvidenceError("metadata must not authorize production")
+    return root
+
+
+def build_lifecycle_artifact(
+    metadata: Any,
+    *,
+    artifact_kind: str,
+    artifact: Any,
+) -> dict[str, Any]:
+    root = _validate_metadata_root(metadata)
+    if artifact_kind not in DIGEST_LIFECYCLE_FIELDS:
+        raise SandboxWriteEvidenceError("artifact_kind is invalid")
+    if not isinstance(artifact, dict):
+        raise SandboxWriteEvidenceError("artifact payload must be an object")
+    try:
+        detached_artifact = json.loads(
+            json.dumps(
+                artifact,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise SandboxWriteEvidenceError("artifact payload is not canonical JSON") from exc
+    release = _require_object(root["release_identity"], "metadata.release_identity")
+    lifecycle_artifact = {
+        "schema_version": 1,
+        "scope": LIFECYCLE_ARTIFACT_SCOPE,
+        "artifact_kind": artifact_kind,
+        "artifact": detached_artifact,
+        "capability_id": root["capability_id"],
+        "company_id": root["company_id"],
+        "database_uuid": root["database_uuid"],
+        "environment": root["environment"],
+        "production_promotion_allowed": False,
+        "release_identity": {
+            "manifest_sha256": release["manifest_sha256"],
+            "registry_digest": release["registry_digest"],
+        },
+    }
+    _validate_lifecycle_artifact(
+        lifecycle_artifact,
+        artifact_kind=artifact_kind,
+        metadata=root,
+    )
+    return lifecycle_artifact
+
+
+def build_lifecycle_artifact_paths(
+    metadata_path: Path,
+    artifact_path: Path,
+    *,
+    artifact_kind: str,
+) -> dict[str, Any]:
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("metadata JSON is invalid") from exc
+    try:
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("artifact JSON is invalid") from exc
+    return build_lifecycle_artifact(
+        metadata,
+        artifact_kind=artifact_kind,
+        artifact=artifact,
+    )
+
+
 def _validate_preflight_manifest(
     preflight: Any,
     *,
@@ -741,29 +836,7 @@ def assemble_path(path: Path) -> dict[str, Any]:
 
 
 def build_input_manifest(metadata: Any, *, base_dir: Path) -> dict[str, Any]:
-    root = _require_object(metadata, "metadata")
-    expected_root = {
-        "capability_id",
-        "company_id",
-        "database_uuid",
-        "environment",
-        "lifecycle_receipt_ids",
-        "production_promotion_allowed",
-        "registry_receipts",
-        "release_identity",
-        "schema_version",
-        "scope",
-    }
-    if set(root) != expected_root:
-        raise SandboxWriteEvidenceError("metadata fields are invalid")
-    if root["schema_version"] != 1:
-        raise SandboxWriteEvidenceError("metadata.schema_version must be 1")
-    if root["scope"] != METADATA_SCOPE:
-        raise SandboxWriteEvidenceError("metadata.scope is invalid")
-    if root["environment"] != "sandbox":
-        raise SandboxWriteEvidenceError("metadata must target sandbox")
-    if root["production_promotion_allowed"] is not False:
-        raise SandboxWriteEvidenceError("metadata must not authorize production")
+    root = _validate_metadata_root(metadata)
 
     manifest = {
         "schema_version": 1,
@@ -842,6 +915,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Build a sandbox-write evidence input manifest from standard retained artifacts and metadata.",
     )
     parser.add_argument(
+        "--build-artifact-from",
+        type=Path,
+        help="Build one bound sandbox-write lifecycle artifact envelope from metadata.",
+    )
+    parser.add_argument(
+        "--artifact-kind",
+        help="Lifecycle artifact kind for --build-artifact-from.",
+    )
+    parser.add_argument(
+        "--artifact-json",
+        type=Path,
+        help="Raw lifecycle artifact payload JSON for --build-artifact-from.",
+    )
+    parser.add_argument(
         "--inspect-root",
         type=Path,
         help="Inspect standard retained sandbox-write artifacts and print their verified completeness report.",
@@ -879,6 +966,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.evidence_json,
                 args.assemble_from,
                 args.build_input_from,
+                args.build_artifact_from,
                 args.inspect_root,
                 args.review_promotion_from,
                 args.build_promotion_candidate_from,
@@ -886,7 +974,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if selected != 1:
             parser.error(
-                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --inspect-root, --review-promotion-from, or --build-promotion-candidate-from"
+                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --build-artifact-from, --inspect-root, --review-promotion-from, or --build-promotion-candidate-from"
             )
         if args.build_promotion_candidate_from is not None:
             if args.promotion_candidate is not None:
@@ -895,6 +983,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.build_promotion_candidate_from,
                 target_environment=args.target_environment,
                 target_channel=args.target_channel,
+            )
+        elif args.build_artifact_from is not None:
+            if args.artifact_kind is None or args.artifact_json is None:
+                parser.error("--artifact-kind and --artifact-json are required with --build-artifact-from")
+            result = build_lifecycle_artifact_paths(
+                args.build_artifact_from,
+                args.artifact_json,
+                artifact_kind=args.artifact_kind,
             )
         elif args.review_promotion_from is not None:
             if args.promotion_candidate is None:

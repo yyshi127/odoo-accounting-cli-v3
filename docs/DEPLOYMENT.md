@@ -698,8 +698,13 @@ JSON envelope with scope
 `production_promotion_allowed:false`. The exact release validates those
 bindings before hashing the artifact into the final evidence bundle, so a
 phase artifact from another capability, company, sandbox, release, or registry
-is rejected. Provide the remaining signed receipt IDs and registry receipts in
-a metadata JSON with scope
+is rejected. To avoid hand-written envelopes, wrap each retained phase payload
+with
+`odoo-accounting-cli-v3 evidence build-sandbox-write-artifact --metadata-json ... --artifact-kind ... --artifact-json ...`
+and save the command output under that phase's standard filename. The command
+checks the metadata against the currently anchored release and still reports
+`business_succeeded:false`. Provide the remaining signed receipt IDs and
+registry receipts in a metadata JSON with scope
 `odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1`, then run
 `odoo-accounting-cli-v3 evidence build-sandbox-write-input --metadata-json ...`.
 The command builds the `--assemble-from` input manifest from the retained files,
