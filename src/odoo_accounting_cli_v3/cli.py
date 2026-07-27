@@ -830,6 +830,71 @@ def evidence_review_write_promotion(
     )
 
 
+@evidence_group.command("build-write-promotion-candidate")
+@click.option(
+    "--evidence-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained sandbox write evidence JSON bundle to bind to the candidate.",
+)
+@click.option(
+    "--target-environment",
+    default="sandbox",
+    show_default=True,
+    help="Promotion target environment. Sandbox evidence can only build sandbox candidates.",
+)
+@click.option(
+    "--target-channel",
+    default="staged",
+    show_default=True,
+    help="Promotion target channel. Sandbox evidence can only build staged candidates.",
+)
+def evidence_build_write_promotion_candidate(
+    evidence_json: Path,
+    target_environment: str,
+    target_channel: str,
+) -> None:
+    """Build a non-authorizing promotion candidate from exact-release evidence."""
+
+    command = "evidence.build-write-promotion-candidate"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        candidate = verifier.build_promotion_candidate_path(
+            evidence_json,
+            target_environment=target_environment,
+            target_channel=target_channel,
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="write_promotion_candidate_build_rejected",
+                message="The write promotion candidate could not be built from exact-release sandbox evidence.",
+                exit_code=6,
+            ) from exc
+        raise
+    release = candidate["release_identity"]
+    if (
+        release.get("manifest_sha256") != identity["manifest_sha256"]
+        or release.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="write_promotion_candidate_release_mismatch",
+            message="The write promotion candidate is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "promotion_candidate": candidate,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("build-sandbox-write-input")
 @click.option(
     "--metadata-json",

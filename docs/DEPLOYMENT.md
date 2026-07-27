@@ -733,6 +733,17 @@ release digests match the currently anchored CLI release. A passing verifier
 report is an admission check for human review only; it is not a production
 authorization.
 
+For the next non-authorizing registry-promotion review step, build the
+candidate from the verified exact-release evidence instead of hand-writing it:
+`odoo-accounting-cli-v3 evidence build-write-promotion-candidate --evidence-json ...`.
+The command only emits a `sandbox`/`staged` candidate, binds it to the same
+capability, company, database, release manifest, and registry digest, and still
+reports `business_succeeded:false`. It rejects production targets and direct
+`enabled` targets. Review that generated candidate with
+`odoo-accounting-cli-v3 evidence review-write-promotion --evidence-json ... --candidate-json ...`.
+The review result is a sandbox-staging admission artifact only; it does not
+modify the registry and does not authorize any production write.
+
 Dev21 canonicalizes the installed-module graph under a transaction-scoped
 `LOCK TABLE ir_module_module IN SHARE MODE` before execution and again before
 post-commit verification. The execution transaction commits before

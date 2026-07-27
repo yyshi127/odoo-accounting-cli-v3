@@ -128,6 +128,44 @@ def test_sandbox_write_evidence_supports_staged_sandbox_promotion_review():
     assert result["evidence"]["verified"] is True
 
 
+def test_sandbox_write_evidence_builds_staged_sandbox_promotion_candidate():
+    candidate = verifier.build_promotion_candidate(
+        _document(),
+        target_environment="sandbox",
+        target_channel="staged",
+    )
+
+    assert candidate == _promotion_candidate()
+
+
+@pytest.mark.parametrize(
+    ("target_environment", "target_channel", "match"),
+    (
+        (
+            "production",
+            "staged",
+            "cannot build a production promotion candidate",
+        ),
+        (
+            "sandbox",
+            "enabled",
+            "can only build a staged sandbox candidate",
+        ),
+    ),
+)
+def test_promotion_candidate_builder_rejects_unsafe_targets(
+    target_environment,
+    target_channel,
+    match,
+):
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match=match):
+        verifier.build_promotion_candidate(
+            _document(),
+            target_environment=target_environment,
+            target_channel=target_channel,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutate", "match"),
     (

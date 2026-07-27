@@ -364,6 +364,54 @@ def review_promotion_candidate(document: Any, candidate: Any) -> dict[str, Any]:
     }
 
 
+def build_promotion_candidate(
+    document: Any,
+    *,
+    target_environment: str,
+    target_channel: str,
+) -> dict[str, Any]:
+    evidence = verify_document(document)
+    if target_environment != "sandbox":
+        raise SandboxWriteEvidenceError(
+            "sandbox write evidence cannot build a production promotion candidate"
+        )
+    if target_channel != "staged":
+        raise SandboxWriteEvidenceError(
+            "sandbox write evidence can only build a staged sandbox candidate"
+        )
+    return {
+        "schema_version": 1,
+        "scope": PROMOTION_CANDIDATE_SCOPE,
+        "capability_id": evidence["capability_id"],
+        "company_id": evidence["company_id"],
+        "database_uuid": evidence["database_uuid"],
+        "production_promotion_allowed": False,
+        "release_identity": {
+            "manifest_sha256": evidence["release_sha256"],
+            "registry_digest": evidence["registry_digest"],
+        },
+        "target_channel": "staged",
+        "target_environment": "sandbox",
+    }
+
+
+def build_promotion_candidate_path(
+    evidence_path: Path,
+    *,
+    target_environment: str,
+    target_channel: str,
+) -> dict[str, Any]:
+    try:
+        document = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("evidence JSON is invalid") from exc
+    return build_promotion_candidate(
+        document,
+        target_environment=target_environment,
+        target_channel=target_channel,
+    )
+
+
 def review_promotion_candidate_paths(
     evidence_path: Path,
     candidate_path: Path,
@@ -721,6 +769,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Verify a sandbox-write evidence JSON against a non-authorizing promotion candidate.",
     )
     parser.add_argument(
+        "--build-promotion-candidate-from",
+        type=Path,
+        help="Build a non-authorizing staged sandbox promotion candidate from sandbox-write evidence.",
+    )
+    parser.add_argument(
+        "--target-environment",
+        default="sandbox",
+        help="Promotion target environment for --build-promotion-candidate-from.",
+    )
+    parser.add_argument(
+        "--target-channel",
+        default="staged",
+        help="Promotion target channel for --build-promotion-candidate-from.",
+    )
+    parser.add_argument(
         "--promotion-candidate",
         type=Path,
         help="Promotion candidate JSON to review with --review-promotion-from.",
@@ -735,13 +798,22 @@ def main(argv: list[str] | None = None) -> int:
                 args.build_input_from,
                 args.inspect_root,
                 args.review_promotion_from,
+                args.build_promotion_candidate_from,
             )
         )
         if selected != 1:
             parser.error(
-                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --inspect-root, or --review-promotion-from"
+                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --inspect-root, --review-promotion-from, or --build-promotion-candidate-from"
             )
-        if args.review_promotion_from is not None:
+        if args.build_promotion_candidate_from is not None:
+            if args.promotion_candidate is not None:
+                parser.error("--promotion-candidate cannot be used when building a candidate")
+            result = build_promotion_candidate_path(
+                args.build_promotion_candidate_from,
+                target_environment=args.target_environment,
+                target_channel=args.target_channel,
+            )
+        elif args.review_promotion_from is not None:
             if args.promotion_candidate is None:
                 parser.error("--promotion-candidate is required with --review-promotion-from")
             result = review_promotion_candidate_paths(
