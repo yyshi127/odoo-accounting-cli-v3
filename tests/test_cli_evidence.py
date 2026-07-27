@@ -1409,6 +1409,10 @@ def _read_runtime_plan_args(
     *,
     tmp_path: Path,
     database_name: str = "odoo_v3_sandbox",
+    odoo_python_sha256: str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    odoo_bin_sha256: str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+    odoo_config_sha256: str = "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0",
+    canonical_package_sha256: str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
 ) -> list[str]:
     return [
         "evidence",
@@ -1422,15 +1426,15 @@ def _read_runtime_plan_args(
         "--odoo-python",
         str(tmp_path / "odoo-venv" / "bin" / "python"),
         "--odoo-python-sha256",
-        "1" * 64,
+        odoo_python_sha256,
         "--odoo-bin",
         str(tmp_path / "odoo-server" / "odoo-bin"),
         "--odoo-bin-sha256",
-        "2" * 64,
+        odoo_bin_sha256,
         "--odoo-config",
         str(tmp_path / "odoo.conf"),
         "--odoo-config-sha256",
-        "3" * 64,
+        odoo_config_sha256,
         "--runtime-config-path",
         str(tmp_path / "runtime-sandbox.json"),
         "--release-root",
@@ -1438,7 +1442,7 @@ def _read_runtime_plan_args(
         "--canonical-package-path",
         str(tmp_path / "packages" / "release.tar.gz"),
         "--canonical-package-sha256",
-        "4" * 64,
+        canonical_package_sha256,
         "--read-state-root",
         str(tmp_path / "read-state"),
         "--secret-root",
@@ -1533,6 +1537,45 @@ def test_evidence_sandbox_read_runtime_config_plan_flags_unclear_database_name(
     assert payload["data"]["sandbox_read_runtime_configurable"] is False
     assert payload["data"]["blockers"] == [
         "sandbox read runtime database name is not clearly sandbox"
+    ]
+
+
+def test_evidence_sandbox_read_runtime_config_plan_flags_placeholder_digests(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev194",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _read_runtime_plan_args(
+                tmp_path=tmp_path,
+                odoo_python_sha256="1" * 64,
+                odoo_bin_sha256="2" * 64,
+                odoo_config_sha256="3" * 64,
+                canonical_package_sha256="4" * 64,
+            ),
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_read_runtime_configurable"] is False
+    assert payload["data"]["blockers"] == [
+        "canonical_package_sha256 must be a real measured digest, not a placeholder",
+        "odoo_bin_sha256 must be a real measured digest, not a placeholder",
+        "odoo_config_sha256 must be a real measured digest, not a placeholder",
+        "odoo_python_sha256 must be a real measured digest, not a placeholder",
     ]
 
 

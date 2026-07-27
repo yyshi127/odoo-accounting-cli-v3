@@ -68,6 +68,14 @@ def _sha256_json(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def _looks_like_placeholder_sha256(value: str) -> bool:
+    return (
+        len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+        and len(set(value)) == 1
+    )
+
+
 def _success(
     command: str,
     data: dict[str, Any],
@@ -1793,6 +1801,14 @@ def evidence_sandbox_read_runtime_config_plan(
         blockers.append("sandbox read runtime database name is not clearly sandbox")
     if document["auth_state_path"] == document["receipt_state_path"]:
         blockers.append("read auth and receipt state paths must differ")
+    for field in (
+        "odoo_python_sha256",
+        "odoo_bin_sha256",
+        "odoo_config_sha256",
+        "canonical_package_sha256",
+    ):
+        if _looks_like_placeholder_sha256(str(document[field])):
+            blockers.append(f"{field} must be a real measured digest, not a placeholder")
     _success(
         command,
         {

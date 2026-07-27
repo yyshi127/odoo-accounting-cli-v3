@@ -315,6 +315,9 @@ root-managed install actions, and keeps `business_succeeded:false`. It does not
 create secrets, write `/etc`, open Odoo, or prove a real read result. A
 generated plan becomes usable only after the installed file is reloaded by the
 exact release and the read evidence gates below pass.
+Obvious placeholder SHA-256 values, such as one repeated hexadecimal character,
+must keep the plan non-configurable; use only measured digests from the target
+host.
 
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,
