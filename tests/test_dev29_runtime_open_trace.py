@@ -1133,6 +1133,37 @@ def test_manifest_accepts_guarded_readonly_process_view_failure() -> None:
     assert policy.failure_guard == trace.PROCESS_VIEW_FAILURE_GUARD
 
 
+def test_manifest_accepts_guarded_unix_socket_failure() -> None:
+    document = manifest_document()
+    path = "/var/run/nscd/socket"
+    document["allowed_paths"] = sorted([*document["allowed_paths"], path])  # type: ignore[index]
+    document["path_access_policy"] = sorted(  # type: ignore[index]
+        [
+            *document["path_access_policy"],  # type: ignore[index]
+            {
+                "path": path,
+                "role": "signer",
+                "classification": "unix-socket",
+                "allowed_access": ["unix-connect"],
+                "create_suffixes": [],
+                "delta_verifier": None,
+                "delta_contract_sha256": None,
+                "allow_success": False,
+                "allowed_errnos": ["ENOENT"],
+                "failure_guard": trace.UNIX_SOCKET_FAILURE_GUARD,
+            },
+        ],
+        key=lambda item: item["path"],
+    )
+
+    loaded = trace.validate_manifest_document(document, request(VALID_WATCH_ROOTS))
+    policy = next(item for item in loaded.path_access_policy if item.path == path)
+
+    assert policy.classification == "unix-socket"
+    assert policy.allowed_errnos == ("ENOENT",)
+    assert policy.failure_guard == trace.UNIX_SOCKET_FAILURE_GUARD
+
+
 def test_manifest_accepts_verifier_evidence_parent_metadata() -> None:
     document = manifest_document()
     verifier_final = (

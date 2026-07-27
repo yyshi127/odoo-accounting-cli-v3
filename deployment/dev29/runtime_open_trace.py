@@ -238,6 +238,7 @@ PROCESS_VIEW_ACCESS = frozenset({"read", "metadata"})
 SQLITE_DELTA_VERIFIER = "dev29-sqlite-state-delta-v1"
 WATCH_TREE_FAILURE_GUARD = "dev29-watch-tree-identity-v1"
 PROCESS_VIEW_FAILURE_GUARD = "dev29-process-view-identity-v1"
+UNIX_SOCKET_FAILURE_GUARD = "dev29-unix-socket-identity-v1"
 PRODUCTION_PROMOTION_ALLOWED = False
 STAGING_DIRECTORY = re.compile(
     r"^trace-([1-9][0-9]*)-([1-9][0-9]*)-([0-9a-f]{16})$"
@@ -1171,9 +1172,8 @@ def _path_access_policies(
                     and not suffixes
                     and delta is None
                     and delta_contract is None
-                    and allow_success
-                    and not errnos
-                    and failure_guard is None
+                    and failure_guard
+                    == (UNIX_SOCKET_FAILURE_GUARD if errnos else None)
                 )
         if classification == "process-view" and not _is_process_view_path(path):
             raise RuntimeOpenTraceError("path access policy process view path is unsafe")

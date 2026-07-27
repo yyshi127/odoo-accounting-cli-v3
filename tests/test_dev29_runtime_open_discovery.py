@@ -273,6 +273,23 @@ def test_discovery_allows_guarded_verifier_bundle_failure() -> None:
     assert policy["failure_guard"] == runtime_trace.SQLITE_DELTA_VERIFIER
 
 
+def test_discovery_allows_guarded_unix_socket_failure() -> None:
+    policy = discovery._policy_for_path(
+        "/var/run/nscd/socket",
+        ("unix-connect",),
+        ("ENOENT",),
+        role="verifier",
+        mutable_roots=(),
+        watch_roots=WATCH_ROOTS,
+        sqlite_delta_contract_sha256=DELTA_SHA,
+    )
+
+    assert policy["classification"] == "unix-socket"
+    assert policy["allow_success"] is False
+    assert policy["allowed_errnos"] == ["ENOENT"]
+    assert policy["failure_guard"] == runtime_trace.UNIX_SOCKET_FAILURE_GUARD
+
+
 def fragments(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
     full = inventory(tmp_path)
     suite_fragment = json.loads(json.dumps(full))
