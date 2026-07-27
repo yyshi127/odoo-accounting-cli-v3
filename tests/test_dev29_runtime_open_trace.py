@@ -1240,10 +1240,23 @@ def test_manifest_accepts_verifier_evidence_parent_metadata() -> None:
         (*bootstrap_template[: -len(verifier_final)], *final_template)
     )
     path = trace.VERIFIER_EVIDENCE_PARENT
-    document["allowed_paths"] = sorted([*document["allowed_paths"], path])  # type: ignore[index]
+    ancestor = "/var/lib"
+    document["allowed_paths"] = sorted([*document["allowed_paths"], ancestor, path])  # type: ignore[index]
     document["path_access_policy"] = sorted(  # type: ignore[index]
         [
             *document["path_access_policy"],  # type: ignore[index]
+            {
+                "path": ancestor,
+                "role": "verifier",
+                "classification": "immutable",
+                "allowed_access": ["metadata"],
+                "create_suffixes": [],
+                "delta_verifier": None,
+                "delta_contract_sha256": None,
+                "allow_success": True,
+                "allowed_errnos": [],
+                "failure_guard": None,
+            },
             {
                 "path": path,
                 "role": "verifier",

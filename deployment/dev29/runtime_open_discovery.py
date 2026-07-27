@@ -394,7 +394,7 @@ def _policy_for_path(
         if not _covered(path, watch_roots) and not metadata_ancestor:
             verifier_evidence_parent = (
                 role == "verifier"
-                and path == runtime_trace.VERIFIER_EVIDENCE_PARENT
+                and runtime_trace._is_verifier_evidence_parent_metadata_ancestor(path)
                 and access == ("metadata",)
                 and success
                 and not errnos

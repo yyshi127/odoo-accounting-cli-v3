@@ -1213,6 +1213,16 @@ def _is_watch_root_metadata_ancestor(path: str, watch_roots: Sequence[str]) -> b
     return any(root.startswith(prefix) for root in watch_roots)
 
 
+def _is_verifier_evidence_parent_metadata_ancestor(path: str) -> bool:
+    if path == VERIFIER_EVIDENCE_PARENT:
+        return True
+    if path == "/":
+        prefix = "/"
+    else:
+        prefix = path + "/"
+    return VERIFIER_EVIDENCE_PARENT.startswith(prefix)
+
+
 def _nearest_existing_parent(path: Path) -> tuple[Path, os.stat_result]:
     parent = path.parent
     while True:
@@ -1342,7 +1352,10 @@ def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManife
                 and not policy.allowed_errnos
                 and (
                     _is_watch_root_metadata_ancestor(path, watches)
-                    or (verifier_template and path == VERIFIER_EVIDENCE_PARENT)
+                    or (
+                        verifier_template
+                        and _is_verifier_evidence_parent_metadata_ancestor(path)
+                    )
                 )
             )
             for path, policy in policy_for_allowed.items()
