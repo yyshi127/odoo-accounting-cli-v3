@@ -94,6 +94,14 @@ receipt signatures. A trusted error such as "approval missing" may carry the
 header only after the broker has authenticated the session and validated that
 error without dispatching an unauthorized write.
 
+For terminal writes, `ok:true` means only that the broker/CLI returned a
+well-formed tool envelope. Pi must still treat `business_succeeded:false` as an
+unverified business outcome. The bridge adds
+`bridge_guidance.must_not_report_business_success:true` with the next
+`operation.status`/operator-review action for such responses; the model must
+not convert them into accounting success, create a replacement operation, or
+hide the missing verification/audit receipt from the user.
+
 Production remains disabled until the authenticated-session resolver, broker
 socket ownership/permissions, broker session mapping, independent approval
 endpoint, and retained-release routing have been implemented and exercised in

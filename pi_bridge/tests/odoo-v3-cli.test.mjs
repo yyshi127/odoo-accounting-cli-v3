@@ -180,6 +180,7 @@ if (mutation === "__test_non_terminal") data.operation_state = "executing";
 if (mutation === "__test_missing_finalization") delete data.database_finalization;
 if (mutation === "__test_wrong_finalization_operation") data.database_finalization.operation_id = "op-other";
 if (mutation === "__test_invalid_remaining_count") data.database_finalization.remaining_unresolved_count = -1;
+if (mutation === "__test_unverified_business_result") data.verification.passed = false;
 if (mutation.startsWith("__test_recovered")) {
   // Current incident recovery is a distinct operation that completes while
   // its database receipt resolves the failed origin as "recovered".
@@ -201,7 +202,9 @@ if (mutation === "__test_recovered_wrong_anchor_count") {
 }
 const payload = { command, data, ok: true };
 if (["operation.approve_execute", "operation.result"].includes(command)) {
-  payload.business_succeeded = true;
+  payload.business_succeeded = mutation === "__test_unverified_business_result"
+    ? false
+    : true;
 }
 process.stdout.write(JSON.stringify(payload));
 `, "utf8");
@@ -842,6 +845,25 @@ test("recovered write success requires the exact two-anchor database binding", a
 				assert.equal(result.ok, false);
 				assert.equal(result.error.code, "bridge_invalid_v3_broker_response");
 			}
+		});
+	}
+});
+
+test("unverified terminal write response carries explicit no-success guidance", async () => {
+	const run = createBoundRunner({
+		cliPath: process.execPath,
+		prefixArgs: [trustedFixture, "__test_unverified_business_result"],
+		timeoutMs: 5000,
+	});
+	for (const action of ["operation.approve_execute", "operation.result"]) {
+		const result = await run(action, requests()[action]);
+		assert.equal(result.ok, true);
+		assert.equal(result.business_succeeded, false);
+		assert.deepEqual(result.bridge_guidance, {
+			must_not_report_business_success: true,
+			next_action: "operation.status",
+			operation_id: requests()[action].operation_id,
+			reason: "terminal_write_result_is_not_business_verified",
 		});
 	}
 });

@@ -499,6 +499,26 @@ function bridgeFailure(
 	return { command: action, error, ok: false };
 }
 
+function addUnverifiedBusinessGuidance(payload, action, request) {
+	if (
+		!["operation.approve_execute", "operation.result"].includes(action)
+		|| payload?.ok !== true
+		|| payload.business_succeeded !== false
+	) {
+		return payload;
+	}
+	const operationId = requestedOperationId(action, request) ?? null;
+	return {
+		...payload,
+		bridge_guidance: {
+			must_not_report_business_success: true,
+			next_action: operationId ? "operation.status" : "operator_review",
+			operation_id: operationId,
+			reason: "terminal_write_result_is_not_business_verified",
+		},
+	};
+}
+
 function parseSafePreauthReconciliationEnvelope(raw, cliCommand) {
 	let payload;
 	try {
@@ -587,7 +607,7 @@ function parseCliEnvelope(
 		) {
 			return null;
 		}
-		return payload;
+		return addUnverifiedBusinessGuidance(payload, cliCommand, request);
 	}
 	const error = payload.error;
 	const errorKeys = Object.keys(error ?? {});
