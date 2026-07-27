@@ -168,6 +168,22 @@ def _write_lifecycle_artifacts(tmp_path: Path) -> dict[str, str]:
     return artifacts
 
 
+def _write_preflight_manifest(tmp_path: Path) -> str:
+    path = tmp_path / "preflight_manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "scope": "odoo-accounting-cli-v3.sandbox-write-preflight.v1",
+                "database_uuid": "11111111-1111-4111-8111-111111111111",
+                "release": "0.1.0.dev165-abc123",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path.name
+
+
 def _input_manifest(tmp_path: Path):
     return {
         "schema_version": 1,
@@ -176,7 +192,7 @@ def _input_manifest(tmp_path: Path):
         "company_id": 7,
         "database_uuid": "11111111-1111-4111-8111-111111111111",
         "environment": "sandbox",
-        "preflight_manifest_sha256": "9" * 64,
+        "preflight_manifest": _write_preflight_manifest(tmp_path),
         "production_promotion_allowed": False,
         "release_identity": {
             "commit": "abc123",
@@ -202,7 +218,9 @@ def test_assembler_builds_verified_evidence_from_retained_artifact_files(tmp_pat
     document = verifier.assemble_document(manifest, base_dir=tmp_path)
 
     assert verifier.verify_document(document)["verified"] is True
-    assert document["preflight_manifest_sha256"] == "9" * 64
+    assert document["preflight_manifest_sha256"] == hashlib.sha256(
+        (tmp_path / manifest["preflight_manifest"]).read_bytes()
+    ).hexdigest()
     for field, relative_path in manifest["lifecycle_artifacts"].items():
         artifact = tmp_path / relative_path
         assert document["lifecycle"][field] == hashlib.sha256(
@@ -224,6 +242,14 @@ def test_assembler_cli_prints_verified_evidence_document(tmp_path, capsys):
 def test_assembler_rejects_artifact_paths_that_escape_evidence_root(tmp_path):
     manifest = _input_manifest(tmp_path)
     manifest["lifecycle_artifacts"]["pi_e2e_digest"] = "../outside.json"
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match="escapes"):
+        verifier.assemble_document(manifest, base_dir=tmp_path)
+
+
+def test_assembler_rejects_preflight_manifest_path_escape(tmp_path):
+    manifest = _input_manifest(tmp_path)
+    manifest["preflight_manifest"] = "../preflight_manifest.json"
 
     with pytest.raises(verifier.SandboxWriteEvidenceError, match="escapes"):
         verifier.assemble_document(manifest, base_dir=tmp_path)

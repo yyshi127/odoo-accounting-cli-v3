@@ -665,10 +665,13 @@ result authorizes a production write.
 Before a sandbox write evidence bundle can be collected for registry promotion,
 first run the read-only
 `odoo-accounting-cli-v3 evidence sandbox-write-preflight ...` gate and retain
-its `preflight_manifest` plus `preflight_manifest_sha256`. The final sandbox
-write evidence bundle must carry that `preflight_manifest_sha256`; evidence
-without a preflight binding is rejected before promotion review. The preflight
-manifest is not an Odoo write receipt and always reports
+its `preflight_manifest` as a file inside the evidence root. The
+`--assemble-from` input manifest must reference that retained
+`preflight_manifest` file; the exact release computes
+`preflight_manifest_sha256` from the retained bytes and copies only the digest
+into the final evidence bundle. Evidence without this computed preflight
+binding is rejected before promotion review. The preflight manifest is not an
+Odoo write receipt and always reports
 `real_odoo_write_performed:false`; it only proves that the release, staged
 sandbox runtime, evidence root, and capacity checks were admissible before
 collection began.

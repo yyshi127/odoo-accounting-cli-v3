@@ -252,7 +252,7 @@ def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
         "environment",
         "lifecycle_artifacts",
         "lifecycle_receipt_ids",
-        "preflight_manifest_sha256",
+        "preflight_manifest",
         "production_promotion_allowed",
         "registry_receipts",
         "release_identity",
@@ -278,6 +278,9 @@ def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
         raise SandboxWriteEvidenceError("lifecycle artifact fields are invalid")
     if set(receipt_ids) != ID_LIFECYCLE_FIELDS:
         raise SandboxWriteEvidenceError("lifecycle receipt id fields are invalid")
+    preflight_manifest_sha256 = _sha256_file(
+        _source_path(base_dir, root["preflight_manifest"], "input.preflight_manifest")
+    )
 
     lifecycle: dict[str, str] = {}
     for field in sorted(DIGEST_LIFECYCLE_FIELDS):
@@ -294,7 +297,7 @@ def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
         "company_id": root["company_id"],
         "database_uuid": root["database_uuid"],
         "environment": root["environment"],
-        "preflight_manifest_sha256": root["preflight_manifest_sha256"],
+        "preflight_manifest_sha256": preflight_manifest_sha256,
         "production_promotion_allowed": False,
         "release_identity": root["release_identity"],
         "lifecycle": lifecycle,
