@@ -1115,6 +1115,50 @@ def evidence_inspect_sandbox_write_root(metadata_json: Path) -> None:
     )
 
 
+@evidence_group.command("inspect-sandbox-write-pipeline")
+@click.option(
+    "--metadata-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Metadata JSON beside standard retained sandbox-write artifacts.",
+)
+def evidence_inspect_sandbox_write_pipeline(metadata_json: Path) -> None:
+    """Inspect the ordered sandbox-write evidence pipeline without authorizing writes."""
+
+    command = "evidence.inspect-sandbox-write-pipeline"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        report = verifier.inspect_pipeline_path(metadata_json)
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="sandbox_write_evidence_pipeline_rejected",
+                message="The retained sandbox write evidence pipeline is incomplete or unsafe.",
+                exit_code=6,
+            ) from exc
+        raise
+    if (
+        report.get("release_sha256") != identity["manifest_sha256"]
+        or report.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_evidence_release_mismatch",
+            message="The retained sandbox write evidence pipeline is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "pipeline_report": report,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
+
+
 def _load_write_capability_implementation(command: str) -> tuple[Any, Any]:
     try:
         from .odoo.write_handlers import _CAPABILITIES as odoo_write_capabilities

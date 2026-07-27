@@ -67,6 +67,7 @@ METADATA_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1"
 OUTPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence.v1"
 PREFLIGHT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-preflight.v1"
 LIFECYCLE_ARTIFACT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-lifecycle-artifact.v1"
+PIPELINE_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-pipeline.v1"
 PROMOTION_CANDIDATE_SCOPE = "odoo-accounting-cli-v3.write-promotion-candidate.v1"
 PROMOTION_REVIEW_SCOPE = "odoo-accounting-cli-v3.write-promotion-review.v1"
 DIGEST_LIFECYCLE_FIELDS = frozenset(
@@ -982,6 +983,84 @@ def inspect_retained_root_path(path: Path) -> dict[str, Any]:
     return result
 
 
+def inspect_pipeline_path(path: Path) -> dict[str, Any]:
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("metadata JSON is invalid") from exc
+    manifest = build_input_manifest(metadata, base_dir=path.parent)
+    document = assemble_document(manifest, base_dir=path.parent)
+    evidence = verify_document(document)
+    candidate = build_promotion_candidate(
+        document,
+        target_environment="sandbox",
+        target_channel="staged",
+    )
+    artifact_sha256 = {
+        field: _sha256_file(
+            _source_path(
+                path.parent,
+                manifest["lifecycle_artifacts"][field],
+                f"lifecycle_artifacts.{field}",
+            )
+        )
+        for field in sorted(DIGEST_LIFECYCLE_FIELDS)
+    }
+    preflight_manifest_sha256 = document["preflight_manifest_sha256"]
+    metadata_sha256 = _sha256_file(path)
+    input_manifest_sha256 = _json_digest(manifest)
+    evidence_sha256 = _json_digest(document)
+    promotion_candidate_sha256 = _json_digest(candidate)
+    steps = [
+        {
+            "name": "preflight_manifest_retained",
+            "sha256": preflight_manifest_sha256,
+        },
+        {
+            "name": "metadata_verified",
+            "sha256": metadata_sha256,
+        },
+        {
+            "name": "lifecycle_artifacts_verified",
+            "sha256": _json_digest(artifact_sha256),
+        },
+        {
+            "name": "input_manifest_built",
+            "sha256": input_manifest_sha256,
+        },
+        {
+            "name": "evidence_assembled",
+            "sha256": evidence_sha256,
+        },
+        {
+            "name": "promotion_candidate_built",
+            "sha256": promotion_candidate_sha256,
+        },
+    ]
+    return {
+        "artifact_sha256": artifact_sha256,
+        "capability_id": evidence["capability_id"],
+        "company_id": evidence["company_id"],
+        "database_uuid": evidence["database_uuid"],
+        "environment": evidence["environment"],
+        "evidence": evidence,
+        "evidence_sha256": evidence_sha256,
+        "input_manifest": manifest,
+        "input_manifest_sha256": input_manifest_sha256,
+        "metadata_sha256": metadata_sha256,
+        "preflight_manifest_sha256": preflight_manifest_sha256,
+        "production_promotion_allowed": False,
+        "promotion_candidate": candidate,
+        "promotion_candidate_sha256": promotion_candidate_sha256,
+        "registry_digest": evidence["registry_digest"],
+        "release_sha256": evidence["release_sha256"],
+        "schema_version": 1,
+        "scope": PIPELINE_SCOPE,
+        "steps": steps,
+        "verified": True,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence_json", nargs="?", type=Path)
@@ -1030,6 +1109,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Inspect standard retained sandbox-write artifacts and print their verified completeness report.",
     )
     parser.add_argument(
+        "--inspect-pipeline",
+        type=Path,
+        help="Inspect the ordered retained sandbox-write evidence pipeline from metadata.",
+    )
+    parser.add_argument(
         "--review-promotion-from",
         type=Path,
         help="Verify a sandbox-write evidence JSON against a non-authorizing promotion candidate.",
@@ -1065,13 +1149,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.build_metadata_from_preflight,
                 args.build_artifact_from,
                 args.inspect_root,
+                args.inspect_pipeline,
                 args.review_promotion_from,
                 args.build_promotion_candidate_from,
             )
         )
         if selected != 1:
             parser.error(
-                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --build-metadata-from-preflight, --build-artifact-from, --inspect-root, --review-promotion-from, or --build-promotion-candidate-from"
+                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --build-metadata-from-preflight, --build-artifact-from, --inspect-root, --inspect-pipeline, --review-promotion-from, or --build-promotion-candidate-from"
             )
         if args.build_promotion_candidate_from is not None:
             if args.promotion_candidate is not None:
@@ -1106,6 +1191,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         elif args.promotion_candidate is not None:
             parser.error("--promotion-candidate requires --review-promotion-from")
+        elif args.inspect_pipeline is not None:
+            result = inspect_pipeline_path(args.inspect_pipeline)
         elif args.inspect_root is not None:
             result = inspect_retained_root_path(args.inspect_root)
         elif args.build_input_from is not None:

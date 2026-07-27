@@ -717,6 +717,53 @@ def test_inspector_reports_standard_root_hashes(tmp_path):
     )
 
 
+def test_pipeline_inspector_reports_ordered_bound_steps(tmp_path):
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(_metadata(tmp_path)), encoding="utf-8")
+
+    report = verifier.inspect_pipeline_path(path)
+
+    assert report["scope"] == verifier.PIPELINE_SCOPE
+    assert report["verified"] is True
+    assert report["production_promotion_allowed"] is False
+    assert report["capability_id"] == "acct.invoice.customer_create.v1"
+    assert report["promotion_candidate"]["target_environment"] == "sandbox"
+    assert report["promotion_candidate"]["target_channel"] == "staged"
+    assert [step["name"] for step in report["steps"]] == [
+        "preflight_manifest_retained",
+        "metadata_verified",
+        "lifecycle_artifacts_verified",
+        "input_manifest_built",
+        "evidence_assembled",
+        "promotion_candidate_built",
+    ]
+    assert all(step["sha256"] for step in report["steps"])
+
+
+def test_pipeline_inspector_rejects_unbound_artifact(tmp_path):
+    path = tmp_path / "metadata.json"
+    metadata = _metadata(tmp_path)
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+    artifact_path = tmp_path / "preview_digest.json"
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    artifact["database_uuid"] = "22222222-2222-4222-8222-222222222222"
+    artifact_path.write_text(json.dumps(artifact, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match="database_uuid mismatch"):
+        verifier.inspect_pipeline_path(path)
+
+
+def test_pipeline_inspector_cli_prints_pipeline_report(tmp_path, capsys):
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(_metadata(tmp_path)), encoding="utf-8")
+
+    assert verifier.main(["--inspect-pipeline", str(path)]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["scope"] == verifier.PIPELINE_SCOPE
+    assert output["steps"][-1]["name"] == "promotion_candidate_built"
+    assert output["promotion_candidate"]["production_promotion_allowed"] is False
+
+
 def test_inspector_cli_prints_completeness_report(tmp_path, capsys):
     path = tmp_path / "metadata.json"
     path.write_text(json.dumps(_metadata(tmp_path)), encoding="utf-8")

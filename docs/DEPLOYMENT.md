@@ -718,6 +718,13 @@ For an audit-friendly completeness report, run
 That command recomputes the retained metadata, preflight manifest, and lifecycle
 artifact SHA-256 values, verifies that the directory can still assemble into a
 valid sandbox evidence bundle, and still reports `business_succeeded:false`.
+For an ordered handoff checklist, run
+`odoo-accounting-cli-v3 evidence inspect-sandbox-write-pipeline --metadata-json ...`.
+It verifies the same retained root, assembles the final evidence, builds the
+non-authorizing sandbox/staged promotion candidate, and emits a step-by-step
+hash chain for preflight, metadata, lifecycle artifacts, input manifest,
+evidence, and promotion candidate. Treat that pipeline report as the minimum
+review packet before any registry-staging discussion.
 
 The `--assemble-from` input manifest references the retained
 `preflight_manifest` file; the exact release computes
