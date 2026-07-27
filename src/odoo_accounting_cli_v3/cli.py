@@ -959,6 +959,71 @@ def evidence_build_sandbox_write_artifact(
     )
 
 
+@evidence_group.command("build-sandbox-write-metadata")
+@click.option(
+    "--preflight-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained sandbox-write preflight manifest JSON.",
+)
+@click.option(
+    "--registry-receipts-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Registry receipts JSON array for the capability under drill.",
+)
+@click.option(
+    "--lifecycle-receipt-ids-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Lifecycle receipt ids JSON object for non-digest write phases.",
+)
+def evidence_build_sandbox_write_metadata(
+    preflight_json: Path,
+    registry_receipts_json: Path,
+    lifecycle_receipt_ids_json: Path,
+) -> None:
+    """Build exact-release sandbox write evidence metadata from retained inputs."""
+
+    command = "evidence.build-sandbox-write-metadata"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        metadata = verifier.build_metadata_paths(
+            preflight_json,
+            registry_receipts_json,
+            lifecycle_receipt_ids_json,
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="sandbox_write_metadata_build_rejected",
+                message="The sandbox write evidence metadata could not be built from exact-release retained inputs.",
+                exit_code=6,
+            ) from exc
+        raise
+    release = metadata["release_identity"]
+    if (
+        release.get("manifest_sha256") != identity["manifest_sha256"]
+        or release.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_metadata_release_mismatch",
+            message="The sandbox write evidence metadata is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "metadata": metadata,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("build-sandbox-write-input")
 @click.option(
     "--metadata-json",

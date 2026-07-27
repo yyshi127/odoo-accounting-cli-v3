@@ -451,6 +451,85 @@ def _metadata(tmp_path: Path):
     }
 
 
+def test_metadata_builder_derives_release_binding_from_preflight(tmp_path):
+    manifest = _input_manifest(tmp_path)
+    preflight = json.loads(
+        (tmp_path / manifest["preflight_manifest"]).read_text(encoding="utf-8")
+    )
+
+    metadata = verifier.build_metadata(
+        preflight,
+        registry_receipts=manifest["registry_receipts"],
+        lifecycle_receipt_ids=manifest["lifecycle_receipt_ids"],
+    )
+
+    assert metadata == _metadata(tmp_path)
+
+
+def test_metadata_builder_rejects_registry_receipt_mismatch(tmp_path):
+    manifest = _input_manifest(tmp_path)
+    preflight = json.loads(
+        (tmp_path / manifest["preflight_manifest"]).read_text(encoding="utf-8")
+    )
+    receipts = copy.deepcopy(manifest["registry_receipts"])
+    receipts[0]["capability_id"] = "acct.bill.vendor_create.v1"
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match="capability_id mismatch"):
+        verifier.build_metadata(
+            preflight,
+            registry_receipts=receipts,
+            lifecycle_receipt_ids=manifest["lifecycle_receipt_ids"],
+        )
+
+
+def test_metadata_builder_rejects_incomplete_lifecycle_receipt_ids(tmp_path):
+    manifest = _input_manifest(tmp_path)
+    preflight = json.loads(
+        (tmp_path / manifest["preflight_manifest"]).read_text(encoding="utf-8")
+    )
+    receipt_ids = copy.deepcopy(manifest["lifecycle_receipt_ids"])
+    receipt_ids.pop("verification_receipt_id")
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match="receipt id fields"):
+        verifier.build_metadata(
+            preflight,
+            registry_receipts=manifest["registry_receipts"],
+            lifecycle_receipt_ids=receipt_ids,
+        )
+
+
+def test_metadata_builder_cli_prints_metadata(tmp_path, capsys):
+    manifest = _input_manifest(tmp_path)
+    registry_receipts_path = tmp_path / "registry-receipts.json"
+    lifecycle_receipt_ids_path = tmp_path / "lifecycle-receipt-ids.json"
+    registry_receipts_path.write_text(
+        json.dumps(manifest["registry_receipts"], sort_keys=True),
+        encoding="utf-8",
+    )
+    lifecycle_receipt_ids_path.write_text(
+        json.dumps(manifest["lifecycle_receipt_ids"], sort_keys=True),
+        encoding="utf-8",
+    )
+
+    assert (
+        verifier.main(
+            [
+                "--build-metadata-from-preflight",
+                str(tmp_path / manifest["preflight_manifest"]),
+                "--registry-receipts-json",
+                str(registry_receipts_path),
+                "--lifecycle-receipt-ids-json",
+                str(lifecycle_receipt_ids_path),
+            ]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["scope"] == verifier.METADATA_SCOPE
+    assert output["capability_id"] == "acct.invoice.customer_create.v1"
+    assert output["release_identity"]["registry_digest"] == "b" * 64
+
+
 def test_assembler_builds_verified_evidence_from_retained_artifact_files(tmp_path):
     manifest = _input_manifest(tmp_path)
     document = verifier.assemble_document(manifest, base_dir=tmp_path)

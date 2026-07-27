@@ -644,6 +644,151 @@ def test_evidence_build_sandbox_write_input_from_standard_retained_files(
     assert manifest["lifecycle_artifacts"]["preview_digest"] == "preview_digest.json"
 
 
+def test_evidence_build_sandbox_write_metadata_from_exact_release_preflight(
+    tmp_path: Path,
+):
+    manifest = sandbox_write_input_manifest(tmp_path)
+    registry_receipts_path = tmp_path / "registry-receipts.json"
+    lifecycle_receipt_ids_path = tmp_path / "lifecycle-receipt-ids.json"
+    registry_receipts_path.write_text(
+        __import__("json").dumps(manifest["registry_receipts"]),
+        encoding="utf-8",
+    )
+    lifecycle_receipt_ids_path.write_text(
+        __import__("json").dumps(manifest["lifecycle_receipt_ids"]),
+        encoding="utf-8",
+    )
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "c" * 64,
+        "package_sha256": "e" * 64,
+        "registry_digest": "b" * 64,
+        "release": "0.1.0.dev183-test",
+        "verified": True,
+        "version": "0.1.0.dev183",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "build-sandbox-write-metadata",
+                "--preflight-json",
+                str(tmp_path / manifest["preflight_manifest"]),
+                "--registry-receipts-json",
+                str(registry_receipts_path),
+                "--lifecycle-receipt-ids-json",
+                str(lifecycle_receipt_ids_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.build-sandbox-write-metadata"
+    assert payload["business_succeeded"] is False
+    metadata = payload["data"]["metadata"]
+    assert metadata["scope"] == "odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1"
+    assert metadata["release_identity"]["registry_digest"] == "b" * 64
+    assert metadata["registry_receipts"] == manifest["registry_receipts"]
+    assert payload["data"]["release_identity"] == expected_identity
+
+
+def test_evidence_build_sandbox_write_metadata_rejects_registry_receipt_mismatch(
+    tmp_path: Path,
+):
+    manifest = sandbox_write_input_manifest(tmp_path)
+    receipts = manifest["registry_receipts"]
+    receipts[0]["company_id"] = 8
+    registry_receipts_path = tmp_path / "registry-receipts.json"
+    lifecycle_receipt_ids_path = tmp_path / "lifecycle-receipt-ids.json"
+    registry_receipts_path.write_text(
+        __import__("json").dumps(receipts),
+        encoding="utf-8",
+    )
+    lifecycle_receipt_ids_path.write_text(
+        __import__("json").dumps(manifest["lifecycle_receipt_ids"]),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "c" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev183-test",
+            "verified": True,
+            "version": "0.1.0.dev183",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "build-sandbox-write-metadata",
+                "--preflight-json",
+                str(tmp_path / manifest["preflight_manifest"]),
+                "--registry-receipts-json",
+                str(registry_receipts_path),
+                "--lifecycle-receipt-ids-json",
+                str(lifecycle_receipt_ids_path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"sandbox_write_metadata_build_rejected"' in result.output
+
+
+def test_evidence_build_sandbox_write_metadata_rejects_release_mismatch(
+    tmp_path: Path,
+):
+    manifest = sandbox_write_input_manifest(tmp_path)
+    registry_receipts_path = tmp_path / "registry-receipts.json"
+    lifecycle_receipt_ids_path = tmp_path / "lifecycle-receipt-ids.json"
+    registry_receipts_path.write_text(
+        __import__("json").dumps(manifest["registry_receipts"]),
+        encoding="utf-8",
+    )
+    lifecycle_receipt_ids_path.write_text(
+        __import__("json").dumps(manifest["lifecycle_receipt_ids"]),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "f" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev183-test",
+            "verified": True,
+            "version": "0.1.0.dev183",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "build-sandbox-write-metadata",
+                "--preflight-json",
+                str(tmp_path / manifest["preflight_manifest"]),
+                "--registry-receipts-json",
+                str(registry_receipts_path),
+                "--lifecycle-receipt-ids-json",
+                str(lifecycle_receipt_ids_path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"sandbox_write_metadata_release_mismatch"' in result.output
+
+
 def test_evidence_build_sandbox_write_artifact_from_exact_release_metadata(
     tmp_path: Path,
 ):

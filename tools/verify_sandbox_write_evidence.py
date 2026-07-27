@@ -643,6 +643,87 @@ def build_lifecycle_artifact_paths(
     )
 
 
+def build_metadata(
+    preflight: Any,
+    *,
+    registry_receipts: Any,
+    lifecycle_receipt_ids: Any,
+) -> dict[str, Any]:
+    preflight_root = _require_object(preflight, "preflight_manifest")
+    release = _require_object(
+        preflight_root.get("release_identity"),
+        "preflight_manifest.release_identity",
+    )
+    if set(release) != {"commit", "manifest_sha256", "package_sha256", "release"}:
+        raise SandboxWriteEvidenceError("preflight_manifest release identity fields are invalid")
+    metadata = {
+        "schema_version": 1,
+        "scope": METADATA_SCOPE,
+        "capability_id": preflight_root.get("capability_id"),
+        "company_id": preflight_root.get("company_id"),
+        "database_uuid": preflight_root.get("database_uuid"),
+        "environment": preflight_root.get("environment"),
+        "production_promotion_allowed": False,
+        "release_identity": {
+            "commit": release["commit"],
+            "manifest_sha256": release["manifest_sha256"],
+            "package_sha256": release["package_sha256"],
+            "registry_digest": preflight_root.get("registry_digest"),
+            "release": release["release"],
+        },
+        "lifecycle_receipt_ids": lifecycle_receipt_ids,
+        "registry_receipts": registry_receipts,
+    }
+    root = _validate_metadata_root(metadata)
+    if not isinstance(lifecycle_receipt_ids, dict) or set(lifecycle_receipt_ids) != ID_LIFECYCLE_FIELDS:
+        raise SandboxWriteEvidenceError("lifecycle receipt id fields are invalid")
+    _validate_preflight_manifest(preflight_root, metadata=root)
+    document = {
+        "schema_version": 1,
+        "scope": OUTPUT_SCOPE,
+        "capability_id": root["capability_id"],
+        "company_id": root["company_id"],
+        "database_uuid": root["database_uuid"],
+        "environment": root["environment"],
+        "preflight_manifest_sha256": "0" * 64,
+        "production_promotion_allowed": False,
+        "release_identity": root["release_identity"],
+        "lifecycle": {
+            **{field: "0" * 64 for field in DIGEST_LIFECYCLE_FIELDS},
+            **lifecycle_receipt_ids,
+        },
+        "registry_receipts": registry_receipts,
+    }
+    verify_document(document)
+    return metadata
+
+
+def build_metadata_paths(
+    preflight_path: Path,
+    registry_receipts_path: Path,
+    lifecycle_receipt_ids_path: Path,
+) -> dict[str, Any]:
+    try:
+        preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("preflight JSON is invalid") from exc
+    try:
+        registry_receipts = json.loads(registry_receipts_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("registry receipts JSON is invalid") from exc
+    try:
+        lifecycle_receipt_ids = json.loads(
+            lifecycle_receipt_ids_path.read_text(encoding="utf-8")
+        )
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("lifecycle receipt ids JSON is invalid") from exc
+    return build_metadata(
+        preflight,
+        registry_receipts=registry_receipts,
+        lifecycle_receipt_ids=lifecycle_receipt_ids,
+    )
+
+
 def _validate_preflight_manifest(
     preflight: Any,
     *,
@@ -915,6 +996,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Build a sandbox-write evidence input manifest from standard retained artifacts and metadata.",
     )
     parser.add_argument(
+        "--build-metadata-from-preflight",
+        type=Path,
+        help="Build sandbox-write metadata from a retained preflight manifest.",
+    )
+    parser.add_argument(
+        "--registry-receipts-json",
+        type=Path,
+        help="Registry receipts JSON array for --build-metadata-from-preflight.",
+    )
+    parser.add_argument(
+        "--lifecycle-receipt-ids-json",
+        type=Path,
+        help="Lifecycle receipt ids JSON object for --build-metadata-from-preflight.",
+    )
+    parser.add_argument(
         "--build-artifact-from",
         type=Path,
         help="Build one bound sandbox-write lifecycle artifact envelope from metadata.",
@@ -966,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.evidence_json,
                 args.assemble_from,
                 args.build_input_from,
+                args.build_metadata_from_preflight,
                 args.build_artifact_from,
                 args.inspect_root,
                 args.review_promotion_from,
@@ -974,7 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         if selected != 1:
             parser.error(
-                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --build-artifact-from, --inspect-root, --review-promotion-from, or --build-promotion-candidate-from"
+                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --build-metadata-from-preflight, --build-artifact-from, --inspect-root, --review-promotion-from, or --build-promotion-candidate-from"
             )
         if args.build_promotion_candidate_from is not None:
             if args.promotion_candidate is not None:
@@ -991,6 +1088,14 @@ def main(argv: list[str] | None = None) -> int:
                 args.build_artifact_from,
                 args.artifact_json,
                 artifact_kind=args.artifact_kind,
+            )
+        elif args.build_metadata_from_preflight is not None:
+            if args.registry_receipts_json is None or args.lifecycle_receipt_ids_json is None:
+                parser.error("--registry-receipts-json and --lifecycle-receipt-ids-json are required with --build-metadata-from-preflight")
+            result = build_metadata_paths(
+                args.build_metadata_from_preflight,
+                args.registry_receipts_json,
+                args.lifecycle_receipt_ids_json,
             )
         elif args.review_promotion_from is not None:
             if args.promotion_candidate is None:

@@ -703,9 +703,12 @@ with
 `odoo-accounting-cli-v3 evidence build-sandbox-write-artifact --metadata-json ... --artifact-kind ... --artifact-json ...`
 and save the command output under that phase's standard filename. The command
 checks the metadata against the currently anchored release and still reports
-`business_succeeded:false`. Provide the remaining signed receipt IDs and
-registry receipts in a metadata JSON with scope
-`odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1`, then run
+`business_succeeded:false`. Build the metadata JSON from the retained
+preflight manifest, registry receipts, and lifecycle receipt ids with
+`odoo-accounting-cli-v3 evidence build-sandbox-write-metadata --preflight-json ... --registry-receipts-json ... --lifecycle-receipt-ids-json ...`.
+The metadata builder derives the capability, company, database, sandbox, and
+release binding from the preflight manifest, validates all registry receipts
+against that binding, and still reports `business_succeeded:false`. Then run
 `odoo-accounting-cli-v3 evidence build-sandbox-write-input --metadata-json ...`.
 The command builds the `--assemble-from` input manifest from the retained files,
 checks that it is bound to the currently anchored release and registry, and
