@@ -1891,6 +1891,153 @@ def test_evidence_sandbox_database_provision_plan_rejects_unsafe_name_and_filter
     ]
 
 
+def _sandbox_authorization_document(**overrides):
+    summary = {
+        "allowed_actions": [
+            "create_or_clone_postgresql_database",
+            "create_isolated_filestore",
+            "start_sandbox_odoo_service",
+            "measure_runtime_identity",
+        ],
+        "company_scope": ["SG Company"],
+        "retention_until": "2026-08-03T00:00:00Z",
+        "sandbox_database_name": "odoo_v3_sandbox",
+        "source_database_name": "odoo_sg",
+    }
+    summary.update(overrides.pop("immutable_summary", {}))
+    digest = __import__("hashlib").sha256(
+        __import__("json")
+        .dumps(
+            summary,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        .encode("utf-8")
+    ).hexdigest()
+    document = {
+        "expires_at": "2026-07-27T13:00:00Z",
+        "immutable_summary": summary,
+        "immutable_summary_sha256": digest,
+        "issued_at": "2026-07-27T12:00:00Z",
+        "purpose": "sandbox_database_provision",
+        "schema_version": 1,
+    }
+    document.update(overrides)
+    return document
+
+
+def test_evidence_sandbox_provision_authorization_check_accepts_bound_record(tmp_path):
+    authorization = tmp_path / "authorization.json"
+    authorization.write_text(
+        __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-provision-authorization-check",
+            "--authorization-file",
+            str(authorization),
+            "--expected-sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--expected-source-database-name",
+            "odoo_sg",
+            "--expected-company",
+            "SG Company",
+            "--now",
+            "2026-07-27T12:30:00Z",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-provision-authorization-check"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["authorization_record_ready"] is True
+    assert payload["data"]["business_write_authorized"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["postgresql_write_performed"] is False
+    assert payload["data"]["blockers"] == []
+
+
+def test_evidence_sandbox_provision_authorization_check_rejects_expired_tampered_record(
+    tmp_path,
+):
+    authorization = tmp_path / "authorization.json"
+    document = _sandbox_authorization_document()
+    document["immutable_summary"]["source_database_name"] = "odoo"
+    authorization.write_text(
+        __import__("json").dumps(document, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-provision-authorization-check",
+            "--authorization-file",
+            str(authorization),
+            "--expected-sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--expected-source-database-name",
+            "odoo_sg",
+            "--expected-company",
+            "SG Company",
+            "--now",
+            "2026-07-28T12:30:00Z",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["authorization_record_ready"] is False
+    assert payload["data"]["blockers"] == [
+        "authorization record is expired",
+        "immutable_summary_sha256 does not match immutable_summary",
+        "source database name is not bound to this authorization",
+    ]
+
+
+def test_evidence_sandbox_provision_authorization_check_rejects_cross_company(
+    tmp_path,
+):
+    authorization = tmp_path / "authorization.json"
+    authorization.write_text(
+        __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-provision-authorization-check",
+            "--authorization-file",
+            str(authorization),
+            "--expected-sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--expected-source-database-name",
+            "odoo_sg",
+            "--expected-company",
+            "Other Company",
+            "--now",
+            "2026-07-27T12:30:00Z",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["authorization_record_ready"] is False
+    assert payload["data"]["blockers"] == [
+        "expected company scope is not fully authorized"
+    ]
+
+
 def test_evidence_target_capacity_plan_reports_ready_v3_owned_candidates(tmp_path):
     retained = (
         tmp_path

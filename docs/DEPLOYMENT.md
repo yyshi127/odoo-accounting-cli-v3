@@ -358,6 +358,23 @@ evidence actions needed before a read or write runtime can be configured. Only
 use `--authorization-recorded` after the authorization record exists and names
 the sandbox database, source database, company scope, retention window, and
 operator.
+Before setting `--authorization-recorded`, validate the authorization JSON with
+the exact release:
+
+```bash
+odoo-accounting-cli-v3 evidence sandbox-provision-authorization-check \
+  --authorization-file <AUTHORIZATION_JSON> \
+  --expected-sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
+  --expected-source-database-name <AUTHORIZED_SOURCE_DATABASE> \
+  --expected-company <AUTHORIZED_COMPANY>
+```
+
+The authorization record must bind purpose
+`sandbox_database_provision`, the exact sandbox and source database names,
+company scope, allowed provisioning actions, UTC issue/expiry timestamps, and
+an `immutable_summary_sha256`. This check is not business-write authorization:
+it only proves that the environment-provisioning approval record is structured,
+unexpired, and bound to the intended sandbox setup.
 
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,

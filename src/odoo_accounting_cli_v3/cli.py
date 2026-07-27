@@ -126,6 +126,16 @@ def _expected_sandbox_database_filter(database_name: str) -> str:
     return f"^{re.escape(database_name)}$"
 
 
+def _parse_utc_datetime(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty UTC timestamp")
+    normalized = value.replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ValueError(f"{field} must be a UTC timestamp")
+    return parsed.astimezone(timezone.utc)
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -2263,6 +2273,147 @@ def evidence_sandbox_database_provision_plan(
         "sandbox_database_provision_ready": not blockers,
         "sandbox_database_report": sandbox_report,
         "source_database_report": source_report,
+        "warnings": sorted(set(warnings)),
+    }
+    _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("sandbox-provision-authorization-check")
+@click.option(
+    "--authorization-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="JSON authorization record to validate before sandbox database provisioning.",
+)
+@click.option(
+    "--expected-sandbox-database-name",
+    required=True,
+    help="Sandbox database name the authorization must bind.",
+)
+@click.option(
+    "--expected-source-database-name",
+    required=True,
+    help="Source database name the authorization must bind.",
+)
+@click.option(
+    "--expected-company",
+    multiple=True,
+    help="Company scope entry that must be present; repeat for every expected company.",
+)
+@click.option(
+    "--now",
+    help="UTC timestamp used for deterministic validation tests; defaults to current UTC time.",
+)
+def evidence_sandbox_provision_authorization_check(
+    authorization_file: Path,
+    expected_sandbox_database_name: str,
+    expected_source_database_name: str,
+    expected_company: tuple[str, ...],
+    now: str | None,
+) -> None:
+    """Validate a sandbox provisioning authorization record without provisioning."""
+
+    command = "evidence.sandbox-provision-authorization-check"
+    try:
+        document = json.loads(authorization_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CliFailure(
+            command=command,
+            code="sandbox_provision_authorization_rejected",
+            message="The sandbox provisioning authorization record is unavailable or invalid JSON.",
+            exit_code=5,
+        ) from exc
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if not isinstance(document, dict):
+        blockers.append("authorization record must be a JSON object")
+        document = {}
+    current_time = datetime.now(timezone.utc)
+    if now is not None:
+        try:
+            current_time = _parse_utc_datetime(now, "now")
+        except ValueError:
+            blockers.append("now must be a UTC timestamp")
+    summary = document.get("immutable_summary")
+    if not isinstance(summary, dict):
+        blockers.append("immutable_summary must be a JSON object")
+        summary = {}
+    expected_summary_sha256 = _sha256_json(summary)
+    supplied_summary_sha256 = document.get("immutable_summary_sha256")
+    if supplied_summary_sha256 != expected_summary_sha256:
+        blockers.append("immutable_summary_sha256 does not match immutable_summary")
+    if document.get("schema_version") != 1:
+        blockers.append("schema_version must be 1")
+    if document.get("purpose") != "sandbox_database_provision":
+        blockers.append("purpose must be sandbox_database_provision")
+    if summary.get("sandbox_database_name") != expected_sandbox_database_name:
+        blockers.append("sandbox database name is not bound to this authorization")
+    if summary.get("source_database_name") != expected_source_database_name:
+        blockers.append("source database name is not bound to this authorization")
+    company_scope = summary.get("company_scope")
+    if (
+        not isinstance(company_scope, list)
+        or not company_scope
+        or any(not isinstance(item, str) or not item for item in company_scope)
+    ):
+        blockers.append("company_scope must be a non-empty list of company names")
+        company_scope_set: set[str] = set()
+    else:
+        company_scope_set = set(company_scope)
+    missing_companies = sorted(set(expected_company) - company_scope_set)
+    if missing_companies:
+        blockers.append("expected company scope is not fully authorized")
+    allowed_actions = summary.get("allowed_actions")
+    required_actions = {
+        "create_or_clone_postgresql_database",
+        "create_isolated_filestore",
+        "start_sandbox_odoo_service",
+        "measure_runtime_identity",
+    }
+    if (
+        not isinstance(allowed_actions, list)
+        or any(not isinstance(item, str) or not item for item in allowed_actions)
+    ):
+        blockers.append("allowed_actions must be a list of action names")
+        allowed_action_set: set[str] = set()
+    else:
+        allowed_action_set = set(allowed_actions)
+    if not required_actions.issubset(allowed_action_set):
+        blockers.append("authorization does not include every required sandbox provisioning action")
+    if not _database_name_is_clear_sandbox(expected_sandbox_database_name):
+        blockers.append("expected sandbox database name is not clearly sandbox")
+    if _database_name_looks_production(expected_sandbox_database_name):
+        blockers.append("expected sandbox database name looks production-like")
+    if expected_sandbox_database_name == expected_source_database_name:
+        blockers.append("sandbox database name must differ from source database name")
+    try:
+        issued_at = _parse_utc_datetime(document.get("issued_at"), "issued_at")
+        expires_at = _parse_utc_datetime(document.get("expires_at"), "expires_at")
+    except ValueError as exc:
+        blockers.append(str(exc))
+        issued_at = expires_at = current_time
+    if expires_at <= current_time:
+        blockers.append("authorization record is expired")
+    if expires_at <= issued_at:
+        blockers.append("expires_at must be after issued_at")
+    ttl_seconds = int((expires_at - issued_at).total_seconds())
+    if ttl_seconds > 24 * 60 * 60:
+        blockers.append("authorization TTL must not exceed 86400 seconds")
+    if summary.get("retention_until") is None:
+        warnings.append("retention_until is not recorded in immutable_summary")
+    data = {
+        "authorization_file": str(authorization_file),
+        "authorization_record_ready": not blockers,
+        "blockers": sorted(set(blockers)),
+        "business_write_authorized": False,
+        "cleanup_executed": False,
+        "expected_company_scope": sorted(expected_company),
+        "immutable_summary_sha256": expected_summary_sha256,
+        "postgresql_write_performed": False,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "sandbox_database_name": expected_sandbox_database_name,
+        "source_database_name": expected_source_database_name,
         "warnings": sorted(set(warnings)),
     }
     _success(command, data, business_succeeded=False)
