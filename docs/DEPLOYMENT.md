@@ -422,12 +422,20 @@ odoo-accounting-cli-v3 evidence sandbox-onboarding-readiness \
   --protected-database-name <PRODUCTION_DATABASE> \
   --authorization-file <AUTHORIZATION_JSON> \
   --expected-company <AUTHORIZED_COMPANY> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST> \
   --required-free-bytes 8589934592
 ```
 
 This command is read-only. It does not query PostgreSQL itself, create a
 database, write an authorization file, or perform an Odoo action; callers must
-feed it the observed catalog names from the separate catalog audit.
+feed it the observed catalog names from the separate catalog audit. It also
+reuses the current-route release gate so a sandbox cannot be treated as ready
+unless `/opt/odoo-accounting-cli-v3/current` resolves to the intended immutable
+release package and registry digest.
 
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,

@@ -952,30 +952,16 @@ def release_identity() -> None:
     _success("release.identity", _load_release_identity())
 
 
-@release_group.command("current-route")
-@click.option(
-    "--current-path",
-    type=click.Path(path_type=Path),
-    default=Path("/opt/odoo-accounting-cli-v3/current"),
-    show_default=True,
-    help="Current release symlink to inspect.",
-)
-@click.option("--expected-release", help="Expected routed release name.")
-@click.option("--expected-commit", help="Expected full Git commit.")
-@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
-@click.option("--expected-package-sha256", help="Expected package SHA-256.")
-@click.option("--expected-registry-digest", help="Expected capability registry digest.")
-def release_current_route(
+def _current_route_report(
     current_path: Path,
+    *,
+    command: str,
     expected_release: str | None,
     expected_commit: str | None,
     expected_manifest_sha256: str | None,
     expected_package_sha256: str | None,
     expected_registry_digest: str | None,
-) -> None:
-    """Verify that the current route points at the intended immutable release."""
-
-    command = "release.current-route"
+) -> dict[str, Any]:
     blockers: list[str] = []
     resolved: Path | None = None
     identity: dict[str, Any] | None = None
@@ -1022,7 +1008,7 @@ def release_current_route(
         for field, expected in expected_pairs.items():
             if expected is not None and identity[field] != expected:
                 blockers.append(f"current route {field} does not match expected value")
-    data = {
+    return {
         "blockers": sorted(set(blockers)),
         "current_path": str(current_path),
         "current_route_ready": not blockers,
@@ -1035,6 +1021,41 @@ def release_current_route(
         "resolved_release_path": str(resolved) if resolved is not None else None,
         "route_identity": identity,
     }
+
+
+@release_group.command("current-route")
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to inspect.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def release_current_route(
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Verify that the current route points at the intended immutable release."""
+
+    command = "release.current-route"
+    data = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release,
+        expected_commit=expected_commit,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_package_sha256=expected_package_sha256,
+        expected_registry_digest=expected_registry_digest,
+    )
     _success(command, data)
 
 
@@ -2323,6 +2344,18 @@ def evidence_sandbox_database_candidates(
     show_default=True,
 )
 @click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to verify as part of onboarding.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+@click.option(
     "--now",
     help="UTC timestamp used for deterministic authorization validation.",
 )
@@ -2335,6 +2368,12 @@ def evidence_sandbox_onboarding_readiness(
     expected_company: tuple[str, ...],
     capacity_path: Path,
     required_free_bytes: int,
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
     now: str | None,
 ) -> None:
     """Summarize read-only gates before sandbox write onboarding can continue."""
@@ -2367,6 +2406,17 @@ def evidence_sandbox_onboarding_readiness(
         ) from exc
     if not capacity_report["sandbox_write_capacity_ready"]:
         blockers.append("sandbox write capacity gate is not ready")
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release,
+        expected_commit=expected_commit,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_package_sha256=expected_package_sha256,
+        expected_registry_digest=expected_registry_digest,
+    )
+    if not route_report["current_route_ready"]:
+        blockers.append("current release route is not ready")
     authorization_report: dict[str, Any]
     if authorization_file is None:
         blockers.append("sandbox provision authorization file was not supplied")
@@ -2413,6 +2463,10 @@ def evidence_sandbox_onboarding_readiness(
             action
             for condition, action in (
                 (
+                    not route_report["current_route_ready"],
+                    "fix current release route and rerun release current-route",
+                ),
+                (
                     not capacity_report["sandbox_write_capacity_ready"],
                     "free or add disk capacity and rerun evidence target-capacity-recheck",
                 ),
@@ -2430,6 +2484,7 @@ def evidence_sandbox_onboarding_readiness(
         "postgresql_write_performed": False,
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
+        "route": route_report,
         "sandbox_onboarding_ready": not blockers,
     }
     _success(command, data, business_succeeded=False)

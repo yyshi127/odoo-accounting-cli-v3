@@ -23,6 +23,30 @@ from test_write_runtime import _make_runtime as make_write_runtime
 from test_write_runtime import _write_json as write_runtime_json
 
 
+READY_CURRENT_ROUTE = {
+    "blockers": [],
+    "current_path": "/opt/odoo-accounting-cli-v3/current",
+    "current_route_ready": True,
+    "expected": {
+        "commit": None,
+        "manifest_sha256": None,
+        "package_sha256": None,
+        "registry_digest": None,
+        "release": None,
+    },
+    "real_odoo_write_performed": False,
+    "resolved_release_path": "/opt/odoo-accounting-cli-v3/releases/0.1.0.dev207-a0af30bff17c",
+    "route_identity": {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev207-a0af30bff17c",
+        "verified": True,
+    },
+}
+
+
 def identity(config) -> dict:
     return {
         "commit": "1" * 40,
@@ -2128,29 +2152,33 @@ def test_evidence_sandbox_onboarding_readiness_reports_ready(tmp_path):
         encoding="utf-8",
     )
 
-    result = CliRunner().invoke(
-        main,
-        [
-            "evidence",
-            "sandbox-onboarding-readiness",
-            "--sandbox-database-name",
-            "odoo_v3_sandbox",
-            "--source-database-name",
-            "odoo_sg",
-            "--observed-database-name",
-            "odoo_v3_sandbox",
-            "--authorization-file",
-            str(authorization),
-            "--expected-company",
-            "SG Company",
-            "--capacity-path",
-            str(tmp_path),
-            "--required-free-bytes",
-            "1",
-            "--now",
-            "2026-07-27T12:30:00Z",
-        ],
-    )
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-onboarding-readiness",
+                "--sandbox-database-name",
+                "odoo_v3_sandbox",
+                "--source-database-name",
+                "odoo_sg",
+                "--observed-database-name",
+                "odoo_v3_sandbox",
+                "--authorization-file",
+                str(authorization),
+                "--expected-company",
+                "SG Company",
+                "--capacity-path",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+                "--now",
+                "2026-07-27T12:30:00Z",
+            ],
+        )
 
     assert result.exit_code == 0, result.output
     payload = __import__("json").loads(result.output)
@@ -2160,27 +2188,32 @@ def test_evidence_sandbox_onboarding_readiness_reports_ready(tmp_path):
     assert payload["data"]["blockers"] == []
     assert payload["data"]["capacity"]["sandbox_write_capacity_ready"] is True
     assert payload["data"]["database"]["sandbox_database_observed"] is True
+    assert payload["data"]["route"]["current_route_ready"] is True
     assert payload["data"]["authorization"]["authorization_record_ready"] is True
     assert payload["data"]["postgresql_write_performed"] is False
     assert payload["data"]["real_odoo_write_performed"] is False
 
 
 def test_evidence_sandbox_onboarding_readiness_reports_missing_gates(tmp_path):
-    result = CliRunner().invoke(
-        main,
-        [
-            "evidence",
-            "sandbox-onboarding-readiness",
-            "--sandbox-database-name",
-            "odoo_v3_sandbox",
-            "--source-database-name",
-            "odoo_sg",
-            "--capacity-path",
-            str(tmp_path),
-            "--required-free-bytes",
-            str(1024**5),
-        ],
-    )
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-onboarding-readiness",
+                "--sandbox-database-name",
+                "odoo_v3_sandbox",
+                "--source-database-name",
+                "odoo_sg",
+                "--capacity-path",
+                str(tmp_path),
+                "--required-free-bytes",
+                str(1024**5),
+            ],
+        )
 
     assert result.exit_code == 0, result.output
     payload = __import__("json").loads(result.output)
@@ -2194,6 +2227,58 @@ def test_evidence_sandbox_onboarding_readiness_reports_missing_gates(tmp_path):
         "free or add disk capacity and rerun evidence target-capacity-recheck",
         "create or select the dedicated sandbox database and rerun sandbox-database-candidates",
         "save a valid sandbox provision authorization JSON and rerun sandbox-provision-authorization-check",
+    ]
+
+
+def test_evidence_sandbox_onboarding_readiness_reports_bad_current_route(tmp_path):
+    authorization = tmp_path / "authorization.json"
+    authorization.write_text(
+        __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
+        encoding="utf-8",
+    )
+    bad_route = {
+        **READY_CURRENT_ROUTE,
+        "blockers": ["current route commit does not match expected value"],
+        "current_route_ready": False,
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=bad_route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-onboarding-readiness",
+                "--sandbox-database-name",
+                "odoo_v3_sandbox",
+                "--source-database-name",
+                "odoo_sg",
+                "--observed-database-name",
+                "odoo_v3_sandbox",
+                "--authorization-file",
+                str(authorization),
+                "--expected-company",
+                "SG Company",
+                "--capacity-path",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+                "--now",
+                "2026-07-27T12:30:00Z",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_onboarding_ready"] is False
+    assert payload["data"]["blockers"] == ["current release route is not ready"]
+    assert payload["data"]["route"]["blockers"] == [
+        "current route commit does not match expected value"
+    ]
+    assert payload["data"]["next_required_actions"] == [
+        "fix current release route and rerun release current-route"
     ]
 
 
