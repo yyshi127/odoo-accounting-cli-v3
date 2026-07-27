@@ -848,8 +848,17 @@ result authorizes a production write.
 
 Before a sandbox write evidence bundle can be collected for registry promotion,
 first retain the passing JSON output from
-`evidence sandbox-onboarding-readiness` as the onboarding receipt, then run the
-read-only environment audit:
+`evidence sandbox-onboarding-readiness` as the onboarding receipt. Validate the
+retained receipt independently before using it in any write preflight:
+
+`odoo-accounting-cli-v3 evidence sandbox-onboarding-receipt-check --onboarding-receipt ... --expected-sandbox-database-name ... --expected-release ... --expected-commit ... --expected-manifest-sha256 ... --expected-package-sha256 ... --expected-registry-digest ...`
+
+The receipt check is read-only and non-authorizing. It must report
+`sandbox_write_preflight_receipt_acceptable:true` before a write preflight can
+consume the receipt; any route, digest, database, capacity, authorization, or
+read-only invariant mismatch keeps the receipt unacceptable.
+
+Then run the read-only environment audit:
 
 `odoo-accounting-cli-v3 evidence sandbox-write-environment-audit --write-runtime-config ... --evidence-root ... --onboarding-receipt ...`
 

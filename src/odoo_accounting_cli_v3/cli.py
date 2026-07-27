@@ -169,7 +169,7 @@ def _sandbox_onboarding_receipt_report(
                             "release": expected_release_identity.get("release"),
                         }
                         for field, expected in expected_pairs.items():
-                            if route_identity.get(field) != expected:
+                            if expected is not None and route_identity.get(field) != expected:
                                 blockers.append(
                                     f"sandbox onboarding route {field} does not match write runtime release"
                                 )
@@ -2587,6 +2587,71 @@ def evidence_sandbox_onboarding_readiness(
         "sandbox_onboarding_ready": not blockers,
     }
     _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("sandbox-onboarding-receipt-check")
+@click.option(
+    "--onboarding-receipt",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained evidence.sandbox-onboarding-readiness JSON receipt to validate.",
+)
+@click.option(
+    "--expected-sandbox-database-name",
+    help="Sandbox database name the retained onboarding receipt must bind.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_sandbox_onboarding_receipt_check(
+    onboarding_receipt: Path,
+    expected_sandbox_database_name: str | None,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Validate a retained sandbox onboarding readiness receipt without writes."""
+
+    command = "evidence.sandbox-onboarding-receipt-check"
+    expected_release_identity = None
+    if any(
+        item is not None
+        for item in (
+            expected_release,
+            expected_commit,
+            expected_manifest_sha256,
+            expected_package_sha256,
+            expected_registry_digest,
+        )
+    ):
+        expected_release_identity = {
+            "commit": expected_commit,
+            "manifest_sha256": expected_manifest_sha256,
+            "package_sha256": expected_package_sha256,
+            "registry_digest": expected_registry_digest,
+            "release": expected_release,
+        }
+    report = _sandbox_onboarding_receipt_report(
+        onboarding_receipt,
+        command=command,
+        expected_database_name=expected_sandbox_database_name,
+        expected_release_identity=expected_release_identity,
+    )
+    _success(
+        command,
+        {
+            "onboarding": report,
+            "postgresql_write_performed": False,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "sandbox_write_preflight_receipt_acceptable": report["ready"],
+        },
+        business_succeeded=False,
+    )
 
 
 @evidence_group.command("sandbox-database-provision-plan")

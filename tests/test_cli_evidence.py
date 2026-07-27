@@ -2418,6 +2418,81 @@ def test_evidence_sandbox_onboarding_readiness_reports_bad_current_route(tmp_pat
     ]
 
 
+def test_evidence_sandbox_onboarding_receipt_check_accepts_ready_receipt(tmp_path):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev210",
+    }
+    receipt = _ready_onboarding_receipt(
+        tmp_path,
+        release_identity=expected_identity,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-onboarding-receipt-check",
+            "--onboarding-receipt",
+            str(receipt),
+            "--expected-sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--expected-release",
+            "release",
+            "--expected-commit",
+            "1" * 40,
+            "--expected-manifest-sha256",
+            "d" * 64,
+            "--expected-package-sha256",
+            "4" * 64,
+            "--expected-registry-digest",
+            "b" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-onboarding-receipt-check"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["sandbox_write_preflight_receipt_acceptable"] is True
+    assert payload["data"]["onboarding"]["ready"] is True
+    assert payload["data"]["onboarding"]["blockers"] == []
+    assert payload["data"]["postgresql_write_performed"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+
+
+def test_evidence_sandbox_onboarding_receipt_check_reports_binding_mismatch(tmp_path):
+    receipt = _ready_onboarding_receipt(tmp_path)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-onboarding-receipt-check",
+            "--onboarding-receipt",
+            str(receipt),
+            "--expected-sandbox-database-name",
+            "other_sandbox",
+            "--expected-registry-digest",
+            "c" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_write_preflight_receipt_acceptable"] is False
+    assert payload["data"]["onboarding"]["ready"] is False
+    assert payload["data"]["onboarding"]["blockers"] == [
+        "sandbox onboarding database does not match write runtime",
+        "sandbox onboarding route registry_digest does not match write runtime release",
+    ]
+
+
 def test_evidence_target_capacity_plan_reports_ready_v3_owned_candidates(tmp_path):
     retained = (
         tmp_path
