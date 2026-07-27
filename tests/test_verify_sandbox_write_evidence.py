@@ -288,7 +288,24 @@ def _write_lifecycle_artifacts(tmp_path: Path) -> dict[str, str]:
     for field in sorted(verifier.DIGEST_LIFECYCLE_FIELDS):
         path = tmp_path / f"{field}.json"
         path.write_text(
-            json.dumps({"artifact": field}, sort_keys=True),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "scope": verifier.LIFECYCLE_ARTIFACT_SCOPE,
+                    "artifact_kind": field,
+                    "artifact": {"name": field},
+                    "capability_id": "acct.invoice.customer_create.v1",
+                    "company_id": 7,
+                    "database_uuid": "11111111-1111-4111-8111-111111111111",
+                    "environment": "sandbox",
+                    "production_promotion_allowed": False,
+                    "release_identity": {
+                        "manifest_sha256": "c" * 64,
+                        "registry_digest": "b" * 64,
+                    },
+                },
+                sort_keys=True,
+            ),
             encoding="utf-8",
         )
         artifacts[field] = path.name
@@ -447,6 +464,50 @@ def test_assembler_builds_verified_evidence_from_retained_artifact_files(tmp_pat
         assert document["lifecycle"][field] == hashlib.sha256(
             artifact.read_bytes()
         ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (
+            lambda artifact: artifact.__setitem__(
+                "capability_id", "acct.bill.vendor_create.v1"
+            ),
+            "capability_id mismatch",
+        ),
+        (
+            lambda artifact: artifact.__setitem__("company_id", 8),
+            "company_id mismatch",
+        ),
+        (
+            lambda artifact: artifact["release_identity"].__setitem__(
+                "manifest_sha256", "f" * 64
+            ),
+            "release manifest mismatch",
+        ),
+        (
+            lambda artifact: artifact.__setitem__(
+                "production_promotion_allowed", True
+            ),
+            "must not authorize production",
+        ),
+        (
+            lambda artifact: artifact.__setitem__(
+                "artifact_kind", "preview_digest"
+            ),
+            "artifact_kind mismatch",
+        ),
+    ),
+)
+def test_assembler_rejects_unbound_lifecycle_artifacts(tmp_path, mutate, match):
+    manifest = _input_manifest(tmp_path)
+    artifact_path = tmp_path / manifest["lifecycle_artifacts"]["approval_digest"]
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+    mutate(artifact)
+    artifact_path.write_text(json.dumps(artifact, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match=match):
+        verifier.assemble_document(manifest, base_dir=tmp_path)
 
 
 def test_assembler_cli_prints_verified_evidence_document(tmp_path, capsys):

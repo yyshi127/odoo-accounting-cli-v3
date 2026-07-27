@@ -66,6 +66,7 @@ INPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-input.v1"
 METADATA_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1"
 OUTPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence.v1"
 PREFLIGHT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-preflight.v1"
+LIFECYCLE_ARTIFACT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-lifecycle-artifact.v1"
 PROMOTION_CANDIDATE_SCOPE = "odoo-accounting-cli-v3.write-promotion-candidate.v1"
 PROMOTION_REVIEW_SCOPE = "odoo-accounting-cli-v3.write-promotion-review.v1"
 DIGEST_LIFECYCLE_FIELDS = frozenset(
@@ -145,6 +146,20 @@ PROMOTION_CANDIDATE_FIELDS = frozenset(
         "scope",
         "target_channel",
         "target_environment",
+    }
+)
+LIFECYCLE_ARTIFACT_FIELDS = frozenset(
+    {
+        "artifact",
+        "artifact_kind",
+        "capability_id",
+        "company_id",
+        "database_uuid",
+        "environment",
+        "production_promotion_allowed",
+        "release_identity",
+        "schema_version",
+        "scope",
     }
 )
 
@@ -471,6 +486,68 @@ def _json_digest(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _validate_lifecycle_artifact(
+    document: Any,
+    *,
+    artifact_kind: str,
+    metadata: dict[str, Any],
+) -> None:
+    artifact = _require_object(document, f"lifecycle_artifacts.{artifact_kind}")
+    if set(artifact) != LIFECYCLE_ARTIFACT_FIELDS:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind} fields are invalid"
+        )
+    if artifact["schema_version"] != 1:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.schema_version must be 1"
+        )
+    if artifact["scope"] != LIFECYCLE_ARTIFACT_SCOPE:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.scope is invalid"
+        )
+    if artifact["artifact_kind"] != artifact_kind:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.artifact_kind mismatch"
+        )
+    if artifact["capability_id"] != metadata["capability_id"]:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.capability_id mismatch"
+        )
+    if artifact["company_id"] != metadata["company_id"]:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.company_id mismatch"
+        )
+    if artifact["database_uuid"] != metadata["database_uuid"]:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.database_uuid mismatch"
+        )
+    if artifact["environment"] != metadata["environment"]:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.environment mismatch"
+        )
+    if artifact["production_promotion_allowed"] is not False:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind} must not authorize production"
+        )
+    release = _require_object(
+        artifact["release_identity"],
+        f"lifecycle_artifacts.{artifact_kind}.release_identity",
+    )
+    if set(release) != {"manifest_sha256", "registry_digest"}:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind} release identity fields are invalid"
+        )
+    expected_release = metadata["release_identity"]
+    if release["manifest_sha256"] != expected_release["manifest_sha256"]:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.release manifest mismatch"
+        )
+    if release["registry_digest"] != expected_release["registry_digest"]:
+        raise SandboxWriteEvidenceError(
+            f"lifecycle_artifacts.{artifact_kind}.registry digest mismatch"
+        )
+
+
 def _validate_preflight_manifest(
     preflight: Any,
     *,
@@ -626,9 +703,15 @@ def assemble_document(manifest: Any, *, base_dir: Path) -> dict[str, Any]:
 
     lifecycle: dict[str, str] = {}
     for field in sorted(DIGEST_LIFECYCLE_FIELDS):
-        lifecycle[field] = _sha256_file(
-            _source_path(base_dir, artifacts[field], f"lifecycle_artifacts.{field}")
+        artifact_path = _source_path(
+            base_dir, artifacts[field], f"lifecycle_artifacts.{field}"
         )
+        _validate_lifecycle_artifact(
+            _load_json_path(artifact_path, f"lifecycle_artifacts.{field}"),
+            artifact_kind=field,
+            metadata=root,
+        )
+        lifecycle[field] = _sha256_file(artifact_path)
     for field in sorted(ID_LIFECYCLE_FIELDS):
         lifecycle[field] = _require_text(receipt_ids[field], f"lifecycle_receipt_ids.{field}")
 

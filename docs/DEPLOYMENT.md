@@ -690,8 +690,16 @@ release (`preflight_manifest.json`, `approval_digest.json`,
 `failure_case_digest.json`, `idempotency_replay_digest.json`,
 `parameter_roundtrip_sha256.json`, `pi_e2e_digest.json`,
 `preview_digest.json`, `recovery_case_digest.json`, and
-`security_negative_digest.json`). Provide the remaining signed receipt IDs and
-registry receipts in a metadata JSON with scope
+`security_negative_digest.json`). Each lifecycle artifact file must be a
+JSON envelope with scope
+`odoo-accounting-cli-v3.sandbox-write-lifecycle-artifact.v1`, its exact
+`artifact_kind`, `capability_id`, `company_id`, `database_uuid`,
+`environment`, release `manifest_sha256`, `registry_digest`, and
+`production_promotion_allowed:false`. The exact release validates those
+bindings before hashing the artifact into the final evidence bundle, so a
+phase artifact from another capability, company, sandbox, release, or registry
+is rejected. Provide the remaining signed receipt IDs and registry receipts in
+a metadata JSON with scope
 `odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1`, then run
 `odoo-accounting-cli-v3 evidence build-sandbox-write-input --metadata-json ...`.
 The command builds the `--assemble-from` input manifest from the retained files,
