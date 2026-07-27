@@ -868,26 +868,7 @@ def evidence_inspect_sandbox_write_root(metadata_json: Path) -> None:
     )
 
 
-@evidence_group.command("write-capability-readiness")
-@click.option(
-    "--capability-id",
-    required=True,
-    help="Exact registered write capability to check before sandbox drill collection.",
-)
-def evidence_write_capability_readiness(capability_id: str) -> None:
-    """Check static readiness before a real sandbox write evidence drill."""
-
-    command = "evidence.write-capability-readiness"
-    identity = _load_release_identity(command=command)
-    capabilities = _load_capabilities()
-    capability = next((item for item in capabilities if item.id == capability_id), None)
-    if capability is None or capability.data["access"] != "write":
-        raise CliFailure(
-            command=command,
-            code="write_capability_rejected",
-            message="The readiness gate must target one registered write capability.",
-            exit_code=5,
-        )
+def _load_write_capability_implementation(command: str) -> tuple[Any, Any]:
     try:
         from .odoo.write_handlers import _CAPABILITIES as odoo_write_capabilities
         from .write_service import _ALLOWED_MODELS as allowed_models_by_capability
@@ -898,6 +879,16 @@ def evidence_write_capability_readiness(capability_id: str) -> None:
             message="The write capability implementation allowlists are unavailable.",
             exit_code=5,
         ) from exc
+    return odoo_write_capabilities, allowed_models_by_capability
+
+
+def _write_capability_readiness_report(
+    capability: Capability,
+    *,
+    allowed_models_by_capability: Any,
+    odoo_write_capabilities: Any,
+) -> dict[str, Any]:
+    capability_id = capability.id
 
     data = capability.data
     allowed_models = sorted(allowed_models_by_capability.get(capability_id, ()))
@@ -931,26 +922,99 @@ def evidence_write_capability_readiness(capability_id: str) -> None:
         ),
     }
     sandbox_drill_admissible = all(checks.values())
+    return {
+        "allowed_models": allowed_models,
+        "capability": {
+            "access": data["access"],
+            "approval": data["approval"],
+            "company_scope": data["company_scope"],
+            "enabled_environments": data["enabled_environments"],
+            "evidence_level": data["evidence"]["level"],
+            "id": capability_id,
+            "idempotency": data["idempotency"],
+            "recovery": data["recovery"],
+            "risk_level": data["risk_level"],
+        },
+        "checks": checks,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "sandbox_drill_admissible": sandbox_drill_admissible,
+    }
+
+
+@evidence_group.command("write-capability-readiness")
+@click.option(
+    "--capability-id",
+    required=True,
+    help="Exact registered write capability to check before sandbox drill collection.",
+)
+def evidence_write_capability_readiness(capability_id: str) -> None:
+    """Check static readiness before a real sandbox write evidence drill."""
+
+    command = "evidence.write-capability-readiness"
+    identity = _load_release_identity(command=command)
+    capabilities = _load_capabilities()
+    capability = next((item for item in capabilities if item.id == capability_id), None)
+    if capability is None or capability.data["access"] != "write":
+        raise CliFailure(
+            command=command,
+            code="write_capability_rejected",
+            message="The readiness gate must target one registered write capability.",
+            exit_code=5,
+        )
+    odoo_write_capabilities, allowed_models_by_capability = (
+        _load_write_capability_implementation(command)
+    )
+    report = _write_capability_readiness_report(
+        capability,
+        allowed_models_by_capability=allowed_models_by_capability,
+        odoo_write_capabilities=odoo_write_capabilities,
+    )
     _success(
         command,
         {
-            "allowed_models": allowed_models,
-            "capability": {
-                "access": data["access"],
-                "approval": data["approval"],
-                "company_scope": data["company_scope"],
-                "enabled_environments": data["enabled_environments"],
-                "evidence_level": data["evidence"]["level"],
-                "id": capability_id,
-                "idempotency": data["idempotency"],
-                "recovery": data["recovery"],
-                "risk_level": data["risk_level"],
-            },
-            "checks": checks,
+            **report,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("write-capabilities-readiness")
+def evidence_write_capabilities_readiness() -> None:
+    """Check static readiness for every registered write capability."""
+
+    command = "evidence.write-capabilities-readiness"
+    identity = _load_release_identity(command=command)
+    capabilities = _load_capabilities()
+    write_capabilities = sorted(
+        (item for item in capabilities if item.data["access"] == "write"),
+        key=lambda item: item.id,
+    )
+    odoo_write_capabilities, allowed_models_by_capability = (
+        _load_write_capability_implementation(command)
+    )
+    reports = [
+        _write_capability_readiness_report(
+            capability,
+            allowed_models_by_capability=allowed_models_by_capability,
+            odoo_write_capabilities=odoo_write_capabilities,
+        )
+        for capability in write_capabilities
+    ]
+    admissible_count = sum(
+        1 for report in reports if report["sandbox_drill_admissible"] is True
+    )
+    _success(
+        command,
+        {
+            "admissible_count": admissible_count,
+            "capabilities": reports,
             "production_promotion_allowed": False,
             "real_odoo_write_performed": False,
             "release_identity": identity,
-            "sandbox_drill_admissible": sandbox_drill_admissible,
+            "sandbox_drill_admissible": admissible_count == len(reports),
+            "total_write_capabilities": len(reports),
         },
         business_succeeded=False,
     )

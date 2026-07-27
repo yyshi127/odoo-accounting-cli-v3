@@ -670,6 +670,11 @@ strict schemas, approval, idempotency, recovery metadata, service model
 allowlist, and Odoo write-handler support. A passing report only admits the
 capability to sandbox drill planning; it still reports
 `business_succeeded:false` and never authorizes production.
+Before planning a batch of sandbox drills, run
+`odoo-accounting-cli-v3 evidence write-capabilities-readiness` to report the
+same static readiness checks for every registered write capability in the exact
+release. Treat any non-admissible capability as closed until its registry,
+service allowlist, or Odoo handler gap is fixed and retested.
 
 Then run the read-only
 `odoo-accounting-cli-v3 evidence sandbox-write-preflight --capability-id ... --company-id ...`

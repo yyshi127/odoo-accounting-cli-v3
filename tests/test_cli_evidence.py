@@ -689,6 +689,44 @@ def test_evidence_write_capability_readiness_rejects_read_capability():
     assert '"code":"write_capability_rejected"' in result.output
 
 
+def test_evidence_write_capabilities_readiness_reports_all_registered_writes():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev171",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "write-capabilities-readiness",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.write-capabilities-readiness"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert payload["data"]["sandbox_drill_admissible"] is True
+    assert payload["data"]["total_write_capabilities"] == 14
+    assert payload["data"]["admissible_count"] == 14
+    reported = [item["capability"]["id"] for item in payload["data"]["capabilities"]]
+    assert reported == sorted(reported)
+    assert "acct.invoice.customer_create.v1" in reported
+    assert all(item["sandbox_drill_admissible"] is True for item in payload["data"]["capabilities"])
+
+
 def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
     tmp_path: Path,
 ):
