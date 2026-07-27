@@ -90,6 +90,7 @@ PR_SET_PDEATHSIG = 1
 PR_GET_PDEATHSIG = 2
 SIGKILL = getattr(signal, "SIGKILL", 9)
 LEASE_POLL_SECONDS = 0.05
+MAX_LAUNCHER_LEASE_BYTES = 64 * 1024
 COMMON_OPTIONS = (
     ("evidence_name", "--evidence-name"),
     ("expected_release", "--expected-release"),
@@ -284,7 +285,7 @@ def _strict_positive_decimal(value: Any, *, label: str) -> int:
 
 def _read_small_descriptor(descriptor: int, *, label: str) -> bytes:
     before = os.fstat(descriptor)
-    if before.st_size <= 0 or before.st_size > 16 * 1024:
+    if before.st_size <= 0 or before.st_size > MAX_LAUNCHER_LEASE_BYTES:
         raise SupervisorError(f"{label} size is invalid")
     os.lseek(descriptor, 0, os.SEEK_SET)
     payload = bytearray()

@@ -233,6 +233,32 @@ def test_verifier_fragment_action_forwards_bundle_and_fragment_options() -> None
     assert "--verifier-fragment-output" in argv
 
 
+def test_launcher_lease_reader_allows_long_verifier_argv_payload(
+    tmp_path: Path,
+) -> None:
+    payload = b'{"argv":"' + (b"x" * (20 * 1024)) + b'"}\n'
+    path = tmp_path / "long-lease.json"
+    path.write_bytes(payload)
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        assert runner._read_small_descriptor(descriptor, label="launcher lease") == payload
+    finally:
+        os.close(descriptor)
+
+
+def test_launcher_lease_reader_keeps_a_bounded_payload_limit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "oversized-lease.json"
+    path.write_bytes(b"x" * (runner.MAX_LAUNCHER_LEASE_BYTES + 1))
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        with pytest.raises(runner.SupervisorError, match="launcher lease size"):
+            runner._read_small_descriptor(descriptor, label="launcher lease")
+    finally:
+        os.close(descriptor)
+
+
 def test_verifier_fragment_worker_keeps_gate_values_as_strict_decimals() -> None:
     parsed = runner._parser().parse_args(
         [
