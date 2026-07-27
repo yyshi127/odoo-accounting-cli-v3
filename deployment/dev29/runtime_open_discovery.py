@@ -542,7 +542,7 @@ def _manifest_from_entry(
             path_normalizer = _verifier_evidence_path_normalizer(final)
     except runtime_trace.RuntimeOpenTraceError as exc:
         raise DiscoveryError("discovery bootstrap argv cannot be templated") from exc
-    normalized_paths = tuple(path_normalizer(path) for path in parsed.paths)
+    normalized_paths = tuple(sorted(set(path_normalizer(path) for path in parsed.paths)))
     access_by_path = {
         path_normalizer(path): access for path, access in parsed.accesses
     }

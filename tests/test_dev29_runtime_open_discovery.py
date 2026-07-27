@@ -290,6 +290,56 @@ def test_discovery_allows_guarded_unix_socket_failure() -> None:
     assert policy["failure_guard"] == runtime_trace.UNIX_SOCKET_FAILURE_GUARD
 
 
+def test_discovery_deduplicates_normalized_verifier_paths(tmp_path: Path) -> None:
+    value = inventory(tmp_path)
+    verifier = next(
+        item
+        for item in value["targets"]  # type: ignore[index]
+        if item["target_id"] == "independent-verifier"
+    )
+    evidence_dir = "/var/lib/odoo-accounting-cli-v3/evidence/dev29-proof-001"
+    verifier["final_argv"] = [
+        "/usr/bin/python3.12",
+        "-I",
+        "-B",
+        "-S",
+        f"{RELEASE_ROOT}/deployment/dev29/verify_read_evidence.py",
+        "--expected-bundle-manifest-sha256",
+        "a" * 64,
+        "--evidence-dir",
+        evidence_dir,
+    ]
+    verifier["bootstrap_argv"] = [
+        *bootstrap_argv("independent-verifier")[:-len(final_argv("independent-verifier"))],
+        *verifier["final_argv"],
+    ]
+    trace_path = Path(verifier["trace_path"])
+    trace_path.write_bytes(
+        (
+            "\n".join(
+                [
+                    f'410 execve("/usr/bin/python3.12", {argv_text(demotion_argv("independent-verifier"))}, 0x7fff) = 0',
+                    f'410 execve("/usr/bin/python3.12", {argv_text(tuple(verifier["bootstrap_argv"]))}, 0x7fff) = 0',
+                    f'410 stat("{evidence_dir}", {{st_mode=S_IFDIR|0700}}, 0) = 0',
+                    f'410 stat("{evidence_dir}", {{st_mode=S_IFDIR|0700}}, 0) = 0',
+                    f'410 openat(AT_FDCWD, "{evidence_dir}/BUNDLE-MANIFEST.json", O_RDONLY|O_CLOEXEC) = -1 ENOENT (No such file or directory)',
+                    f'410 execve("/usr/bin/python3.12", {argv_text(tuple(verifier["final_argv"]))}, 0x7fff) = 0',
+                    "410 +++ exited with 2 +++",
+                ]
+            )
+            + "\n"
+        ).encode("utf-8")
+    )
+    verifier["expected_returncodes"] = [2]
+    output = tmp_path / "review"
+
+    result = discovery.build_review(value, output_directory=output)
+    manifest = json.loads((output / "independent-verifier.json").read_bytes())
+
+    assert result["target_count"] == 19
+    assert manifest["allowed_paths"].count(runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER) == 1
+
+
 def fragments(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
     full = inventory(tmp_path)
     suite_fragment = json.loads(json.dumps(full))
