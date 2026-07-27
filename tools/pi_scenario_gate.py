@@ -41,6 +41,7 @@ CLARIFICATION_OUTCOMES = {"not_required", "clarified", "refused"}
 SCENARIO_ID = re.compile(r"^pi-v1-[a-z0-9]+(?:-[a-z0-9]+)*$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
+PLACEHOLDER_SHA256_VALUES = frozenset(character * 64 for character in "0123456789abcdef")
 RFC3339_UTC = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$"
 )
@@ -175,6 +176,22 @@ def _validate_json_values(
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _validate_json_values(child, f"{location}[{index}]", error_type)
+    elif isinstance(value, str) and value in PLACEHOLDER_SHA256_VALUES:
+        raise error_type(f"{location} must not be a placeholder SHA-256")
+
+
+def _require_sha256(
+    value: Any,
+    location: str,
+    error_type: type[ValueError],
+    *,
+    reject_placeholder: bool = True,
+) -> str:
+    if not isinstance(value, str) or not SHA256.fullmatch(value):
+        raise error_type(f"{location} must be lowercase SHA-256")
+    if reject_placeholder and value in PLACEHOLDER_SHA256_VALUES:
+        raise error_type(f"{location} must not be a placeholder SHA-256")
+    return value
 
 
 def _registry_map(registry_document: Any) -> dict[str, dict[str, Any]]:
@@ -614,13 +631,11 @@ def validate_trace_document(
     payload = trace_attestation_payload(root)
     payload_digest = hashlib.sha256(payload).hexdigest()
     claimed_payload_digest = attestation["signed_payload_sha256"]
-    if (
-        not isinstance(claimed_payload_digest, str)
-        or not SHA256.fullmatch(claimed_payload_digest)
-    ):
-        raise TraceValidationError(
-            "traces.attestation.signed_payload_sha256 must be lowercase SHA-256"
-        )
+    _require_sha256(
+        claimed_payload_digest,
+        "traces.attestation.signed_payload_sha256",
+        TraceValidationError,
+    )
     if claimed_payload_digest != payload_digest:
         raise TraceValidationError("traces.attestation signed payload digest mismatch")
     signature = attestation["signature"]
@@ -633,14 +648,14 @@ def validate_trace_document(
         raise TraceValidationError(f"traces.schema_version must be {TRACE_SCHEMA}")
     if root["corpus_id"] != corpus_document["corpus_id"]:
         raise TraceValidationError("traces.corpus_id mismatch")
-    digest = root["corpus_sha256"]
-    if not isinstance(digest, str) or not SHA256.fullmatch(digest):
-        raise TraceValidationError("traces.corpus_sha256 must be lowercase SHA-256")
+    digest = _require_sha256(
+        root["corpus_sha256"], "traces.corpus_sha256", TraceValidationError
+    )
     if digest != canonical_sha256(corpus_document):
         raise TraceValidationError("traces.corpus_sha256 mismatch")
-    registry_digest = root["registry_sha256"]
-    if not isinstance(registry_digest, str) or not SHA256.fullmatch(registry_digest):
-        raise TraceValidationError("traces.registry_sha256 must be lowercase SHA-256")
+    registry_digest = _require_sha256(
+        root["registry_sha256"], "traces.registry_sha256", TraceValidationError
+    )
     if registry_digest != canonical_sha256(registry_document):
         raise TraceValidationError("traces.registry_sha256 mismatch")
 
@@ -668,20 +683,16 @@ def validate_trace_document(
         )
     if not IDENTIFIER.fullmatch(capture["run_id"]):
         raise TraceValidationError("traces.capture.run_id has invalid format")
-    if (
-        not isinstance(capture["v3_release_sha256"], str)
-        or not SHA256.fullmatch(capture["v3_release_sha256"])
-    ):
-        raise TraceValidationError(
-            "traces.capture.v3_release_sha256 must be lowercase SHA-256"
-        )
-    if (
-        not isinstance(expected_release_sha256, str)
-        or not SHA256.fullmatch(expected_release_sha256)
-    ):
-        raise TraceValidationError(
-            "expected release SHA-256 must be lowercase SHA-256"
-        )
+    _require_sha256(
+        capture["v3_release_sha256"],
+        "traces.capture.v3_release_sha256",
+        TraceValidationError,
+    )
+    _require_sha256(
+        expected_release_sha256,
+        "expected release SHA-256",
+        TraceValidationError,
+    )
     if not hmac.compare_digest(
         capture["v3_release_sha256"], expected_release_sha256
     ):
@@ -853,10 +864,11 @@ def validate_trace_document(
                 for field in ("parameters_sha256", "approval_digest"):
                     value = data[field]
                     if is_write:
-                        if not isinstance(value, str) or not SHA256.fullmatch(value):
-                            raise TraceValidationError(
-                                f"{data_location}.{field} must be lowercase SHA-256 for writes"
-                            )
+                        _require_sha256(
+                            value,
+                            f"{data_location}.{field}",
+                            TraceValidationError,
+                        )
                     elif value is not None:
                         raise TraceValidationError(
                             f"{data_location}.{field} must be null for reads"
@@ -873,13 +885,11 @@ def validate_trace_document(
                     data_location,
                     TraceValidationError,
                 )
-                if (
-                    not isinstance(data["parameters_sha256"], str)
-                    or not SHA256.fullmatch(data["parameters_sha256"])
-                ):
-                    raise TraceValidationError(
-                        f"{data_location}.parameters_sha256 must be lowercase SHA-256"
-                    )
+                _require_sha256(
+                    data["parameters_sha256"],
+                    f"{data_location}.parameters_sha256",
+                    TraceValidationError,
+                )
                 _nonempty_string(
                     data[reference_field],
                     f"{data_location}.{reference_field}",
@@ -893,13 +903,11 @@ def validate_trace_document(
                     data_location,
                     TraceValidationError,
                 )
-                if (
-                    not isinstance(data["parameters_sha256"], str)
-                    or not SHA256.fullmatch(data["parameters_sha256"])
-                ):
-                    raise TraceValidationError(
-                        f"{data_location}.parameters_sha256 must be lowercase SHA-256"
-                    )
+                _require_sha256(
+                    data["parameters_sha256"],
+                    f"{data_location}.parameters_sha256",
+                    TraceValidationError,
+                )
                 _nonempty_string(
                     data["receipt_id"],
                     f"{data_location}.receipt_id",

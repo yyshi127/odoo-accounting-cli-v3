@@ -37,12 +37,12 @@
     "reverse_move_id": {"json_type": "integer", "description": "沙箱待冲销分录 ID", "example": 1401},
     "draft_customer_invoice_id": {"json_type": "integer", "description": "可信候选读取返回的沙箱客户草稿发票 ID", "example": 1402},
     "draft_vendor_bill_id": {"json_type": "integer", "description": "可信候选读取返回的沙箱供应商草稿账单 ID", "example": 1403},
-    "draft_customer_document_binding": {"json_type": "string", "description": "可信候选读取返回的客户草稿发票单据绑定", "example": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"},
-    "draft_customer_business_binding": {"json_type": "string", "description": "可信候选读取返回的客户草稿发票业务绑定", "example": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"},
-    "draft_vendor_document_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单单据绑定", "example": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
-    "draft_vendor_business_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单业务绑定", "example": "9999999999999999999999999999999999999999999999999999999999999999"},
+    "draft_customer_document_binding": {"json_type": "string", "description": "可信候选读取返回的客户草稿发票单据绑定", "example": "b8e742d110c1231c07820d07d8c3b7d7ab75e8d00f497e31cefe42966679792e"},
+    "draft_customer_business_binding": {"json_type": "string", "description": "可信候选读取返回的客户草稿发票业务绑定", "example": "66713f00d613883faf5cb31dbd7e65592ab077abc9bebfd8e68b4b5f48f76494"},
+    "draft_vendor_document_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单单据绑定", "example": "5828176ca525d57db393e36e306d6518b40c83a21ea8048b93017782cf8ba121"},
+    "draft_vendor_business_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单业务绑定", "example": "65b15a94f0a9e28aa4feb90507403971b302c68311acd2475985f18b57f9e098"},
     "failed_operation_id": {"json_type": "string", "description": "沙箱失败操作 ID", "example": "op-failed-001"},
-    "recovery_plan_digest": {"json_type": "string", "description": "沙箱已验证恢复计划摘要", "example": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    "recovery_plan_digest": {"json_type": "string", "description": "沙箱已验证恢复计划摘要", "example": "91e3271c8ebb67c97f1e8acbbe8e7e798a9309cee0911e8e8e1c425f8d5f4ed3"}
   },
   "scenarios": [
     {
@@ -171,9 +171,9 @@
         "material_parameters": {
           "company_id": {"$fixture": "company_primary_id"}, "journal_id": {"$fixture": "bank_journal_id"},
           "statement_date": "2026-06-26", "currency_id": {"$fixture": "currency_cny_id"},
-          "external_reference": "PI-BANK-20260626", "source_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "external_reference": "PI-BANK-20260626", "source_digest": "234643d9ba5874ebe099a0972febdda3d11bdde3a12cbd81ad40f12c68086d46",
           "source_filename": "pi-bank-20260626.csv", "opening_balance": "10000.00", "closing_balance": "17000.00",
-          "lines": [{"external_transaction_id": "pi-bank-txn-1", "transaction_date": "2026-06-26", "value_date": "2026-06-26", "direction": "credit", "amount": "7000.00", "foreign_currency_id": {"$fixture": "currency_usd_id"}, "foreign_amount": "1000.00", "summary": "客户美元收款", "partner_id": {"$fixture": "customer_id"}, "source_line_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}],
+          "lines": [{"external_transaction_id": "pi-bank-txn-1", "transaction_date": "2026-06-26", "value_date": "2026-06-26", "direction": "credit", "amount": "7000.00", "foreign_currency_id": {"$fixture": "currency_usd_id"}, "foreign_amount": "1000.00", "summary": "客户美元收款", "partner_id": {"$fixture": "customer_id"}, "source_line_digest": "2cbd93403e482749cf8cdef842ac7b1e06b59da78c3d8bf0b094f57bf6b01f05"}],
           "idempotency_key": "pi-v1-bank-statement"
         }
       }

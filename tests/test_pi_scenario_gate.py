@@ -26,7 +26,13 @@ REGISTRY_PATH = PROJECT_ROOT / "registry" / "capabilities.json"
 TEST_ATTESTATION_KEY_ID = "test-pi-capture-key"
 TEST_ATTESTATION_KEY = secrets.token_bytes(32)
 TEST_ATTESTATION_KEYS = {TEST_ATTESTATION_KEY_ID: TEST_ATTESTATION_KEY}
-TEST_RELEASE_SHA256 = "e" * 64
+TEST_RELEASE_SHA256 = hashlib.sha256(b"test v3 release").hexdigest()
+TEST_WRONG_RELEASE_SHA256 = hashlib.sha256(b"wrong test v3 release").hexdigest()
+TEST_APPROVAL_DIGEST = hashlib.sha256(b"approval binding").hexdigest()
+TEST_WRONG_PARAMETERS_DIGEST = hashlib.sha256(b"wrong parameters").hexdigest()
+TEST_WRONG_RECEIPT_DIGEST = hashlib.sha256(b"wrong receipt parameters").hexdigest()
+TEST_WRONG_CORPUS_DIGEST = hashlib.sha256(b"wrong corpus").hexdigest()
+TEST_WRONG_REGISTRY_DIGEST = hashlib.sha256(b"wrong registry").hexdigest()
 
 
 class PiScenarioGateTest(unittest.TestCase):
@@ -118,7 +124,7 @@ class PiScenarioGateTest(unittest.TestCase):
                             "data": {
                                 "applicable": is_write,
                                 "parameters_sha256": parameters_sha256 if is_write else None,
-                                "approval_digest": "d" * 64 if is_write else None,
+                                "approval_digest": TEST_APPROVAL_DIGEST if is_write else None,
                             },
                         },
                         {
@@ -159,7 +165,7 @@ class PiScenarioGateTest(unittest.TestCase):
                 "captured_at": "2026-07-17T00:01:00Z",
                 "pi_agent_version": "test-pi-build",
                 "pi_bridge_version": "test-bridge-build",
-                "v3_release_sha256": "e" * 64,
+                "v3_release_sha256": TEST_RELEASE_SHA256,
             },
             "bindings": bindings,
             "traces": traces,
@@ -265,7 +271,7 @@ class PiScenarioGateTest(unittest.TestCase):
                 {
                     "applicable": True,
                     "parameters_sha256": canonical_sha256(resolved),
-                    "approval_digest": "d" * 64,
+                    "approval_digest": TEST_APPROVAL_DIGEST,
                 },
             )
 
@@ -315,6 +321,24 @@ class PiScenarioGateTest(unittest.TestCase):
             CorpusValidationError, "missing material schema properties"
         ):
             validate_corpus(nested_omission, nested_registry)
+
+    def test_corpus_rejects_placeholder_sha256_values(self) -> None:
+        placeholder_fixture = copy.deepcopy(self.corpus)
+        placeholder_fixture["fixture_bindings"]["recovery_plan_digest"][
+            "example"
+        ] = "a" * 64
+        with self.assertRaisesRegex(CorpusValidationError, "placeholder SHA-256"):
+            validate_corpus(placeholder_fixture, self.registry)
+
+        placeholder_parameter = copy.deepcopy(self.corpus)
+        bank_scenario = next(
+            scenario
+            for scenario in placeholder_parameter["scenarios"]
+            if scenario["id"] == "pi-v1-bank-statement"
+        )
+        bank_scenario["expected"]["material_parameters"]["source_digest"] = "b" * 64
+        with self.assertRaisesRegex(CorpusValidationError, "placeholder SHA-256"):
+            validate_corpus(placeholder_parameter, self.registry)
 
     def test_empty_trace_set_cannot_claim_accuracy(self) -> None:
         trace_document = self._perfect_trace_document()
@@ -425,8 +449,12 @@ class PiScenarioGateTest(unittest.TestCase):
             if trace["scenario_id"] == "pi-v1-customer-invoice"
         )
         invoice_trace["events"][4]["data"]["parameters"]["company_id"] = 999999
-        invoice_trace["events"][7]["data"]["parameters_sha256"] = "0" * 64
-        invoice_trace["events"][10]["data"]["parameters_sha256"] = "1" * 64
+        invoice_trace["events"][7]["data"]["parameters_sha256"] = (
+            TEST_WRONG_PARAMETERS_DIGEST
+        )
+        invoice_trace["events"][10]["data"]["parameters_sha256"] = (
+            TEST_WRONG_RECEIPT_DIGEST
+        )
         self._resign(trace_document)
         report = score_documents(
             self.corpus,
@@ -519,11 +547,11 @@ class PiScenarioGateTest(unittest.TestCase):
                 self.corpus,
                 self.registry,
                 TEST_ATTESTATION_KEYS,
-                expected_release_sha256="f" * 64,
+                expected_release_sha256=TEST_WRONG_RELEASE_SHA256,
             )
 
         wrong_digest = self._perfect_trace_document()
-        wrong_digest["corpus_sha256"] = "0" * 64
+        wrong_digest["corpus_sha256"] = TEST_WRONG_CORPUS_DIGEST
         self._resign(wrong_digest)
         with self.assertRaisesRegex(TraceValidationError, "corpus_sha256 mismatch"):
             validate_trace_document(
@@ -535,7 +563,7 @@ class PiScenarioGateTest(unittest.TestCase):
             )
 
         wrong_registry = self._perfect_trace_document()
-        wrong_registry["registry_sha256"] = "0" * 64
+        wrong_registry["registry_sha256"] = TEST_WRONG_REGISTRY_DIGEST
         self._resign(wrong_registry)
         with self.assertRaisesRegex(TraceValidationError, "registry_sha256 mismatch"):
             validate_trace_document(
@@ -564,6 +592,20 @@ class PiScenarioGateTest(unittest.TestCase):
         with self.assertRaisesRegex(TraceValidationError, "fields invalid"):
             validate_trace_document(
                 extra,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+        placeholder_approval = self._perfect_trace_document()
+        placeholder_approval["traces"][4]["events"][7]["data"][
+            "approval_digest"
+        ] = "d" * 64
+        self._resign(placeholder_approval)
+        with self.assertRaisesRegex(TraceValidationError, "placeholder SHA-256"):
+            validate_trace_document(
+                placeholder_approval,
                 self.corpus,
                 self.registry,
                 TEST_ATTESTATION_KEYS,

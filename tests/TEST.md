@@ -316,8 +316,10 @@ receipt. Every applicable stage carries the full parameters or their canonical
 SHA-256 binding.
 
 The scorer rejects unknown fields, duplicate IDs, unsigned or untrusted
-exports, signature/digest mismatches, wrong corpus or registry digests, empty
-trace sets, invalid fixture types, and traces not bound to the frozen input.
+exports, signature/digest mismatches, obvious placeholder SHA-256 strings in
+fixture/material evidence bindings or captured trace digests, wrong corpus or
+registry digests, empty trace sets, invalid fixture types, and traces not bound
+to the frozen input.
 Missing scenarios remain in every denominator and fail trace coverage. F01
 passes only when the exact integer ratio is at least 95%; F02 and F03 require
 100%. The JSON report retains the exact numerator, denominator, decimal
