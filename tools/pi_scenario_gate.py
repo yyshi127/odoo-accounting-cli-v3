@@ -1,4 +1,4 @@
-"""Score frozen Pi natural-language traces for acceptance gates F01-F03.
+"""Score frozen Pi natural-language traces for acceptance gates F01-F03/F05.
 
 This tool is deliberately offline: it consumes a frozen corpus and already
 captured, normalized Pi traces.  It never invokes Pi, an LLM, Odoo, or a
@@ -29,6 +29,7 @@ TRACE_SCHEMA = "odoo-accounting-cli-v3.pi-traces.v1"
 REPORT_SCHEMA = "odoo-accounting-cli-v3.pi-gate-report.v1"
 SELECTION_MINIMUM_PERCENT = 95
 COMPLETE_MINIMUM_PERCENT = 100
+VERIFIED_ANSWER_MINIMUM_PERCENT = 100
 CATEGORIES = {
     "ordinary",
     "ambiguous",
@@ -879,9 +880,12 @@ def validate_trace_document(
                     if expected_type == "odoo_execution"
                     else "result_reference"
                 )
+                fields = {"parameters_sha256", reference_field}
+                if expected_type == "odoo_result":
+                    fields.update({"business_succeeded", "bridge_guidance"})
                 data = _exact_object(
                     event["data"],
-                    {"parameters_sha256", reference_field},
+                    fields,
                     data_location,
                     TraceValidationError,
                 )
@@ -896,6 +900,52 @@ def validate_trace_document(
                     TraceValidationError,
                     maximum=128,
                 )
+                if expected_type == "odoo_result":
+                    if not isinstance(data["business_succeeded"], bool):
+                        raise TraceValidationError(
+                            f"{data_location}.business_succeeded must be boolean"
+                        )
+                    if data["business_succeeded"]:
+                        if data["bridge_guidance"] is not None:
+                            raise TraceValidationError(
+                                f"{data_location}.bridge_guidance must be null when business_succeeded is true"
+                            )
+                    else:
+                        guidance = _exact_object(
+                            data["bridge_guidance"],
+                            {
+                                "must_not_report_business_success",
+                                "next_action",
+                                "operation_id",
+                                "reason",
+                            },
+                            f"{data_location}.bridge_guidance",
+                            TraceValidationError,
+                        )
+                        if guidance["must_not_report_business_success"] is not True:
+                            raise TraceValidationError(
+                                f"{data_location}.bridge_guidance.must_not_report_business_success must be true"
+                            )
+                        _nonempty_string(
+                            guidance["next_action"],
+                            f"{data_location}.bridge_guidance.next_action",
+                            TraceValidationError,
+                            maximum=128,
+                        )
+                        operation_id = guidance["operation_id"]
+                        if operation_id is not None:
+                            _nonempty_string(
+                                operation_id,
+                                f"{data_location}.bridge_guidance.operation_id",
+                                TraceValidationError,
+                                maximum=128,
+                            )
+                        _nonempty_string(
+                            guidance["reason"],
+                            f"{data_location}.bridge_guidance.reason",
+                            TraceValidationError,
+                            maximum=512,
+                        )
             else:
                 data = _exact_object(
                     event["data"],
@@ -991,7 +1041,7 @@ def score_documents(
     *,
     expected_release_sha256: str,
 ) -> dict[str, Any]:
-    """Validate captured evidence and return a deterministic F01-F03 report."""
+    """Validate captured evidence and return a deterministic F01-F03/F05 report."""
 
     validate_trace_document(
         trace_document,
@@ -1009,6 +1059,7 @@ def score_documents(
     f01_failures: dict[str, Any] = {}
     f02_failures: dict[str, Any] = {}
     f03_failures: dict[str, Any] = {}
+    f05_failures: dict[str, Any] = {}
     for scenario in scenarios:
         scenario_id = scenario["id"]
         trace = traces.get(scenario_id)
@@ -1017,6 +1068,7 @@ def score_documents(
             f01_failures[scenario_id] = failure
             f02_failures[scenario_id] = failure
             f03_failures[scenario_id] = failure
+            f05_failures[scenario_id] = failure
             continue
         events = _events_by_type(trace)
         selected = events["capability_selected"]["capability_id"]
@@ -1099,6 +1151,24 @@ def score_documents(
                 "stages": sorted(stage_failures),
                 "details": stage_failures,
             }
+        result_event = events["odoo_result"]
+        receipt_event = events["audit_receipt"]
+        verified_answer_issues: dict[str, Any] = {}
+        if result_event["business_succeeded"] is not True:
+            verified_answer_issues["business_succeeded"] = {
+                "actual": result_event["business_succeeded"],
+                "bridge_guidance": result_event["bridge_guidance"],
+                "reason": "terminal_result_not_business_verified",
+            }
+        if not receipt_event.get("receipt_id"):
+            verified_answer_issues["audit_receipt"] = {
+                "reason": "missing_audit_receipt_id"
+            }
+        if verified_answer_issues:
+            f05_failures[scenario_id] = {
+                "reason": "verified_answer_missing",
+                "issues": verified_answer_issues,
+            }
 
     denominator = len(scenarios)
     scenario_ids = [scenario["id"] for scenario in scenarios]
@@ -1121,6 +1191,12 @@ def score_documents(
             denominator,
             COMPLETE_MINIMUM_PERCENT,
             f03_failures,
+        ),
+        "F05": _gate_report(
+            denominator - len(f05_failures),
+            denominator,
+            VERIFIED_ANSWER_MINIMUM_PERCENT,
+            f05_failures,
         ),
     }
     coverage = {
@@ -1185,7 +1261,7 @@ def _parser() -> argparse.ArgumentParser:
     project_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(
         description=(
-            "Score already captured Pi traces against frozen acceptance gates F01-F03; "
+            "Score already captured Pi traces against frozen acceptance gates F01-F03/F05; "
             "this command never invokes an LLM."
         )
     )

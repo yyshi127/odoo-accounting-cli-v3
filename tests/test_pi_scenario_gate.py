@@ -141,6 +141,8 @@ class PiScenarioGateTest(unittest.TestCase):
                             "data": {
                                 "parameters_sha256": parameters_sha256,
                                 "result_reference": f"odoo-result-{index:03d}",
+                                "business_succeeded": True,
+                                "bridge_guidance": None,
                             },
                         },
                         {
@@ -374,7 +376,7 @@ class PiScenarioGateTest(unittest.TestCase):
                 "missing_scenario_ids": [],
             },
         )
-        for gate_id in ("F01", "F02", "F03"):
+        for gate_id in ("F01", "F02", "F03", "F05"):
             self.assertEqual(report["gates"][gate_id]["numerator"], 25)
             self.assertEqual(report["gates"][gate_id]["denominator"], 25)
             self.assertEqual(report["gates"][gate_id]["percent"], "100.00")
@@ -499,6 +501,40 @@ class PiScenarioGateTest(unittest.TestCase):
             failure["details"]["prepare"]["paths"], ["$.currency_id"]
         )
 
+    def test_unverified_terminal_business_result_fails_f05(self) -> None:
+        trace_document = self._perfect_trace_document()
+        invoice_trace = next(
+            trace
+            for trace in trace_document["traces"]
+            if trace["scenario_id"] == "pi-v1-customer-invoice"
+        )
+        invoice_trace["events"][9]["data"]["business_succeeded"] = False
+        invoice_trace["events"][9]["data"]["bridge_guidance"] = {
+            "must_not_report_business_success": True,
+            "next_action": "operation.status",
+            "operation_id": "op-1",
+            "reason": "terminal_write_result_is_not_business_verified",
+        }
+        self._resign(trace_document)
+        report = score_documents(
+            self.corpus,
+            trace_document,
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_release_sha256=TEST_RELEASE_SHA256,
+        )
+        self.assertEqual(report["gates"]["F05"]["numerator"], 24)
+        self.assertFalse(report["gates"]["F05"]["passed"])
+        self.assertFalse(report["acceptance_passed"])
+        failure = report["gates"]["F05"]["failures"][
+            "pi-v1-customer-invoice"
+        ]
+        self.assertEqual(failure["reason"], "verified_answer_missing")
+        self.assertEqual(
+            failure["issues"]["business_succeeded"]["reason"],
+            "terminal_result_not_business_verified",
+        )
+
     def test_clarification_answer_must_be_captured_and_bound_to_final_value(self) -> None:
         trace_document = self._perfect_trace_document()
         trace_document["traces"][0]["events"][2]["data"]["turns"][0][
@@ -534,7 +570,7 @@ class PiScenarioGateTest(unittest.TestCase):
         )
         self.assertFalse(report["trace_coverage"]["passed"])
         self.assertEqual(report["trace_coverage"]["missing_scenario_ids"], [missing_id])
-        for gate_id in ("F01", "F02", "F03"):
+        for gate_id in ("F01", "F02", "F03", "F05"):
             self.assertEqual(report["gates"][gate_id]["numerator"], 24)
             self.assertEqual(report["gates"][gate_id]["denominator"], 25)
             self.assertIn(missing_id, report["gates"][gate_id]["failures"])

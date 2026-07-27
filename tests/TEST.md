@@ -286,7 +286,7 @@ requests across all enabled domains.
 | F07 | Denied requests | Unauthorized, cross-company, expired, replayed, and tampered requests are refused with safe actionable errors |
 | F08 | Recovery journey | Pi can diagnose a failed/incorrect operation, present its registered recovery, obtain approval, execute it, and report verified outcome |
 
-### Frozen F01-F03 scoring contract
+### Frozen F01-F03/F05 scoring contract
 
 `tests/fixtures/pi_scenarios.v1.json` is the revision-1 frozen Chinese key
 scenario corpus. Its 25 scenarios cover every one of the 24 registered
@@ -321,10 +321,14 @@ fixture/material evidence bindings or captured trace digests, wrong corpus or
 registry digests, empty trace sets, invalid fixture types, and traces not bound
 to the frozen input.
 Missing scenarios remain in every denominator and fail trace coverage. F01
-passes only when the exact integer ratio is at least 95%; F02 and F03 require
-100%. The JSON report retains the exact numerator, denominator, decimal
-percentage, capture/release/attestation identity, stage-level parameter
-failures, and scenario-level failures.
+passes only when the exact integer ratio is at least 95%; F02, F03, and F05
+require 100%. F05 requires every captured terminal result to record
+`business_succeeded:true` and an audit receipt identifier; a bridge-guided
+`business_succeeded:false` result is valid trace evidence but fails acceptance
+rather than being converted into success. The JSON report retains the exact
+numerator, denominator, decimal percentage, capture/release/attestation
+identity, stage-level parameter failures, verified-answer failures, and
+scenario-level failures.
 
 Run it only with an actual capture artifact:
 
@@ -337,13 +341,13 @@ PYTHONPATH=src python tools/pi_scenario_gate.py \
 
 The expected release digest must come from the independently trusted canonical
 package anchor; a signed capture from any other V3 build is rejected. Exit `0`
-means F01-F03 and full trace coverage passed, exit `1` means valid
+means F01-F03/F05 and full trace coverage passed, exit `1` means valid
 captured evidence was scored but a gate failed, and exit `2` means no score was
 issued because the corpus or evidence was invalid. The attestation key file is
 host-local, is never included in the release, and maps trusted key IDs to at
 least 32 bytes of hex-encoded HMAC secret. Unit tests use an explicit test-only
 key and build synthetic trace documents solely to verify scorer behavior; they
-are not Pi evidence and must never be reported as an F01-F03 acceptance pass.
+are not Pi evidence and must never be reported as an F01-F03/F05 acceptance pass.
 
 ## Gate G — promotion and rollback
 
