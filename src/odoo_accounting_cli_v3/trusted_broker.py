@@ -425,10 +425,16 @@ def _approval_peer_metadata(
     return peer_uid, peer_gid, peer_pid
 
 
+def _authority_field_key(value: str) -> str:
+    normalized = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", normalized)
+    return normalized.strip("_").lower()
+
+
 def _contains_authority_field(value: Any) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
-            if key.lower().replace("-", "_") in _AUTHORITY_FIELDS:
+            if _authority_field_key(str(key)) in _AUTHORITY_FIELDS:
                 return True
             if _contains_authority_field(child):
                 return True

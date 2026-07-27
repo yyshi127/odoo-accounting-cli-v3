@@ -1777,6 +1777,8 @@ def test_business_schema_rejects_authority_route_and_generated_id_injection(
         {"operation_id": "x", "approval": {"signature": "attacker"}},
         {"operation_id": "x", "context": {"user_id": 1}},
         {"operation_id": "x", "release_digest": OLD_RELEASE},
+        {"operation_id": "x", "releaseDigest": OLD_RELEASE},
+        {"operation_id": "x", "release.digest": OLD_RELEASE},
         {"operation_id": "x", "challenge_id": "attacker"},
     ]
     for payload in injected_values:
@@ -2244,9 +2246,14 @@ def test_prepare_lost_response_reuses_exact_durable_operation_and_rejects_drift(
         ("cli_path", "/tmp/attacker"),
         ("config_path", "/tmp/attacker"),
         ("runtime_config", {"path": "/tmp/attacker"}),
+        ("runtimeConfig", {"path": "/tmp/attacker"}),
         ("reconciliation_only", True),
+        ("reconciliationOnly", True),
         ("signature", "f" * 64),
         ("key_id", "attacker-key"),
+        ("keyId", "attacker-key"),
+        ("authSignature", "f" * 64),
+        ("approval.signature", "attacker"),
     ],
 )
 def test_nested_runtime_and_authority_injection_is_rejected(
