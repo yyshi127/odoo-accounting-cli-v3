@@ -66,6 +66,8 @@ INPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-input.v1"
 METADATA_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1"
 OUTPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence.v1"
 PREFLIGHT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-preflight.v1"
+PROMOTION_CANDIDATE_SCOPE = "odoo-accounting-cli-v3.write-promotion-candidate.v1"
+PROMOTION_REVIEW_SCOPE = "odoo-accounting-cli-v3.write-promotion-review.v1"
 DIGEST_LIFECYCLE_FIELDS = frozenset(
     field for field in LIFECYCLE_FIELDS if not field.endswith("_id")
 )
@@ -130,6 +132,19 @@ READINESS_CHECK_FIELDS = frozenset(
         "strict_output_schema",
         "write_not_enabled",
         "write_not_staged",
+    }
+)
+PROMOTION_CANDIDATE_FIELDS = frozenset(
+    {
+        "capability_id",
+        "company_id",
+        "database_uuid",
+        "production_promotion_allowed",
+        "release_identity",
+        "schema_version",
+        "scope",
+        "target_channel",
+        "target_environment",
     }
 )
 
@@ -290,6 +305,78 @@ def verify_path(path: Path) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise SandboxWriteEvidenceError("evidence JSON is invalid") from exc
     return verify_document(document)
+
+
+def review_promotion_candidate(document: Any, candidate: Any) -> dict[str, Any]:
+    evidence = verify_document(document)
+    root = _require_object(candidate, "promotion_candidate")
+    if set(root) != PROMOTION_CANDIDATE_FIELDS:
+        raise SandboxWriteEvidenceError("promotion_candidate fields are invalid")
+    if root["schema_version"] != 1:
+        raise SandboxWriteEvidenceError("promotion_candidate.schema_version must be 1")
+    if root["scope"] != PROMOTION_CANDIDATE_SCOPE:
+        raise SandboxWriteEvidenceError("promotion_candidate.scope is invalid")
+    if root["capability_id"] != evidence["capability_id"]:
+        raise SandboxWriteEvidenceError("promotion_candidate.capability_id mismatch")
+    if root["company_id"] != evidence["company_id"]:
+        raise SandboxWriteEvidenceError("promotion_candidate.company_id mismatch")
+    if root["database_uuid"] != evidence["database_uuid"]:
+        raise SandboxWriteEvidenceError("promotion_candidate.database_uuid mismatch")
+    if root["target_environment"] != "sandbox":
+        raise SandboxWriteEvidenceError(
+            "sandbox write evidence cannot authorize production promotion"
+        )
+    if root["target_channel"] != "staged":
+        raise SandboxWriteEvidenceError(
+            "sandbox write evidence may only support staged sandbox review"
+        )
+    if root["production_promotion_allowed"] is not False:
+        raise SandboxWriteEvidenceError("promotion_candidate must not authorize production")
+    release = _require_object(root["release_identity"], "promotion_candidate.release_identity")
+    if set(release) != {"manifest_sha256", "registry_digest"}:
+        raise SandboxWriteEvidenceError("promotion_candidate release identity fields are invalid")
+    manifest_sha256 = _require_hex64(
+        release["manifest_sha256"], "promotion_candidate.release_identity.manifest_sha256"
+    )
+    registry_digest = _require_hex64(
+        release["registry_digest"], "promotion_candidate.release_identity.registry_digest"
+    )
+    if manifest_sha256 != evidence["release_sha256"]:
+        raise SandboxWriteEvidenceError("promotion_candidate release manifest mismatch")
+    if registry_digest != evidence["registry_digest"]:
+        raise SandboxWriteEvidenceError("promotion_candidate registry digest mismatch")
+    return {
+        "capability_id": evidence["capability_id"],
+        "company_id": evidence["company_id"],
+        "database_uuid": evidence["database_uuid"],
+        "environment": evidence["environment"],
+        "evidence": evidence,
+        "preflight_manifest_sha256": evidence["preflight_manifest_sha256"],
+        "production_promotion_allowed": False,
+        "promotion_allowed": True,
+        "registry_digest": evidence["registry_digest"],
+        "release_sha256": evidence["release_sha256"],
+        "reviewed": True,
+        "schema_version": 1,
+        "scope": PROMOTION_REVIEW_SCOPE,
+        "target_channel": "staged",
+        "target_environment": "sandbox",
+    }
+
+
+def review_promotion_candidate_paths(
+    evidence_path: Path,
+    candidate_path: Path,
+) -> dict[str, Any]:
+    try:
+        document = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("evidence JSON is invalid") from exc
+    try:
+        candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("promotion candidate JSON is invalid") from exc
+    return review_promotion_candidate(document, candidate)
 
 
 def _sha256_file(path: Path) -> str:
@@ -628,6 +715,16 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Inspect standard retained sandbox-write artifacts and print their verified completeness report.",
     )
+    parser.add_argument(
+        "--review-promotion-from",
+        type=Path,
+        help="Verify a sandbox-write evidence JSON against a non-authorizing promotion candidate.",
+    )
+    parser.add_argument(
+        "--promotion-candidate",
+        type=Path,
+        help="Promotion candidate JSON to review with --review-promotion-from.",
+    )
     args = parser.parse_args(argv)
     try:
         selected = sum(
@@ -637,13 +734,23 @@ def main(argv: list[str] | None = None) -> int:
                 args.assemble_from,
                 args.build_input_from,
                 args.inspect_root,
+                args.review_promotion_from,
             )
         )
         if selected != 1:
             parser.error(
-                "provide exactly one of evidence_json, --assemble-from, --build-input-from, or --inspect-root"
+                "provide exactly one of evidence_json, --assemble-from, --build-input-from, --inspect-root, or --review-promotion-from"
             )
-        if args.inspect_root is not None:
+        if args.review_promotion_from is not None:
+            if args.promotion_candidate is None:
+                parser.error("--promotion-candidate is required with --review-promotion-from")
+            result = review_promotion_candidate_paths(
+                args.review_promotion_from,
+                args.promotion_candidate,
+            )
+        elif args.promotion_candidate is not None:
+            parser.error("--promotion-candidate requires --review-promotion-from")
+        elif args.inspect_root is not None:
             result = inspect_retained_root_path(args.inspect_root)
         elif args.build_input_from is not None:
             result = build_input_manifest_path(args.build_input_from)

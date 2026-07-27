@@ -777,6 +777,59 @@ def evidence_verify_sandbox_write(
     )
 
 
+@evidence_group.command("review-write-promotion")
+@click.option(
+    "--evidence-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained sandbox write evidence JSON bundle to bind to the promotion review.",
+)
+@click.option(
+    "--candidate-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Non-authorizing write promotion candidate JSON.",
+)
+def evidence_review_write_promotion(
+    evidence_json: Path,
+    candidate_json: Path,
+) -> None:
+    """Review whether sandbox evidence may support staged sandbox promotion."""
+
+    command = "evidence.review-write-promotion"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        review = verifier.review_promotion_candidate_paths(evidence_json, candidate_json)
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="write_promotion_candidate_rejected",
+                message="The write promotion candidate is not supported by exact-release sandbox evidence.",
+                exit_code=6,
+            ) from exc
+        raise
+    if (
+        review.get("release_sha256") != identity["manifest_sha256"]
+        or review.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="write_promotion_release_mismatch",
+            message="The write promotion review is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "release_identity": identity,
+            "promotion_review": review,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("build-sandbox-write-input")
 @click.option(
     "--metadata-json",

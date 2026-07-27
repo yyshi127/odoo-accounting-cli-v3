@@ -18,6 +18,7 @@ from test_odoo_read_boundary_evidence_runner import (
 from test_verify_sandbox_write_evidence import _document as sandbox_write_document
 from test_verify_sandbox_write_evidence import _input_manifest as sandbox_write_input_manifest
 from test_verify_sandbox_write_evidence import _metadata as sandbox_write_metadata
+from test_verify_sandbox_write_evidence import _promotion_candidate as sandbox_write_promotion_candidate
 from test_write_runtime import _make_runtime as make_write_runtime
 from test_write_runtime import _write_json as write_runtime_json
 
@@ -315,6 +316,140 @@ def test_evidence_verify_sandbox_write_rejects_invalid_bundle(tmp_path: Path):
 
     assert result.exit_code == 6
     assert '"code":"sandbox_write_evidence_rejected"' in result.output
+
+
+def test_evidence_review_write_promotion_returns_non_authorizing_sandbox_review(
+    tmp_path: Path,
+):
+    evidence_path = tmp_path / "sandbox-write-evidence.json"
+    candidate_path = tmp_path / "promotion-candidate.json"
+    evidence_path.write_text(
+        __import__("json").dumps(sandbox_write_document()),
+        encoding="utf-8",
+    )
+    candidate_path.write_text(
+        __import__("json").dumps(sandbox_write_promotion_candidate()),
+        encoding="utf-8",
+    )
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "c" * 64,
+        "package_sha256": "e" * 64,
+        "registry_digest": "b" * 64,
+        "release": "0.1.0.dev179-test",
+        "verified": True,
+        "version": "0.1.0.dev179",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "review-write-promotion",
+                "--evidence-json",
+                str(evidence_path),
+                "--candidate-json",
+                str(candidate_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.review-write-promotion"
+    assert payload["ok"] is True
+    assert payload["business_succeeded"] is False
+    review = payload["data"]["promotion_review"]
+    assert review["promotion_allowed"] is True
+    assert review["production_promotion_allowed"] is False
+    assert review["target_environment"] == "sandbox"
+    assert review["target_channel"] == "staged"
+    assert payload["data"]["release_identity"] == expected_identity
+
+
+def test_evidence_review_write_promotion_rejects_production_candidate(tmp_path: Path):
+    evidence_path = tmp_path / "sandbox-write-evidence.json"
+    candidate_path = tmp_path / "promotion-candidate.json"
+    candidate = sandbox_write_promotion_candidate()
+    candidate["target_environment"] = "production"
+    evidence_path.write_text(
+        __import__("json").dumps(sandbox_write_document()),
+        encoding="utf-8",
+    )
+    candidate_path.write_text(
+        __import__("json").dumps(candidate),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "c" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev179-test",
+            "verified": True,
+            "version": "0.1.0.dev179",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "review-write-promotion",
+                "--evidence-json",
+                str(evidence_path),
+                "--candidate-json",
+                str(candidate_path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"write_promotion_candidate_rejected"' in result.output
+
+
+def test_evidence_review_write_promotion_rejects_release_mismatch(tmp_path: Path):
+    evidence_path = tmp_path / "sandbox-write-evidence.json"
+    candidate_path = tmp_path / "promotion-candidate.json"
+    evidence_path.write_text(
+        __import__("json").dumps(sandbox_write_document()),
+        encoding="utf-8",
+    )
+    candidate_path.write_text(
+        __import__("json").dumps(sandbox_write_promotion_candidate()),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value={
+            "commit": "1" * 40,
+            "manifest_sha256": "f" * 64,
+            "package_sha256": "e" * 64,
+            "registry_digest": "b" * 64,
+            "release": "0.1.0.dev179-test",
+            "verified": True,
+            "version": "0.1.0.dev179",
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "review-write-promotion",
+                "--evidence-json",
+                str(evidence_path),
+                "--candidate-json",
+                str(candidate_path),
+            ],
+        )
+
+    assert result.exit_code == 6
+    assert '"code":"write_promotion_release_mismatch"' in result.output
 
 
 def test_evidence_verify_sandbox_write_can_assemble_retained_artifacts(tmp_path: Path):

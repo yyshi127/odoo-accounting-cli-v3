@@ -82,6 +82,23 @@ def _document():
     }
 
 
+def _promotion_candidate():
+    return {
+        "schema_version": 1,
+        "scope": verifier.PROMOTION_CANDIDATE_SCOPE,
+        "capability_id": "acct.invoice.customer_create.v1",
+        "company_id": 7,
+        "database_uuid": "11111111-1111-4111-8111-111111111111",
+        "production_promotion_allowed": False,
+        "release_identity": {
+            "manifest_sha256": "c" * 64,
+            "registry_digest": "b" * 64,
+        },
+        "target_channel": "staged",
+        "target_environment": "sandbox",
+    }
+
+
 def test_complete_sandbox_write_evidence_is_accepted():
     result = verifier.verify_document(_document())
 
@@ -97,6 +114,65 @@ def test_complete_sandbox_write_evidence_is_accepted():
         "release_sha256": "c" * 64,
         "verified": True,
     }
+
+
+def test_sandbox_write_evidence_supports_staged_sandbox_promotion_review():
+    result = verifier.review_promotion_candidate(_document(), _promotion_candidate())
+
+    assert result["scope"] == verifier.PROMOTION_REVIEW_SCOPE
+    assert result["reviewed"] is True
+    assert result["promotion_allowed"] is True
+    assert result["production_promotion_allowed"] is False
+    assert result["target_environment"] == "sandbox"
+    assert result["target_channel"] == "staged"
+    assert result["evidence"]["verified"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (
+            lambda candidate: candidate.__setitem__("target_environment", "production"),
+            "cannot authorize production promotion",
+        ),
+        (
+            lambda candidate: candidate.__setitem__("target_channel", "enabled"),
+            "only support staged sandbox review",
+        ),
+        (
+            lambda candidate: candidate.__setitem__(
+                "capability_id", "acct.bill.vendor_create.v1"
+            ),
+            "capability_id mismatch",
+        ),
+        (
+            lambda candidate: candidate.__setitem__("company_id", 8),
+            "company_id mismatch",
+        ),
+        (
+            lambda candidate: candidate["release_identity"].__setitem__(
+                "manifest_sha256", "f" * 64
+            ),
+            "release manifest mismatch",
+        ),
+        (
+            lambda candidate: candidate["release_identity"].__setitem__(
+                "registry_digest", "f" * 64
+            ),
+            "registry digest mismatch",
+        ),
+        (
+            lambda candidate: candidate.__setitem__("production_promotion_allowed", True),
+            "must not authorize production",
+        ),
+    ),
+)
+def test_promotion_review_rejects_unsafe_or_unbound_candidates(mutate, match):
+    candidate = copy.deepcopy(_promotion_candidate())
+    mutate(candidate)
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match=match):
+        verifier.review_promotion_candidate(_document(), candidate)
 
 
 @pytest.mark.parametrize(
