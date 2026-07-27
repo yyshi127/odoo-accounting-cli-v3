@@ -43,6 +43,7 @@ from .write_runtime import (
     WriteRuntimeError,
     load_write_runtime_config,
 )
+from .write_receipts import RECEIPT_FIELDS, WRITE_RECEIPT_PURPOSE
 
 
 DEFAULT_WRITE_RUNTIME_CONFIG = Path("/etc/odoo-accounting-cli-v3/write-runtime.json")
@@ -915,9 +916,10 @@ def _business_succeeded(data: dict[str, Any]) -> bool:
     except EffectFinalizationError:
         return False
     audit_receipt = data.get("audit_receipt")
-    if (
-        not isinstance(audit_receipt, dict)
-        or finalization["database_uuid"] != audit_receipt.get("database_uuid")
+    if not _terminal_audit_receipt_is_business_ready(
+        audit_receipt,
+        operation_id=operation_id,
+        database_uuid=finalization["database_uuid"],
     ):
         return False
     if finalization["resolution_kind"] == "verified":
@@ -929,6 +931,71 @@ def _business_succeeded(data: dict[str, Any]) -> bool:
         finalization["operation_id"] != operation_id
         and finalization["resolution_operation_id"] == operation_id
     )
+
+
+def _terminal_audit_receipt_is_business_ready(
+    audit_receipt: Any,
+    *,
+    operation_id: str,
+    database_uuid: str,
+) -> bool:
+    if not isinstance(audit_receipt, dict) or set(audit_receipt) != RECEIPT_FIELDS:
+        return False
+    digest_fields = {
+        "approval_digest",
+        "audit_head",
+        "operation_digest",
+        "registry_digest",
+        "release_digest",
+        "request_digest",
+        "result_digest",
+        "signature",
+        "verification_evidence_digest",
+    }
+    text_fields = {
+        "capability_id",
+        "capability_channel",
+        "database_name",
+        "environment",
+        "issued_at",
+        "odoo_instance_id",
+        "principal",
+        "receipt_id",
+        "request_id",
+        "signing_key_id",
+    }
+    positive_integer_fields = {"approver_user_id", "company_id", "user_id"}
+    if (
+        audit_receipt.get("operation_id") != operation_id
+        or audit_receipt.get("database_uuid") != database_uuid
+        or audit_receipt.get("signature_purpose") != WRITE_RECEIPT_PURPOSE
+        or audit_receipt.get("signature_version") != 1
+        or audit_receipt.get("environment") not in {"test", "sandbox", "production"}
+        or audit_receipt.get("capability_channel") not in {"staged", "enabled"}
+    ):
+        return False
+    if any(
+        not isinstance(audit_receipt.get(field), str)
+        or re.fullmatch(r"[0-9a-f]{64}", audit_receipt[field]) is None
+        for field in digest_fields
+    ):
+        return False
+    if any(
+        not isinstance(audit_receipt.get(field), str)
+        or not audit_receipt[field].strip()
+        or audit_receipt[field] != audit_receipt[field].strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in audit_receipt[field])
+        for field in text_fields
+    ):
+        return False
+    if any(
+        isinstance(audit_receipt.get(field), bool)
+        or not isinstance(audit_receipt.get(field), int)
+        or audit_receipt[field] <= 0
+        for field in positive_integer_fields
+    ):
+        return False
+    return True
 
 
 def _execute_write_command(

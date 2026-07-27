@@ -83,7 +83,34 @@ def _completed_result(
         "operation_state": "completed",
         "verification": {"passed": True},
         "database_finalization": finalization,
-        "audit_receipt": {"database_uuid": intent.database_uuid},
+        "audit_receipt": {
+            "approval_digest": "6" * 64,
+            "approver_user_id": 99,
+            "audit_head": "7" * 64,
+            "capability_channel": "staged",
+            "capability_id": "acct.bill.vendor_create.v1",
+            "company_id": 7,
+            "database_name": intent.database_name,
+            "database_uuid": intent.database_uuid,
+            "environment": "sandbox",
+            "issued_at": "2026-07-15T08:00:02Z",
+            "odoo_instance_id": "odoo19@sandbox",
+            "operation_digest": "8" * 64,
+            "operation_id": operation_id,
+            "principal": "pi:user-42",
+            "receipt_id": "write-receipt-1",
+            "registry_digest": "9" * 64,
+            "release_digest": "a" * 64,
+            "request_digest": "b" * 64,
+            "request_id": "req-1",
+            "result_digest": "c" * 64,
+            "signature": "d" * 64,
+            "signature_purpose": "write_audit_receipt_v1",
+            "signature_version": 1,
+            "signing_key_id": "write-receipt-v1",
+            "user_id": 42,
+            "verification_evidence_digest": "e" * 64,
+        },
     }
 
 
@@ -291,6 +318,23 @@ def test_cli_never_reports_success_without_operation_bound_database_receipt(
             result["audit_receipt"]["database_uuid"] = (
                 "33333333-3333-4333-8333-333333333333"
             )
+        return result
+
+    _install_dispatcher(monkeypatch, dispatch)
+    response = _invoke("operation.result", _request("operation.result"))
+
+    assert response.exit_code == 0, response.output
+    assert json.loads(response.stdout)["business_succeeded"] is False
+
+
+def test_cli_never_reports_success_with_thin_audit_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def dispatch(_action: str, _parsed: Any) -> dict[str, Any]:
+        result = _completed_result()
+        result["audit_receipt"] = {
+            "database_uuid": "11111111-1111-4111-8111-111111111111"
+        }
         return result
 
     _install_dispatcher(monkeypatch, dispatch)

@@ -422,6 +422,18 @@ broker does not report business success; an ambiguous executed request must be
 retried through the same operation/idempotency identity and reconciled from
 durable evidence.
 
+The Pi-facing CLI applies the same fail-closed rule to terminal write results.
+`operation.result`, `operation.verify`, and a completed
+`operation.approve-execute` may report `business_succeeded:true` only when the
+terminal result is completed or recovered, verification passed, the effect
+finalizer receipt binds the resolved operation and database UUID, and the
+result includes a complete `write_audit_receipt_v1` audit receipt with the
+operation, request, user, company, environment, channel, registry, release,
+result, verification-evidence, audit-head, key ID, and signature fields. A thin
+receipt containing only a database UUID, or any receipt with missing or malformed
+digest/identity fields, keeps `business_succeeded:false` even if the backend
+returned `verification.passed:true`.
+
 ## Read receipt persistence
 
 Since dev5, the receipt signature is reverified against the complete request,
