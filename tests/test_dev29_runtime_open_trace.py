@@ -1131,6 +1131,121 @@ def test_manifest_accepts_guarded_readonly_process_view_failure() -> None:
     assert policy.failure_guard == trace.PROCESS_VIEW_FAILURE_GUARD
 
 
+def test_manifest_accepts_verifier_evidence_parent_metadata() -> None:
+    document = manifest_document()
+    verifier_final = (
+        "/usr/bin/python3.12",
+        "-I",
+        "-B",
+        "-S",
+        f"{RELEASE_ROOT}/deployment/dev29/verify_read_evidence.py",
+        "--expected-bundle-manifest-sha256",
+        "a" * 64,
+        "--evidence-dir",
+        "/var/lib/odoo-accounting-cli-v3/evidence/dev29-proof-001",
+    )
+    document["target_id"] = "independent-verifier"
+    document["role"] = "verifier"
+    document["environment"] = dict(trace.ROLE_ENVIRONMENTS["verifier"])
+    document["expected_child_environment_sha256"] = hashlib.sha256(
+        trace.canonical_json(trace.ROLE_ENVIRONMENTS["verifier"])
+    ).hexdigest()
+    for policy in document["path_access_policy"]:  # type: ignore[index]
+        policy["role"] = "verifier"
+    final_template = trace.verifier_final_argv_template(verifier_final)
+    document["final_argv"] = list(final_template)
+    verifier_bootstrap = (
+        "/usr/bin/python3.12",
+        "-I",
+        "-B",
+        "-S",
+        f"{RELEASE_ROOT}/deployment/dev29/direct_child.py",
+        "--role",
+        "verifier",
+        "--attestation-fd",
+        "7",
+        "--expected-uid",
+        "0",
+        "--expected-gid",
+        "0",
+        "--expected-python",
+        "/usr/bin/python3.12",
+        "--expected-venv-root",
+        "/opt/odoo-accounting-cli-v3/dependencies/odoo19-venv",
+        "--release-root",
+        RELEASE_ROOT,
+        "--expected-self-namespace-device",
+        "4",
+        "--expected-self-namespace-inode",
+        "100",
+        "--expected-host-namespace-device",
+        "4",
+        "--expected-host-namespace-inode",
+        "200",
+        "--expected-loop-device",
+        "/dev/loop7",
+        "--expected-mount-json",
+        MOUNTS[0],
+        "--expected-mount-json",
+        MOUNTS[1],
+        "--expected-mount-json",
+        MOUNTS[2],
+        "--expected-mount-json",
+        MOUNTS[3],
+        "--expected-mount-json",
+        MOUNTS[4],
+        "--",
+        *verifier_final,
+    )
+    bootstrap_template = trace.dynamic_bootstrap_template(
+        verifier_bootstrap,
+        verifier_final,
+        role="verifier",
+        release_root=RELEASE_ROOT,
+    )
+    document["bootstrap_argv"] = list(
+        (*bootstrap_template[: -len(verifier_final)], *final_template)
+    )
+    path = trace.VERIFIER_EVIDENCE_PARENT
+    document["allowed_paths"] = sorted([*document["allowed_paths"], path])  # type: ignore[index]
+    document["path_access_policy"] = sorted(  # type: ignore[index]
+        [
+            *document["path_access_policy"],  # type: ignore[index]
+            {
+                "path": path,
+                "role": "verifier",
+                "classification": "immutable",
+                "allowed_access": ["metadata"],
+                "create_suffixes": [],
+                "delta_verifier": None,
+                "delta_contract_sha256": None,
+                "allow_success": True,
+                "allowed_errnos": [],
+                "failure_guard": None,
+            },
+        ],
+        key=lambda item: item["path"],
+    )
+
+    loaded = trace.validate_manifest_document(
+        document,
+        trace.TraceRequest(
+            RELEASE,
+            "independent-verifier",
+            "b" * 64,
+            "c" * 64,
+            "a" * 64,
+            hashlib.sha256(
+                trace.canonical_json(trace.ROLE_ENVIRONMENTS["verifier"])
+            ).hexdigest(),
+            hashlib.sha256(trace.canonical_json(VALID_WATCH_ROOTS)).hexdigest(),
+        ),
+    )
+    policy = next(item for item in loaded.path_access_policy if item.path == path)
+
+    assert policy.allowed_access == ("metadata",)
+
+
 def test_manifest_rejects_watched_process_view() -> None:
     watches = tuple(sorted((*VALID_WATCH_ROOTS, "/proc/self")))
     document = manifest_document()

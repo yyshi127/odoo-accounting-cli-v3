@@ -68,6 +68,7 @@ _DYNAMIC_BOOTSTRAP_MARKERS = frozenset(
 ) | frozenset(DYNAMIC_MOUNT_ARGUMENTS)
 VERIFIER_BUNDLE_MANIFEST_SHA256_MARKER = "@DEV29_BUNDLE_MANIFEST_SHA256@"
 VERIFIER_EVIDENCE_DIR_MARKER = "@DEV29_EVIDENCE_DIR@"
+VERIFIER_EVIDENCE_PARENT = "/var/lib/odoo-accounting-cli-v3/evidence"
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$")
 PID_PREFIX = re.compile(r"^(?:\[pid\s+(\d+)\]|(\d+))\s+")
@@ -1336,7 +1337,10 @@ def validate_manifest_document(value: Any, request: TraceRequest) -> TraceManife
                 policy.allowed_access == ("metadata",)
                 and policy.allow_success
                 and not policy.allowed_errnos
-                and _is_watch_root_metadata_ancestor(path, watches)
+                and (
+                    _is_watch_root_metadata_ancestor(path, watches)
+                    or (verifier_template and path == VERIFIER_EVIDENCE_PARENT)
+                )
             )
             for path, policy in policy_for_allowed.items()
         )

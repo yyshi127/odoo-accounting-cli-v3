@@ -388,7 +388,15 @@ def _policy_for_path(
             and _metadata_ancestor(path, (*watch_roots, *mutable_roots))
         )
         if not _covered(path, watch_roots) and not metadata_ancestor:
-            raise DiscoveryError("immutable discovery path is outside watch roots")
+            verifier_evidence_parent = (
+                role == "verifier"
+                and path == runtime_trace.VERIFIER_EVIDENCE_PARENT
+                and access == ("metadata",)
+                and success
+                and not errnos
+            )
+            if not verifier_evidence_parent:
+                raise DiscoveryError("immutable discovery path is outside watch roots")
         return {
             "path": path,
             "role": role,
