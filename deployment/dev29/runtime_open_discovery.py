@@ -354,7 +354,9 @@ def _policy_for_path(
     success = "success" in outcomes
     errnos = tuple(sorted(item for item in set(outcomes) if item != "success"))
     mutates = bool(set(access) & {"write", "create", "truncate", "append", "delete"})
-    if path.startswith(runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER + "/"):
+    if path == runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER or path.startswith(
+        runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER + "/"
+    ):
         if role != "verifier" or errnos:
             raise DiscoveryError("verifier evidence bundle path is unsafe")
         return {

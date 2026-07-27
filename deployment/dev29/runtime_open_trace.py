@@ -416,7 +416,10 @@ def _canonical_manifest_path(
     if (
         verifier_template
         and isinstance(value, str)
-        and value.startswith(VERIFIER_EVIDENCE_DIR_MARKER + "/")
+        and (
+            value == VERIFIER_EVIDENCE_DIR_MARKER
+            or value.startswith(VERIFIER_EVIDENCE_DIR_MARKER + "/")
+        )
         and "\x00" not in value
         and not any(ord(character) < 0x20 for character in value)
         and posixpath.normpath(value) == value

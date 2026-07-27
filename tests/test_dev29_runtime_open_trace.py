@@ -849,11 +849,13 @@ def test_verifier_template_allows_only_bundle_manifest_digest_to_vary() -> None:
         bootstrap_argv=approved_bootstrap,
         final_argv=final_template,
         allowed_paths=(
+            trace.VERIFIER_EVIDENCE_DIR_MARKER,
             trace.VERIFIER_EVIDENCE_DIR_MARKER + "/BUNDLE-MANIFEST.json",
             *expected_paths(),
         ),
         path_access_policy=policies(
             (
+                trace.VERIFIER_EVIDENCE_DIR_MARKER,
                 trace.VERIFIER_EVIDENCE_DIR_MARKER + "/BUNDLE-MANIFEST.json",
                 *expected_paths(),
             ),
