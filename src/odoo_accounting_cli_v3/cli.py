@@ -870,6 +870,17 @@ def evidence_inspect_sandbox_write_root(metadata_json: Path) -> None:
 
 @evidence_group.command("sandbox-write-preflight")
 @click.option(
+    "--capability-id",
+    required=True,
+    help="Exact registered write capability that this sandbox evidence drill will collect.",
+)
+@click.option(
+    "--company-id",
+    required=True,
+    type=click.IntRange(min=1),
+    help="Exact Odoo company ID that this sandbox evidence drill is bound to.",
+)
+@click.option(
     "--write-runtime-config",
     required=True,
     type=click.Path(path_type=Path, dir_okay=False),
@@ -889,6 +900,8 @@ def evidence_inspect_sandbox_write_root(metadata_json: Path) -> None:
     help="Minimum free bytes required before starting sandbox write evidence collection.",
 )
 def evidence_sandbox_write_preflight(
+    capability_id: str,
+    company_id: int,
     write_runtime_config: Path,
     evidence_root: Path,
     min_free_bytes: int,
@@ -896,6 +909,17 @@ def evidence_sandbox_write_preflight(
     """Read-only gate before any real sandbox accounting write drill."""
 
     command = "evidence.sandbox-write-preflight"
+    capability = next(
+        (item for item in _load_capabilities() if item.id == capability_id),
+        None,
+    )
+    if capability is None or capability.data["access"] != "write":
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_capability_rejected",
+            message="The sandbox write preflight must target one registered write capability.",
+            exit_code=5,
+        )
     try:
         config = load_write_runtime_config(write_runtime_config)
     except WriteRuntimeError as exc:
@@ -928,6 +952,8 @@ def evidence_sandbox_write_preflight(
     preflight_manifest = {
         "schema_version": 1,
         "scope": "odoo-accounting-cli-v3.sandbox-write-preflight.v1",
+        "capability_id": capability_id,
+        "company_id": company_id,
         "database_name": database_name,
         "database_uuid": config.base_runtime.database_uuid,
         "environment": config.base_runtime.environment,
@@ -947,6 +973,8 @@ def evidence_sandbox_write_preflight(
     _success(
         command,
         {
+            "capability_id": capability_id,
+            "company_id": company_id,
             "database_name": database_name,
             "evidence_root": evidence_root_status,
             "preflight_manifest": preflight_manifest,

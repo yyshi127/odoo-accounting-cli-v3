@@ -664,8 +664,11 @@ result authorizes a production write.
 
 Before a sandbox write evidence bundle can be collected for registry promotion,
 first run the read-only
-`odoo-accounting-cli-v3 evidence sandbox-write-preflight ...` gate and retain
-its `preflight_manifest` as a file inside the evidence root. The
+`odoo-accounting-cli-v3 evidence sandbox-write-preflight --capability-id ... --company-id ...`
+gate for the exact registered write capability and Odoo company under test,
+then retain its `preflight_manifest` as a file inside the evidence root. The
+preflight command rejects non-write capabilities; one generic preflight cannot
+be reused as evidence for a different capability or company. The
 evidence root should keep the standard artifact filenames used by the exact
 release (`preflight_manifest.json`, `approval_digest.json`,
 `failure_case_digest.json`, `idempotency_replay_digest.json`,
@@ -689,12 +692,12 @@ The `--assemble-from` input manifest references the retained
 `preflight_manifest_sha256` from the retained bytes and copies only the digest
 into the final evidence bundle. Evidence without this computed preflight
 binding is rejected before promotion review. The assembler also validates the
-retained preflight manifest's `database_uuid`, `environment`,
-`registry_digest`, release identity, `write_execution_mode`, and runtime
-identity against the metadata before it computes the final evidence document.
-Mixing a preflight file from one sandbox, release, or registry with another
-metadata set is rejected. The preflight manifest is not an Odoo write receipt
-and always reports
+retained preflight manifest's `capability_id`, `company_id`, `database_uuid`,
+`environment`, `registry_digest`, release identity, `write_execution_mode`, and
+runtime identity against the metadata before it computes the final evidence
+document. Mixing a preflight file from one capability, company, sandbox,
+release, or registry with another metadata set is rejected. The preflight
+manifest is not an Odoo write receipt and always reports
 `real_odoo_write_performed:false`; it only proves that the release, staged
 sandbox runtime, evidence root, and capacity checks were admissible before
 collection began.

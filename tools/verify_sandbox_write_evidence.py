@@ -76,6 +76,8 @@ DEFAULT_LIFECYCLE_ARTIFACTS = {
 }
 PREFLIGHT_FIELDS = frozenset(
     {
+        "capability_id",
+        "company_id",
         "database_name",
         "database_uuid",
         "environment",
@@ -292,6 +294,10 @@ def _validate_preflight_manifest(
         raise SandboxWriteEvidenceError("preflight_manifest must not be a write receipt")
     if document["write_execution_mode"] != "sandbox_staged":
         raise SandboxWriteEvidenceError("preflight_manifest write mode is invalid")
+    if document["capability_id"] != metadata["capability_id"]:
+        raise SandboxWriteEvidenceError("preflight_manifest capability_id mismatch")
+    if document["company_id"] != metadata["company_id"]:
+        raise SandboxWriteEvidenceError("preflight_manifest company_id mismatch")
     if document["database_uuid"] != metadata["database_uuid"]:
         raise SandboxWriteEvidenceError("preflight_manifest database_uuid mismatch")
     if document["environment"] != metadata["environment"]:

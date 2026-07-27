@@ -567,6 +567,10 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
             [
                 "evidence",
                 "sandbox-write-preflight",
+                "--capability-id",
+                "acct.invoice.customer_create.v1",
+                "--company-id",
+                "7",
                 "--write-runtime-config",
                 str(runtime_path),
                 "--evidence-root",
@@ -581,7 +585,13 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
     assert payload["command"] == "evidence.sandbox-write-preflight"
     assert payload["ok"] is True
     assert payload["business_succeeded"] is False
+    assert payload["data"]["capability_id"] == "acct.invoice.customer_create.v1"
+    assert payload["data"]["company_id"] == 7
     assert payload["data"]["database_name"] == "odoo_v3_sandbox"
+    assert payload["data"]["preflight_manifest"]["capability_id"] == (
+        "acct.invoice.customer_create.v1"
+    )
+    assert payload["data"]["preflight_manifest"]["company_id"] == 7
     assert payload["data"]["preflight_manifest"]["scope"] == (
         "odoo-accounting-cli-v3.sandbox-write-preflight.v1"
     )
@@ -630,6 +640,10 @@ def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
             [
                 "evidence",
                 "sandbox-write-preflight",
+                "--capability-id",
+                "acct.invoice.customer_create.v1",
+                "--company-id",
+                "7",
                 "--write-runtime-config",
                 str(runtime_path),
                 "--evidence-root",
@@ -641,6 +655,35 @@ def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
 
     assert result.exit_code == 5
     assert '"code":"sandbox_write_scope_rejected"' in result.output
+
+
+def test_evidence_sandbox_write_preflight_rejects_non_write_capability(
+    tmp_path: Path,
+):
+    runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
+    evidence_root = tmp_path / "evidence-root"
+    evidence_root.mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-write-preflight",
+            "--capability-id",
+            "acct.registry.list.v1",
+            "--company-id",
+            "7",
+            "--write-runtime-config",
+            str(runtime_path),
+            "--evidence-root",
+            str(evidence_root),
+            "--min-free-bytes",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 5
+    assert '"code":"sandbox_write_capability_rejected"' in result.output
 
 
 def test_evidence_sandbox_write_preflight_rejects_release_internal_evidence_root(
@@ -668,6 +711,10 @@ def test_evidence_sandbox_write_preflight_rejects_release_internal_evidence_root
             [
                 "evidence",
                 "sandbox-write-preflight",
+                "--capability-id",
+                "acct.invoice.customer_create.v1",
+                "--company-id",
+                "7",
                 "--write-runtime-config",
                 str(runtime_path),
                 "--evidence-root",

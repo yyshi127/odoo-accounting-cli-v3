@@ -175,6 +175,8 @@ def _write_preflight_manifest(tmp_path: Path) -> str:
             {
                 "schema_version": 1,
                 "scope": verifier.PREFLIGHT_SCOPE,
+                "capability_id": "acct.invoice.customer_create.v1",
+                "company_id": 7,
                 "database_name": "odoo_v3_sandbox",
                 "database_uuid": "11111111-1111-4111-8111-111111111111",
                 "environment": "sandbox",
@@ -346,6 +348,16 @@ def test_builder_rejects_missing_standard_artifacts(tmp_path):
 @pytest.mark.parametrize(
     ("mutate", "match"),
     (
+        (
+            lambda preflight: preflight.__setitem__(
+                "capability_id", "acct.bill.vendor_create.v1"
+            ),
+            "capability_id mismatch",
+        ),
+        (
+            lambda preflight: preflight.__setitem__("company_id", 8),
+            "company_id mismatch",
+        ),
         (
             lambda preflight: preflight.__setitem__(
                 "database_uuid", "22222222-2222-4222-8222-222222222222"
