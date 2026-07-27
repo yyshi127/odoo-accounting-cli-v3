@@ -256,6 +256,23 @@ def test_discovery_rejects_incomplete_target_set(tmp_path: Path) -> None:
         discovery.build_review(value, output_directory=tmp_path / "review")
 
 
+def test_discovery_allows_guarded_verifier_bundle_failure() -> None:
+    policy = discovery._policy_for_path(
+        runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER + "/BUNDLE-MANIFEST.json",
+        ("read",),
+        ("ENOENT",),
+        role="verifier",
+        mutable_roots=(),
+        watch_roots=WATCH_ROOTS,
+        sqlite_delta_contract_sha256=DELTA_SHA,
+    )
+
+    assert policy["classification"] == "mutable-state"
+    assert policy["allow_success"] is False
+    assert policy["allowed_errnos"] == ["ENOENT"]
+    assert policy["failure_guard"] == runtime_trace.SQLITE_DELTA_VERIFIER
+
+
 def fragments(tmp_path: Path) -> tuple[dict[str, object], dict[str, object]]:
     full = inventory(tmp_path)
     suite_fragment = json.loads(json.dumps(full))

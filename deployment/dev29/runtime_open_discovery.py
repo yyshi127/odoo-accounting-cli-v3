@@ -357,7 +357,7 @@ def _policy_for_path(
     if path == runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER or path.startswith(
         runtime_trace.VERIFIER_EVIDENCE_DIR_MARKER + "/"
     ):
-        if role != "verifier" or errnos:
+        if role != "verifier":
             raise DiscoveryError("verifier evidence bundle path is unsafe")
         return {
             "path": path,
@@ -368,8 +368,10 @@ def _policy_for_path(
             "delta_verifier": runtime_trace.SQLITE_DELTA_VERIFIER,
             "delta_contract_sha256": sqlite_delta_contract_sha256,
             "allow_success": success,
-            "allowed_errnos": [],
-            "failure_guard": None,
+            "allowed_errnos": list(errnos),
+            "failure_guard": (
+                runtime_trace.SQLITE_DELTA_VERIFIER if errnos else None
+            ),
         }
     if runtime_trace._is_process_view_path(path):
         classification = "process-view"
