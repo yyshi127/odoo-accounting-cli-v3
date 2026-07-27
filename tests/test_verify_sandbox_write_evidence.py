@@ -213,6 +213,22 @@ def _input_manifest(tmp_path: Path):
     }
 
 
+def _metadata(tmp_path: Path):
+    manifest = _input_manifest(tmp_path)
+    return {
+        "schema_version": 1,
+        "scope": verifier.METADATA_SCOPE,
+        "capability_id": manifest["capability_id"],
+        "company_id": manifest["company_id"],
+        "database_uuid": manifest["database_uuid"],
+        "environment": manifest["environment"],
+        "production_promotion_allowed": False,
+        "release_identity": manifest["release_identity"],
+        "lifecycle_receipt_ids": manifest["lifecycle_receipt_ids"],
+        "registry_receipts": manifest["registry_receipts"],
+    }
+
+
 def test_assembler_builds_verified_evidence_from_retained_artifact_files(tmp_path):
     manifest = _input_manifest(tmp_path)
     document = verifier.assemble_document(manifest, base_dir=tmp_path)
@@ -237,6 +253,39 @@ def test_assembler_cli_prints_verified_evidence_document(tmp_path, capsys):
     assert output["scope"] == "odoo-accounting-cli-v3.sandbox-write-evidence.v1"
     assert output["lifecycle"]["prepare_receipt_id"] == "prepare-receipt"
     assert verifier.verify_document(output)["registry_receipt_count"] == 7
+
+
+def test_builder_creates_input_manifest_from_standard_retained_files(tmp_path):
+    manifest = verifier.build_input_manifest(_metadata(tmp_path), base_dir=tmp_path)
+
+    assert manifest["scope"] == verifier.INPUT_SCOPE
+    assert manifest["preflight_manifest"] == "preflight_manifest.json"
+    assert manifest["lifecycle_artifacts"] == verifier.DEFAULT_LIFECYCLE_ARTIFACTS
+    evidence = verifier.assemble_document(manifest, base_dir=tmp_path)
+    assert verifier.verify_document(evidence)["preflight_manifest_sha256"] == hashlib.sha256(
+        (tmp_path / "preflight_manifest.json").read_bytes()
+    ).hexdigest()
+
+
+def test_builder_cli_prints_verified_input_manifest(tmp_path, capsys):
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(_metadata(tmp_path)), encoding="utf-8")
+
+    assert verifier.main(["--build-input-from", str(path)]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["scope"] == verifier.INPUT_SCOPE
+    assert output["lifecycle_artifacts"]["preview_digest"] == "preview_digest.json"
+    assert verifier.verify_document(
+        verifier.assemble_document(output, base_dir=tmp_path)
+    )["verified"] is True
+
+
+def test_builder_rejects_missing_standard_artifacts(tmp_path):
+    metadata = _metadata(tmp_path)
+    (tmp_path / "preview_digest.json").unlink()
+
+    with pytest.raises(verifier.SandboxWriteEvidenceError, match="file is absent"):
+        verifier.build_input_manifest(metadata, base_dir=tmp_path)
 
 
 def test_assembler_rejects_artifact_paths_that_escape_evidence_root(tmp_path):

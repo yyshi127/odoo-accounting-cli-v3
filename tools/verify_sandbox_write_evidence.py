@@ -63,11 +63,16 @@ RECEIPT_FIELDS = frozenset(
     }
 )
 INPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-input.v1"
+METADATA_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1"
 OUTPUT_SCOPE = "odoo-accounting-cli-v3.sandbox-write-evidence.v1"
 DIGEST_LIFECYCLE_FIELDS = frozenset(
     field for field in LIFECYCLE_FIELDS if not field.endswith("_id")
 )
 ID_LIFECYCLE_FIELDS = LIFECYCLE_FIELDS - DIGEST_LIFECYCLE_FIELDS
+DEFAULT_PREFLIGHT_MANIFEST = "preflight_manifest.json"
+DEFAULT_LIFECYCLE_ARTIFACTS = {
+    field: f"{field}.json" for field in sorted(DIGEST_LIFECYCLE_FIELDS)
+}
 
 
 class SandboxWriteEvidenceError(ValueError):
@@ -315,6 +320,57 @@ def assemble_path(path: Path) -> dict[str, Any]:
     return assemble_document(manifest, base_dir=path.parent)
 
 
+def build_input_manifest(metadata: Any, *, base_dir: Path) -> dict[str, Any]:
+    root = _require_object(metadata, "metadata")
+    expected_root = {
+        "capability_id",
+        "company_id",
+        "database_uuid",
+        "environment",
+        "lifecycle_receipt_ids",
+        "production_promotion_allowed",
+        "registry_receipts",
+        "release_identity",
+        "schema_version",
+        "scope",
+    }
+    if set(root) != expected_root:
+        raise SandboxWriteEvidenceError("metadata fields are invalid")
+    if root["schema_version"] != 1:
+        raise SandboxWriteEvidenceError("metadata.schema_version must be 1")
+    if root["scope"] != METADATA_SCOPE:
+        raise SandboxWriteEvidenceError("metadata.scope is invalid")
+    if root["environment"] != "sandbox":
+        raise SandboxWriteEvidenceError("metadata must target sandbox")
+    if root["production_promotion_allowed"] is not False:
+        raise SandboxWriteEvidenceError("metadata must not authorize production")
+
+    manifest = {
+        "schema_version": 1,
+        "scope": INPUT_SCOPE,
+        "capability_id": root["capability_id"],
+        "company_id": root["company_id"],
+        "database_uuid": root["database_uuid"],
+        "environment": root["environment"],
+        "preflight_manifest": DEFAULT_PREFLIGHT_MANIFEST,
+        "production_promotion_allowed": False,
+        "release_identity": root["release_identity"],
+        "lifecycle_artifacts": dict(DEFAULT_LIFECYCLE_ARTIFACTS),
+        "lifecycle_receipt_ids": root["lifecycle_receipt_ids"],
+        "registry_receipts": root["registry_receipts"],
+    }
+    assemble_document(manifest, base_dir=base_dir)
+    return manifest
+
+
+def build_input_manifest_path(path: Path) -> dict[str, Any]:
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SandboxWriteEvidenceError("metadata JSON is invalid") from exc
+    return build_input_manifest(metadata, base_dir=path.parent)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("evidence_json", nargs="?", type=Path)
@@ -323,13 +379,26 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Build and verify a sandbox write evidence JSON from an input manifest.",
     )
+    parser.add_argument(
+        "--build-input-from",
+        type=Path,
+        help="Build a sandbox-write evidence input manifest from standard retained artifacts and metadata.",
+    )
     args = parser.parse_args(argv)
     try:
-        if args.assemble_from is not None:
+        selected = sum(
+            item is not None
+            for item in (args.evidence_json, args.assemble_from, args.build_input_from)
+        )
+        if selected != 1:
+            parser.error(
+                "provide exactly one of evidence_json, --assemble-from, or --build-input-from"
+            )
+        if args.build_input_from is not None:
+            result = build_input_manifest_path(args.build_input_from)
+        elif args.assemble_from is not None:
             result = assemble_path(args.assemble_from)
         else:
-            if args.evidence_json is None:
-                parser.error("evidence_json is required unless --assemble-from is used")
             result = verify_path(args.evidence_json)
     except SandboxWriteEvidenceError as exc:
         print(str(exc), file=sys.stderr)

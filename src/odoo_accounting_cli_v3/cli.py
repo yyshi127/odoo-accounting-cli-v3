@@ -777,6 +777,53 @@ def evidence_verify_sandbox_write(
     )
 
 
+@evidence_group.command("build-sandbox-write-input")
+@click.option(
+    "--metadata-json",
+    required=True,
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Metadata JSON beside standard retained sandbox-write artifacts.",
+)
+def evidence_build_sandbox_write_input(metadata_json: Path) -> None:
+    """Build a verified sandbox-write evidence input manifest from retained files."""
+
+    command = "evidence.build-sandbox-write-input"
+    identity = _load_release_identity(command=command)
+    verifier = _load_sandbox_write_evidence_verifier()
+    try:
+        manifest = verifier.build_input_manifest_path(metadata_json)
+        evidence = verifier.verify_document(
+            verifier.assemble_document(manifest, base_dir=metadata_json.parent)
+        )
+    except Exception as exc:
+        if exc.__class__.__name__ == "SandboxWriteEvidenceError":
+            raise CliFailure(
+                command=command,
+                code="sandbox_write_evidence_input_rejected",
+                message="The sandbox write evidence input manifest could not be built from retained files.",
+                exit_code=6,
+            ) from exc
+        raise
+    if (
+        evidence.get("release_sha256") != identity["manifest_sha256"]
+        or evidence.get("registry_digest") != identity["registry_digest"]
+    ):
+        raise CliFailure(
+            command=command,
+            code="sandbox_write_evidence_release_mismatch",
+            message="The sandbox write evidence input is not bound to this exact release.",
+            exit_code=6,
+        )
+    _success(
+        command,
+        {
+            "input_manifest": manifest,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("sandbox-write-preflight")
 @click.option(
     "--write-runtime-config",

@@ -666,7 +666,20 @@ Before a sandbox write evidence bundle can be collected for registry promotion,
 first run the read-only
 `odoo-accounting-cli-v3 evidence sandbox-write-preflight ...` gate and retain
 its `preflight_manifest` as a file inside the evidence root. The
-`--assemble-from` input manifest must reference that retained
+evidence root should keep the standard artifact filenames used by the exact
+release (`preflight_manifest.json`, `approval_digest.json`,
+`failure_case_digest.json`, `idempotency_replay_digest.json`,
+`parameter_roundtrip_sha256.json`, `pi_e2e_digest.json`,
+`preview_digest.json`, `recovery_case_digest.json`, and
+`security_negative_digest.json`). Provide the remaining signed receipt IDs and
+registry receipts in a metadata JSON with scope
+`odoo-accounting-cli-v3.sandbox-write-evidence-metadata.v1`, then run
+`odoo-accounting-cli-v3 evidence build-sandbox-write-input --metadata-json ...`.
+The command builds the `--assemble-from` input manifest from the retained files,
+checks that it is bound to the currently anchored release and registry, and
+prevents hand-listed artifact paths from drifting.
+
+The `--assemble-from` input manifest references the retained
 `preflight_manifest` file; the exact release computes
 `preflight_manifest_sha256` from the retained bytes and copies only the digest
 into the final evidence bundle. Evidence without this computed preflight
