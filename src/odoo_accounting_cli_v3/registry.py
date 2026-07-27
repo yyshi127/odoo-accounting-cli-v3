@@ -164,6 +164,11 @@ def _validate_evidence(item: dict[str, Any], location: str) -> None:
         "verified_at",
     }
     kinds: set[str] = set()
+    kinds_by_environment: dict[str, set[str]] = {
+        "test": set(),
+        "sandbox": set(),
+        "production": set(),
+    }
     receipt_ids: set[str] = set()
     for index, raw in enumerate(receipts):
         receipt_location = f"{location}.evidence.receipts[{index}]"
@@ -178,6 +183,7 @@ def _validate_evidence(item: dict[str, Any], location: str) -> None:
         kinds.add(kind)
         if receipt["environment"] not in {"test", "sandbox", "production"}:
             raise RegistryError(f"{receipt_location}.environment is invalid")
+        receipt_environment = receipt["environment"]
         company_id = receipt["company_id"]
         if isinstance(company_id, bool) or not isinstance(company_id, int) or company_id <= 0:
             raise RegistryError(f"{receipt_location}.company_id must be positive")
@@ -187,6 +193,7 @@ def _validate_evidence(item: dict[str, Any], location: str) -> None:
             digest = receipt[field]
             if not isinstance(digest, str) or not SHA256.fullmatch(digest):
                 raise RegistryError(f"{receipt_location}.{field} must be lowercase SHA-256")
+        kinds_by_environment[receipt_environment].add(kind)
 
     environments = set(item["enabled_environments"])
     staged_environments = set(item.get("staged_environments", []))
@@ -213,18 +220,25 @@ def _validate_evidence(item: dict[str, Any], location: str) -> None:
             if item["access"] == "write"
             else PRODUCTION_READ_EVIDENCE
         )
-        if not required.issubset(kinds):
+        if not required.issubset(kinds_by_environment["test"]):
             raise RegistryError(f"{location} test enablement evidence is incomplete")
     if "sandbox" in environments:
         if evidence["level"] not in {"sandbox_verified", "production_verified"}:
             raise RegistryError(f"{location} cannot enable sandbox without sandbox_verified evidence")
-        if item["access"] == "write" and not {"sandbox_write_lifecycle", "recovery", "security_negative"}.issubset(kinds):
-            raise RegistryError(f"{location} sandbox write evidence is incomplete")
+        required = (
+            PRODUCTION_WRITE_EVIDENCE
+            if item["access"] == "write"
+            else PRODUCTION_READ_EVIDENCE
+        )
+        if not required.issubset(kinds_by_environment["sandbox"]):
+            if item["access"] == "write":
+                raise RegistryError(f"{location} sandbox write evidence is incomplete")
+            raise RegistryError(f"{location} sandbox read evidence is incomplete")
     if "production" in environments:
         if evidence["level"] != "production_verified":
             raise RegistryError(f"{location} cannot enable production without production_verified evidence")
         required = PRODUCTION_WRITE_EVIDENCE if item["access"] == "write" else PRODUCTION_READ_EVIDENCE
-        if not required.issubset(kinds):
+        if not required.issubset(kinds_by_environment["production"]):
             raise RegistryError(f"{location} production evidence is incomplete")
 
 

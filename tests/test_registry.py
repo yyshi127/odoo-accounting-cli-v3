@@ -9,6 +9,21 @@ from odoo_accounting_cli_v3.registry import RegistryError, load_registry, regist
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
 
 
+def _evidence_receipt(kind: str, *, environment: str = "sandbox") -> dict[str, object]:
+    return {
+        "artifact_sha256": "a" * 64,
+        "company_id": 7,
+        "database_uuid": "11111111-1111-4111-8111-111111111111",
+        "environment": environment,
+        "id": f"receipt-{environment}-{kind}",
+        "kind": kind,
+        "registry_sha256": "b" * 64,
+        "release_sha256": "c" * 64,
+        "signature": "signature",
+        "verified_at": "2026-07-17T00:00:00Z",
+    }
+
+
 class RegistryTest(unittest.TestCase):
     def setUp(self) -> None:
         self.document = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
@@ -304,6 +319,57 @@ class RegistryTest(unittest.TestCase):
         write["evidence"]["level"] = "sandbox_verified"
         with self.assertRaisesRegex(RegistryError, "sandbox write evidence is incomplete"):
             validate_registry(invalid)
+
+    def test_sandbox_write_requires_complete_same_environment_evidence(self) -> None:
+        invalid = copy.deepcopy(self.document)
+        write = next(item for item in invalid["capabilities"] if item["access"] == "write")
+        write["enabled_environments"] = ["sandbox"]
+        write["evidence"]["level"] = "sandbox_verified"
+        write["evidence"]["receipts"] = [
+            _evidence_receipt(kind)
+            for kind in ("sandbox_write_lifecycle", "recovery", "security_negative")
+        ]
+        with self.assertRaisesRegex(RegistryError, "sandbox write evidence is incomplete"):
+            validate_registry(invalid)
+
+        wrong_environment = copy.deepcopy(invalid)
+        wrong_environment_write = next(
+            item
+            for item in wrong_environment["capabilities"]
+            if item["access"] == "write"
+        )
+        wrong_environment_write["evidence"]["receipts"] = [
+            _evidence_receipt(kind, environment="production")
+            for kind in (
+                "accounting_oracle",
+                "live_odoo",
+                "pi_e2e",
+                "release_identity",
+                "recovery",
+                "sandbox_write_lifecycle",
+                "security_negative",
+            )
+        ]
+        with self.assertRaisesRegex(RegistryError, "sandbox write evidence is incomplete"):
+            validate_registry(wrong_environment)
+
+        complete = copy.deepcopy(invalid)
+        complete_write = next(
+            item for item in complete["capabilities"] if item["access"] == "write"
+        )
+        complete_write["evidence"]["receipts"] = [
+            _evidence_receipt(kind)
+            for kind in (
+                "accounting_oracle",
+                "live_odoo",
+                "pi_e2e",
+                "release_identity",
+                "recovery",
+                "sandbox_write_lifecycle",
+                "security_negative",
+            )
+        ]
+        validate_registry(complete)
 
     def test_write_approval_ttl_is_bounded(self) -> None:
         invalid = copy.deepcopy(self.document)
