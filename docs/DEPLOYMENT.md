@@ -673,6 +673,11 @@ first run the read-only environment audit:
 
 `odoo-accounting-cli-v3 evidence sandbox-write-environment-audit --write-runtime-config ... --evidence-root ...`
 
+Use `--summary-only` for Pi Bridge preflight dashboards and operator checks that
+only need the environment verdict, runtime/evidence-root status, write-capability
+counts, not-ready capability IDs, and shared blockers. Omit `--summary-only`
+when retaining the full per-capability readiness detail as review evidence.
+
 This command does not execute Odoo and does not create evidence. It reports
 whether the write runtime exists, is bound to `sandbox_staged`, names a clearly
 sandbox database, has a staged sandbox base runtime, whether the evidence root

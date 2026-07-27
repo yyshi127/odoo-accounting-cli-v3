@@ -1517,10 +1517,16 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
     show_default=True,
     help="Minimum free bytes required before starting sandbox write evidence collection.",
 )
+@click.option(
+    "--summary-only",
+    is_flag=True,
+    help="Omit per-capability readiness details while retaining counts and blockers.",
+)
 def evidence_sandbox_write_environment_audit(
     write_runtime_config: Path,
     evidence_root: Path | None,
     min_free_bytes: int,
+    summary_only: bool,
 ) -> None:
     """Read-only inventory before planning real sandbox write drills."""
 
@@ -1547,6 +1553,18 @@ def evidence_sandbox_write_environment_audit(
     )
     sandbox_staging_promotion_ready_count = sum(
         1 for report in capability_reports if report["sandbox_staging_promotion_ready"]
+    )
+    not_staging_ready_capability_ids = [
+        report["capability"]["id"]
+        for report in capability_reports
+        if not report["sandbox_staging_promotion_ready"]
+    ]
+    staging_promotion_blockers = sorted(
+        {
+            blocker
+            for report in capability_reports
+            for blocker in report["sandbox_staging_promotion_blockers"]
+        }
     )
     runtime_report: dict[str, Any]
     evidence_root_report: dict[str, Any]
@@ -1601,28 +1619,34 @@ def evidence_sandbox_write_environment_audit(
             release_root=config.base_runtime.release_root,
             minimum_free_bytes=min_free_bytes,
         )
-    _success(
-        command,
-        {
-            "capabilities": capability_reports,
-            "environment_ready_for_sandbox_write_drills": (
-                runtime_ready
-                and evidence_root_report["ready"]
-                and sandbox_drill_admissible_count == len(capability_reports)
-            ),
-            "evidence_root": evidence_root_report,
-            "production_promotion_allowed": False,
-            "real_odoo_write_performed": False,
-            "release_identity": identity,
-            "runtime": runtime_report,
+    data = {
+        "capability_summary": {
+            "not_staging_ready_capability_ids": not_staging_ready_capability_ids,
+            "not_staging_ready_count": len(not_staging_ready_capability_ids),
             "sandbox_drill_admissible_count": sandbox_drill_admissible_count,
             "sandbox_staging_promotion_ready_count": (
                 sandbox_staging_promotion_ready_count
             ),
+            "staging_promotion_blockers": staging_promotion_blockers,
             "total_write_capabilities": len(capability_reports),
         },
-        business_succeeded=False,
-    )
+        "environment_ready_for_sandbox_write_drills": (
+            runtime_ready
+            and evidence_root_report["ready"]
+            and sandbox_drill_admissible_count == len(capability_reports)
+        ),
+        "evidence_root": evidence_root_report,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "release_identity": identity,
+        "runtime": runtime_report,
+        "sandbox_drill_admissible_count": sandbox_drill_admissible_count,
+        "sandbox_staging_promotion_ready_count": sandbox_staging_promotion_ready_count,
+        "total_write_capabilities": len(capability_reports),
+    }
+    if not summary_only:
+        data["capabilities"] = capability_reports
+    _success(command, data, business_succeeded=False)
 
 
 @evidence_group.command("sandbox-write-preflight")

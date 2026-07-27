@@ -1259,7 +1259,7 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
         "registry_digest": "b" * 64,
         "release": "release",
         "verified": True,
-        "version": "0.1.0.dev190",
+        "version": "0.1.0.dev191",
     }
 
     with patch(
@@ -1291,9 +1291,74 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
     assert payload["data"]["runtime"]["database_name"] == "odoo_v3_sandbox"
     assert payload["data"]["evidence_root"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
+    assert len(payload["data"]["capabilities"]) == 14
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 14
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 14
+    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 14
+    assert payload["data"]["capability_summary"][
+        "sandbox_staging_promotion_ready_count"
+    ] == 0
+    assert payload["data"]["capability_summary"]["staging_promotion_blockers"] == [
+        "registry evidence level is not sandbox_verified",
+        "registry has no retained sandbox write evidence receipts",
+    ]
     assert payload["data"]["total_write_capabilities"] == 14
     assert payload["data"]["sandbox_drill_admissible_count"] == 14
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
+
+
+def test_evidence_sandbox_write_environment_audit_summary_omits_capability_details(
+    tmp_path: Path,
+):
+    runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
+    evidence_root = tmp_path / "evidence-root"
+    evidence_root.mkdir()
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev191",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "sandbox-write-environment-audit",
+                "--write-runtime-config",
+                str(runtime_path),
+                "--evidence-root",
+                str(evidence_root),
+                "--min-free-bytes",
+                "1",
+                "--summary-only",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert "capabilities" not in payload["data"]
+    assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 14
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 14
+    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 14
+    assert payload["data"]["capability_summary"][
+        "sandbox_staging_promotion_ready_count"
+    ] == 0
+    assert payload["data"]["capability_summary"][
+        "not_staging_ready_capability_ids"
+    ] == sorted(payload["data"]["capability_summary"]["not_staging_ready_capability_ids"])
+    assert payload["data"]["capability_summary"]["staging_promotion_blockers"] == [
+        "registry evidence level is not sandbox_verified",
+        "registry has no retained sandbox write evidence receipts",
+    ]
 
 
 def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
@@ -1306,7 +1371,7 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
         "registry_digest": "b" * 64,
         "release": "release",
         "verified": True,
-        "version": "0.1.0.dev190",
+        "version": "0.1.0.dev191",
     }
 
     with patch(
@@ -1335,6 +1400,8 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
     assert payload["data"]["evidence_root"]["blockers"] == [
         "sandbox write evidence root was not supplied"
     ]
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 14
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 14
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
