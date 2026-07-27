@@ -362,6 +362,13 @@ Before setting `--authorization-recorded`, validate the authorization JSON with
 the exact release:
 
 ```bash
+odoo-accounting-cli-v3 evidence sandbox-provision-authorization-template \
+  --sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
+  --source-database-name <AUTHORIZED_SOURCE_DATABASE> \
+  --company <AUTHORIZED_COMPANY> \
+  --operator-id <OPERATOR_ID> \
+  --retention-until <UTC_TIMESTAMP>
+
 odoo-accounting-cli-v3 evidence sandbox-provision-authorization-check \
   --authorization-file <AUTHORIZATION_JSON> \
   --expected-sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
@@ -375,6 +382,9 @@ company scope, allowed provisioning actions, UTC issue/expiry timestamps, and
 an `immutable_summary_sha256`. This check is not business-write authorization:
 it only proves that the environment-provisioning approval record is structured,
 unexpired, and bound to the intended sandbox setup.
+The template command is only a drafting aid. It does not save the authorization
+record, does not prove the operator accepted it, and must not be treated as
+permission until the saved JSON passes the check command above.
 
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,

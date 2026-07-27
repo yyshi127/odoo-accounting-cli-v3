@@ -9,7 +9,7 @@ import re
 import shutil
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from importlib import resources, util
 from pathlib import Path
 from typing import Any, NoReturn
@@ -134,6 +134,10 @@ def _parse_utc_datetime(value: Any, field: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValueError(f"{field} must be a UTC timestamp")
     return parsed.astimezone(timezone.utc)
+
+
+def _format_utc_datetime(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _sha256_file(path: Path) -> str:
@@ -2274,6 +2278,135 @@ def evidence_sandbox_database_provision_plan(
         "sandbox_database_report": sandbox_report,
         "source_database_report": source_report,
         "warnings": sorted(set(warnings)),
+    }
+    _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("sandbox-provision-authorization-template")
+@click.option(
+    "--sandbox-database-name",
+    required=True,
+    help="Dedicated sandbox database name the authorization will bind.",
+)
+@click.option(
+    "--source-database-name",
+    required=True,
+    help="Source database name the authorization will bind.",
+)
+@click.option(
+    "--company",
+    "company_scope",
+    multiple=True,
+    required=True,
+    help="Authorized company scope; repeat for multiple companies.",
+)
+@click.option(
+    "--operator-id",
+    required=True,
+    help="Human/operator identity that will be accountable for provisioning.",
+)
+@click.option(
+    "--retention-until",
+    required=True,
+    help="UTC timestamp naming how long the sandbox evidence/data must be retained.",
+)
+@click.option(
+    "--ttl-seconds",
+    type=click.IntRange(min=1, max=24 * 60 * 60),
+    default=3600,
+    show_default=True,
+    help="Authorization validity window.",
+)
+@click.option(
+    "--issued-at",
+    help="UTC issue timestamp for deterministic review; defaults to current UTC time.",
+)
+def evidence_sandbox_provision_authorization_template(
+    sandbox_database_name: str,
+    source_database_name: str,
+    company_scope: tuple[str, ...],
+    operator_id: str,
+    retention_until: str,
+    ttl_seconds: int,
+    issued_at: str | None,
+) -> None:
+    """Render a sandbox provisioning authorization JSON template without approving it."""
+
+    command = "evidence.sandbox-provision-authorization-template"
+    blockers: list[str] = []
+    if not _database_name_is_clear_sandbox(sandbox_database_name):
+        blockers.append("sandbox database name is not clearly sandbox")
+    if _database_name_looks_production(sandbox_database_name):
+        blockers.append("sandbox database name looks production-like")
+    if sandbox_database_name == source_database_name:
+        blockers.append("sandbox database name must differ from source database name")
+    if any(not value for value in company_scope):
+        blockers.append("company scope entries must be non-empty")
+    try:
+        issued = (
+            _parse_utc_datetime(issued_at, "issued_at")
+            if issued_at is not None
+            else datetime.now(timezone.utc)
+        )
+        retention = _parse_utc_datetime(retention_until, "retention_until")
+    except ValueError as exc:
+        blockers.append(str(exc))
+        issued = retention = datetime.now(timezone.utc)
+    expires = issued + timedelta(seconds=ttl_seconds)
+    if retention <= issued:
+        blockers.append("retention_until must be after issued_at")
+    summary = {
+        "allowed_actions": [
+            "create_or_clone_postgresql_database",
+            "create_isolated_filestore",
+            "start_sandbox_odoo_service",
+            "measure_runtime_identity",
+        ],
+        "company_scope": sorted(set(company_scope)),
+        "operator_id": operator_id,
+        "retention_until": _format_utc_datetime(retention),
+        "sandbox_database_name": sandbox_database_name,
+        "source_database_name": source_database_name,
+    }
+    document = {
+        "expires_at": _format_utc_datetime(expires),
+        "immutable_summary": summary,
+        "immutable_summary_sha256": _sha256_json(summary),
+        "issued_at": _format_utc_datetime(issued),
+        "purpose": "sandbox_database_provision",
+        "schema_version": 1,
+    }
+    data = {
+        "authorization_record_template": document,
+        "authorization_template_ready": not blockers,
+        "blockers": sorted(set(blockers)),
+        "business_write_authorized": False,
+        "postgresql_write_performed": False,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "save_path_recommendation": "/etc/odoo-accounting-cli-v3/sandbox-provision-authorization.json",
+        "template_only_not_authorized": True,
+        "validation_command": (
+            "odoo-accounting-cli-v3 evidence sandbox-provision-authorization-check "
+            "--authorization-file /etc/odoo-accounting-cli-v3/sandbox-provision-authorization.json "
+            f"--expected-sandbox-database-name {sandbox_database_name} "
+            f"--expected-source-database-name {source_database_name}"
+        ),
+        "validation_command_args": [
+            "evidence",
+            "sandbox-provision-authorization-check",
+            "--authorization-file",
+            "/etc/odoo-accounting-cli-v3/sandbox-provision-authorization.json",
+            "--expected-sandbox-database-name",
+            sandbox_database_name,
+            "--expected-source-database-name",
+            source_database_name,
+            *[
+                item
+                for company in sorted(set(company_scope))
+                for item in ("--expected-company", company)
+            ],
+        ],
     }
     _success(command, data, business_succeeded=False)
 

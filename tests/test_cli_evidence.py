@@ -1891,6 +1891,89 @@ def test_evidence_sandbox_database_provision_plan_rejects_unsafe_name_and_filter
     ]
 
 
+def test_evidence_sandbox_provision_authorization_template_renders_checkable_document():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-provision-authorization-template",
+            "--sandbox-database-name",
+            "odoo_v3_sandbox",
+            "--source-database-name",
+            "odoo_sg",
+            "--company",
+            "SG Company",
+            "--operator-id",
+            "yyshi",
+            "--retention-until",
+            "2026-08-03T00:00:00Z",
+            "--issued-at",
+            "2026-07-27T12:00:00Z",
+            "--ttl-seconds",
+            "3600",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-provision-authorization-template"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["authorization_template_ready"] is True
+    assert payload["data"]["business_write_authorized"] is False
+    assert payload["data"]["template_only_not_authorized"] is True
+    document = payload["data"]["authorization_record_template"]
+    assert document["expires_at"] == "2026-07-27T13:00:00Z"
+    assert document["immutable_summary"]["operator_id"] == "yyshi"
+    assert document["immutable_summary"]["company_scope"] == ["SG Company"]
+    assert payload["data"]["validation_command_args"][-2:] == [
+        "--expected-company",
+        "SG Company",
+    ]
+    digest = __import__("hashlib").sha256(
+        __import__("json")
+        .dumps(
+            document["immutable_summary"],
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        .encode("utf-8")
+    ).hexdigest()
+    assert document["immutable_summary_sha256"] == digest
+
+
+def test_evidence_sandbox_provision_authorization_template_rejects_unsafe_name():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-provision-authorization-template",
+            "--sandbox-database-name",
+            "odoo_sg",
+            "--source-database-name",
+            "odoo_sg",
+            "--company",
+            "SG Company",
+            "--operator-id",
+            "yyshi",
+            "--retention-until",
+            "2026-08-03T00:00:00Z",
+            "--issued-at",
+            "2026-07-27T12:00:00Z",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["authorization_template_ready"] is False
+    assert payload["data"]["blockers"] == [
+        "sandbox database name is not clearly sandbox",
+        "sandbox database name looks production-like",
+        "sandbox database name must differ from source database name",
+    ]
+
+
 def _sandbox_authorization_document(**overrides):
     summary = {
         "allowed_actions": [
