@@ -51,6 +51,7 @@ EVENT_TYPES = (
     "clarification_completed",
     "material_parameters_finalized",
     "cli_input",
+    "prepare",
     "preview",
     "approval_binding",
     "odoo_execution",
@@ -746,7 +747,7 @@ def validate_trace_document(
         events = trace["events"]
         if not isinstance(events, list) or len(events) != len(EVENT_TYPES):
             raise TraceValidationError(
-                f"{location}.events must contain exactly the ten normalized Pi events"
+                f"{location}.events must contain exactly the normalized Pi events"
             )
         for event_index, (raw_event, expected_type) in enumerate(
             zip(events, EVENT_TYPES), start=1
@@ -806,7 +807,7 @@ def validate_trace_document(
                     f"{data_location}.parameters",
                     TraceValidationError,
                 )
-            elif expected_type == "preview":
+            elif expected_type in {"prepare", "preview"}:
                 data = _exact_object(
                     event["data"],
                     {"applicable", "parameters"},
@@ -1067,11 +1068,12 @@ def score_documents(
                 stage_failures[stage] = {"paths": differences}
         is_write = access_by_capability[expected["capability_id"]] == "write"
         if is_write:
-            differences = _different_paths(
-                expected_parameters, events["preview"]["parameters"]
-            )
-            if differences:
-                stage_failures["preview"] = {"paths": differences}
+            for stage in ("prepare", "preview"):
+                differences = _different_paths(
+                    expected_parameters, events[stage]["parameters"]
+                )
+                if differences:
+                    stage_failures[stage] = {"paths": differences}
         expected_parameters_sha256 = canonical_sha256(expected_parameters)
         digest_stages = ["odoo_execution", "odoo_result", "audit_receipt"]
         if is_write:

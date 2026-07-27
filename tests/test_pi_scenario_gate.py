@@ -98,7 +98,7 @@ class PiScenarioGateTest(unittest.TestCase):
                         },
                         {
                             "sequence": 6,
-                            "type": "preview",
+                            "type": "prepare",
                             "data": {
                                 "applicable": is_write,
                                 "parameters": copy.deepcopy(parameters) if is_write else None,
@@ -106,6 +106,14 @@ class PiScenarioGateTest(unittest.TestCase):
                         },
                         {
                             "sequence": 7,
+                            "type": "preview",
+                            "data": {
+                                "applicable": is_write,
+                                "parameters": copy.deepcopy(parameters) if is_write else None,
+                            },
+                        },
+                        {
+                            "sequence": 8,
                             "type": "approval_binding",
                             "data": {
                                 "applicable": is_write,
@@ -114,7 +122,7 @@ class PiScenarioGateTest(unittest.TestCase):
                             },
                         },
                         {
-                            "sequence": 8,
+                            "sequence": 9,
                             "type": "odoo_execution",
                             "data": {
                                 "parameters_sha256": parameters_sha256,
@@ -122,7 +130,7 @@ class PiScenarioGateTest(unittest.TestCase):
                             },
                         },
                         {
-                            "sequence": 9,
+                            "sequence": 10,
                             "type": "odoo_result",
                             "data": {
                                 "parameters_sha256": parameters_sha256,
@@ -130,7 +138,7 @@ class PiScenarioGateTest(unittest.TestCase):
                             },
                         },
                         {
-                            "sequence": 10,
+                            "sequence": 11,
                             "type": "audit_receipt",
                             "data": {
                                 "parameters_sha256": parameters_sha256,
@@ -250,6 +258,10 @@ class PiScenarioGateTest(unittest.TestCase):
             )
             self.assertEqual(
                 trace["events"][6]["data"],
+                {"applicable": True, "parameters": resolved},
+            )
+            self.assertEqual(
+                trace["events"][7]["data"],
                 {
                     "applicable": True,
                     "parameters_sha256": canonical_sha256(resolved),
@@ -413,8 +425,8 @@ class PiScenarioGateTest(unittest.TestCase):
             if trace["scenario_id"] == "pi-v1-customer-invoice"
         )
         invoice_trace["events"][4]["data"]["parameters"]["company_id"] = 999999
-        invoice_trace["events"][6]["data"]["parameters_sha256"] = "0" * 64
-        invoice_trace["events"][9]["data"]["parameters_sha256"] = "1" * 64
+        invoice_trace["events"][7]["data"]["parameters_sha256"] = "0" * 64
+        invoice_trace["events"][10]["data"]["parameters_sha256"] = "1" * 64
         self._resign(trace_document)
         report = score_documents(
             self.corpus,
@@ -430,6 +442,33 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertEqual(
             set(failure["stages"]),
             {"approval_binding", "audit_receipt", "cli_input"},
+        )
+
+    def test_write_prepare_parameter_loss_fails_f03(self) -> None:
+        trace_document = self._perfect_trace_document()
+        invoice_trace = next(
+            trace
+            for trace in trace_document["traces"]
+            if trace["scenario_id"] == "pi-v1-customer-invoice"
+        )
+        invoice_trace["events"][5]["data"]["parameters"]["currency_id"] = (
+            self._bindings()["currency_eur_id"]
+        )
+        self._resign(trace_document)
+        report = score_documents(
+            self.corpus,
+            trace_document,
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_release_sha256=TEST_RELEASE_SHA256,
+        )
+        self.assertEqual(report["gates"]["F03"]["numerator"], 24)
+        failure = report["gates"]["F03"]["failures"][
+            "pi-v1-customer-invoice"
+        ]
+        self.assertEqual(failure["stages"], ["prepare"])
+        self.assertEqual(
+            failure["details"]["prepare"]["paths"], ["$.currency_id"]
         )
 
     def test_clarification_answer_must_be_captured_and_bound_to_final_value(self) -> None:

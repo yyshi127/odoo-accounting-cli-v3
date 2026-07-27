@@ -646,8 +646,8 @@ Invoke the six standard actions only through the immutable release launcher:
 prepare, preview, approve-execute, status, result, and recover. Send each signed
 JSON request over standard input. For every staged write capability retain:
 
-- exact parameter round-trip evidence from Pi/CLI input through preview,
-  approval digest, Odoo execution, verification, and receipt;
+- exact parameter round-trip evidence from Pi/CLI input through prepare,
+  preview, approval digest, Odoo execution, verification, and receipt;
 - one intended Odoo effect under the bound user and company;
 - repeated and concurrent requests proving no duplicate effect;
 - ACL, company, expiry, replay, and tamper rejection;
