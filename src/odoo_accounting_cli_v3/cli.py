@@ -1956,10 +1956,16 @@ def evidence_sandbox_read_runtime_config_plan(
     "--selected-database-name",
     help="Optional operator-selected sandbox candidate to check against the observed catalog.",
 )
+@click.option(
+    "--summary-only",
+    is_flag=True,
+    help="Omit per-database reports while retaining counts, blockers, and selection status.",
+)
 def evidence_sandbox_database_candidates(
     database_name: tuple[str, ...],
     protected_database_name: tuple[str, ...],
     selected_database_name: str | None,
+    summary_only: bool,
 ) -> None:
     """Classify observed PostgreSQL databases before choosing a sandbox runtime base."""
 
@@ -1977,37 +1983,45 @@ def evidence_sandbox_database_candidates(
     eligible = [
         item["name"] for item in candidates if item["eligible_for_sandbox_runtime_plan"]
     ]
+    blocker_counts: dict[str, int] = {}
+    for item in candidates:
+        for blocker in item["blockers"]:
+            blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+    selected_report = next(
+        (item for item in candidates if item["name"] == selected_database_name),
+        None,
+    )
     blockers: list[str] = []
     if not observed_names:
         blockers.append("database catalog is empty or was not supplied")
     if selected_database_name is not None and selected_database_name not in observed_names:
         blockers.append("selected database was not observed in the PostgreSQL catalog")
     if selected_database_name is not None:
-        selected = next(
-            (item for item in candidates if item["name"] == selected_database_name),
-            None,
-        )
-        if selected is not None and selected["blockers"]:
+        if selected_report is not None and selected_report["blockers"]:
             blockers.append("selected database is not eligible for sandbox runtime plan")
     if not eligible:
         blockers.append("no eligible clearly named dedicated sandbox database was observed")
-    _success(
-        command,
-        {
-            "blockers": sorted(set(blockers)),
+    data: dict[str, Any] = {
+        "blockers": sorted(set(blockers)),
+        "candidate_summary": {
+            "blocker_counts": dict(sorted(blocker_counts.items())),
             "candidate_count": len(candidates),
-            "candidates": candidates,
-            "eligible_database_names": eligible,
-            "production_promotion_allowed": False,
-            "real_odoo_write_performed": False,
-            "selected_database_name": selected_database_name,
-            "selected_database_eligible": (
-                selected_database_name in eligible if selected_database_name else None
-            ),
-            "sandbox_database_selection_ready": not blockers,
+            "eligible_count": len(eligible),
+            "rejected_count": len(candidates) - len(eligible),
         },
-        business_succeeded=False,
-    )
+        "eligible_database_names": eligible,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "selected_database": selected_report,
+        "selected_database_name": selected_database_name,
+        "selected_database_eligible": (
+            selected_database_name in eligible if selected_database_name else None
+        ),
+        "sandbox_database_selection_ready": not blockers,
+    }
+    if not summary_only:
+        data["candidates"] = candidates
+    _success(command, data, business_succeeded=False)
 
 
 @evidence_group.command("write-runtime-config-plan")

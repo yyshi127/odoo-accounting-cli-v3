@@ -1710,6 +1710,17 @@ def test_evidence_sandbox_database_candidates_selects_clear_sandbox():
     assert payload["data"]["production_promotion_allowed"] is False
     assert payload["data"]["sandbox_database_selection_ready"] is True
     assert payload["data"]["eligible_database_names"] == ["odoo_v3_sandbox"]
+    assert payload["data"]["candidate_summary"] == {
+        "blocker_counts": {
+            "database name is explicitly protected": 1,
+            "database name is not clearly sandbox": 2,
+            "database name looks production-like": 1,
+            "database name looks transient or test-generated": 1,
+        },
+        "candidate_count": 3,
+        "eligible_count": 1,
+        "rejected_count": 2,
+    }
     assert payload["data"]["selected_database_eligible"] is True
     by_name = {item["name"]: item for item in payload["data"]["candidates"]}
     assert by_name["odoo_sg"]["blockers"] == [
@@ -1740,6 +1751,47 @@ def test_evidence_sandbox_database_candidates_rejects_missing_or_bad_selection()
     payload = __import__("json").loads(result.output)
     assert payload["data"]["sandbox_database_selection_ready"] is False
     assert payload["data"]["selected_database_eligible"] is False
+    assert payload["data"]["blockers"] == [
+        "no eligible clearly named dedicated sandbox database was observed",
+        "selected database was not observed in the PostgreSQL catalog",
+    ]
+
+
+def test_evidence_sandbox_database_candidates_summary_omits_candidate_details():
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-database-candidates",
+            "--database-name",
+            "codex_cn_m31_demo_01",
+            "--database-name",
+            "odoo_sg",
+            "--protected-database-name",
+            "odoo_sg",
+            "--selected-database-name",
+            "odoo_v3_sandbox",
+            "--summary-only",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert "candidates" not in payload["data"]
+    assert payload["data"]["sandbox_database_selection_ready"] is False
+    assert payload["data"]["selected_database"] is None
+    assert payload["data"]["selected_database_eligible"] is False
+    assert payload["data"]["candidate_summary"] == {
+        "blocker_counts": {
+            "database name is explicitly protected": 1,
+            "database name is not clearly sandbox": 2,
+            "database name looks production-like": 1,
+            "database name looks transient or test-generated": 1,
+        },
+        "candidate_count": 2,
+        "eligible_count": 0,
+        "rejected_count": 2,
+    }
     assert payload["data"]["blockers"] == [
         "no eligible clearly named dedicated sandbox database was observed",
         "selected database was not observed in the PostgreSQL catalog",

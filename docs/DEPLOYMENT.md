@@ -336,6 +336,9 @@ as sandbox, must not be explicitly protected, must not look production/live-like
 and must not look like a transient Codex/demo/test/runtime/candidate database.
 It performs no PostgreSQL mutation and does not prove Odoo isolation; it only
 prevents a non-sandbox name from becoming the read runtime base.
+Use `--summary-only` when feeding a large PostgreSQL catalog to Pi Bridge or an
+operator dashboard; it omits the per-database list while keeping candidate
+counts, blocker counts, eligible names, and the selected database verdict.
 
 For a staged read, first run the exact release's Dev28 read-transaction gate on
 the dedicated test database. The Odoo shell cursor must begin libpq `IDLE`,
