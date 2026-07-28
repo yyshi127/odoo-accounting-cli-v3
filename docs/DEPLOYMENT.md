@@ -830,6 +830,13 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
 The recheck is read-only and does not inspect cleanup candidates. It is the
 post-remediation capacity receipt for the current filesystem only; it is not an
 Odoo receipt, not a sandbox database receipt, and not write authorization.
+Retain both `target-capacity-plan` and `target-capacity-recheck` JSON outputs
+and pass them to the aggregate final gate with
+`--target-capacity-plan-report <TARGET_CAPACITY_PLAN_JSON>` and
+`--target-capacity-recheck-report <TARGET_CAPACITY_RECHECK_JSON>`. The retained
+reports prove the capacity decision was read-only, bind the cleanup-candidate
+summary and recheck SHA-256 into `goal-readiness`, and still fail closed until
+the live recheck satisfies the configured free-space floor.
 
 The write runtime configuration schema is version 2. Its
 `write_execution_mode` starts as `disabled`. A sandbox candidate may use

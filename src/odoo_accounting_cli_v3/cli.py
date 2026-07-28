@@ -747,6 +747,111 @@ def _sandbox_database_candidates_report_status(
     }
 
 
+def _target_capacity_plan_report_status(
+    target_capacity_plan_report: Path | None,
+    *,
+    command: str,
+) -> dict[str, Any] | None:
+    if target_capacity_plan_report is None:
+        return None
+    blockers: list[str] = []
+    report = _load_retained_json_report(
+        target_capacity_plan_report,
+        command=command,
+        label="target capacity plan",
+    )
+    if report.get("ok") is not True:
+        blockers.append("target capacity plan report is not successful")
+    if report.get("command") != "evidence.target-capacity-plan":
+        blockers.append("target capacity plan report has the wrong command")
+    data = report.get("data")
+    if not isinstance(data, dict):
+        blockers.append("target capacity plan report data is invalid")
+        data = {}
+    plan = data.get("plan")
+    if not isinstance(plan, dict):
+        blockers.append("target capacity plan report is missing data.plan")
+        plan = {}
+    if plan.get("kind") != "odoo-accounting-cli-v3.target-capacity-plan.v1":
+        blockers.append("target capacity plan kind is invalid")
+    if plan.get("cleanup_executed") is not False or data.get("cleanup_executed") is not False:
+        blockers.append("target capacity plan must be read-only and unexecuted")
+    if data.get("real_odoo_write_performed") is not False:
+        blockers.append("target capacity plan must not be a real Odoo write receipt")
+    shortfall_bytes = plan.get("shortfall_bytes")
+    candidate_reclaimable_bytes = plan.get("candidate_reclaimable_bytes")
+    if isinstance(shortfall_bytes, int) and shortfall_bytes > 0:
+        blockers.append("target capacity plan still reports a filesystem shortfall")
+    if (
+        isinstance(shortfall_bytes, int)
+        and isinstance(candidate_reclaimable_bytes, int)
+        and shortfall_bytes > candidate_reclaimable_bytes
+    ):
+        blockers.append(
+            "target capacity plan candidates cannot cover the capacity shortfall"
+        )
+    summary = {
+        "candidate_count": plan.get("candidate_count"),
+        "candidate_reclaimable_bytes": candidate_reclaimable_bytes,
+        "candidates_truncated": plan.get("candidates_truncated"),
+        "required_free_bytes": plan.get("required_free_bytes"),
+        "retained_candidate_count": plan.get("retained_candidate_count"),
+        "shortfall_bytes": shortfall_bytes,
+    }
+    return {
+        "blockers": sorted(set(blockers)),
+        "plan_ready": not blockers,
+        "report_path": str(target_capacity_plan_report),
+        "report_sha256": _sha256_file(target_capacity_plan_report),
+        "summary": summary,
+    }
+
+
+def _target_capacity_recheck_report_status(
+    target_capacity_recheck_report: Path | None,
+    *,
+    command: str,
+    expected_required_free_bytes: int,
+) -> dict[str, Any] | None:
+    if target_capacity_recheck_report is None:
+        return None
+    blockers: list[str] = []
+    report = _load_retained_json_report(
+        target_capacity_recheck_report,
+        command=command,
+        label="target capacity recheck",
+    )
+    if report.get("ok") is not True:
+        blockers.append("target capacity recheck report is not successful")
+    if report.get("command") != "evidence.target-capacity-recheck":
+        blockers.append("target capacity recheck report has the wrong command")
+    data = report.get("data")
+    if not isinstance(data, dict):
+        blockers.append("target capacity recheck report data is invalid")
+        data = {}
+    if data.get("cleanup_executed") is not False:
+        blockers.append("target capacity recheck must be read-only and unexecuted")
+    if data.get("real_odoo_write_performed") is not False:
+        blockers.append("target capacity recheck must not be a real Odoo write receipt")
+    if data.get("required_free_bytes") != expected_required_free_bytes:
+        blockers.append("target capacity recheck required_free_bytes mismatch")
+    if data.get("sandbox_write_capacity_ready") is not True:
+        blockers.append("target capacity recheck is not ready")
+    summary = {
+        "available_bytes": data.get("available_bytes"),
+        "required_free_bytes": data.get("required_free_bytes"),
+        "sandbox_write_capacity_ready": data.get("sandbox_write_capacity_ready"),
+        "shortfall_bytes": data.get("shortfall_bytes"),
+    }
+    return {
+        "blockers": sorted(set(blockers)),
+        "recheck_ready": not blockers,
+        "report_path": str(target_capacity_recheck_report),
+        "report_sha256": _sha256_file(target_capacity_recheck_report),
+        "summary": summary,
+    }
+
+
 FINAL_EVIDENCE_MANIFEST_SCHEMA = "odoo-accounting-cli-v3.final-evidence-manifest.v1"
 FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
     "goal_readiness_report": "evidence.goal-readiness",
@@ -3976,6 +4081,16 @@ def evidence_final_evidence_manifest_check(
     help="Optional retained evidence.write-evidence-index JSON handoff index.",
 )
 @click.option(
+    "--target-capacity-plan-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Optional retained evidence.target-capacity-plan JSON report.",
+)
+@click.option(
+    "--target-capacity-recheck-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Optional retained evidence.target-capacity-recheck JSON report.",
+)
+@click.option(
     "--sandbox-database-candidates-report",
     type=click.Path(path_type=Path, dir_okay=False),
     help="Optional retained evidence.sandbox-database-candidates JSON catalog report.",
@@ -4041,6 +4156,8 @@ def evidence_goal_readiness(
     sandbox_onboarding_receipt: Path | None,
     write_pipeline_report: Path | None,
     write_evidence_index: Path | None,
+    target_capacity_plan_report: Path | None,
+    target_capacity_recheck_report: Path | None,
     sandbox_database_candidates_report: Path | None,
     sandbox_provision_authorization_file: Path | None,
     expected_sandbox_database_name: str | None,
@@ -4090,6 +4207,15 @@ def evidence_goal_readiness(
             message="The goal-readiness capacity path is unavailable.",
             exit_code=5,
         ) from exc
+    retained_capacity_plan = _target_capacity_plan_report_status(
+        target_capacity_plan_report,
+        command=command,
+    )
+    retained_capacity_recheck = _target_capacity_recheck_report_status(
+        target_capacity_recheck_report,
+        command=command,
+        expected_required_free_bytes=required_free_bytes,
+    )
     capabilities = _load_capabilities()
     registry_report = _registry_audit_report(capabilities)
     write_capabilities = sorted(
@@ -4233,6 +4359,13 @@ def evidence_goal_readiness(
         blockers.append("current release route is not ready")
     if not capacity_report["sandbox_write_capacity_ready"]:
         blockers.append("sandbox write capacity gate is not ready")
+    if retained_capacity_plan is not None and not retained_capacity_plan["plan_ready"]:
+        blockers.extend(retained_capacity_plan["blockers"])
+    if (
+        retained_capacity_recheck is not None
+        and not retained_capacity_recheck["recheck_ready"]
+    ):
+        blockers.extend(retained_capacity_recheck["blockers"])
     if not registry_report["registry_audit_ready"]:
         blockers.append("capability registry audit is not ready")
     if static_write_admissible_count != len(static_write_reports):
@@ -4253,7 +4386,11 @@ def evidence_goal_readiness(
         command,
         {
             "blockers": sorted(set(blockers)),
-            "capacity": capacity_report,
+            "capacity": {
+                **capacity_report,
+                "retained_plan": retained_capacity_plan,
+                "retained_recheck": retained_capacity_recheck,
+            },
             "goal_readiness_ready": not blockers,
             "pi_scenario": pi_report,
             "production_promotion_allowed": False,

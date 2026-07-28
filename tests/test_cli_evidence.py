@@ -4286,6 +4286,122 @@ def test_evidence_goal_readiness_reports_live_capacity_shortfall():
     assert data["capacity"]["shortfall_bytes"] == 1024
 
 
+def test_evidence_goal_readiness_retains_capacity_plan_and_recheck_reports(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev243",
+    }
+    capacity_plan = tmp_path / "capacity-plan.json"
+    capacity_plan.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.target-capacity-plan",
+                "data": {
+                    "authorization_required_before_cleanup": True,
+                    "blockers": [
+                        "target filesystem free space is below the configured floor"
+                    ],
+                    "cleanup_executed": False,
+                    "plan": {
+                        "authorization_required_before_cleanup": True,
+                        "candidate_count": 3,
+                        "candidate_reclaimable_bytes": 100,
+                        "candidates_truncated": True,
+                        "cleanup_executed": False,
+                        "filesystem": {"available_bytes": 50},
+                        "kind": "odoo-accounting-cli-v3.target-capacity-plan.v1",
+                        "mode": "read_only_plan_no_delete",
+                        "required_free_bytes": 1024,
+                        "retained_candidate_count": 1,
+                        "schema_version": 1,
+                        "shortfall_bytes": 974,
+                    },
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "sandbox_write_capacity_ready": False,
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    capacity_recheck = tmp_path / "capacity-recheck.json"
+    capacity_recheck.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.target-capacity-recheck",
+                "data": {
+                    "available_bytes": 50,
+                    "blockers": [
+                        "target filesystem free space is below the configured floor"
+                    ],
+                    "cleanup_executed": False,
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "required_free_bytes": 1024,
+                    "sandbox_write_capacity_ready": False,
+                    "shortfall_bytes": 974,
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={
+            "sandbox_write_capacity_ready": False,
+            "blockers": ["target filesystem free space is below the configured floor"],
+            "shortfall_bytes": 974,
+        },
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--required-free-bytes",
+                "1024",
+                "--target-capacity-plan-report",
+                str(capacity_plan),
+                "--target-capacity-recheck-report",
+                str(capacity_recheck),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["goal_readiness_ready"] is False
+    assert data["capacity"]["retained_plan"]["summary"]["candidate_count"] == 3
+    assert data["capacity"]["retained_plan"]["summary"]["shortfall_bytes"] == 974
+    assert data["capacity"]["retained_recheck"]["summary"]["available_bytes"] == 50
+    assert len(data["capacity"]["retained_plan"]["report_sha256"]) == 64
+    assert len(data["capacity"]["retained_recheck"]["report_sha256"]) == 64
+    assert "target capacity recheck is not ready" in data["blockers"]
+    assert (
+        "target capacity plan candidates cannot cover the capacity shortfall"
+        in data["blockers"]
+    )
+
+
 def test_evidence_goal_readiness_reports_missing_sandbox_database_observation():
     expected_identity = {
         "commit": "1" * 40,
