@@ -3599,6 +3599,13 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         assert action["command_args_template"]
         assert isinstance(action["required_placeholders"], list)
         assert action["required_placeholders"]
+        assert set(action["placeholder_schema"]) == set(action["required_placeholders"])
+        for placeholder, schema in action["placeholder_schema"].items():
+            assert schema["description"]
+            assert schema["format"]
+            assert schema["operator_supplied"] is True
+            assert schema["sensitive"] is False
+            assert placeholder in action["required_placeholders"]
         assert all(isinstance(step, list) for step in action["command_args_template"])
         assert all(step[0] in {"evidence", "tools/pi_scenario_gate.py"} for step in action["command_args_template"])
     capacity = next(
@@ -3614,6 +3621,10 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         "REQUIRED_FREE_BYTES",
         "ROUTED_RELEASE",
     ]
+    assert capacity["placeholder_schema"]["REQUIRED_FREE_BYTES"]["format"] == (
+        "positive_integer"
+    )
+    assert capacity["placeholder_schema"]["CAPACITY_PATH"]["format"] == "absolute_path"
 
 
 def test_evidence_goal_remediation_checklist_rejects_wrong_retained_command(

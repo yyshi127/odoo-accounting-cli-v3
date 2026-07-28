@@ -140,7 +140,12 @@ human-readable `operator_command` and a structured `command_args_template` so
 Pi Bridge or an operator tool can fill placeholders without parsing shell text.
 Each action also carries `required_placeholders`, derived from the command
 templates, so automation can reject incomplete operator input before invoking a
-release command.
+release command. The companion `placeholder_schema` field describes every
+placeholder's expected format, operator-supplied status, sensitivity, and
+business meaning. Treat a checklist action as incomplete if any required
+placeholder has no matching schema entry or if an operator cannot bind it to a
+retained evidence file, exact database/company value, routed release identity,
+or positive capacity threshold as described.
 It is read-only and never turns a failing readiness report into business
 success. The expected release options bind the handoff to the same exact
 release as the readiness report and reject stale or cross-release evidence

@@ -716,6 +716,104 @@ FINAL_EVIDENCE_REQUIRED_ARTIFACTS = tuple(
 
 
 GOAL_REMEDIATION_SCHEMA = "odoo-accounting-cli-v3.goal-remediation-checklist.v1"
+GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
+    "CAPACITY_PATH": {
+        "description": "Filesystem path whose free space must satisfy the sandbox write capacity floor.",
+        "format": "absolute_path",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "COMPANY": {
+        "description": "Exact Odoo company name or identifier bound to the sandbox evidence packet.",
+        "format": "odoo_company",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "NORMALIZED_PI_TRACE_CAPTURE_JSON": {
+        "description": "Retained normalized Pi Agent trace capture JSON for the routed release.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "OBSERVED_DATABASE": {
+        "description": "Database name observed in the PostgreSQL catalog evidence.",
+        "format": "postgres_database_name",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "OPERATOR_ID": {
+        "description": "Human or service operator identity recorded on sandbox provisioning authorization.",
+        "format": "operator_identity",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "PI_GATE_REPORT_JSON": {
+        "description": "Output path for the Pi scenario acceptance gate report.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "PRODUCTION_DATABASE": {
+        "description": "Protected production database name that must not be selected for sandbox writes.",
+        "format": "postgres_database_name",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "REQUIRED_FREE_BYTES": {
+        "description": "Minimum free bytes required by the sandbox write capacity gate.",
+        "format": "positive_integer",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "ROUTED_RELEASE": {
+        "description": "Immutable release directory name currently routed through /opt/odoo-accounting-cli-v3/current.",
+        "format": "release_identity",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "SANDBOX_DATABASE_NAME": {
+        "description": "Dedicated sandbox database name authorized for V3 write-lifecycle validation.",
+        "format": "postgres_database_name",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "SANDBOX_ONBOARDING_READINESS_JSON": {
+        "description": "Retained sandbox onboarding readiness receipt JSON for the routed release.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "SANDBOX_PROVISION_AUTHORIZATION_JSON": {
+        "description": "Retained sandbox provisioning authorization JSON signed or approved by the authorized operator.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "SANDBOX_WRITE_EVIDENCE_ROOT": {
+        "description": "Directory containing real sandbox write lifecycle evidence for registered write capabilities.",
+        "format": "directory_path",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "SOURCE_DATABASE_NAME": {
+        "description": "Source database name used to provision or refresh the dedicated sandbox database.",
+        "format": "postgres_database_name",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "TRUSTED_TRACE_ATTESTATION_KEYS_JSON": {
+        "description": "JSON file containing the trusted attestation keys used to verify Pi trace integrity.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "UTC_TIMESTAMP": {
+        "description": "UTC expiration timestamp for sandbox provisioning authorization.",
+        "format": "rfc3339_utc_timestamp",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+}
 GOAL_REMEDIATION_ACTIONS = (
     {
         "action_id": "pi_scenario_acceptance",
@@ -840,6 +938,14 @@ def _command_template_placeholders(command_args_template: Any) -> list[str]:
     return sorted(placeholders)
 
 
+def _placeholder_schema(placeholders: list[str]) -> dict[str, dict[str, Any]]:
+    return {
+        name: dict(GOAL_REMEDIATION_PLACEHOLDER_SCHEMA[name])
+        for name in placeholders
+        if name in GOAL_REMEDIATION_PLACEHOLDER_SCHEMA
+    }
+
+
 def _goal_remediation_report(
     goal_readiness_report: Path,
     *,
@@ -885,6 +991,9 @@ def _goal_remediation_report(
         )
         if not matching:
             continue
+        placeholders = _command_template_placeholders(
+            template["command_args_template"]
+        )
         actions.append(
             {
                 "action_id": template["action_id"],
@@ -899,9 +1008,8 @@ def _goal_remediation_report(
                 "production_promotion_allowed": False,
                 "real_odoo_write_performed": False,
                 "required_artifacts": list(template["required_artifacts"]),
-                "required_placeholders": _command_template_placeholders(
-                    template["command_args_template"]
-                ),
+                "required_placeholders": placeholders,
+                "placeholder_schema": _placeholder_schema(placeholders),
                 "status": "pending",
             }
         )
