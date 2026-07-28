@@ -3516,6 +3516,109 @@ def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
     assert "sandbox write pipeline readiness report was not supplied" in data["blockers"]
 
 
+def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
+    tmp_path: Path,
+):
+    report = tmp_path / "goal-readiness.json"
+    report.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.goal-readiness",
+                "data": {
+                    "blockers": [
+                        "Pi scenario acceptance report was not supplied",
+                        "sandbox database was not observed in the PostgreSQL catalog",
+                        "sandbox onboarding readiness receipt was not supplied",
+                        "sandbox provision authorization file was not supplied",
+                        "sandbox write capacity gate is not ready",
+                        "sandbox write pipeline readiness report was not supplied",
+                    ],
+                    "goal_readiness_ready": False,
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "release_identity": {
+                        "commit": "1" * 40,
+                        "manifest_sha256": "2" * 64,
+                        "package_sha256": "3" * 64,
+                        "registry_digest": "4" * 64,
+                        "release": "0.1.0.dev236-test",
+                    },
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "goal-remediation-checklist",
+            "--goal-readiness-report",
+            str(report),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.goal-remediation-checklist"
+    assert payload["business_succeeded"] is False
+    data = payload["data"]
+    assert data["schema_version"] == (
+        "odoo-accounting-cli-v3.goal-remediation-checklist.v1"
+    )
+    assert data["goal_readiness_ready"] is False
+    assert data["ordered_action_count"] == 6
+    assert data["unmatched_blockers"] == []
+    assert data["real_odoo_write_performed"] is False
+    assert {
+        action["action_id"] for action in data["actions"]
+    } == {
+        "pi_scenario_acceptance",
+        "sandbox_capacity",
+        "sandbox_database_catalog",
+        "sandbox_onboarding_receipt",
+        "sandbox_provision_authorization",
+        "sandbox_write_pipeline",
+    }
+
+
+def test_evidence_goal_remediation_checklist_rejects_wrong_retained_command(
+    tmp_path: Path,
+):
+    report = tmp_path / "wrong.json"
+    report.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.registry.audit",
+                "data": {"blockers": [], "goal_readiness_ready": True},
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "goal-remediation-checklist",
+            "--goal-readiness-report",
+            str(report),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["goal_readiness_ready"] is False
+    assert data["blockers"] == ["goal-readiness report has the wrong command"]
+
+
 def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     expected_identity = {
         "commit": "1" * 40,

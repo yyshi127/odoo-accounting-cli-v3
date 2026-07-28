@@ -116,6 +116,23 @@ sandbox/source/company scope, and independently passing. A passing aggregate
 report is a final checklist input; it still does not itself authorize production
 writes.
 
+If `goal-readiness` remains false, convert the retained JSON report into a
+bounded operator handoff checklist:
+
+```bash
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence goal-remediation-checklist \
+  --goal-readiness-report <GOAL_READINESS_JSON>
+```
+
+The checklist has schema
+`odoo-accounting-cli-v3.goal-remediation-checklist.v1`. It maps retained
+blockers to stable action IDs for Pi scenario acceptance, sandbox capacity,
+sandbox database observation, sandbox provisioning authorization, sandbox
+onboarding, and sandbox write-pipeline evidence. It is read-only and never
+turns a failing readiness report into business success.
+
 After the final gate and all prerequisite checks are retained, build a final
 evidence manifest with schema
 `odoo-accounting-cli-v3.final-evidence-manifest.v1`. The manifest must bind the

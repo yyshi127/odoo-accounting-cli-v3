@@ -715,6 +715,78 @@ FINAL_EVIDENCE_REQUIRED_ARTIFACTS = tuple(
 )
 
 
+GOAL_REMEDIATION_SCHEMA = "odoo-accounting-cli-v3.goal-remediation-checklist.v1"
+GOAL_REMEDIATION_ACTIONS = (
+    {
+        "action_id": "pi_scenario_acceptance",
+        "blocker_patterns": ("Pi scenario",),
+        "description": "Capture and score real Pi Agent end-to-end traces for the routed release.",
+        "required_artifacts": (
+            "pi_trace_capture_check",
+            "pi_scenario_report",
+            "pi_scenario_report_check",
+        ),
+        "operator_command": "evidence pi-trace-capture-check; tools/pi_scenario_gate.py; evidence pi-scenario-report-check",
+        "authorization_required": False,
+    },
+    {
+        "action_id": "sandbox_capacity",
+        "blocker_patterns": ("capacity", "free space"),
+        "description": "Add, relocate, or explicitly authorize reviewed cleanup until the sandbox capacity floor passes.",
+        "required_artifacts": (
+            "target_capacity_plan",
+            "target_capacity_recheck",
+        ),
+        "operator_command": "evidence target-capacity-plan; evidence target-capacity-recheck",
+        "authorization_required": True,
+    },
+    {
+        "action_id": "sandbox_database_catalog",
+        "blocker_patterns": ("sandbox database", "database catalog"),
+        "description": "Create or select the dedicated sandbox database and retain catalog evidence for that exact name.",
+        "required_artifacts": (
+            "sandbox_database_candidates",
+            "sandbox_database_catalog_observation",
+        ),
+        "operator_command": "evidence sandbox-database-candidates",
+        "authorization_required": True,
+    },
+    {
+        "action_id": "sandbox_provision_authorization",
+        "blocker_patterns": ("sandbox provision authorization", "authorization file"),
+        "description": "Save and validate the sandbox database provisioning authorization record.",
+        "required_artifacts": (
+            "sandbox_provision_authorization",
+            "sandbox_provision_authorization_check",
+        ),
+        "operator_command": "evidence sandbox-provision-authorization-template; evidence sandbox-provision-authorization-check",
+        "authorization_required": True,
+    },
+    {
+        "action_id": "sandbox_onboarding_receipt",
+        "blocker_patterns": ("sandbox onboarding",),
+        "description": "Rerun the aggregate sandbox onboarding gate after route, capacity, database, and authorization evidence pass.",
+        "required_artifacts": (
+            "sandbox_onboarding_receipt",
+            "sandbox_onboarding_receipt_check",
+        ),
+        "operator_command": "evidence sandbox-onboarding-readiness; evidence sandbox-onboarding-receipt-check",
+        "authorization_required": False,
+    },
+    {
+        "action_id": "sandbox_write_pipeline",
+        "blocker_patterns": ("write pipeline", "write evidence index"),
+        "description": "Collect real sandbox write lifecycle evidence for every registered write capability, then validate the pipeline.",
+        "required_artifacts": (
+            "write_pipeline_report",
+            "write_evidence_index",
+        ),
+        "operator_command": "evidence write-pipeline-readiness; evidence write-evidence-index",
+        "authorization_required": True,
+    },
+)
+
+
 def _manifest_artifact_reference(manifest_path: Path, artifact_path: Path) -> str:
     try:
         return artifact_path.resolve().relative_to(manifest_path.parent.resolve()).as_posix()
@@ -729,6 +801,77 @@ def _manifest_artifact_path(manifest_path: Path, value: Any) -> Path | None:
     if path.is_absolute():
         return path
     return manifest_path.parent / path
+
+
+def _goal_remediation_report(goal_readiness_report: Path, *, command: str) -> dict[str, Any]:
+    retained = _load_retained_json_report(
+        goal_readiness_report, command=command, label="goal readiness"
+    )
+    data = retained.get("data")
+    blockers: list[str] = []
+    if retained.get("ok") is not True:
+        blockers.append("goal-readiness report is not successful")
+    if retained.get("command") != "evidence.goal-readiness":
+        blockers.append("goal-readiness report has the wrong command")
+    if not isinstance(data, dict):
+        blockers.append("goal-readiness report data is invalid")
+        data = {}
+    goal_blockers = data.get("blockers") if isinstance(data, dict) else None
+    if not isinstance(goal_blockers, list) or any(
+        not isinstance(item, str) for item in goal_blockers
+    ):
+        blockers.append("goal-readiness blockers are invalid")
+        goal_blockers = []
+    release_identity = data.get("release_identity") if isinstance(data, dict) else None
+    if not isinstance(release_identity, dict):
+        release_identity = None
+    goal_ready = data.get("goal_readiness_ready") is True if isinstance(data, dict) else False
+    actions = []
+    for template in GOAL_REMEDIATION_ACTIONS:
+        matching = sorted(
+            {
+                blocker
+                for blocker in goal_blockers
+                if any(pattern in blocker for pattern in template["blocker_patterns"])
+            }
+        )
+        if not matching:
+            continue
+        actions.append(
+            {
+                "action_id": template["action_id"],
+                "authorization_required": template["authorization_required"],
+                "blocking_evidence": matching,
+                "description": template["description"],
+                "operator_command": template["operator_command"],
+                "production_promotion_allowed": False,
+                "real_odoo_write_performed": False,
+                "required_artifacts": list(template["required_artifacts"]),
+                "status": "pending",
+            }
+        )
+    unmatched_blockers = sorted(
+        set(goal_blockers)
+        - {
+            blocker
+            for action in actions
+            for blocker in action["blocking_evidence"]
+        }
+    )
+    return {
+        "actions": actions,
+        "blockers": sorted(set(blockers)),
+        "goal_blockers": sorted(set(goal_blockers)),
+        "goal_readiness_ready": goal_ready and not blockers,
+        "goal_readiness_report": str(goal_readiness_report),
+        "goal_readiness_report_sha256": _sha256_file(goal_readiness_report),
+        "ordered_action_count": len(actions),
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "release_identity": release_identity,
+        "schema_version": GOAL_REMEDIATION_SCHEMA,
+        "unmatched_blockers": unmatched_blockers,
+    }
 
 
 def _final_evidence_manifest_document(
@@ -3257,6 +3400,24 @@ def evidence_pi_trace_capture_check(
         "trace_file_sha256": _sha256_file(trace_file),
     }
     _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("goal-remediation-checklist")
+@click.option(
+    "--goal-readiness-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.goal-readiness JSON output to convert into operator actions.",
+)
+def evidence_goal_remediation_checklist(goal_readiness_report: Path) -> None:
+    """Render a read-only remediation checklist from a retained goal-readiness report."""
+
+    command = "evidence.goal-remediation-checklist"
+    _success(
+        command,
+        _goal_remediation_report(goal_readiness_report, command=command),
+        business_succeeded=False,
+    )
 
 
 @evidence_group.command("final-evidence-manifest-assemble")
