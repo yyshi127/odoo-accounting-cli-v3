@@ -337,6 +337,129 @@ def _load_capabilities() -> tuple[Capability, ...]:
     )
 
 
+def _count_values(values: list[str], expected: tuple[str, ...] = ()) -> dict[str, int]:
+    counts = {key: 0 for key in expected}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _is_strict_object_schema(schema: Any) -> bool:
+    return (
+        isinstance(schema, dict)
+        and schema.get("type") == "object"
+        and schema.get("additionalProperties") is False
+        and isinstance(schema.get("properties"), dict)
+    )
+
+
+def _registry_audit_report(capabilities: tuple[Capability, ...]) -> dict[str, Any]:
+    items = sorted((capability.data for capability in capabilities), key=lambda item: item["id"])
+    capability_ids = [item["id"] for item in items]
+    write_items = [item for item in items if item["access"] == "write"]
+    read_items = [item for item in items if item["access"] == "read"]
+    strict_input_ids = [
+        item["id"] for item in items if _is_strict_object_schema(item["input_schema"])
+    ]
+    strict_output_ids = [
+        item["id"] for item in items if _is_strict_object_schema(item["output_schema"])
+    ]
+    write_approval_ids = [
+        item["id"] for item in write_items if item["approval"].get("required") is True
+    ]
+    write_idempotency_ids = [
+        item["id"] for item in write_items if item["idempotency"].get("required") is True
+    ]
+    read_approval_closed_ids = [
+        item["id"] for item in read_items if item["approval"].get("required") is False
+    ]
+    read_idempotency_closed_ids = [
+        item["id"] for item in read_items if item["idempotency"].get("required") is False
+    ]
+    enabled_by_environment = {
+        environment: sorted(
+            item["id"]
+            for item in items
+            if environment in item.get("enabled_environments", [])
+        )
+        for environment in ("test", "sandbox", "production")
+    }
+    staged_by_environment = {
+        environment: sorted(
+            item["id"]
+            for item in items
+            if environment in item.get("staged_environments", [])
+        )
+        for environment in ("test", "sandbox", "production")
+    }
+    blockers: list[str] = []
+    if len(strict_input_ids) != len(items):
+        blockers.append("not every capability has a strict object input schema")
+    if len(strict_output_ids) != len(items):
+        blockers.append("not every capability has a strict object output schema")
+    if len(write_approval_ids) != len(write_items):
+        blockers.append("not every write capability requires approval")
+    if len(write_idempotency_ids) != len(write_items):
+        blockers.append("not every write capability requires idempotency")
+    if len(read_approval_closed_ids) != len(read_items):
+        blockers.append("not every read capability keeps approval disabled")
+    if len(read_idempotency_closed_ids) != len(read_items):
+        blockers.append("not every read capability keeps idempotency disabled")
+    if enabled_by_environment["production"]:
+        blockers.append("one or more capabilities are enabled in production")
+    if any(item["id"] in staged_by_environment["sandbox"] for item in write_items):
+        blockers.append("one or more write capabilities are staged in sandbox")
+    return {
+        "access_counts": _count_values(
+            [item["access"] for item in items],
+            ("read", "write"),
+        ),
+        "blockers": sorted(set(blockers)),
+        "capability_ids": capability_ids,
+        "enabled_by_environment": enabled_by_environment,
+        "enabled_environment_counts": {
+            environment: len(ids) for environment, ids in enabled_by_environment.items()
+        },
+        "evidence_level_counts": _count_values(
+            [item["evidence"]["level"] for item in items],
+            (
+                "contract_tested",
+                "declared",
+                "odoo_verified",
+                "sandbox_verified",
+                "production_verified",
+            ),
+        ),
+        "policy_counts": {
+            "read_approval_disabled": len(read_approval_closed_ids),
+            "read_idempotency_disabled": len(read_idempotency_closed_ids),
+            "write_approval_required": len(write_approval_ids),
+            "write_idempotency_required": len(write_idempotency_ids),
+        },
+        "production_promotion_allowed": False,
+        "read_count": len(read_items),
+        "real_odoo_write_performed": False,
+        "registry_audit_ready": not blockers,
+        "registry_digest": registry_digest(capabilities),
+        "risk_level_counts": _count_values(
+            [item["risk_level"] for item in items],
+            ("critical", "high", "low", "medium"),
+        ),
+        "staged_by_environment": staged_by_environment,
+        "staged_environment_counts": {
+            environment: len(ids) for environment, ids in staged_by_environment.items()
+        },
+        "strict_schema": {
+            "input_strict_count": len(strict_input_ids),
+            "input_strict_ids": strict_input_ids,
+            "output_strict_count": len(strict_output_ids),
+            "output_strict_ids": strict_output_ids,
+        },
+        "total_count": len(items),
+        "write_count": len(write_items),
+    }
+
+
 def _load_release_identity(
     root: Path | None = None, *, command: str = "release.identity"
 ) -> dict[str, Any]:
@@ -3694,6 +3817,14 @@ def registry_list() -> None:
             "registry_digest": registry_digest(capabilities),
         },
     )
+
+
+@registry_group.command("audit")
+def registry_audit() -> None:
+    """Return machine-checkable registry completeness and safety gates."""
+
+    capabilities = _load_capabilities()
+    _success("registry.audit", _registry_audit_report(capabilities))
 
 
 @registry_group.command("get")

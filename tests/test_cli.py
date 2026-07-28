@@ -53,6 +53,32 @@ def test_registry_list_is_json_and_uses_validated_registry() -> None:
     )
 
 
+def test_registry_audit_reports_complete_contract_and_closed_production_gate() -> None:
+    result = _run("registry", "audit")
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    data = payload["data"]
+    assert payload["ok"] is True
+    assert payload["command"] == "registry.audit"
+    assert data["registry_audit_ready"] is True
+    assert data["blockers"] == []
+    assert data["total_count"] == 24
+    assert data["access_counts"] == {"read": 10, "write": 14}
+    assert data["read_count"] == 10
+    assert data["write_count"] == 14
+    assert data["strict_schema"]["input_strict_count"] == data["total_count"]
+    assert data["strict_schema"]["output_strict_count"] == data["total_count"]
+    assert data["policy_counts"]["write_approval_required"] == data["write_count"]
+    assert data["policy_counts"]["write_idempotency_required"] == data["write_count"]
+    assert data["enabled_environment_counts"] == {"production": 0, "sandbox": 0, "test": 0}
+    assert data["staged_environment_counts"] == {"production": 0, "sandbox": 0, "test": 6}
+    assert data["production_promotion_allowed"] is False
+    assert data["real_odoo_write_performed"] is False
+    assert len(data["registry_digest"]) == 64
+
+
 def test_registry_get_returns_exact_capability() -> None:
     capability_id = "acct.gl.trial_balance.v1"
     result = _run("registry", "get", "--capability-id", capability_id)
