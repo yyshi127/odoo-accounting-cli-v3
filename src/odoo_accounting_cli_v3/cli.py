@@ -827,6 +827,19 @@ def _manifest_artifact_path(manifest_path: Path, value: Any) -> Path | None:
     return manifest_path.parent / path
 
 
+def _command_template_placeholders(command_args_template: Any) -> list[str]:
+    placeholders: set[str] = set()
+    if not isinstance(command_args_template, tuple):
+        return []
+    for command_args in command_args_template:
+        if not isinstance(command_args, tuple):
+            continue
+        for item in command_args:
+            if isinstance(item, str) and item.startswith("<") and item.endswith(">"):
+                placeholders.add(item[1:-1])
+    return sorted(placeholders)
+
+
 def _goal_remediation_report(
     goal_readiness_report: Path,
     *,
@@ -886,6 +899,9 @@ def _goal_remediation_report(
                 "production_promotion_allowed": False,
                 "real_odoo_write_performed": False,
                 "required_artifacts": list(template["required_artifacts"]),
+                "required_placeholders": _command_template_placeholders(
+                    template["command_args_template"]
+                ),
                 "status": "pending",
             }
         )

@@ -3597,6 +3597,8 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
     for action in data["actions"]:
         assert isinstance(action["command_args_template"], list)
         assert action["command_args_template"]
+        assert isinstance(action["required_placeholders"], list)
+        assert action["required_placeholders"]
         assert all(isinstance(step, list) for step in action["command_args_template"])
         assert all(step[0] in {"evidence", "tools/pi_scenario_gate.py"} for step in action["command_args_template"])
     capacity = next(
@@ -3607,6 +3609,11 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         "target-capacity-plan",
     ]
     assert "<REQUIRED_FREE_BYTES>" in capacity["command_args_template"][0]
+    assert capacity["required_placeholders"] == [
+        "CAPACITY_PATH",
+        "REQUIRED_FREE_BYTES",
+        "ROUTED_RELEASE",
+    ]
 
 
 def test_evidence_goal_remediation_checklist_rejects_wrong_retained_command(

@@ -138,6 +138,9 @@ sandbox database observation, sandbox provisioning authorization, sandbox
 onboarding, and sandbox write-pipeline evidence. Each action includes both a
 human-readable `operator_command` and a structured `command_args_template` so
 Pi Bridge or an operator tool can fill placeholders without parsing shell text.
+Each action also carries `required_placeholders`, derived from the command
+templates, so automation can reject incomplete operator input before invoking a
+release command.
 It is read-only and never turns a failing readiness report into business
 success. The expected release options bind the handoff to the same exact
 release as the readiness report and reject stale or cross-release evidence
