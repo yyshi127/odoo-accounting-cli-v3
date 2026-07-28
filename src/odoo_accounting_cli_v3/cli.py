@@ -858,6 +858,8 @@ FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
     "pi_scenario_report_check": "evidence.pi-scenario-report-check",
     "pi_trace_capture_check": "evidence.pi-trace-capture-check",
     "sandbox_onboarding_receipt": "evidence.sandbox-onboarding-readiness",
+    "sandbox_prerequisite_handoff": "evidence.sandbox-prerequisite-handoff",
+    "sandbox_prerequisite_handoff_check": "evidence.sandbox-prerequisite-handoff-check",
     "write_evidence_index": "evidence.write-evidence-index",
     "write_pipeline_report": "evidence.write-pipeline-readiness",
 }
@@ -1567,6 +1569,26 @@ def _final_evidence_manifest_report(
         if name == "sandbox_provision_authorization" and isinstance(document, dict):
             if document.get("purpose") != "sandbox_database_provision":
                 artifact_blockers.append("sandbox provision authorization purpose is invalid")
+        if name == "sandbox_prerequisite_handoff" and isinstance(document, dict):
+            data = document.get("data")
+            if not isinstance(data, dict):
+                artifact_blockers.append("sandbox prerequisite handoff data is invalid")
+            else:
+                if data.get("schema_version") != SANDBOX_PREREQUISITE_HANDOFF_SCHEMA:
+                    artifact_blockers.append("sandbox prerequisite handoff schema is invalid")
+                if data.get("production_promotion_allowed") is not False:
+                    artifact_blockers.append("sandbox prerequisite handoff must not authorize production")
+                if data.get("real_odoo_write_performed") is not False:
+                    artifact_blockers.append("sandbox prerequisite handoff must not be a write receipt")
+        if name == "sandbox_prerequisite_handoff_check" and isinstance(document, dict):
+            data = document.get("data")
+            if not isinstance(data, dict):
+                artifact_blockers.append("sandbox prerequisite handoff check data is invalid")
+            else:
+                if data.get("schema_version") != SANDBOX_PREREQUISITE_HANDOFF_SCHEMA:
+                    artifact_blockers.append("sandbox prerequisite handoff check schema is invalid")
+                if data.get("handoff_check_ready") is not True:
+                    artifact_blockers.append("sandbox prerequisite handoff check is not ready")
         if artifact_blockers:
             blockers.extend(f"{name}: {item}" for item in artifact_blockers)
         artifact_reports[name] = {
@@ -4227,6 +4249,18 @@ def evidence_sandbox_prerequisite_handoff_check(
     help="Retained sandbox provision authorization JSON.",
 )
 @click.option(
+    "--sandbox-prerequisite-handoff",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.sandbox-prerequisite-handoff JSON.",
+)
+@click.option(
+    "--sandbox-prerequisite-handoff-check",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.sandbox-prerequisite-handoff-check JSON.",
+)
+@click.option(
     "--write-pipeline-report",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
@@ -4268,6 +4302,8 @@ def evidence_final_evidence_manifest_assemble(
     pi_scenario_report_check: Path,
     sandbox_onboarding_receipt: Path,
     sandbox_provision_authorization: Path,
+    sandbox_prerequisite_handoff: Path,
+    sandbox_prerequisite_handoff_check: Path,
     write_pipeline_report: Path,
     write_evidence_index: Path,
     goal_readiness_report: Path,
@@ -4296,6 +4332,8 @@ def evidence_final_evidence_manifest_assemble(
         "pi_trace_capture_check": pi_trace_capture_check,
         "sandbox_onboarding_receipt": sandbox_onboarding_receipt,
         "sandbox_provision_authorization": sandbox_provision_authorization,
+        "sandbox_prerequisite_handoff": sandbox_prerequisite_handoff,
+        "sandbox_prerequisite_handoff_check": sandbox_prerequisite_handoff_check,
         "write_evidence_index": write_evidence_index,
         "write_pipeline_report": write_pipeline_report,
     }

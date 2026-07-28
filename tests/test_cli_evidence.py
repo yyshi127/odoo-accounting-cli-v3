@@ -231,6 +231,65 @@ def _ready_final_evidence_manifest(
         __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
         encoding="utf-8",
     )
+    handoff = {
+        "business_succeeded": False,
+        "command": "evidence.sandbox-prerequisite-handoff",
+        "data": {
+            "blockers": [],
+            "decision_count": 1,
+            "decisions": [
+                {
+                    "authorization_required": True,
+                    "business_reason": "A dedicated sandbox database must exist before real Odoo write evidence can be collected.",
+                    "decision_id": "dedicated_sandbox_database",
+                    "evidence": {
+                        "eligible_count": 0,
+                        "expected_sandbox_database_name": "odoo_v3_sandbox",
+                    },
+                    "required_operator_action": "create or select the dedicated sandbox database",
+                    "status": "pending",
+                }
+            ],
+            "goal_readiness_report": "goal_readiness_report.json",
+            "goal_readiness_report_sha256": "5" * 64,
+            "handoff_ready": True,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "release_identity": release_identity,
+            "schema_version": "odoo-accounting-cli-v3.sandbox-prerequisite-handoff.v1",
+        },
+        "ok": True,
+    }
+    handoff_path = tmp_path / "sandbox_prerequisite_handoff.json"
+    handoff_path.write_text(
+        __import__("json").dumps(handoff, sort_keys=True),
+        encoding="utf-8",
+    )
+    artifacts["sandbox_prerequisite_handoff"] = handoff_path
+    handoff_check = {
+        "business_succeeded": False,
+        "command": "evidence.sandbox-prerequisite-handoff-check",
+        "data": {
+            "authorization_required_count": 1,
+            "blockers": [],
+            "decision_count": 1,
+            "decision_ids": ["dedicated_sandbox_database"],
+            "handoff_check_ready": True,
+            "handoff_file": str(handoff_path),
+            "handoff_sha256": _sha256_path(handoff_path),
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "release_identity": release_identity,
+            "schema_version": "odoo-accounting-cli-v3.sandbox-prerequisite-handoff.v1",
+        },
+        "ok": True,
+    }
+    handoff_check_path = tmp_path / "sandbox_prerequisite_handoff_check.json"
+    handoff_check_path.write_text(
+        __import__("json").dumps(handoff_check, sort_keys=True),
+        encoding="utf-8",
+    )
+    artifacts["sandbox_prerequisite_handoff_check"] = handoff_check_path
     for name, command in {
         "goal_readiness_report": "evidence.goal-readiness",
         "pi_scenario_report_check": "evidence.pi-scenario-report-check",
@@ -4375,7 +4434,7 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     assert payload["business_succeeded"] is False
     data = payload["data"]
     assert data["final_evidence_manifest_ready"] is True
-    assert data["artifact_count"] == 8
+    assert data["artifact_count"] == 10
     assert data["blockers"] == []
     assert data["real_odoo_write_performed"] is False
 
@@ -4421,6 +4480,10 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
                 str(artifacts["sandbox_onboarding_receipt"]),
                 "--sandbox-provision-authorization",
                 str(artifacts["sandbox_provision_authorization"]),
+                "--sandbox-prerequisite-handoff",
+                str(artifacts["sandbox_prerequisite_handoff"]),
+                "--sandbox-prerequisite-handoff-check",
+                str(artifacts["sandbox_prerequisite_handoff_check"]),
                 "--write-pipeline-report",
                 str(artifacts["write_pipeline_report"]),
                 "--write-evidence-index",
@@ -4480,6 +4543,10 @@ def test_evidence_final_evidence_manifest_assemble_rejects_duplicate_artifact(
             str(artifacts["sandbox_onboarding_receipt"]),
             "--sandbox-provision-authorization",
             str(artifacts["sandbox_provision_authorization"]),
+            "--sandbox-prerequisite-handoff",
+            str(artifacts["sandbox_prerequisite_handoff"]),
+            "--sandbox-prerequisite-handoff-check",
+            str(artifacts["sandbox_prerequisite_handoff_check"]),
             "--write-pipeline-report",
             str(artifacts["write_pipeline_report"]),
             "--write-evidence-index",
