@@ -105,6 +105,7 @@ does not replace the captured Pi trace report.
 
 A release can pass the Pi scenario gate only when its retained report has:
 
+- `capture.v3_release_sha256` equal to the current release package SHA-256;
 - `trace_coverage.passed:true`;
 - `gates.F01.passed:true` with at least `95.00`;
 - `gates.F02.passed:true`;

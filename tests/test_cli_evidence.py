@@ -105,7 +105,11 @@ def _ready_onboarding_receipt(
     return path
 
 
-def _ready_pi_scenario_report(tmp_path: Path) -> Path:
+def _ready_pi_scenario_report(
+    tmp_path: Path,
+    *,
+    package_sha256: str = "4" * 64,
+) -> Path:
     gates = {
         gate_id: {
             "denominator": 25,
@@ -120,7 +124,10 @@ def _ready_pi_scenario_report(tmp_path: Path) -> Path:
     report = {
         "acceptance_passed": True,
         "attestation": {"key_id": "test-key", "signature": "ab"},
-        "capture": {"run_id": "pi-run-1"},
+        "capture": {
+            "run_id": "pi-run-1",
+            "v3_release_sha256": package_sha256,
+        },
         "corpus_id": "xiaojing-accounting-key-scenarios-v1",
         "corpus_sha256": "1" * 64,
         "gates": gates,
@@ -3330,7 +3337,9 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         "verified": True,
         "version": "0.1.0.dev221",
     }
-    pi_report = _ready_pi_scenario_report(tmp_path)
+    pi_report = _ready_pi_scenario_report(
+        tmp_path, package_sha256=expected_identity["package_sha256"]
+    )
     onboarding_receipt = _ready_onboarding_receipt(
         tmp_path, release_identity=expected_identity
     )
@@ -3388,6 +3397,53 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     assert data["sandbox_database"]["sandbox_database_ready"] is True
     assert data["write_pipeline"]["write_pipeline_ready"] is True
     assert data["write_static_readiness"]["admissible_count"] == 14
+
+
+def test_evidence_goal_readiness_rejects_pi_report_from_other_release(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev227",
+    }
+    pi_report = _ready_pi_scenario_report(tmp_path, package_sha256="5" * 64)
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--pi-scenario-report",
+                str(pi_report),
+                "--observed-database-name",
+                "odoo_v3_sandbox",
+                "--expected-sandbox-database-name",
+                "odoo_v3_sandbox",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["pi_scenario"]["scenario_acceptance_ready"] is False
+    assert (
+        "Pi scenario report is not bound to the current release package"
+        in data["blockers"]
+    )
 
 
 def test_evidence_goal_readiness_reports_live_capacity_shortfall():

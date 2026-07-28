@@ -484,6 +484,7 @@ def _pi_scenario_acceptance_report_status(
     pi_scenario_report: Path | None,
     *,
     command: str,
+    expected_release_identity: dict[str, Any],
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if pi_scenario_report is None:
@@ -509,11 +510,16 @@ def _pi_scenario_acceptance_report_status(
     )
     gates = report.get("gates")
     coverage = report.get("trace_coverage")
+    capture = report.get("capture")
     required_gates = ("F01", "F02", "F03", "F05")
     if report.get("schema_version") != "odoo-accounting-cli-v3.pi-gate-report.v1":
         blockers.append("Pi scenario report has the wrong schema")
     if report.get("acceptance_passed") is not True:
         blockers.append("Pi scenario report did not pass acceptance")
+    if not isinstance(capture, dict):
+        blockers.append("Pi scenario capture summary is invalid")
+    elif capture.get("v3_release_sha256") != expected_release_identity.get("package_sha256"):
+        blockers.append("Pi scenario report is not bound to the current release package")
     if not isinstance(coverage, dict) or coverage.get("passed") is not True:
         blockers.append("Pi scenario trace coverage did not pass")
     if not isinstance(gates, dict):
@@ -536,6 +542,7 @@ def _pi_scenario_acceptance_report_status(
         "scenario_acceptance_ready": not blockers,
         "summary": {
             "acceptance_passed": report.get("acceptance_passed"),
+            "capture": capture,
             "coverage": coverage,
             "gates": gate_summary,
             "run_id": report.get("run_id"),
@@ -2923,7 +2930,9 @@ def evidence_goal_readiness(
         1 for report in static_write_reports if report["sandbox_drill_admissible"] is True
     )
     pi_report = _pi_scenario_acceptance_report_status(
-        pi_scenario_report, command=command
+        pi_scenario_report,
+        command=command,
+        expected_release_identity=expected_release_identity,
     )
     onboarding_report = _sandbox_onboarding_receipt_report(
         sandbox_onboarding_receipt,
