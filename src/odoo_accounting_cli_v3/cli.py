@@ -803,7 +803,12 @@ def _manifest_artifact_path(manifest_path: Path, value: Any) -> Path | None:
     return manifest_path.parent / path
 
 
-def _goal_remediation_report(goal_readiness_report: Path, *, command: str) -> dict[str, Any]:
+def _goal_remediation_report(
+    goal_readiness_report: Path,
+    *,
+    command: str,
+    expected_release_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     retained = _load_retained_json_report(
         goal_readiness_report, command=command, label="goal readiness"
     )
@@ -824,7 +829,13 @@ def _goal_remediation_report(goal_readiness_report: Path, *, command: str) -> di
         goal_blockers = []
     release_identity = data.get("release_identity") if isinstance(data, dict) else None
     if not isinstance(release_identity, dict):
+        if expected_release_identity is not None:
+            blockers.append("goal-readiness release identity is invalid")
         release_identity = None
+    elif expected_release_identity is not None:
+        for field, expected in expected_release_identity.items():
+            if expected is not None and release_identity.get(field) != expected:
+                blockers.append(f"goal-readiness release {field} mismatch")
     goal_ready = data.get("goal_readiness_ready") is True if isinstance(data, dict) else False
     actions = []
     for template in GOAL_REMEDIATION_ACTIONS:
@@ -3409,13 +3420,40 @@ def evidence_pi_trace_capture_check(
     required=True,
     help="Retained evidence.goal-readiness JSON output to convert into operator actions.",
 )
-def evidence_goal_remediation_checklist(goal_readiness_report: Path) -> None:
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_goal_remediation_checklist(
+    goal_readiness_report: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
     """Render a read-only remediation checklist from a retained goal-readiness report."""
 
     command = "evidence.goal-remediation-checklist"
+    expected_release_identity = {
+        "commit": expected_commit,
+        "manifest_sha256": expected_manifest_sha256,
+        "package_sha256": expected_package_sha256,
+        "registry_digest": expected_registry_digest,
+        "release": expected_release,
+    }
     _success(
         command,
-        _goal_remediation_report(goal_readiness_report, command=command),
+        _goal_remediation_report(
+            goal_readiness_report,
+            command=command,
+            expected_release_identity=(
+                expected_release_identity
+                if any(value is not None for value in expected_release_identity.values())
+                else None
+            ),
+        ),
         business_succeeded=False,
     )
 

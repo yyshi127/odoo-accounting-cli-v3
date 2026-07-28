@@ -3559,6 +3559,16 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
             "goal-remediation-checklist",
             "--goal-readiness-report",
             str(report),
+            "--expected-release",
+            "0.1.0.dev236-test",
+            "--expected-commit",
+            "1" * 40,
+            "--expected-manifest-sha256",
+            "2" * 64,
+            "--expected-package-sha256",
+            "3" * 64,
+            "--expected-registry-digest",
+            "4" * 64,
         ],
     )
 
@@ -3617,6 +3627,51 @@ def test_evidence_goal_remediation_checklist_rejects_wrong_retained_command(
     data = __import__("json").loads(result.output)["data"]
     assert data["goal_readiness_ready"] is False
     assert data["blockers"] == ["goal-readiness report has the wrong command"]
+
+
+def test_evidence_goal_remediation_checklist_rejects_other_release_report(
+    tmp_path: Path,
+):
+    report = tmp_path / "goal-readiness.json"
+    report.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.goal-readiness",
+                "data": {
+                    "blockers": ["Pi scenario acceptance report was not supplied"],
+                    "goal_readiness_ready": False,
+                    "release_identity": {
+                        "commit": "1" * 40,
+                        "manifest_sha256": "2" * 64,
+                        "package_sha256": "3" * 64,
+                        "registry_digest": "4" * 64,
+                        "release": "0.1.0.dev236-test",
+                    },
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "goal-remediation-checklist",
+            "--goal-readiness-report",
+            str(report),
+            "--expected-package-sha256",
+            "9" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["goal_readiness_ready"] is False
+    assert data["blockers"] == ["goal-readiness release package_sha256 mismatch"]
 
 
 def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):

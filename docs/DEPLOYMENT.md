@@ -123,7 +123,12 @@ bounded operator handoff checklist:
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
 V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
 "$V3_CLI" evidence goal-remediation-checklist \
-  --goal-readiness-report <GOAL_READINESS_JSON>
+  --goal-readiness-report <GOAL_READINESS_JSON> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
 ```
 
 The checklist has schema
@@ -131,7 +136,9 @@ The checklist has schema
 blockers to stable action IDs for Pi scenario acceptance, sandbox capacity,
 sandbox database observation, sandbox provisioning authorization, sandbox
 onboarding, and sandbox write-pipeline evidence. It is read-only and never
-turns a failing readiness report into business success.
+turns a failing readiness report into business success. The expected release
+options bind the handoff to the same exact release as the readiness report and
+reject stale or cross-release evidence packets.
 
 After the final gate and all prerequisite checks are retained, build a final
 evidence manifest with schema
