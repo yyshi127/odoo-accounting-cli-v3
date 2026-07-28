@@ -217,16 +217,22 @@ def filesystem_summary(root: Path, probe: PurePosixPath) -> dict[str, int | str]
     if hasattr(os, "statvfs"):
         stats = os.statvfs(path)
         available = stats.f_bavail * stats.f_frsize
+        free = stats.f_bfree * stats.f_frsize
         total = stats.f_blocks * stats.f_frsize
+        used = (stats.f_blocks - stats.f_bfree) * stats.f_frsize
     else:
         usage = shutil.disk_usage(path)
         available = usage.free
+        free = usage.free
         total = usage.total
+        used = usage.used
     return {
         "probe_path": str(probe),
         "total_bytes": total,
+        "free_bytes": free,
         "available_bytes": available,
-        "used_bytes": total - available,
+        "reserved_unavailable_bytes": max(0, free - available),
+        "used_bytes": used,
     }
 
 

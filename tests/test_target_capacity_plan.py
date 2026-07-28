@@ -47,6 +47,12 @@ def test_capacity_plan_lists_reviewable_v3_candidates_without_cleanup(tmp_path):
     assert plan["mode"] == "read_only_plan_no_delete"
     assert plan["authorization_required_before_cleanup"] is True
     assert plan["cleanup_executed"] is False
+    filesystem = plan["filesystem"]
+    assert filesystem["used_bytes"] + filesystem["free_bytes"] == filesystem["total_bytes"]
+    assert (
+        filesystem["free_bytes"] - filesystem["available_bytes"]
+        == filesystem["reserved_unavailable_bytes"]
+    )
     paths = {item["path"]: item for item in plan["candidates"]}
     assert "/opt/odoo-accounting-cli-v3/dependency-images/0.1.0.dev151-keep.squashfs" not in paths
     assert paths[
