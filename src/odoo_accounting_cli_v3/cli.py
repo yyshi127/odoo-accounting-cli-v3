@@ -11,7 +11,7 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 from importlib import resources, util
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
 import click
@@ -1230,26 +1230,24 @@ def _target_capacity_recheck_report(
     *,
     required_free_bytes: int,
 ) -> dict[str, Any]:
+    from . import capacity_plan
+
     resolved = probe_path.resolve(strict=True)
-    usage = shutil.disk_usage(resolved)
+    filesystem = capacity_plan.filesystem_summary(resolved, PurePosixPath("/"))
+    available = int(filesystem["available_bytes"])
     blockers: list[str] = []
-    if usage.free < required_free_bytes:
+    if available < required_free_bytes:
         blockers.append("target filesystem free space is below the configured floor")
     return {
-        "available_bytes": usage.free,
+        "available_bytes": available,
         "blockers": sorted(set(blockers)),
         "cleanup_executed": False,
-        "filesystem": {
-            "available_bytes": usage.free,
-            "probe_path": str(resolved),
-            "total_bytes": usage.total,
-            "used_bytes": usage.used,
-        },
+        "filesystem": {**filesystem, "probe_path": str(resolved)},
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
         "required_free_bytes": required_free_bytes,
         "sandbox_write_capacity_ready": not blockers,
-        "shortfall_bytes": max(0, required_free_bytes - usage.free),
+        "shortfall_bytes": max(0, required_free_bytes - available),
     }
 
 

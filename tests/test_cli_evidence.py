@@ -2690,6 +2690,12 @@ def test_evidence_target_capacity_recheck_reports_ready(tmp_path):
     assert payload["data"]["sandbox_write_capacity_ready"] is True
     assert payload["data"]["shortfall_bytes"] == 0
     assert payload["data"]["filesystem"]["available_bytes"] >= 1
+    filesystem = payload["data"]["filesystem"]
+    assert filesystem["used_bytes"] + filesystem["free_bytes"] == filesystem["total_bytes"]
+    assert (
+        filesystem["free_bytes"] - filesystem["available_bytes"]
+        == filesystem["reserved_unavailable_bytes"]
+    )
 
 
 def test_evidence_target_capacity_recheck_reports_shortfall(tmp_path):
@@ -2713,6 +2719,7 @@ def test_evidence_target_capacity_recheck_reports_shortfall(tmp_path):
         "target filesystem free space is below the configured floor"
     ]
     assert payload["data"]["shortfall_bytes"] > 0
+    assert "reserved_unavailable_bytes" in payload["data"]["filesystem"]
 
 
 def _write_runtime_plan_args(
