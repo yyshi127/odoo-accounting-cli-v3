@@ -138,5 +138,6 @@ python tools/check_source_boundary.py
 
 The acceptance gates and current evidence limits are in `tests/TEST.md` and
 `docs/BASELINE.md`. The current machine-checkable capability-registry audit is
-recorded in `docs/CAPABILITY_AUDIT.md`. Deployment, upgrade, promotion, and
-rollback are defined in `docs/DEPLOYMENT.md`.
+recorded in `docs/CAPABILITY_AUDIT.md`. Pi natural-language scenario scoring is
+defined in `docs/PI_SCENARIO_ACCEPTANCE.md`. Deployment, upgrade, promotion,
+and rollback are defined in `docs/DEPLOYMENT.md`.
