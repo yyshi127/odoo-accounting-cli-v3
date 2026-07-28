@@ -3321,6 +3321,59 @@ def test_evidence_write_pipeline_readiness_reports_rejected_release_mismatch(
     assert "exact release" in invoice["rejection"]
 
 
+def test_evidence_write_evidence_index_reports_compact_handoff(tmp_path: Path):
+    evidence_root = tmp_path / "pipelines"
+    capability_root = evidence_root / "acct.invoice.customer_create.v1"
+    capability_root.mkdir(parents=True)
+    (capability_root / "metadata.json").write_text(
+        __import__("json").dumps(sandbox_write_metadata(capability_root)),
+        encoding="utf-8",
+    )
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "c" * 64,
+        "package_sha256": "e" * 64,
+        "registry_digest": "b" * 64,
+        "release": "0.1.0.dev230-test",
+        "verified": True,
+        "version": "0.1.0.dev230",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "write-evidence-index",
+                "--evidence-root",
+                str(evidence_root),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.write-evidence-index"
+    assert payload["business_succeeded"] is False
+    data = payload["data"]
+    assert data["index_kind"] == "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1"
+    assert data["total_write_capabilities"] == 14
+    assert data["verified_count"] == 1
+    assert data["missing_count"] == 13
+    assert data["rejected_count"] == 0
+    invoice = next(
+        item
+        for item in data["capabilities"]
+        if item["capability_id"] == "acct.invoice.customer_create.v1"
+    )
+    assert invoice["status"] == "verified"
+    assert invoice["pipeline_ready"] is True
+    assert len(invoice["pipeline_sha256"]) == 64
+    assert invoice["rejection"] is None
+
+
 def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
     expected_identity = {
         "commit": "1" * 40,

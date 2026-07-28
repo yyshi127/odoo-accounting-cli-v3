@@ -1050,6 +1050,13 @@ The command validates each capability's pipeline against the current release
 and reports `verified`, `missing`, or `rejected` per capability. It is
 non-authorizing, reports `business_succeeded:false`, and must show every write
 capability as `verified` before a registry-wide sandbox-staging review.
+For a compact operator handoff index over the same retained root, run
+`odoo-accounting-cli-v3 evidence write-evidence-index --evidence-root ...`.
+The index contains one row per registered write capability with status,
+metadata path, rejection reason, and the SHA-256 of the exact verified pipeline
+summary. It is useful for issue trackers, release packets, and Pi operator
+dashboards that need to prove which capability evidence is missing without
+copying the full retained pipeline details into every checklist.
 
 The `--assemble-from` input manifest references the retained
 `preflight_manifest` file; the exact release computes

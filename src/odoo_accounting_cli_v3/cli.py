@@ -2721,17 +2721,7 @@ def evidence_write_capabilities_readiness() -> None:
     )
 
 
-@evidence_group.command("write-pipeline-readiness")
-@click.option(
-    "--evidence-root",
-    required=True,
-    type=click.Path(path_type=Path, file_okay=False),
-    help="Root containing one <capability_id>/metadata.json retained sandbox evidence directory per write capability.",
-)
-def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
-    """Report which write capabilities have exact-release sandbox pipeline evidence."""
-
-    command = "evidence.write-pipeline-readiness"
+def _write_pipeline_readiness_data(evidence_root: Path, *, command: str) -> dict[str, Any]:
     identity = _load_release_identity(command=command)
     if not evidence_root.is_dir():
         raise CliFailure(
@@ -2793,22 +2783,77 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
     verified_count = sum(1 for report in reports if report["status"] == "verified")
     missing_count = sum(1 for report in reports if report["status"] == "missing")
     rejected_count = sum(1 for report in reports if report["status"] == "rejected")
+    return {
+        "capabilities": reports,
+        "evidence_root": str(evidence_root),
+        "missing_count": missing_count,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "rejected_count": rejected_count,
+        "release_identity": identity,
+        "sandbox_pipeline_ready": verified_count == len(reports),
+        "total_write_capabilities": len(reports),
+        "verified_count": verified_count,
+    }
+
+
+@evidence_group.command("write-pipeline-readiness")
+@click.option(
+    "--evidence-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Root containing one <capability_id>/metadata.json retained sandbox evidence directory per write capability.",
+)
+def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
+    """Report which write capabilities have exact-release sandbox pipeline evidence."""
+
+    command = "evidence.write-pipeline-readiness"
     _success(
         command,
-        {
-            "capabilities": reports,
-            "evidence_root": str(evidence_root),
-            "missing_count": missing_count,
-            "production_promotion_allowed": False,
-            "real_odoo_write_performed": False,
-            "rejected_count": rejected_count,
-            "release_identity": identity,
-            "sandbox_pipeline_ready": verified_count == len(reports),
-            "total_write_capabilities": len(reports),
-            "verified_count": verified_count,
-        },
+        _write_pipeline_readiness_data(evidence_root, command=command),
         business_succeeded=False,
     )
+
+
+@evidence_group.command("write-evidence-index")
+@click.option(
+    "--evidence-root",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False),
+    help="Root containing one <capability_id>/metadata.json retained sandbox evidence directory per write capability.",
+)
+def evidence_write_evidence_index(evidence_root: Path) -> None:
+    """Build a compact handoff index for retained sandbox write evidence."""
+
+    command = "evidence.write-evidence-index"
+    readiness = _write_pipeline_readiness_data(evidence_root, command=command)
+    indexed_capabilities = []
+    for report in readiness["capabilities"]:
+        pipeline = report.get("pipeline")
+        indexed_capabilities.append(
+            {
+                "capability_id": report["capability_id"],
+                "metadata_path": report["metadata_path"],
+                "pipeline_ready": report["pipeline_ready"],
+                "pipeline_sha256": _sha256_json(pipeline) if pipeline else None,
+                "rejection": report["rejection"],
+                "status": report["status"],
+            }
+        )
+    index = {
+        "capabilities": indexed_capabilities,
+        "evidence_root": readiness["evidence_root"],
+        "index_kind": "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1",
+        "missing_count": readiness["missing_count"],
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "rejected_count": readiness["rejected_count"],
+        "release_identity": readiness["release_identity"],
+        "sandbox_pipeline_ready": readiness["sandbox_pipeline_ready"],
+        "total_write_capabilities": readiness["total_write_capabilities"],
+        "verified_count": readiness["verified_count"],
+    }
+    _success(command, index, business_succeeded=False)
 
 
 @evidence_group.command("pi-scenario-report-check")
