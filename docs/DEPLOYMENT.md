@@ -23,6 +23,23 @@ An extracted `/opt` directory is a verified artifact, not another source tree.
 Never patch an extracted release. A change requires a new commit, version, and
 archive.
 
+## Capability-registry audit
+
+After every release install or route change, run the exact release member:
+
+```bash
+cd /opt/odoo-accounting-cli-v3/current
+bin/odoo-accounting-cli-v3 registry audit
+```
+
+Retain the JSON output with the release identity evidence. The audit must show
+`registry_audit_ready:true`, an empty `blockers` list, strict input and output
+schema counts equal to `total_count`, write approval and idempotency counts
+equal to `write_count`, and `enabled_environment_counts.production:0` unless a
+separate production promotion has been explicitly approved and evidenced. The
+audit is read-only and reports `real_odoo_write_performed:false`; it is not a
+signed Odoo business receipt and cannot enable a write capability.
+
 ## Fixed server layout
 
 ```text
