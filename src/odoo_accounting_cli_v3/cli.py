@@ -1678,6 +1678,316 @@ def evidence_target_capacity_recheck(
     _success(command, data, business_succeeded=False)
 
 
+def _extract_target_capacity_plan(document: Any) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise ValueError("target capacity plan document must be a JSON object")
+    data = document.get("data")
+    if isinstance(data, dict) and isinstance(data.get("plan"), dict):
+        plan = data["plan"]
+    elif isinstance(document.get("plan"), dict):
+        plan = document["plan"]
+    else:
+        raise ValueError("target capacity plan payload is missing data.plan")
+    if plan.get("kind") != "odoo-accounting-cli-v3.target-capacity-plan.v1":
+        raise ValueError("target capacity plan kind is not supported")
+    if plan.get("cleanup_executed") is not False:
+        raise ValueError("target capacity plan must be read-only and unexecuted")
+    return plan
+
+
+def _load_target_capacity_plan_file(capacity_plan_file: Path) -> tuple[dict[str, Any], str]:
+    payload = capacity_plan_file.read_bytes()
+    document = json.loads(payload.decode("utf-8"))
+    return _extract_target_capacity_plan(document), _sha256_bytes(payload)
+
+
+def _capacity_plan_candidates_by_path(plan: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    candidates = plan.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("target capacity plan must retain candidates for authorization")
+    by_path: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise ValueError("target capacity candidate must be a JSON object")
+        path = candidate.get("path")
+        size_bytes = candidate.get("size_bytes")
+        if not isinstance(path, str) or not path.startswith("/"):
+            raise ValueError("target capacity candidate path is invalid")
+        if not isinstance(size_bytes, int) or size_bytes <= 0:
+            raise ValueError("target capacity candidate size is invalid")
+        by_path[path] = candidate
+    return by_path
+
+
+@evidence_group.command("target-capacity-cleanup-authorization-template")
+@click.option(
+    "--capacity-plan-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.target-capacity-plan JSON output with candidate paths.",
+)
+@click.option(
+    "--candidate-path",
+    multiple=True,
+    required=True,
+    help="Exact V3-owned cleanup candidate path to authorize; repeat for each path.",
+)
+@click.option(
+    "--operator-id",
+    required=True,
+    help="Human/operator identity accountable for the cleanup decision.",
+)
+@click.option(
+    "--retention-until",
+    required=True,
+    help="UTC timestamp naming how long the cleanup decision evidence is retained.",
+)
+@click.option(
+    "--ttl-seconds",
+    type=click.IntRange(min=1, max=24 * 60 * 60),
+    default=3600,
+    show_default=True,
+    help="Authorization validity window.",
+)
+@click.option(
+    "--issued-at",
+    help="UTC issue timestamp for deterministic review; defaults to current UTC time.",
+)
+def evidence_target_capacity_cleanup_authorization_template(
+    capacity_plan_file: Path,
+    candidate_path: tuple[str, ...],
+    operator_id: str,
+    retention_until: str,
+    ttl_seconds: int,
+    issued_at: str | None,
+) -> None:
+    """Render a target-capacity cleanup authorization template without cleanup."""
+
+    command = "evidence.target-capacity-cleanup-authorization-template"
+    blockers: list[str] = []
+    try:
+        plan, plan_sha256 = _load_target_capacity_plan_file(capacity_plan_file)
+        candidates = _capacity_plan_candidates_by_path(plan)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise CliFailure(
+            command=command,
+            code="target_capacity_cleanup_authorization_rejected",
+            message="The target capacity plan file is unavailable or invalid.",
+            exit_code=5,
+        ) from exc
+
+    selected_paths = sorted(set(candidate_path))
+    if any(not path.startswith("/") for path in selected_paths):
+        blockers.append("candidate paths must be absolute display paths")
+    missing_paths = [path for path in selected_paths if path not in candidates]
+    if missing_paths:
+        blockers.append("candidate path is not present in the retained capacity plan")
+    selected_candidates = [candidates[path] for path in selected_paths if path in candidates]
+    if any(item.get("requires_explicit_authorization") is not True for item in selected_candidates):
+        blockers.append("selected candidates must require explicit authorization")
+    authorized_reclaimable_bytes = sum(int(item["size_bytes"]) for item in selected_candidates)
+    if authorized_reclaimable_bytes <= 0:
+        blockers.append("authorized reclaimable bytes must be positive")
+    try:
+        issued = (
+            _parse_utc_datetime(issued_at, "issued_at")
+            if issued_at is not None
+            else datetime.now(timezone.utc)
+        )
+        retention = _parse_utc_datetime(retention_until, "retention_until")
+    except ValueError as exc:
+        blockers.append(str(exc))
+        issued = retention = datetime.now(timezone.utc)
+    expires = issued + timedelta(seconds=ttl_seconds)
+    if retention <= issued:
+        blockers.append("retention_until must be after issued_at")
+
+    summary = {
+        "allowed_action": "remove_selected_v3_owned_capacity_candidates",
+        "authorized_reclaimable_bytes": authorized_reclaimable_bytes,
+        "candidate_paths": selected_paths,
+        "operator_id": operator_id,
+        "plan_candidate_count": plan.get("candidate_count"),
+        "plan_required_free_bytes": plan.get("required_free_bytes"),
+        "plan_sha256": plan_sha256,
+        "plan_shortfall_bytes": plan.get("shortfall_bytes"),
+        "retention_until": _format_utc_datetime(retention),
+    }
+    document = {
+        "expires_at": _format_utc_datetime(expires),
+        "immutable_summary": summary,
+        "immutable_summary_sha256": _sha256_json(summary),
+        "issued_at": _format_utc_datetime(issued),
+        "purpose": "target_capacity_cleanup",
+        "schema_version": 1,
+    }
+    data = {
+        "authorization_record_template": document,
+        "authorization_template_ready": not blockers,
+        "blockers": sorted(set(blockers)),
+        "cleanup_executed": False,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "save_path_recommendation": "/etc/odoo-accounting-cli-v3/target-capacity-cleanup-authorization.json",
+        "selected_candidates": selected_candidates,
+        "template_only_not_authorized": True,
+        "validation_command_args": [
+            "evidence",
+            "target-capacity-cleanup-authorization-check",
+            "--authorization-file",
+            "/etc/odoo-accounting-cli-v3/target-capacity-cleanup-authorization.json",
+            "--capacity-plan-file",
+            str(capacity_plan_file),
+            *[
+                item
+                for path in selected_paths
+                for item in ("--expected-candidate-path", path)
+            ],
+        ],
+    }
+    _success(command, data, business_succeeded=False)
+
+
+def _target_capacity_cleanup_authorization_report(
+    document: Any,
+    *,
+    authorization_file: Path,
+    capacity_plan_file: Path,
+    expected_candidate_path: tuple[str, ...],
+    now: str | None,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    try:
+        plan, plan_sha256 = _load_target_capacity_plan_file(capacity_plan_file)
+        candidates = _capacity_plan_candidates_by_path(plan)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        plan = {}
+        plan_sha256 = ""
+        candidates = {}
+        blockers.append("target capacity plan file is unavailable or invalid")
+    if not isinstance(document, dict):
+        blockers.append("authorization record must be a JSON object")
+        document = {}
+    current_time = datetime.now(timezone.utc)
+    if now is not None:
+        try:
+            current_time = _parse_utc_datetime(now, "now")
+        except ValueError:
+            blockers.append("now must be a UTC timestamp")
+    summary = document.get("immutable_summary")
+    if not isinstance(summary, dict):
+        blockers.append("immutable_summary must be a JSON object")
+        summary = {}
+    expected_summary_sha256 = _sha256_json(summary)
+    if document.get("immutable_summary_sha256") != expected_summary_sha256:
+        blockers.append("immutable_summary_sha256 does not match immutable_summary")
+    if document.get("schema_version") != 1:
+        blockers.append("schema_version must be 1")
+    if document.get("purpose") != "target_capacity_cleanup":
+        blockers.append("purpose must be target_capacity_cleanup")
+    if summary.get("allowed_action") != "remove_selected_v3_owned_capacity_candidates":
+        blockers.append("allowed_action must be remove_selected_v3_owned_capacity_candidates")
+    if summary.get("plan_sha256") != plan_sha256:
+        blockers.append("authorization is not bound to the retained capacity plan")
+    candidate_paths = summary.get("candidate_paths")
+    if (
+        not isinstance(candidate_paths, list)
+        or not candidate_paths
+        or any(not isinstance(item, str) or not item.startswith("/") for item in candidate_paths)
+    ):
+        blockers.append("candidate_paths must be a non-empty list of absolute display paths")
+        candidate_path_set: set[str] = set()
+    else:
+        candidate_path_set = set(candidate_paths)
+    missing_expected = sorted(set(expected_candidate_path) - candidate_path_set)
+    if missing_expected:
+        blockers.append("expected candidate path is not authorized")
+    missing_from_plan = sorted(path for path in candidate_path_set if path not in candidates)
+    if missing_from_plan:
+        blockers.append("authorized candidate path is not present in the retained capacity plan")
+    computed_reclaimable = sum(
+        int(candidates[path]["size_bytes"])
+        for path in candidate_path_set
+        if path in candidates
+    )
+    if summary.get("authorized_reclaimable_bytes") != computed_reclaimable:
+        blockers.append("authorized_reclaimable_bytes does not match retained candidates")
+    try:
+        issued_at = _parse_utc_datetime(document.get("issued_at"), "issued_at")
+        expires_at = _parse_utc_datetime(document.get("expires_at"), "expires_at")
+    except ValueError as exc:
+        blockers.append(str(exc))
+        issued_at = expires_at = current_time
+    if expires_at <= current_time:
+        blockers.append("authorization record is expired")
+    if expires_at <= issued_at:
+        blockers.append("expires_at must be after issued_at")
+    if int((expires_at - issued_at).total_seconds()) > 24 * 60 * 60:
+        blockers.append("authorization TTL must not exceed 86400 seconds")
+    return {
+        "authorization_file": str(authorization_file),
+        "authorization_record_ready": not blockers,
+        "authorized_reclaimable_bytes": computed_reclaimable,
+        "blockers": sorted(set(blockers)),
+        "capacity_plan_file": str(capacity_plan_file),
+        "capacity_plan_sha256": plan_sha256,
+        "cleanup_executed": False,
+        "expected_candidate_paths": sorted(expected_candidate_path),
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+    }
+
+
+@evidence_group.command("target-capacity-cleanup-authorization-check")
+@click.option(
+    "--authorization-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="JSON authorization record to validate before any target cleanup.",
+)
+@click.option(
+    "--capacity-plan-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.target-capacity-plan JSON output the authorization must bind.",
+)
+@click.option(
+    "--expected-candidate-path",
+    multiple=True,
+    help="Candidate path that must be explicitly authorized; repeat for each expected path.",
+)
+@click.option(
+    "--now",
+    help="UTC timestamp used for deterministic validation tests; defaults to current UTC time.",
+)
+def evidence_target_capacity_cleanup_authorization_check(
+    authorization_file: Path,
+    capacity_plan_file: Path,
+    expected_candidate_path: tuple[str, ...],
+    now: str | None,
+) -> None:
+    """Validate a target-capacity cleanup authorization without cleanup."""
+
+    command = "evidence.target-capacity-cleanup-authorization-check"
+    try:
+        document = json.loads(authorization_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CliFailure(
+            command=command,
+            code="target_capacity_cleanup_authorization_rejected",
+            message="The target capacity cleanup authorization record is unavailable or invalid JSON.",
+            exit_code=5,
+        ) from exc
+    data = _target_capacity_cleanup_authorization_report(
+        document,
+        authorization_file=authorization_file,
+        capacity_plan_file=capacity_plan_file,
+        expected_candidate_path=expected_candidate_path,
+        now=now,
+    )
+    _success(command, data, business_succeeded=False)
+
+
 @evidence_group.command("read-boundary")
 @click.option(
     "--runtime-config",

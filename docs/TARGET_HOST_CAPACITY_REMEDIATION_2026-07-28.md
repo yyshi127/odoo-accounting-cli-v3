@@ -109,3 +109,23 @@ bin/odoo-accounting-cli-v3 evidence target-capacity-recheck \
 Do not start sandbox write drills until the recheck reports
 `sandbox_write_capacity_ready:true`.
 
+If the operator chooses to remove any V3-owned cleanup candidates from the
+retained `target-capacity-plan` output, first bind that decision to a saved
+authorization record with:
+
+```bash
+bin/odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-template \
+  --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
+  --candidate-path <SELECTED_V3_OWNED_CANDIDATE_PATH> \
+  --operator-id <OPERATOR_ID> \
+  --retention-until <UTC_TIMESTAMP>
+
+bin/odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-check \
+  --authorization-file <TARGET_CAPACITY_CLEANUP_AUTHORIZATION_JSON> \
+  --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
+  --expected-candidate-path <SELECTED_V3_OWNED_CANDIDATE_PATH>
+```
+
+These commands do not delete anything. They only create and validate a
+release-plan-bound authorization record so a later cleanup can be audited back
+to the exact candidate paths and reclaimable bytes the operator approved.

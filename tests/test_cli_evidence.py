@@ -2692,6 +2692,175 @@ def test_evidence_target_capacity_plan_limits_candidates(tmp_path):
     assert payload["data"]["plan"]["candidates_truncated"] is True
 
 
+def test_evidence_target_capacity_cleanup_authorization_template_and_check(tmp_path):
+    candidate = tmp_path / "opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"x" * 10)
+    plan_file = tmp_path / "capacity-plan.json"
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        plan_result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "target-capacity-plan",
+                "--root",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+            ],
+        )
+    assert plan_result.exit_code == 0, plan_result.output
+    plan_file.write_text(plan_result.output, encoding="utf-8")
+
+    template_result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-cleanup-authorization-template",
+            "--capacity-plan-file",
+            str(plan_file),
+            "--candidate-path",
+            "/opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz",
+            "--operator-id",
+            "operator-1",
+            "--retention-until",
+            "2026-07-29T12:00:00Z",
+            "--issued-at",
+            "2026-07-28T12:00:00Z",
+        ],
+    )
+
+    assert template_result.exit_code == 0, template_result.output
+    template_payload = __import__("json").loads(template_result.output)
+    assert (
+        template_payload["command"]
+        == "evidence.target-capacity-cleanup-authorization-template"
+    )
+    assert template_payload["business_succeeded"] is False
+    assert template_payload["data"]["authorization_template_ready"] is True
+    assert template_payload["data"]["cleanup_executed"] is False
+    authorization_file = tmp_path / "cleanup-authorization.json"
+    authorization_file.write_text(
+        __import__("json").dumps(
+            template_payload["data"]["authorization_record_template"],
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    check_result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-cleanup-authorization-check",
+            "--authorization-file",
+            str(authorization_file),
+            "--capacity-plan-file",
+            str(plan_file),
+            "--expected-candidate-path",
+            "/opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz",
+            "--now",
+            "2026-07-28T12:30:00Z",
+        ],
+    )
+
+    assert check_result.exit_code == 0, check_result.output
+    check_payload = __import__("json").loads(check_result.output)
+    assert (
+        check_payload["command"]
+        == "evidence.target-capacity-cleanup-authorization-check"
+    )
+    assert check_payload["business_succeeded"] is False
+    assert check_payload["data"]["authorization_record_ready"] is True
+    assert check_payload["data"]["authorized_reclaimable_bytes"] == 10
+    assert check_payload["data"]["cleanup_executed"] is False
+
+
+def test_evidence_target_capacity_cleanup_authorization_check_rejects_tampering(
+    tmp_path,
+):
+    candidate = tmp_path / "opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"x" * 10)
+    plan_file = tmp_path / "capacity-plan.json"
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        plan_result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "target-capacity-plan",
+                "--root",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+            ],
+        )
+    assert plan_result.exit_code == 0, plan_result.output
+    plan_file.write_text(plan_result.output, encoding="utf-8")
+
+    template_result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-cleanup-authorization-template",
+            "--capacity-plan-file",
+            str(plan_file),
+            "--candidate-path",
+            "/opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz",
+            "--operator-id",
+            "operator-1",
+            "--retention-until",
+            "2026-07-29T12:00:00Z",
+            "--issued-at",
+            "2026-07-28T12:00:00Z",
+        ],
+    )
+    assert template_result.exit_code == 0, template_result.output
+    document = __import__("json").loads(template_result.output)["data"][
+        "authorization_record_template"
+    ]
+    document["immutable_summary"]["candidate_paths"] = ["/root/project"]
+    authorization_file = tmp_path / "cleanup-authorization.json"
+    authorization_file.write_text(
+        __import__("json").dumps(document, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    check_result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "target-capacity-cleanup-authorization-check",
+            "--authorization-file",
+            str(authorization_file),
+            "--capacity-plan-file",
+            str(plan_file),
+            "--expected-candidate-path",
+            "/opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz",
+            "--now",
+            "2026-07-28T12:30:00Z",
+        ],
+    )
+
+    assert check_result.exit_code == 0, check_result.output
+    payload = __import__("json").loads(check_result.output)
+    assert payload["data"]["authorization_record_ready"] is False
+    assert "immutable_summary_sha256 does not match immutable_summary" in payload["data"]["blockers"]
+    assert "expected candidate path is not authorized" in payload["data"]["blockers"]
+    assert (
+        "authorized candidate path is not present in the retained capacity plan"
+        in payload["data"]["blockers"]
+    )
+
+
 def test_evidence_target_capacity_plan_fails_closed_on_bad_current_route(tmp_path):
     bad_route = {
         **READY_CURRENT_ROUTE,

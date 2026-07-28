@@ -643,6 +643,30 @@ Use the release member `tools/target_capacity_plan.py` only as a lower-level
 diagnostic when the CLI entry point itself is unavailable.
 Use `--max-candidates <N>` instead of `--summary-only` when an operator needs a
 bounded top-N review list without returning every candidate path to Pi.
+If an operator chooses to clean V3-owned candidates, first render and retain a
+cleanup authorization record for the exact retained plan and selected paths:
+
+```bash
+odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-template \
+  --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
+  --candidate-path <V3_OWNED_CANDIDATE_PATH> \
+  --operator-id <OPERATOR_ID> \
+  --retention-until <UTC_TIMESTAMP>
+
+odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-check \
+  --authorization-file <TARGET_CAPACITY_CLEANUP_AUTHORIZATION_JSON> \
+  --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
+  --expected-candidate-path <V3_OWNED_CANDIDATE_PATH>
+```
+
+The template and check commands are read-only and non-authorizing by themselves:
+they never delete files and only bind the operator decision to the retained
+capacity plan SHA-256, selected candidate display paths, reclaimable bytes,
+operator id, issue/expiry window, and immutable summary hash. Do not clean any
+candidate until the saved authorization passes the check and a separate cleanup
+runbook has been explicitly approved. Non-V3 paths such as user project
+directories, Odoo data, PostgreSQL data, and agent state require separate review
+and must not be folded into a V3-owned cleanup authorization.
 After an authorized cleanup, disk expansion, or relocation, rerun the immutable
 release's recheck command before continuing to sandbox runtime setup:
 
