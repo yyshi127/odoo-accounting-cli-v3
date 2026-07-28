@@ -3594,6 +3594,19 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         "sandbox_provision_authorization",
         "sandbox_write_pipeline",
     }
+    for action in data["actions"]:
+        assert isinstance(action["command_args_template"], list)
+        assert action["command_args_template"]
+        assert all(isinstance(step, list) for step in action["command_args_template"])
+        assert all(step[0] in {"evidence", "tools/pi_scenario_gate.py"} for step in action["command_args_template"])
+    capacity = next(
+        action for action in data["actions"] if action["action_id"] == "sandbox_capacity"
+    )
+    assert capacity["command_args_template"][0][:2] == [
+        "evidence",
+        "target-capacity-plan",
+    ]
+    assert "<REQUIRED_FREE_BYTES>" in capacity["command_args_template"][0]
 
 
 def test_evidence_goal_remediation_checklist_rejects_wrong_retained_command(

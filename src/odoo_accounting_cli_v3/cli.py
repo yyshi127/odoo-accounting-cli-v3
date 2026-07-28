@@ -727,6 +727,11 @@ GOAL_REMEDIATION_ACTIONS = (
             "pi_scenario_report_check",
         ),
         "operator_command": "evidence pi-trace-capture-check; tools/pi_scenario_gate.py; evidence pi-scenario-report-check",
+        "command_args_template": (
+            ("evidence", "pi-trace-capture-check", "--trace-file", "<NORMALIZED_PI_TRACE_CAPTURE_JSON>", "--attestation-keys", "<TRUSTED_TRACE_ATTESTATION_KEYS_JSON>"),
+            ("tools/pi_scenario_gate.py", "--traces", "<NORMALIZED_PI_TRACE_CAPTURE_JSON>", "--out", "<PI_GATE_REPORT_JSON>"),
+            ("evidence", "pi-scenario-report-check", "--pi-scenario-report", "<PI_GATE_REPORT_JSON>"),
+        ),
         "authorization_required": False,
     },
     {
@@ -738,6 +743,10 @@ GOAL_REMEDIATION_ACTIONS = (
             "target_capacity_recheck",
         ),
         "operator_command": "evidence target-capacity-plan; evidence target-capacity-recheck",
+        "command_args_template": (
+            ("evidence", "target-capacity-plan", "--required-free-bytes", "<REQUIRED_FREE_BYTES>", "--keep-release", "<ROUTED_RELEASE>"),
+            ("evidence", "target-capacity-recheck", "--path", "<CAPACITY_PATH>", "--required-free-bytes", "<REQUIRED_FREE_BYTES>"),
+        ),
         "authorization_required": True,
     },
     {
@@ -749,6 +758,9 @@ GOAL_REMEDIATION_ACTIONS = (
             "sandbox_database_catalog_observation",
         ),
         "operator_command": "evidence sandbox-database-candidates",
+        "command_args_template": (
+            ("evidence", "sandbox-database-candidates", "--database-name", "<OBSERVED_DATABASE>", "--protected-database-name", "<PRODUCTION_DATABASE>", "--selected-database-name", "<SANDBOX_DATABASE_NAME>"),
+        ),
         "authorization_required": True,
     },
     {
@@ -760,6 +772,10 @@ GOAL_REMEDIATION_ACTIONS = (
             "sandbox_provision_authorization_check",
         ),
         "operator_command": "evidence sandbox-provision-authorization-template; evidence sandbox-provision-authorization-check",
+        "command_args_template": (
+            ("evidence", "sandbox-provision-authorization-template", "--sandbox-database-name", "<SANDBOX_DATABASE_NAME>", "--source-database-name", "<SOURCE_DATABASE_NAME>", "--company", "<COMPANY>", "--operator-id", "<OPERATOR_ID>", "--retention-until", "<UTC_TIMESTAMP>"),
+            ("evidence", "sandbox-provision-authorization-check", "--authorization-file", "<SANDBOX_PROVISION_AUTHORIZATION_JSON>", "--expected-sandbox-database-name", "<SANDBOX_DATABASE_NAME>", "--expected-source-database-name", "<SOURCE_DATABASE_NAME>", "--expected-company", "<COMPANY>"),
+        ),
         "authorization_required": True,
     },
     {
@@ -771,6 +787,10 @@ GOAL_REMEDIATION_ACTIONS = (
             "sandbox_onboarding_receipt_check",
         ),
         "operator_command": "evidence sandbox-onboarding-readiness; evidence sandbox-onboarding-receipt-check",
+        "command_args_template": (
+            ("evidence", "sandbox-onboarding-readiness", "--sandbox-database-name", "<SANDBOX_DATABASE_NAME>", "--source-database-name", "<SOURCE_DATABASE_NAME>", "--observed-database-name", "<OBSERVED_DATABASE>", "--authorization-file", "<SANDBOX_PROVISION_AUTHORIZATION_JSON>", "--expected-company", "<COMPANY>"),
+            ("evidence", "sandbox-onboarding-receipt-check", "--onboarding-receipt", "<SANDBOX_ONBOARDING_READINESS_JSON>", "--expected-sandbox-database-name", "<SANDBOX_DATABASE_NAME>"),
+        ),
         "authorization_required": False,
     },
     {
@@ -782,6 +802,10 @@ GOAL_REMEDIATION_ACTIONS = (
             "write_evidence_index",
         ),
         "operator_command": "evidence write-pipeline-readiness; evidence write-evidence-index",
+        "command_args_template": (
+            ("evidence", "write-pipeline-readiness", "--evidence-root", "<SANDBOX_WRITE_EVIDENCE_ROOT>"),
+            ("evidence", "write-evidence-index", "--evidence-root", "<SANDBOX_WRITE_EVIDENCE_ROOT>"),
+        ),
         "authorization_required": True,
     },
 )
@@ -854,6 +878,10 @@ def _goal_remediation_report(
                 "authorization_required": template["authorization_required"],
                 "blocking_evidence": matching,
                 "description": template["description"],
+                "command_args_template": [
+                    list(command_args)
+                    for command_args in template["command_args_template"]
+                ],
                 "operator_command": template["operator_command"],
                 "production_promotion_allowed": False,
                 "real_odoo_write_performed": False,

@@ -135,10 +135,13 @@ The checklist has schema
 `odoo-accounting-cli-v3.goal-remediation-checklist.v1`. It maps retained
 blockers to stable action IDs for Pi scenario acceptance, sandbox capacity,
 sandbox database observation, sandbox provisioning authorization, sandbox
-onboarding, and sandbox write-pipeline evidence. It is read-only and never
-turns a failing readiness report into business success. The expected release
-options bind the handoff to the same exact release as the readiness report and
-reject stale or cross-release evidence packets.
+onboarding, and sandbox write-pipeline evidence. Each action includes both a
+human-readable `operator_command` and a structured `command_args_template` so
+Pi Bridge or an operator tool can fill placeholders without parsing shell text.
+It is read-only and never turns a failing readiness report into business
+success. The expected release options bind the handoff to the same exact
+release as the readiness report and reject stale or cross-release evidence
+packets.
 
 After the final gate and all prerequisite checks are retained, build a final
 evidence manifest with schema
