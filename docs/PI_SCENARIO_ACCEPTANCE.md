@@ -116,3 +116,15 @@ If any scenario is missing, any trace is unsigned, any material parameter
 differs, or any terminal response lacks verified business success, the release
 must remain unaccepted for Pi end-to-end operation.
 
+After the Pi report is retained, bind it into the final aggregate check:
+
+```bash
+bin/odoo-accounting-cli-v3 evidence goal-readiness \
+  --pi-scenario-report <REPORT_JSON> \
+  --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
+  --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
+  --expected-sandbox-database-name <SANDBOX_DATABASE_NAME>
+```
+
+If the report is absent or fails any gate, `goal-readiness` keeps the release
+unaccepted for the full V3 objective.

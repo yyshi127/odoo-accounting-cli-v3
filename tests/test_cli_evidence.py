@@ -105,6 +105,62 @@ def _ready_onboarding_receipt(
     return path
 
 
+def _ready_pi_scenario_report(tmp_path: Path) -> Path:
+    gates = {
+        gate_id: {
+            "denominator": 25,
+            "failures": {},
+            "minimum_percent": "95.00" if gate_id == "F01" else "100.00",
+            "numerator": 25,
+            "passed": True,
+            "percent": "100.00",
+        }
+        for gate_id in ("F01", "F02", "F03", "F05")
+    }
+    report = {
+        "acceptance_passed": True,
+        "attestation": {"key_id": "test-key", "signature": "ab"},
+        "capture": {"run_id": "pi-run-1"},
+        "corpus_id": "xiaojing-accounting-key-scenarios-v1",
+        "corpus_sha256": "1" * 64,
+        "gates": gates,
+        "registry_sha256": "2" * 64,
+        "run_id": "pi-run-1",
+        "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v1",
+        "trace_coverage": {
+            "captured": 25,
+            "expected": 25,
+            "missing_scenario_ids": [],
+            "passed": True,
+        },
+    }
+    path = tmp_path / "pi-scenario-report.json"
+    path.write_text(__import__("json").dumps(report, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def _ready_write_pipeline_report(tmp_path: Path, release_identity: dict) -> Path:
+    report = {
+        "business_succeeded": False,
+        "command": "evidence.write-pipeline-readiness",
+        "data": {
+            "evidence_root": str(tmp_path / "pipelines"),
+            "missing_count": 0,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "rejected_count": 0,
+            "release_identity": release_identity,
+            "sandbox_pipeline_ready": True,
+            "total_write_capabilities": 14,
+            "verified_count": 14,
+        },
+        "ok": True,
+    }
+    path = tmp_path / "write-pipeline-readiness.json"
+    path.write_text(__import__("json").dumps(report, sort_keys=True), encoding="utf-8")
+    return path
+
+
 def identity(config) -> dict:
     return {
         "commit": "1" * 40,
@@ -3054,6 +3110,91 @@ def test_evidence_write_pipeline_readiness_reports_rejected_release_mismatch(
     )
     assert invoice["status"] == "rejected"
     assert "exact release" in invoice["rejection"]
+
+
+def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev221",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(main, ["evidence", "goal-readiness"])
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    data = payload["data"]
+    assert payload["command"] == "evidence.goal-readiness"
+    assert payload["business_succeeded"] is False
+    assert data["goal_readiness_ready"] is False
+    assert data["production_promotion_allowed"] is False
+    assert data["real_odoo_write_performed"] is False
+    assert data["registry"]["registry_audit_ready"] is True
+    assert data["write_static_readiness"]["write_static_readiness_ready"] is True
+    assert "Pi scenario acceptance report was not supplied" in data["blockers"]
+    assert "sandbox onboarding readiness receipt was not supplied" in data["blockers"]
+    assert "sandbox write pipeline readiness report was not supplied" in data["blockers"]
+
+
+def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev221",
+    }
+    pi_report = _ready_pi_scenario_report(tmp_path)
+    onboarding_receipt = _ready_onboarding_receipt(
+        tmp_path, release_identity=expected_identity
+    )
+    write_pipeline_report = _ready_write_pipeline_report(tmp_path, expected_identity)
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--pi-scenario-report",
+                str(pi_report),
+                "--sandbox-onboarding-receipt",
+                str(onboarding_receipt),
+                "--write-pipeline-report",
+                str(write_pipeline_report),
+                "--expected-sandbox-database-name",
+                "odoo_v3_sandbox",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    data = payload["data"]
+    assert data["goal_readiness_ready"] is True
+    assert data["blockers"] == []
+    assert data["pi_scenario"]["scenario_acceptance_ready"] is True
+    assert data["sandbox_onboarding"]["ready"] is True
+    assert data["write_pipeline"]["write_pipeline_ready"] is True
+    assert data["write_static_readiness"]["admissible_count"] == 14
 
 
 def test_evidence_sandbox_write_preflight_rejects_demo_database_name(

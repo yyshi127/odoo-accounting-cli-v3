@@ -50,6 +50,33 @@ report requires at least 95% capability-selection accuracy and 100% coverage of
 clarification, material-parameter transit, and verified business answer gates.
 Corpus tests alone do not prove Pi end-to-end success.
 
+## Final goal-readiness aggregation
+
+After route, registry, Pi scenario, sandbox onboarding, and write-pipeline
+reports have each been retained, run the aggregate non-authorizing check:
+
+```bash
+cd /opt/odoo-accounting-cli-v3/current
+bin/odoo-accounting-cli-v3 evidence goal-readiness \
+  --pi-scenario-report <PI_GATE_REPORT_JSON> \
+  --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
+  --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
+  --expected-sandbox-database-name <SANDBOX_DATABASE_NAME> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
+```
+
+This command performs no Odoo or PostgreSQL write. It aggregates blockers from
+the current-route gate, `registry audit`, static write readiness, the retained
+Pi scenario report, the retained sandbox onboarding receipt, and the retained
+write-pipeline readiness report. It reports `goal_readiness_ready:false` until
+all supplied evidence is present, bound to the exact release, and independently
+passing. A passing aggregate report is a final checklist input; it still does
+not itself authorize production writes.
+
 ## Fixed server layout
 
 ```text

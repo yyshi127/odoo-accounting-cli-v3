@@ -460,6 +460,153 @@ def _registry_audit_report(capabilities: tuple[Capability, ...]) -> dict[str, An
     }
 
 
+def _load_retained_json_report(path: Path, *, command: str, label: str) -> dict[str, Any]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CliFailure(
+            command=command,
+            code="retained_report_rejected",
+            message=f"The retained {label} report is unavailable or invalid JSON.",
+            exit_code=5,
+        ) from exc
+    if not isinstance(loaded, dict):
+        raise CliFailure(
+            command=command,
+            code="retained_report_rejected",
+            message=f"The retained {label} report must be a JSON object.",
+            exit_code=5,
+        )
+    return loaded
+
+
+def _pi_scenario_acceptance_report_status(
+    pi_scenario_report: Path | None,
+    *,
+    command: str,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if pi_scenario_report is None:
+        blockers.append("Pi scenario acceptance report was not supplied")
+        return {
+            "blockers": blockers,
+            "report_path": None,
+            "report_sha256": None,
+            "scenario_acceptance_ready": False,
+            "summary": None,
+        }
+    try:
+        raw = pi_scenario_report.read_bytes()
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="retained_report_rejected",
+            message="The retained Pi scenario acceptance report is unavailable.",
+            exit_code=5,
+        ) from exc
+    report = _load_retained_json_report(
+        pi_scenario_report, command=command, label="Pi scenario acceptance"
+    )
+    gates = report.get("gates")
+    coverage = report.get("trace_coverage")
+    required_gates = ("F01", "F02", "F03", "F05")
+    if report.get("schema_version") != "odoo-accounting-cli-v3.pi-gate-report.v1":
+        blockers.append("Pi scenario report has the wrong schema")
+    if report.get("acceptance_passed") is not True:
+        blockers.append("Pi scenario report did not pass acceptance")
+    if not isinstance(coverage, dict) or coverage.get("passed") is not True:
+        blockers.append("Pi scenario trace coverage did not pass")
+    if not isinstance(gates, dict):
+        blockers.append("Pi scenario gate summary is invalid")
+        gate_summary = None
+    else:
+        gate_summary = {
+            gate_id: gates.get(gate_id)
+            for gate_id in required_gates
+            if isinstance(gates.get(gate_id), dict)
+        }
+        for gate_id in required_gates:
+            gate = gates.get(gate_id)
+            if not isinstance(gate, dict) or gate.get("passed") is not True:
+                blockers.append(f"Pi scenario gate {gate_id} did not pass")
+    return {
+        "blockers": sorted(set(blockers)),
+        "report_path": str(pi_scenario_report),
+        "report_sha256": _sha256_bytes(raw),
+        "scenario_acceptance_ready": not blockers,
+        "summary": {
+            "acceptance_passed": report.get("acceptance_passed"),
+            "coverage": coverage,
+            "gates": gate_summary,
+            "run_id": report.get("run_id"),
+        },
+    }
+
+
+def _write_pipeline_report_status(
+    write_pipeline_report: Path | None,
+    *,
+    command: str,
+    expected_release_identity: dict[str, Any],
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if write_pipeline_report is None:
+        blockers.append("sandbox write pipeline readiness report was not supplied")
+        return {
+            "blockers": blockers,
+            "report_path": None,
+            "report_sha256": None,
+            "summary": None,
+            "write_pipeline_ready": False,
+        }
+    try:
+        raw = write_pipeline_report.read_bytes()
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="retained_report_rejected",
+            message="The retained sandbox write pipeline report is unavailable.",
+            exit_code=5,
+        ) from exc
+    report = _load_retained_json_report(
+        write_pipeline_report, command=command, label="sandbox write pipeline"
+    )
+    data = report.get("data")
+    if report.get("ok") is not True:
+        blockers.append("sandbox write pipeline report is not successful")
+    if report.get("command") != "evidence.write-pipeline-readiness":
+        blockers.append("sandbox write pipeline report has the wrong command")
+    if not isinstance(data, dict):
+        blockers.append("sandbox write pipeline report data is invalid")
+        summary = None
+    else:
+        release = data.get("release_identity")
+        if data.get("sandbox_pipeline_ready") is not True:
+            blockers.append("sandbox write pipeline is not ready")
+        for field, expected in expected_release_identity.items():
+            if (
+                expected is not None
+                and isinstance(release, dict)
+                and release.get(field) != expected
+            ):
+                blockers.append(f"sandbox write pipeline release {field} mismatch")
+        summary = {
+            "evidence_root": data.get("evidence_root"),
+            "missing_count": data.get("missing_count"),
+            "rejected_count": data.get("rejected_count"),
+            "sandbox_pipeline_ready": data.get("sandbox_pipeline_ready"),
+            "total_write_capabilities": data.get("total_write_capabilities"),
+            "verified_count": data.get("verified_count"),
+        }
+    return {
+        "blockers": sorted(set(blockers)),
+        "report_path": str(write_pipeline_report),
+        "report_sha256": _sha256_bytes(raw),
+        "summary": summary,
+        "write_pipeline_ready": not blockers,
+    }
+
+
 def _load_release_identity(
     root: Path | None = None, *, command: str = "release.identity"
 ) -> dict[str, Any]:
@@ -2316,6 +2463,141 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
             "sandbox_pipeline_ready": verified_count == len(reports),
             "total_write_capabilities": len(reports),
             "verified_count": verified_count,
+        },
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("goal-readiness")
+@click.option(
+    "--pi-scenario-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained tools/pi_scenario_gate.py report for the exact release.",
+)
+@click.option(
+    "--sandbox-onboarding-receipt",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained evidence.sandbox-onboarding-readiness JSON receipt.",
+)
+@click.option(
+    "--write-pipeline-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained evidence.write-pipeline-readiness JSON report.",
+)
+@click.option(
+    "--expected-sandbox-database-name",
+    help="Sandbox database name the retained onboarding receipt must bind.",
+)
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_goal_readiness(
+    pi_scenario_report: Path | None,
+    sandbox_onboarding_receipt: Path | None,
+    write_pipeline_report: Path | None,
+    expected_sandbox_database_name: str | None,
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Aggregate final-goal evidence without executing Odoo or mutating state."""
+
+    command = "evidence.goal-readiness"
+    identity = _load_release_identity(command=command)
+    expected_release_identity = {
+        "commit": expected_commit or identity["commit"],
+        "manifest_sha256": expected_manifest_sha256 or identity["manifest_sha256"],
+        "package_sha256": expected_package_sha256 or identity["package_sha256"],
+        "registry_digest": expected_registry_digest or identity["registry_digest"],
+        "release": expected_release or identity["release"],
+    }
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release_identity["release"],
+        expected_commit=expected_release_identity["commit"],
+        expected_manifest_sha256=expected_release_identity["manifest_sha256"],
+        expected_package_sha256=expected_release_identity["package_sha256"],
+        expected_registry_digest=expected_release_identity["registry_digest"],
+    )
+    capabilities = _load_capabilities()
+    registry_report = _registry_audit_report(capabilities)
+    write_capabilities = sorted(
+        (item for item in capabilities if item.data["access"] == "write"),
+        key=lambda item: item.id,
+    )
+    odoo_write_capabilities, allowed_models_by_capability = (
+        _load_write_capability_implementation(command)
+    )
+    static_write_reports = [
+        _write_capability_readiness_report(
+            capability,
+            allowed_models_by_capability=allowed_models_by_capability,
+            odoo_write_capabilities=odoo_write_capabilities,
+        )
+        for capability in write_capabilities
+    ]
+    static_write_admissible_count = sum(
+        1 for report in static_write_reports if report["sandbox_drill_admissible"] is True
+    )
+    pi_report = _pi_scenario_acceptance_report_status(
+        pi_scenario_report, command=command
+    )
+    onboarding_report = _sandbox_onboarding_receipt_report(
+        sandbox_onboarding_receipt,
+        command=command,
+        expected_database_name=expected_sandbox_database_name,
+        expected_release_identity=expected_release_identity,
+    )
+    pipeline_report = _write_pipeline_report_status(
+        write_pipeline_report,
+        command=command,
+        expected_release_identity=expected_release_identity,
+    )
+    blockers: list[str] = []
+    if not route_report["current_route_ready"]:
+        blockers.append("current release route is not ready")
+    if not registry_report["registry_audit_ready"]:
+        blockers.append("capability registry audit is not ready")
+    if static_write_admissible_count != len(static_write_reports):
+        blockers.append("not every write capability is statically admissible for sandbox drills")
+    if not pi_report["scenario_acceptance_ready"]:
+        blockers.extend(pi_report["blockers"])
+    if not onboarding_report["ready"]:
+        blockers.extend(onboarding_report["blockers"])
+    if not pipeline_report["write_pipeline_ready"]:
+        blockers.extend(pipeline_report["blockers"])
+    _success(
+        command,
+        {
+            "blockers": sorted(set(blockers)),
+            "goal_readiness_ready": not blockers,
+            "pi_scenario": pi_report,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "registry": registry_report,
+            "release_identity": identity,
+            "route": route_report,
+            "sandbox_onboarding": onboarding_report,
+            "write_pipeline": pipeline_report,
+            "write_static_readiness": {
+                "admissible_count": static_write_admissible_count,
+                "total_write_capabilities": len(static_write_reports),
+                "write_static_readiness_ready": (
+                    static_write_admissible_count == len(static_write_reports)
+                ),
+            },
         },
         business_succeeded=False,
     )
