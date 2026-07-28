@@ -116,7 +116,33 @@ same release identity and SHA-256 digests for these retained artifacts:
 - `write_evidence_index`
 - `goal_readiness_report`
 
-Validate the retained handoff manifest with:
+Assemble and validate the retained handoff manifest with:
+
+```bash
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence final-evidence-manifest-assemble \
+  --current-path /opt/odoo-accounting-cli-v3/current \
+  --output-file <FINAL_EVIDENCE_MANIFEST_JSON> \
+  --pi-trace-capture-check <PI_TRACE_CAPTURE_CHECK_JSON> \
+  --pi-scenario-report <PI_GATE_REPORT_JSON> \
+  --pi-scenario-report-check <PI_SCENARIO_REPORT_CHECK_JSON> \
+  --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
+  --sandbox-provision-authorization <SANDBOX_PROVISION_AUTHORIZATION_JSON> \
+  --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
+  --write-evidence-index <WRITE_EVIDENCE_INDEX_JSON> \
+  --goal-readiness-report <GOAL_READINESS_JSON> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
+```
+
+The assembler writes canonical JSON with artifact paths and SHA-256 values,
+then immediately reuses the same validation path as the checker. It refuses to
+overwrite an existing manifest unless `--overwrite` is supplied.
+
+To independently recheck an already assembled manifest, run:
 
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
@@ -130,9 +156,10 @@ RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
   --expected-registry-digest <REGISTRY_DIGEST>
 ```
 
-This manifest check is also read-only. It does not make a business-success
-claim; it only proves that the final review packet is complete, untampered, and
-bound to the exact deployed release before a human production promotion review.
+The assembler and checker are both read-only with respect to Odoo and
+PostgreSQL. They do not make a business-success claim; they only prove that the
+final review packet is complete, untampered, and bound to the exact deployed
+release before a human production promotion review.
 
 ## Fixed server layout
 

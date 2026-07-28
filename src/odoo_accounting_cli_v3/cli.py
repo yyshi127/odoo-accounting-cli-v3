@@ -715,6 +715,13 @@ FINAL_EVIDENCE_REQUIRED_ARTIFACTS = tuple(
 )
 
 
+def _manifest_artifact_reference(manifest_path: Path, artifact_path: Path) -> str:
+    try:
+        return artifact_path.resolve().relative_to(manifest_path.parent.resolve()).as_posix()
+    except ValueError:
+        return str(artifact_path)
+
+
 def _manifest_artifact_path(manifest_path: Path, value: Any) -> Path | None:
     if not isinstance(value, str) or not value:
         return None
@@ -722,6 +729,35 @@ def _manifest_artifact_path(manifest_path: Path, value: Any) -> Path | None:
     if path.is_absolute():
         return path
     return manifest_path.parent / path
+
+
+def _final_evidence_manifest_document(
+    artifact_paths: dict[str, Path],
+    *,
+    manifest_path: Path,
+    release_identity: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "artifact_sha256": {
+            name: _sha256_file(artifact_paths[name])
+            for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS
+        },
+        "artifacts": {
+            name: _manifest_artifact_reference(manifest_path, artifact_paths[name])
+            for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS
+        },
+        "release_identity": {
+            field: release_identity[field]
+            for field in (
+                "commit",
+                "manifest_sha256",
+                "package_sha256",
+                "registry_digest",
+                "release",
+            )
+        },
+        "schema_version": FINAL_EVIDENCE_MANIFEST_SCHEMA,
+    }
 
 
 def _final_evidence_manifest_report(
@@ -3221,6 +3257,181 @@ def evidence_pi_trace_capture_check(
         "trace_file_sha256": _sha256_file(trace_file),
     }
     _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("final-evidence-manifest-assemble")
+@click.option(
+    "--output-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Final retained evidence manifest JSON to create.",
+)
+@click.option(
+    "--pi-trace-capture-check",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.pi-trace-capture-check JSON.",
+)
+@click.option(
+    "--pi-scenario-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained tools/pi_scenario_gate.py acceptance report JSON.",
+)
+@click.option(
+    "--pi-scenario-report-check",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.pi-scenario-report-check JSON.",
+)
+@click.option(
+    "--sandbox-onboarding-receipt",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.sandbox-onboarding-readiness JSON.",
+)
+@click.option(
+    "--sandbox-provision-authorization",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained sandbox provision authorization JSON.",
+)
+@click.option(
+    "--write-pipeline-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.write-pipeline-readiness JSON.",
+)
+@click.option(
+    "--write-evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.write-evidence-index JSON.",
+)
+@click.option(
+    "--goal-readiness-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.goal-readiness JSON.",
+)
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to verify before assembling the manifest.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    help="Replace an existing output file after all input artifacts pass validation.",
+)
+def evidence_final_evidence_manifest_assemble(
+    output_file: Path,
+    pi_trace_capture_check: Path,
+    pi_scenario_report: Path,
+    pi_scenario_report_check: Path,
+    sandbox_onboarding_receipt: Path,
+    sandbox_provision_authorization: Path,
+    write_pipeline_report: Path,
+    write_evidence_index: Path,
+    goal_readiness_report: Path,
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+    overwrite: bool,
+) -> None:
+    """Assemble and validate the final retained V3 evidence manifest."""
+
+    command = "evidence.final-evidence-manifest-assemble"
+    if output_file.exists() and not overwrite:
+        raise CliFailure(
+            command=command,
+            code="final_evidence_manifest_exists",
+            message="The final evidence manifest output already exists.",
+            exit_code=5,
+        )
+    artifact_paths = {
+        "goal_readiness_report": goal_readiness_report,
+        "pi_scenario_report": pi_scenario_report,
+        "pi_scenario_report_check": pi_scenario_report_check,
+        "pi_trace_capture_check": pi_trace_capture_check,
+        "sandbox_onboarding_receipt": sandbox_onboarding_receipt,
+        "sandbox_provision_authorization": sandbox_provision_authorization,
+        "write_evidence_index": write_evidence_index,
+        "write_pipeline_report": write_pipeline_report,
+    }
+    duplicate_paths = sorted(
+        {
+            str(path)
+            for path in artifact_paths.values()
+            if sum(1 for candidate in artifact_paths.values() if candidate == path) > 1
+        }
+    )
+    if duplicate_paths:
+        raise CliFailure(
+            command=command,
+            code="final_evidence_manifest_rejected",
+            message="The final evidence manifest cannot reference duplicate artifacts.",
+            exit_code=5,
+        )
+    missing_artifacts = sorted(
+        name for name, path in artifact_paths.items() if not path.is_file()
+    )
+    if missing_artifacts:
+        raise CliFailure(
+            command=command,
+            code="final_evidence_manifest_rejected",
+            message="The final evidence manifest references unavailable artifacts.",
+            exit_code=5,
+        )
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release,
+        expected_commit=expected_commit,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_package_sha256=expected_package_sha256,
+        expected_registry_digest=expected_registry_digest,
+    )
+    expected_release_identity = {
+        "commit": expected_commit or route_report["route_identity"].get("commit"),
+        "manifest_sha256": expected_manifest_sha256
+        or route_report["route_identity"].get("manifest_sha256"),
+        "package_sha256": expected_package_sha256
+        or route_report["route_identity"].get("package_sha256"),
+        "registry_digest": expected_registry_digest
+        or route_report["route_identity"].get("registry_digest"),
+        "release": expected_release or route_report["route_identity"].get("release"),
+    }
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    manifest = _final_evidence_manifest_document(
+        artifact_paths,
+        manifest_path=output_file,
+        release_identity=expected_release_identity,
+    )
+    output_file.write_text(_json(manifest) + "\n", encoding="utf-8")
+    report = _final_evidence_manifest_report(
+        output_file,
+        command=command,
+        expected_release_identity=expected_release_identity,
+    )
+    blockers = list(report["blockers"])
+    if not route_report["current_route_ready"]:
+        blockers.append("current release route is not ready")
+    report["blockers"] = sorted(set(blockers))
+    report["final_evidence_manifest_ready"] = not blockers
+    report["route"] = route_report
+    report["manifest_created"] = report["final_evidence_manifest_ready"]
+    _success(command, report, business_succeeded=False)
 
 
 @evidence_group.command("final-evidence-manifest-check")

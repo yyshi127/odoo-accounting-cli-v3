@@ -3860,6 +3860,120 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     assert data["real_odoo_write_performed"] is False
 
 
+def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev234-test",
+        "verified": True,
+        "version": "0.1.0.dev234",
+    }
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    source_document = __import__("json").loads(source_manifest.read_text(encoding="utf-8"))
+    artifacts = {
+        name: tmp_path / path for name, path in source_document["artifacts"].items()
+    }
+    output_file = tmp_path / "assembled" / "final-evidence-manifest.json"
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-assemble",
+                "--output-file",
+                str(output_file),
+                "--pi-trace-capture-check",
+                str(artifacts["pi_trace_capture_check"]),
+                "--pi-scenario-report",
+                str(artifacts["pi_scenario_report"]),
+                "--pi-scenario-report-check",
+                str(artifacts["pi_scenario_report_check"]),
+                "--sandbox-onboarding-receipt",
+                str(artifacts["sandbox_onboarding_receipt"]),
+                "--sandbox-provision-authorization",
+                str(artifacts["sandbox_provision_authorization"]),
+                "--write-pipeline-report",
+                str(artifacts["write_pipeline_report"]),
+                "--write-evidence-index",
+                str(artifacts["write_evidence_index"]),
+                "--goal-readiness-report",
+                str(artifacts["goal_readiness_report"]),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.final-evidence-manifest-assemble"
+    data = payload["data"]
+    assert output_file.is_file()
+    assert data["manifest_created"] is True
+    assert data["final_evidence_manifest_ready"] is True
+    assembled = __import__("json").loads(output_file.read_text(encoding="utf-8"))
+    assert assembled["schema_version"] == (
+        "odoo-accounting-cli-v3.final-evidence-manifest.v1"
+    )
+    assert assembled["release_identity"]["release"] == "0.1.0.dev234-test"
+
+
+def test_evidence_final_evidence_manifest_assemble_rejects_duplicate_artifact(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev234-test",
+        "verified": True,
+        "version": "0.1.0.dev234",
+    }
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    source_document = __import__("json").loads(source_manifest.read_text(encoding="utf-8"))
+    artifacts = {
+        name: tmp_path / path for name, path in source_document["artifacts"].items()
+    }
+    duplicate = artifacts["goal_readiness_report"]
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "final-evidence-manifest-assemble",
+            "--output-file",
+            str(tmp_path / "assembled-duplicate.json"),
+            "--pi-trace-capture-check",
+            str(duplicate),
+            "--pi-scenario-report",
+            str(artifacts["pi_scenario_report"]),
+            "--pi-scenario-report-check",
+            str(artifacts["pi_scenario_report_check"]),
+            "--sandbox-onboarding-receipt",
+            str(artifacts["sandbox_onboarding_receipt"]),
+            "--sandbox-provision-authorization",
+            str(artifacts["sandbox_provision_authorization"]),
+            "--write-pipeline-report",
+            str(artifacts["write_pipeline_report"]),
+            "--write-evidence-index",
+            str(artifacts["write_evidence_index"]),
+            "--goal-readiness-report",
+            str(duplicate),
+        ],
+    )
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "final_evidence_manifest_rejected"
+
+
 def test_evidence_final_evidence_manifest_check_rejects_tampered_artifact_sha(
     tmp_path: Path,
 ):
