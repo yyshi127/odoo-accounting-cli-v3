@@ -15,6 +15,12 @@ from test_odoo_read_boundary_evidence_runner import (
     runtime_config,
     valid_evidence,
 )
+from test_pi_scenario_gate import (
+    PiScenarioGateTest,
+    TEST_ATTESTATION_KEY,
+    TEST_ATTESTATION_KEY_ID,
+    TEST_RELEASE_SHA256,
+)
 from test_verify_sandbox_write_evidence import _document as sandbox_write_document
 from test_verify_sandbox_write_evidence import _input_manifest as sandbox_write_input_manifest
 from test_verify_sandbox_write_evidence import _metadata as sandbox_write_metadata
@@ -166,6 +172,33 @@ def _ready_write_pipeline_report(tmp_path: Path, release_identity: dict) -> Path
     path = tmp_path / "write-pipeline-readiness.json"
     path.write_text(__import__("json").dumps(report, sort_keys=True), encoding="utf-8")
     return path
+
+
+def _ready_pi_trace_capture(tmp_path: Path) -> tuple[Path, Path]:
+    helper = PiScenarioGateTest()
+    helper.setUp()
+    trace_document = helper._perfect_trace_document()
+    trace_path = tmp_path / "pi-traces.json"
+    trace_path.write_text(
+        __import__("json").dumps(trace_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    key_path = tmp_path / "pi-attestation-keys.json"
+    key_path.write_text(
+        __import__("json").dumps(
+            {
+                "keys": {
+                    TEST_ATTESTATION_KEY_ID: {
+                        "secret_hex": TEST_ATTESTATION_KEY.hex()
+                    }
+                },
+                "schema_version": "odoo-accounting-cli-v3.pi-attestation-keys.v1",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return trace_path, key_path
 
 
 def identity(config) -> dict:
@@ -3501,6 +3534,78 @@ def test_evidence_pi_scenario_report_check_rejects_other_release_report(
         "Pi scenario report is not bound to the current release package"
         in data["blockers"]
     )
+
+
+def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
+    tmp_path: Path,
+):
+    trace_path, key_path = _ready_pi_trace_capture(tmp_path)
+    route = {
+        **READY_CURRENT_ROUTE,
+        "route_identity": {
+            **READY_CURRENT_ROUTE["route_identity"],
+            "package_sha256": TEST_RELEASE_SHA256,
+        },
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "pi-trace-capture-check",
+                "--trace-file",
+                str(trace_path),
+                "--attestation-keys",
+                str(key_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.pi-trace-capture-check"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["trace_capture_ready"] is True
+    assert payload["data"]["trace_count"] == 25
+    assert payload["data"]["real_odoo_write_performed"] is False
+
+
+def test_evidence_pi_trace_capture_check_rejects_other_release_capture(
+    tmp_path: Path,
+):
+    trace_path, key_path = _ready_pi_trace_capture(tmp_path)
+    route = {
+        **READY_CURRENT_ROUTE,
+        "route_identity": {
+            **READY_CURRENT_ROUTE["route_identity"],
+            "package_sha256": "ab" * 32,
+        },
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "pi-trace-capture-check",
+                "--trace-file",
+                str(trace_path),
+                "--attestation-keys",
+                str(key_path),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["trace_capture_ready"] is False
+    assert data["real_odoo_write_performed"] is False
+    assert data["blockers"] == ["traces.capture release SHA-256 mismatch"]
 
 
 def test_evidence_goal_readiness_reports_live_capacity_shortfall():

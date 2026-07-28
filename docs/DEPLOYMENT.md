@@ -54,6 +54,10 @@ and a passing report from an older release must not be reused.
 Before using the report in `goal-readiness`, run
 `evidence pi-scenario-report-check` against the routed release and retain its
 read-only JSON output with the release evidence.
+Before generating that report, run `evidence pi-trace-capture-check` on the
+normalized trace capture and trusted attestation key file. This earlier check is
+also offline and read-only, and catches trace/signature/release mismatches before
+the scorer report is created.
 
 ## Final goal-readiness aggregation
 

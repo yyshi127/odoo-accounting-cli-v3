@@ -855,6 +855,32 @@ def _load_sandbox_write_evidence_verifier() -> Any:
     return module
 
 
+def _load_pi_scenario_gate() -> Any:
+    path = Path(__file__).resolve().parents[2] / "tools" / "pi_scenario_gate.py"
+    spec = util.spec_from_file_location(
+        "odoo_accounting_cli_v3_release_pi_scenario_gate",
+        path,
+    )
+    if spec is None or spec.loader is None:
+        raise CliFailure(
+            command="evidence.pi-trace-capture-check",
+            code="pi_scenario_gate_unavailable",
+            message="The exact-release Pi scenario gate is unavailable.",
+            exit_code=5,
+        )
+    module = util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except OSError as exc:
+        raise CliFailure(
+            command="evidence.pi-trace-capture-check",
+            code="pi_scenario_gate_unavailable",
+            message="The exact-release Pi scenario gate is unavailable.",
+            exit_code=5,
+        ) from exc
+    return module
+
+
 def _is_within(path: Path, root: Path) -> bool:
     try:
         path.resolve().relative_to(root.resolve())
@@ -2842,6 +2868,117 @@ def evidence_pi_scenario_report_check(
         "real_odoo_write_performed": False,
         "route": route_report,
         "scenario_acceptance_ready": not blockers,
+    }
+    _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("pi-trace-capture-check")
+@click.option(
+    "--trace-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Normalized Pi trace capture JSON to validate before scoring.",
+)
+@click.option(
+    "--attestation-keys",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Trusted HMAC attestation key JSON for the captured Pi traces.",
+)
+@click.option(
+    "--corpus",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=Path("tests/fixtures/pi_scenarios.v1.json"),
+    show_default=True,
+    help="Frozen Pi scenario corpus.",
+)
+@click.option(
+    "--registry",
+    "registry_file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=Path("registry/capabilities.json"),
+    show_default=True,
+    help="Exact-release capability registry JSON.",
+)
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to verify before trusting the trace capture.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_pi_trace_capture_check(
+    trace_file: Path,
+    attestation_keys: Path,
+    corpus: Path,
+    registry_file: Path,
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Validate normalized Pi traces against corpus, registry, attestation, and release."""
+
+    command = "evidence.pi-trace-capture-check"
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release,
+        expected_commit=expected_commit,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_package_sha256=expected_package_sha256,
+        expected_registry_digest=expected_registry_digest,
+    )
+    gate = _load_pi_scenario_gate()
+    try:
+        trace_document = gate.load_json_document(trace_file)
+        corpus_document = gate.load_json_document(corpus)
+        registry_document = gate.load_json_document(registry_file)
+        key_document = gate.load_json_document(attestation_keys)
+        trusted_keys = gate.load_attestation_keys(key_document)
+        gate.validate_trace_document(
+            trace_document,
+            corpus_document,
+            registry_document,
+            trusted_keys,
+            expected_release_sha256=route_report["route_identity"]["package_sha256"],
+        )
+    except (OSError, ValueError) as exc:
+        data = {
+            "attestation_keys_path": str(attestation_keys),
+            "blockers": [str(exc)],
+            "corpus_path": str(corpus),
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "registry_path": str(registry_file),
+            "route": route_report,
+            "trace_capture_ready": False,
+            "trace_file": str(trace_file),
+        }
+        _success(command, data, business_succeeded=False)
+        return
+    traces = trace_document.get("traces", [])
+    data = {
+        "attestation": trace_document.get("attestation"),
+        "attestation_keys_path": str(attestation_keys),
+        "blockers": [] if route_report["current_route_ready"] else ["current release route is not ready"],
+        "capture": trace_document.get("capture"),
+        "corpus_path": str(corpus),
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "registry_path": str(registry_file),
+        "route": route_report,
+        "trace_capture_ready": route_report["current_route_ready"],
+        "trace_count": len(traces) if isinstance(traces, list) else 0,
+        "trace_file": str(trace_file),
+        "trace_file_sha256": _sha256_file(trace_file),
     }
     _success(command, data, business_succeeded=False)
 

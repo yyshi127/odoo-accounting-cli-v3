@@ -76,6 +76,24 @@ A scoreable trace document must contain:
 The attestation key file is host-local trusted evidence. It must not be
 generated from the same business message being scored, and it must not be
 committed to the repository.
+Before scoring, validate the retained trace capture against the routed release:
+
+```bash
+bin/odoo-accounting-cli-v3 evidence pi-trace-capture-check \
+  --trace-file <NORMALIZED_PI_TRACE_CAPTURE_JSON> \
+  --attestation-keys <TRUSTED_TRACE_ATTESTATION_KEYS_JSON> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
+```
+
+The trace check is read-only and offline. It uses the exact release's scenario
+gate validator to reject malformed traces, untrusted or invalid HMAC
+attestations, corpus/registry mismatches, missing scenarios, placeholder hashes,
+and captures whose `capture.v3_release_sha256` is not the routed package
+SHA-256.
 
 ## Current status
 
