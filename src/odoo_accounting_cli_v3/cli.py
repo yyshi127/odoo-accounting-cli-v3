@@ -873,6 +873,9 @@ FINAL_EVIDENCE_REQUIRED_ARTIFACTS = tuple(
 
 
 GOAL_REMEDIATION_SCHEMA = "odoo-accounting-cli-v3.goal-remediation-checklist.v1"
+SANDBOX_PREREQUISITE_HANDOFF_SCHEMA = (
+    "odoo-accounting-cli-v3.sandbox-prerequisite-handoff.v1"
+)
 GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
     "CAPACITY_PATH": {
         "description": "Filesystem path whose free space must satisfy the sandbox write capacity floor.",
@@ -1191,6 +1194,167 @@ def _goal_remediation_report(
         "release_identity": release_identity,
         "schema_version": GOAL_REMEDIATION_SCHEMA,
         "unmatched_blockers": unmatched_blockers,
+    }
+
+
+def _sandbox_prerequisite_handoff_report(
+    goal_readiness_report: Path,
+    *,
+    command: str,
+    expected_release_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    retained = _load_retained_json_report(
+        goal_readiness_report, command=command, label="goal readiness"
+    )
+    blockers: list[str] = []
+    if retained.get("ok") is not True:
+        blockers.append("goal-readiness report is not successful")
+    if retained.get("command") != "evidence.goal-readiness":
+        blockers.append("goal-readiness report has the wrong command")
+    data = retained.get("data")
+    if not isinstance(data, dict):
+        blockers.append("goal-readiness report data is invalid")
+        data = {}
+    release_identity = data.get("release_identity")
+    if not isinstance(release_identity, dict):
+        if expected_release_identity is not None:
+            blockers.append("goal-readiness release identity is invalid")
+        release_identity = None
+    elif expected_release_identity is not None:
+        for field, expected in expected_release_identity.items():
+            if expected is not None and release_identity.get(field) != expected:
+                blockers.append(f"goal-readiness release {field} mismatch")
+
+    capacity = data.get("capacity")
+    if not isinstance(capacity, dict):
+        capacity = {}
+    retained_plan = capacity.get("retained_plan")
+    if not isinstance(retained_plan, dict):
+        retained_plan = None
+    retained_recheck = capacity.get("retained_recheck")
+    if not isinstance(retained_recheck, dict):
+        retained_recheck = None
+    sandbox_database = data.get("sandbox_database")
+    if not isinstance(sandbox_database, dict):
+        sandbox_database = {}
+    candidates_report = sandbox_database.get("candidates_report")
+    if not isinstance(candidates_report, dict):
+        candidates_report = None
+
+    capacity_shortfall = capacity.get("shortfall_bytes")
+    if not isinstance(capacity_shortfall, int):
+        capacity_shortfall = None
+    plan_summary = (
+        retained_plan.get("summary") if isinstance(retained_plan, dict) else None
+    )
+    if not isinstance(plan_summary, dict):
+        plan_summary = {}
+    candidate_reclaimable = plan_summary.get("candidate_reclaimable_bytes")
+    if not isinstance(candidate_reclaimable, int):
+        candidate_reclaimable = None
+    expansion_required = (
+        capacity_shortfall is not None
+        and (
+            candidate_reclaimable is None
+            or candidate_reclaimable < capacity_shortfall
+        )
+    )
+
+    decisions = []
+    if capacity.get("sandbox_write_capacity_ready") is not True:
+        decisions.append(
+            {
+                "decision_id": "capacity_remediation",
+                "authorization_required": True,
+                "business_reason": "Sandbox write evidence cannot start until the target filesystem satisfies the configured free-space floor.",
+                "evidence": {
+                    "capacity_shortfall_bytes": capacity_shortfall,
+                    "candidate_reclaimable_bytes": candidate_reclaimable,
+                    "retained_plan_sha256": (
+                        retained_plan.get("report_sha256")
+                        if isinstance(retained_plan, dict)
+                        else None
+                    ),
+                    "retained_recheck_sha256": (
+                        retained_recheck.get("report_sha256")
+                        if isinstance(retained_recheck, dict)
+                        else None
+                    ),
+                },
+                "required_operator_action": (
+                    "expand or relocate capacity, or authorize reviewed cleanup and rerun target-capacity-recheck"
+                ),
+                "requires_external_capacity": expansion_required,
+                "status": "pending",
+            }
+        )
+
+    candidate_summary = (
+        candidates_report.get("candidate_summary")
+        if isinstance(candidates_report, dict)
+        else None
+    )
+    if not isinstance(candidate_summary, dict):
+        candidate_summary = {}
+    if sandbox_database.get("sandbox_database_ready") is not True:
+        decisions.append(
+            {
+                "decision_id": "dedicated_sandbox_database",
+                "authorization_required": True,
+                "business_reason": "Sandbox write validation requires one clearly named dedicated sandbox database, not a transient test/demo/runtime database.",
+                "evidence": {
+                    "candidate_count": candidate_summary.get("candidate_count"),
+                    "eligible_count": candidate_summary.get("eligible_count"),
+                    "expected_sandbox_database_name": sandbox_database.get(
+                        "sandbox_database_name"
+                    ),
+                    "retained_candidates_sha256": (
+                        candidates_report.get("report_sha256")
+                        if isinstance(candidates_report, dict)
+                        else None
+                    ),
+                    "sandbox_database_observed": sandbox_database.get(
+                        "sandbox_database_observed"
+                    ),
+                },
+                "required_operator_action": (
+                    "authorize and create or select a clearly named dedicated sandbox database, then rerun sandbox-database-candidates"
+                ),
+                "requires_external_database_action": True,
+                "status": "pending",
+            }
+        )
+
+    authorization = data.get("sandbox_provision_authorization")
+    if not isinstance(authorization, dict):
+        authorization = {}
+    if authorization.get("authorization_record_ready") is not True:
+        decisions.append(
+            {
+                "decision_id": "sandbox_provision_authorization",
+                "authorization_required": True,
+                "business_reason": "The sandbox database, source database, company scope, operator, and retention window must be approved before provisioning.",
+                "evidence": {
+                    "authorization_file": authorization.get("authorization_file"),
+                },
+                "required_operator_action": (
+                    "save and validate sandbox-provision-authorization JSON"
+                ),
+                "status": "pending",
+            }
+        )
+
+    return {
+        "blockers": sorted(set(blockers)),
+        "decision_count": len(decisions),
+        "decisions": decisions,
+        "goal_readiness_report": str(goal_readiness_report),
+        "goal_readiness_report_sha256": _sha256_file(goal_readiness_report),
+        "handoff_ready": not blockers and bool(decisions),
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "release_identity": release_identity,
+        "schema_version": SANDBOX_PREREQUISITE_HANDOFF_SCHEMA,
     }
 
 
@@ -3808,6 +3972,51 @@ def evidence_goal_remediation_checklist(
     _success(
         command,
         _goal_remediation_report(
+            goal_readiness_report,
+            command=command,
+            expected_release_identity=(
+                expected_release_identity
+                if any(value is not None for value in expected_release_identity.values())
+                else None
+            ),
+        ),
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("sandbox-prerequisite-handoff")
+@click.option(
+    "--goal-readiness-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.goal-readiness JSON output to convert into prerequisite decisions.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_sandbox_prerequisite_handoff(
+    goal_readiness_report: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Render a read-only operator handoff for capacity and sandbox prerequisites."""
+
+    command = "evidence.sandbox-prerequisite-handoff"
+    expected_release_identity = {
+        "commit": expected_commit,
+        "manifest_sha256": expected_manifest_sha256,
+        "package_sha256": expected_package_sha256,
+        "registry_digest": expected_registry_digest,
+        "release": expected_release,
+    }
+    _success(
+        command,
+        _sandbox_prerequisite_handoff_report(
             goal_readiness_report,
             command=command,
             expected_release_identity=(

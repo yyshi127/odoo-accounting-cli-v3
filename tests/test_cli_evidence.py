@@ -3671,6 +3671,124 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
     assert capacity["placeholder_schema"]["CAPACITY_PATH"]["format"] == "absolute_path"
 
 
+def test_evidence_sandbox_prerequisite_handoff_maps_capacity_and_database_decisions(
+    tmp_path: Path,
+):
+    report = tmp_path / "goal-readiness.json"
+    report.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.goal-readiness",
+                "data": {
+                    "blockers": [
+                        "sandbox write capacity gate is not ready",
+                        "expected sandbox database is not an eligible catalog candidate",
+                        "sandbox provision authorization file was not supplied",
+                    ],
+                    "capacity": {
+                        "retained_plan": {
+                            "report_sha256": "5" * 64,
+                            "summary": {
+                                "candidate_count": 251,
+                                "candidate_reclaimable_bytes": 3970154733,
+                                "shortfall_bytes": 6301405184,
+                            },
+                        },
+                        "retained_recheck": {
+                            "report_sha256": "6" * 64,
+                            "summary": {
+                                "available_bytes": 2288529408,
+                                "shortfall_bytes": 6301405184,
+                            },
+                        },
+                        "sandbox_write_capacity_ready": False,
+                        "shortfall_bytes": 6301405184,
+                    },
+                    "goal_readiness_ready": False,
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "release_identity": {
+                        "commit": "1" * 40,
+                        "manifest_sha256": "2" * 64,
+                        "package_sha256": "3" * 64,
+                        "registry_digest": "4" * 64,
+                        "release": "0.1.0.dev243-test",
+                    },
+                    "sandbox_database": {
+                        "candidates_report": {
+                            "candidate_summary": {
+                                "candidate_count": 151,
+                                "eligible_count": 0,
+                                "rejected_count": 151,
+                            },
+                            "report_sha256": "7" * 64,
+                        },
+                        "sandbox_database_name": "odoo_v3_sandbox",
+                        "sandbox_database_observed": False,
+                        "sandbox_database_ready": False,
+                    },
+                    "sandbox_provision_authorization": {
+                        "authorization_file": None,
+                        "authorization_record_ready": False,
+                    },
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-prerequisite-handoff",
+            "--goal-readiness-report",
+            str(report),
+            "--expected-release",
+            "0.1.0.dev243-test",
+            "--expected-commit",
+            "1" * 40,
+            "--expected-manifest-sha256",
+            "2" * 64,
+            "--expected-package-sha256",
+            "3" * 64,
+            "--expected-registry-digest",
+            "4" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-prerequisite-handoff"
+    assert payload["business_succeeded"] is False
+    data = payload["data"]
+    assert data["schema_version"] == (
+        "odoo-accounting-cli-v3.sandbox-prerequisite-handoff.v1"
+    )
+    assert data["handoff_ready"] is True
+    assert data["production_promotion_allowed"] is False
+    assert data["real_odoo_write_performed"] is False
+    assert data["decision_count"] == 3
+    decisions = {item["decision_id"]: item for item in data["decisions"]}
+    assert decisions["capacity_remediation"]["requires_external_capacity"] is True
+    assert decisions["capacity_remediation"]["evidence"][
+        "capacity_shortfall_bytes"
+    ] == 6301405184
+    assert decisions["capacity_remediation"]["evidence"][
+        "candidate_reclaimable_bytes"
+    ] == 3970154733
+    assert decisions["dedicated_sandbox_database"]["evidence"]["eligible_count"] == 0
+    assert decisions["dedicated_sandbox_database"][
+        "requires_external_database_action"
+    ] is True
+    assert decisions["sandbox_provision_authorization"][
+        "authorization_required"
+    ] is True
+
+
 def test_evidence_goal_remediation_checklist_rejects_wrong_retained_command(
     tmp_path: Path,
 ):

@@ -151,6 +151,26 @@ success. The expected release options bind the handoff to the same exact
 release as the readiness report and reject stale or cross-release evidence
 packets.
 
+When capacity, sandbox database selection, or sandbox provisioning authorization
+remain the next prerequisites, render the narrower prerequisite handoff:
+
+```bash
+"$V3_CLI" evidence sandbox-prerequisite-handoff \
+  --goal-readiness-report <GOAL_READINESS_JSON> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
+```
+
+The handoff has schema
+`odoo-accounting-cli-v3.sandbox-prerequisite-handoff.v1`. It is read-only and
+non-authorizing: it summarizes the retained capacity plan/recheck, sandbox
+database candidate report, and provisioning authorization status into explicit
+operator decisions without cleaning files, creating databases, or approving
+writes.
+
 After the final gate and all prerequisite checks are retained, build a final
 evidence manifest with schema
 `odoo-accounting-cli-v3.final-evidence-manifest.v1`. The manifest must bind the
