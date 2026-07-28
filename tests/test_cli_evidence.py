@@ -3189,6 +3189,8 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
                 str(write_pipeline_report),
                 "--expected-sandbox-database-name",
                 "odoo_v3_sandbox",
+                "--observed-database-name",
+                "odoo_v3_sandbox",
             ],
         )
 
@@ -3199,6 +3201,7 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     assert data["blockers"] == []
     assert data["pi_scenario"]["scenario_acceptance_ready"] is True
     assert data["sandbox_onboarding"]["ready"] is True
+    assert data["sandbox_database"]["sandbox_database_ready"] is True
     assert data["write_pipeline"]["write_pipeline_ready"] is True
     assert data["write_static_readiness"]["admissible_count"] == 14
 
@@ -3237,6 +3240,50 @@ def test_evidence_goal_readiness_reports_live_capacity_shortfall():
     assert data["goal_readiness_ready"] is False
     assert "sandbox write capacity gate is not ready" in data["blockers"]
     assert data["capacity"]["shortfall_bytes"] == 1024
+
+
+def test_evidence_goal_readiness_reports_missing_sandbox_database_observation():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev223",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--expected-sandbox-database-name",
+                "odoo_v3_sandbox",
+                "--observed-database-name",
+                "odoo",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["goal_readiness_ready"] is False
+    assert data["sandbox_database"]["sandbox_database_observed"] is False
+    assert data["sandbox_database"]["observed_database_names_count"] == 1
+    assert (
+        "sandbox database was not observed in the PostgreSQL catalog"
+        in data["blockers"]
+    )
 
 
 def test_evidence_sandbox_write_preflight_rejects_demo_database_name(

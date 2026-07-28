@@ -2489,6 +2489,16 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
     help="Sandbox database name the retained onboarding receipt must bind.",
 )
 @click.option(
+    "--observed-database-name",
+    multiple=True,
+    help="Database name observed from PostgreSQL catalog; may be repeated.",
+)
+@click.option(
+    "--protected-database-name",
+    multiple=True,
+    help="Known production or otherwise protected database name.",
+)
+@click.option(
     "--current-path",
     type=click.Path(path_type=Path),
     default=Path("/opt/odoo-accounting-cli-v3/current"),
@@ -2517,6 +2527,8 @@ def evidence_goal_readiness(
     sandbox_onboarding_receipt: Path | None,
     write_pipeline_report: Path | None,
     expected_sandbox_database_name: str | None,
+    observed_database_name: tuple[str, ...],
+    protected_database_name: tuple[str, ...],
     current_path: Path,
     capacity_path: Path,
     required_free_bytes: int,
@@ -2592,6 +2604,36 @@ def evidence_goal_readiness(
         command=command,
         expected_release_identity=expected_release_identity,
     )
+    observed_names = sorted(set(observed_database_name))
+    if expected_sandbox_database_name is None:
+        sandbox_database_report = {
+            "blockers": ["expected sandbox database name was not supplied"],
+            "observed_database_names_count": len(observed_names),
+            "sandbox_database_name": None,
+            "sandbox_database_observed": False,
+            "sandbox_database_report": None,
+            "sandbox_database_ready": False,
+        }
+    else:
+        candidate_report = _sandbox_database_candidate_report(
+            expected_sandbox_database_name,
+            protected_names=frozenset(protected_database_name),
+            selected_name=expected_sandbox_database_name,
+        )
+        database_blockers = list(candidate_report["blockers"])
+        database_observed = expected_sandbox_database_name in observed_names
+        if not observed_names:
+            database_blockers.append("database catalog was not supplied")
+        elif not database_observed:
+            database_blockers.append("sandbox database was not observed in the PostgreSQL catalog")
+        sandbox_database_report = {
+            "blockers": sorted(set(database_blockers)),
+            "observed_database_names_count": len(observed_names),
+            "sandbox_database_name": expected_sandbox_database_name,
+            "sandbox_database_observed": database_observed,
+            "sandbox_database_report": candidate_report,
+            "sandbox_database_ready": not database_blockers,
+        }
     blockers: list[str] = []
     if not route_report["current_route_ready"]:
         blockers.append("current release route is not ready")
@@ -2607,6 +2649,8 @@ def evidence_goal_readiness(
         blockers.extend(onboarding_report["blockers"])
     if not pipeline_report["write_pipeline_ready"]:
         blockers.extend(pipeline_report["blockers"])
+    if not sandbox_database_report["sandbox_database_ready"]:
+        blockers.extend(sandbox_database_report["blockers"])
     _success(
         command,
         {
@@ -2619,6 +2663,7 @@ def evidence_goal_readiness(
             "registry": registry_report,
             "release_identity": identity,
             "route": route_report,
+            "sandbox_database": sandbox_database_report,
             "sandbox_onboarding": onboarding_report,
             "write_pipeline": pipeline_report,
             "write_static_readiness": {

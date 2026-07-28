@@ -62,6 +62,8 @@ bin/odoo-accounting-cli-v3 evidence goal-readiness \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
   --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
   --expected-sandbox-database-name <SANDBOX_DATABASE_NAME> \
+  --observed-database-name <OBSERVED_DATABASE> \
+  --protected-database-name <PRODUCTION_DATABASE> \
   --capacity-path / \
   --required-free-bytes 8589934592 \
   --expected-release <ROUTED_RELEASE> \
@@ -72,7 +74,8 @@ bin/odoo-accounting-cli-v3 evidence goal-readiness \
 ```
 
 This command performs no Odoo or PostgreSQL write. It aggregates blockers from
-the current-route gate, live filesystem capacity recheck, `registry audit`,
+the current-route gate, live filesystem capacity recheck, supplied PostgreSQL
+catalog observations for the expected sandbox database name, `registry audit`,
 static write readiness, the retained Pi scenario report, the retained sandbox
 onboarding receipt, and the retained write-pipeline readiness report. It reports
 `goal_readiness_ready:false` until all supplied evidence is present, bound to
