@@ -101,6 +101,36 @@ sandbox/source/company scope, and independently passing. A passing aggregate
 report is a final checklist input; it still does not itself authorize production
 writes.
 
+After the final gate and all prerequisite checks are retained, build a final
+evidence manifest with schema
+`odoo-accounting-cli-v3.final-evidence-manifest.v1`. The manifest must bind the
+same release identity and SHA-256 digests for these retained artifacts:
+
+- `pi_trace_capture_check`
+- `pi_scenario_report`
+- `pi_scenario_report_check`
+- `sandbox_onboarding_receipt`
+- `sandbox_provision_authorization`
+- `write_pipeline_report`
+- `write_evidence_index`
+- `goal_readiness_report`
+
+Validate the retained handoff manifest with:
+
+```bash
+bin/odoo-accounting-cli-v3 evidence final-evidence-manifest-check \
+  --manifest-file <FINAL_EVIDENCE_MANIFEST_JSON> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
+```
+
+This manifest check is also read-only. It does not make a business-success
+claim; it only proves that the final review packet is complete, untampered, and
+bound to the exact deployed release before a human production promotion review.
+
 ## Fixed server layout
 
 ```text

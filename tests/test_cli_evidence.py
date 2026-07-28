@@ -204,6 +204,79 @@ def _ready_write_evidence_index(
     return path
 
 
+def _sha256_path(path: Path) -> str:
+    hashlib = __import__("hashlib")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _ready_final_evidence_manifest(
+    tmp_path: Path,
+    release_identity: dict,
+) -> Path:
+    artifacts: dict[str, Path] = {}
+    artifacts["pi_scenario_report"] = _ready_pi_scenario_report(
+        tmp_path, package_sha256=release_identity["package_sha256"]
+    )
+    artifacts["sandbox_onboarding_receipt"] = _ready_onboarding_receipt(
+        tmp_path, release_identity=release_identity
+    )
+    artifacts["write_pipeline_report"] = _ready_write_pipeline_report(
+        tmp_path, release_identity
+    )
+    artifacts["write_evidence_index"] = _ready_write_evidence_index(
+        tmp_path, release_identity
+    )
+    artifacts["sandbox_provision_authorization"] = tmp_path / "sandbox-auth.json"
+    artifacts["sandbox_provision_authorization"].write_text(
+        __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
+        encoding="utf-8",
+    )
+    for name, command in {
+        "goal_readiness_report": "evidence.goal-readiness",
+        "pi_scenario_report_check": "evidence.pi-scenario-report-check",
+        "pi_trace_capture_check": "evidence.pi-trace-capture-check",
+    }.items():
+        path = tmp_path / f"{name}.json"
+        path.write_text(
+            __import__("json").dumps(
+                {
+                    "business_succeeded": False,
+                    "command": command,
+                    "data": {
+                        "production_promotion_allowed": False,
+                        "real_odoo_write_performed": False,
+                    },
+                    "ok": True,
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        artifacts[name] = path
+    manifest = {
+        "artifact_sha256": {
+            name: _sha256_path(path) for name, path in artifacts.items()
+        },
+        "artifacts": {name: path.name for name, path in artifacts.items()},
+        "release_identity": {
+            field: release_identity[field]
+            for field in (
+                "commit",
+                "manifest_sha256",
+                "package_sha256",
+                "registry_digest",
+                "release",
+            )
+        },
+        "schema_version": "odoo-accounting-cli-v3.final-evidence-manifest.v1",
+    }
+    manifest_path = tmp_path / "final-evidence-manifest.json"
+    manifest_path.write_text(
+        __import__("json").dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+    return manifest_path
+
+
 def _ready_pi_trace_capture(tmp_path: Path) -> tuple[Path, Path]:
     helper = PiScenarioGateTest()
     helper.setUp()
@@ -3745,6 +3818,89 @@ def test_evidence_pi_trace_capture_check_rejects_other_release_capture(
     assert data["trace_capture_ready"] is False
     assert data["real_odoo_write_performed"] is False
     assert data["blockers"] == ["traces.capture release SHA-256 mismatch"]
+
+
+def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev232-test",
+        "verified": True,
+        "version": "0.1.0.dev232",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.final-evidence-manifest-check"
+    assert payload["business_succeeded"] is False
+    data = payload["data"]
+    assert data["final_evidence_manifest_ready"] is True
+    assert data["artifact_count"] == 8
+    assert data["blockers"] == []
+    assert data["real_odoo_write_performed"] is False
+
+
+def test_evidence_final_evidence_manifest_check_rejects_tampered_artifact_sha(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev232-test",
+        "verified": True,
+        "version": "0.1.0.dev232",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    document["artifact_sha256"]["write_pipeline_report"] = "ab" * 32
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True), encoding="utf-8"
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert (
+        "write_pipeline_report: artifact SHA-256 does not match manifest"
+        in data["blockers"]
+    )
 
 
 def test_evidence_goal_readiness_reports_live_capacity_shortfall():

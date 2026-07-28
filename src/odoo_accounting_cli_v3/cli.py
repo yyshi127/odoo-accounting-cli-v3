@@ -695,6 +695,120 @@ def _write_evidence_index_status(
     }
 
 
+FINAL_EVIDENCE_MANIFEST_SCHEMA = "odoo-accounting-cli-v3.final-evidence-manifest.v1"
+FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
+    "goal_readiness_report": "evidence.goal-readiness",
+    "pi_scenario_report_check": "evidence.pi-scenario-report-check",
+    "pi_trace_capture_check": "evidence.pi-trace-capture-check",
+    "sandbox_onboarding_receipt": "evidence.sandbox-onboarding-readiness",
+    "write_evidence_index": "evidence.write-evidence-index",
+    "write_pipeline_report": "evidence.write-pipeline-readiness",
+}
+FINAL_EVIDENCE_REQUIRED_ARTIFACTS = tuple(
+    sorted(
+        {
+            *FINAL_EVIDENCE_ARTIFACT_COMMANDS,
+            "pi_scenario_report",
+            "sandbox_provision_authorization",
+        }
+    )
+)
+
+
+def _manifest_artifact_path(manifest_path: Path, value: Any) -> Path | None:
+    if not isinstance(value, str) or not value:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    return manifest_path.parent / path
+
+
+def _final_evidence_manifest_report(
+    manifest_path: Path,
+    *,
+    command: str,
+    expected_release_identity: dict[str, Any],
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    try:
+        manifest = _load_retained_json_report(
+            manifest_path, command=command, label="final evidence manifest"
+        )
+    except CliFailure:
+        raise
+    artifacts = manifest.get("artifacts")
+    artifact_sha256 = manifest.get("artifact_sha256")
+    release_identity = manifest.get("release_identity")
+    if manifest.get("schema_version") != FINAL_EVIDENCE_MANIFEST_SCHEMA:
+        blockers.append("final evidence manifest has the wrong schema")
+    if not isinstance(release_identity, dict):
+        blockers.append("final evidence manifest release_identity is invalid")
+    else:
+        for field, expected in expected_release_identity.items():
+            if expected is not None and release_identity.get(field) != expected:
+                blockers.append(f"final evidence manifest release {field} mismatch")
+    if not isinstance(artifacts, dict):
+        blockers.append("final evidence manifest artifacts are invalid")
+        artifacts = {}
+    if not isinstance(artifact_sha256, dict):
+        blockers.append("final evidence manifest artifact_sha256 is invalid")
+        artifact_sha256 = {}
+    missing = sorted(set(FINAL_EVIDENCE_REQUIRED_ARTIFACTS) - set(artifacts))
+    if missing:
+        blockers.append("final evidence manifest is missing required artifacts")
+    artifact_reports: dict[str, Any] = {}
+    for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS:
+        raw_path = artifacts.get(name)
+        artifact_path = _manifest_artifact_path(manifest_path, raw_path)
+        artifact_blockers: list[str] = []
+        digest: str | None = None
+        document: Any = None
+        if artifact_path is None:
+            artifact_blockers.append("artifact path is invalid")
+        elif not artifact_path.is_file():
+            artifact_blockers.append("artifact file is unavailable")
+        else:
+            digest = _sha256_file(artifact_path)
+            if artifact_sha256.get(name) != digest:
+                artifact_blockers.append("artifact SHA-256 does not match manifest")
+            try:
+                document = _load_retained_json_report(
+                    artifact_path, command=command, label=f"final evidence artifact {name}"
+                )
+            except CliFailure as exc:
+                artifact_blockers.append("artifact is unavailable or invalid JSON")
+                document = None
+        expected_command = FINAL_EVIDENCE_ARTIFACT_COMMANDS.get(name)
+        if expected_command is not None and isinstance(document, dict):
+            if document.get("command") != expected_command:
+                artifact_blockers.append("artifact command does not match expected evidence kind")
+        if name == "pi_scenario_report" and isinstance(document, dict):
+            if document.get("schema_version") != "odoo-accounting-cli-v3.pi-gate-report.v1":
+                artifact_blockers.append("Pi scenario report schema is invalid")
+        if name == "sandbox_provision_authorization" and isinstance(document, dict):
+            if document.get("purpose") != "sandbox_database_provision":
+                artifact_blockers.append("sandbox provision authorization purpose is invalid")
+        if artifact_blockers:
+            blockers.extend(f"{name}: {item}" for item in artifact_blockers)
+        artifact_reports[name] = {
+            "blockers": sorted(set(artifact_blockers)),
+            "path": str(artifact_path) if artifact_path is not None else raw_path,
+            "sha256": digest,
+        }
+    return {
+        "artifact_count": len(FINAL_EVIDENCE_REQUIRED_ARTIFACTS),
+        "artifacts": artifact_reports,
+        "blockers": sorted(set(blockers)),
+        "final_evidence_manifest_ready": not blockers,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": _sha256_file(manifest_path),
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "release_identity": expected_release_identity,
+    }
+
+
 def _load_release_identity(
     root: Path | None = None, *, command: str = "release.identity"
 ) -> dict[str, Any]:
@@ -3107,6 +3221,70 @@ def evidence_pi_trace_capture_check(
         "trace_file_sha256": _sha256_file(trace_file),
     }
     _success(command, data, business_succeeded=False)
+
+
+@evidence_group.command("final-evidence-manifest-check")
+@click.option(
+    "--manifest-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Final retained evidence manifest JSON to validate.",
+)
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to verify before trusting the final manifest.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_final_evidence_manifest_check(
+    manifest_file: Path,
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Validate the final retained V3 evidence handoff manifest."""
+
+    command = "evidence.final-evidence-manifest-check"
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release,
+        expected_commit=expected_commit,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_package_sha256=expected_package_sha256,
+        expected_registry_digest=expected_registry_digest,
+    )
+    expected_release_identity = {
+        "commit": expected_commit or route_report["route_identity"].get("commit"),
+        "manifest_sha256": expected_manifest_sha256
+        or route_report["route_identity"].get("manifest_sha256"),
+        "package_sha256": expected_package_sha256
+        or route_report["route_identity"].get("package_sha256"),
+        "registry_digest": expected_registry_digest
+        or route_report["route_identity"].get("registry_digest"),
+        "release": expected_release or route_report["route_identity"].get("release"),
+    }
+    report = _final_evidence_manifest_report(
+        manifest_file,
+        command=command,
+        expected_release_identity=expected_release_identity,
+    )
+    blockers = list(report["blockers"])
+    if not route_report["current_route_ready"]:
+        blockers.append("current release route is not ready")
+    report["blockers"] = sorted(set(blockers))
+    report["final_evidence_manifest_ready"] = not blockers
+    report["route"] = route_report
+    _success(command, report, business_succeeded=False)
 
 
 @evidence_group.command("goal-readiness")
