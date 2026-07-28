@@ -889,6 +889,12 @@ GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
         "operator_supplied": True,
         "sensitive": False,
     },
+    "GOAL_READINESS_JSON": {
+        "description": "Retained evidence.goal-readiness JSON report for the routed release.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
     "NORMALIZED_PI_TRACE_CAPTURE_JSON": {
         "description": "Retained normalized Pi Agent trace capture JSON for the routed release.",
         "format": "json_file",
@@ -945,6 +951,12 @@ GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
     },
     "SANDBOX_PROVISION_AUTHORIZATION_JSON": {
         "description": "Retained sandbox provisioning authorization JSON signed or approved by the authorized operator.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "SANDBOX_PREREQUISITE_HANDOFF_JSON": {
+        "description": "Retained sandbox prerequisite handoff JSON generated from the goal-readiness report.",
         "format": "json_file",
         "operator_supplied": True,
         "sensitive": False,
@@ -1035,6 +1047,27 @@ GOAL_REMEDIATION_ACTIONS = (
             ("evidence", "sandbox-provision-authorization-check", "--authorization-file", "<SANDBOX_PROVISION_AUTHORIZATION_JSON>", "--expected-sandbox-database-name", "<SANDBOX_DATABASE_NAME>", "--expected-source-database-name", "<SOURCE_DATABASE_NAME>", "--expected-company", "<COMPANY>"),
         ),
         "authorization_required": True,
+    },
+    {
+        "action_id": "sandbox_prerequisite_handoff",
+        "blocker_patterns": (
+            "capacity",
+            "free space",
+            "sandbox database",
+            "authorization file",
+            "sandbox provision authorization",
+        ),
+        "description": "Render and validate the read-only operator decision handoff for capacity, sandbox database, and provisioning prerequisites.",
+        "required_artifacts": (
+            "sandbox_prerequisite_handoff",
+            "sandbox_prerequisite_handoff_check",
+        ),
+        "operator_command": "evidence sandbox-prerequisite-handoff; evidence sandbox-prerequisite-handoff-check",
+        "command_args_template": (
+            ("evidence", "sandbox-prerequisite-handoff", "--goal-readiness-report", "<GOAL_READINESS_JSON>"),
+            ("evidence", "sandbox-prerequisite-handoff-check", "--handoff-file", "<SANDBOX_PREREQUISITE_HANDOFF_JSON>"),
+        ),
+        "authorization_required": False,
     },
     {
         "action_id": "sandbox_onboarding_receipt",

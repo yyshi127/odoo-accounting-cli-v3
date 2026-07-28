@@ -3625,7 +3625,7 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         "odoo-accounting-cli-v3.goal-remediation-checklist.v1"
     )
     assert data["goal_readiness_ready"] is False
-    assert data["ordered_action_count"] == 6
+    assert data["ordered_action_count"] == 7
     assert data["unmatched_blockers"] == []
     assert data["real_odoo_write_performed"] is False
     assert {
@@ -3636,6 +3636,7 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         "sandbox_database_catalog",
         "sandbox_onboarding_receipt",
         "sandbox_provision_authorization",
+        "sandbox_prerequisite_handoff",
         "sandbox_write_pipeline",
     }
     for action in data["actions"]:
@@ -3669,6 +3670,19 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         "positive_integer"
     )
     assert capacity["placeholder_schema"]["CAPACITY_PATH"]["format"] == "absolute_path"
+    prerequisite_handoff = next(
+        action
+        for action in data["actions"]
+        if action["action_id"] == "sandbox_prerequisite_handoff"
+    )
+    assert prerequisite_handoff["required_placeholders"] == [
+        "GOAL_READINESS_JSON",
+        "SANDBOX_PREREQUISITE_HANDOFF_JSON",
+    ]
+    assert prerequisite_handoff["authorization_required"] is False
+    assert prerequisite_handoff["placeholder_schema"]["GOAL_READINESS_JSON"][
+        "format"
+    ] == "json_file"
 
 
 def test_evidence_sandbox_prerequisite_handoff_maps_capacity_and_database_decisions(

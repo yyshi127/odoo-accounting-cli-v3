@@ -135,7 +135,8 @@ The checklist has schema
 `odoo-accounting-cli-v3.goal-remediation-checklist.v1`. It maps retained
 blockers to stable action IDs for Pi scenario acceptance, sandbox capacity,
 sandbox database observation, sandbox provisioning authorization, sandbox
-onboarding, and sandbox write-pipeline evidence. Each action includes both a
+prerequisite handoff/check, sandbox onboarding, and sandbox write-pipeline
+evidence. Each action includes both a
 human-readable `operator_command` and a structured `command_args_template` so
 Pi Bridge or an operator tool can fill placeholders without parsing shell text.
 Each action also carries `required_placeholders`, derived from the command
