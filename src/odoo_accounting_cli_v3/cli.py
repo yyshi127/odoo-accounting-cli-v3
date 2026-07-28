@@ -695,6 +695,58 @@ def _write_evidence_index_status(
     }
 
 
+def _sandbox_database_candidates_report_status(
+    sandbox_database_candidates_report: Path | None,
+    *,
+    command: str,
+    expected_database_name: str | None,
+) -> dict[str, Any] | None:
+    if sandbox_database_candidates_report is None:
+        return None
+    blockers: list[str] = []
+    report = _load_retained_json_report(
+        sandbox_database_candidates_report,
+        command=command,
+        label="sandbox database candidates",
+    )
+    if report.get("ok") is not True:
+        blockers.append("sandbox database candidates report is not successful")
+    if report.get("command") != "evidence.sandbox-database-candidates":
+        blockers.append("sandbox database candidates report has the wrong command")
+    data = report.get("data")
+    if not isinstance(data, dict):
+        blockers.append("sandbox database candidates report data is invalid")
+        data = {}
+    eligible_names = data.get("eligible_database_names")
+    if not isinstance(eligible_names, list) or any(
+        not isinstance(name, str) for name in eligible_names
+    ):
+        blockers.append("sandbox database candidates eligible names are invalid")
+        eligible_names = []
+    selected_name = data.get("selected_database_name")
+    selected_eligible = data.get("selected_database_eligible")
+    if expected_database_name is not None:
+        if selected_name not in (None, expected_database_name):
+            blockers.append("sandbox database candidates selected name mismatch")
+        if expected_database_name not in eligible_names:
+            blockers.append(
+                "expected sandbox database is not an eligible catalog candidate"
+            )
+    candidate_summary = data.get("candidate_summary")
+    if not isinstance(candidate_summary, dict):
+        candidate_summary = None
+    return {
+        "blockers": sorted(set(blockers)),
+        "candidate_summary": candidate_summary,
+        "eligible_database_names": sorted(set(eligible_names)),
+        "report_path": str(sandbox_database_candidates_report),
+        "report_sha256": _sha256_file(sandbox_database_candidates_report),
+        "report_valid": not blockers,
+        "selected_database_eligible": selected_eligible,
+        "selected_database_name": selected_name,
+    }
+
+
 FINAL_EVIDENCE_MANIFEST_SCHEMA = "odoo-accounting-cli-v3.final-evidence-manifest.v1"
 FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
     "goal_readiness_report": "evidence.goal-readiness",
@@ -3924,6 +3976,11 @@ def evidence_final_evidence_manifest_check(
     help="Optional retained evidence.write-evidence-index JSON handoff index.",
 )
 @click.option(
+    "--sandbox-database-candidates-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Optional retained evidence.sandbox-database-candidates JSON catalog report.",
+)
+@click.option(
     "--sandbox-provision-authorization-file",
     type=click.Path(path_type=Path, dir_okay=False),
     help="Retained sandbox provision authorization JSON to validate.",
@@ -3984,6 +4041,7 @@ def evidence_goal_readiness(
     sandbox_onboarding_receipt: Path | None,
     write_pipeline_report: Path | None,
     write_evidence_index: Path | None,
+    sandbox_database_candidates_report: Path | None,
     sandbox_provision_authorization_file: Path | None,
     expected_sandbox_database_name: str | None,
     expected_source_database_name: str | None,
@@ -4108,11 +4166,31 @@ def evidence_goal_readiness(
         expected_release_identity=expected_release_identity,
         pipeline_summary=pipeline_report["summary"],
     )
+    retained_candidate_report = _sandbox_database_candidates_report_status(
+        sandbox_database_candidates_report,
+        command=command,
+        expected_database_name=expected_sandbox_database_name,
+    )
     observed_names = sorted(set(observed_database_name))
+    retained_candidate_count = None
+    if retained_candidate_report is not None and isinstance(
+        retained_candidate_report.get("candidate_summary"), dict
+    ):
+        retained_candidate_count = retained_candidate_report["candidate_summary"].get(
+            "candidate_count"
+        )
     if expected_sandbox_database_name is None:
+        database_blockers = ["expected sandbox database name was not supplied"]
+        if retained_candidate_report is not None:
+            database_blockers.extend(retained_candidate_report["blockers"])
         sandbox_database_report = {
-            "blockers": ["expected sandbox database name was not supplied"],
-            "observed_database_names_count": len(observed_names),
+            "blockers": sorted(set(database_blockers)),
+            "candidates_report": retained_candidate_report,
+            "observed_database_names_count": (
+                retained_candidate_count
+                if isinstance(retained_candidate_count, int)
+                else len(observed_names)
+            ),
             "sandbox_database_name": None,
             "sandbox_database_observed": False,
             "sandbox_database_report": None,
@@ -4125,14 +4203,26 @@ def evidence_goal_readiness(
             selected_name=expected_sandbox_database_name,
         )
         database_blockers = list(candidate_report["blockers"])
-        database_observed = expected_sandbox_database_name in observed_names
-        if not observed_names:
+        if retained_candidate_report is not None:
+            database_blockers.extend(retained_candidate_report["blockers"])
+            database_observed = (
+                expected_sandbox_database_name
+                in retained_candidate_report["eligible_database_names"]
+            )
+        else:
+            database_observed = expected_sandbox_database_name in observed_names
+        if not observed_names and retained_candidate_report is None:
             database_blockers.append("database catalog was not supplied")
         elif not database_observed:
             database_blockers.append("sandbox database was not observed in the PostgreSQL catalog")
         sandbox_database_report = {
             "blockers": sorted(set(database_blockers)),
-            "observed_database_names_count": len(observed_names),
+            "candidates_report": retained_candidate_report,
+            "observed_database_names_count": (
+                retained_candidate_count
+                if isinstance(retained_candidate_count, int)
+                else len(observed_names)
+            ),
             "sandbox_database_name": expected_sandbox_database_name,
             "sandbox_database_observed": database_observed,
             "sandbox_database_report": candidate_report,

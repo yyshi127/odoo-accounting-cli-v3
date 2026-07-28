@@ -4330,6 +4330,87 @@ def test_evidence_goal_readiness_reports_missing_sandbox_database_observation():
     )
 
 
+def test_evidence_goal_readiness_accepts_retained_sandbox_candidate_report(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev242",
+    }
+    candidates = tmp_path / "sandbox-database-candidates.json"
+    candidates.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.sandbox-database-candidates",
+                "data": {
+                    "blockers": [
+                        "no eligible clearly named dedicated sandbox database was observed"
+                    ],
+                    "candidate_summary": {
+                        "candidate_count": 151,
+                        "eligible_count": 0,
+                        "rejected_count": 151,
+                    },
+                    "eligible_database_names": [],
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "sandbox_database_selection_ready": False,
+                    "selected_database": None,
+                    "selected_database_eligible": None,
+                    "selected_database_name": None,
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--expected-sandbox-database-name",
+                "odoo_v3_sandbox",
+                "--sandbox-database-candidates-report",
+                str(candidates),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["goal_readiness_ready"] is False
+    database = data["sandbox_database"]
+    assert database["observed_database_names_count"] == 151
+    assert database["sandbox_database_observed"] is False
+    assert database["candidates_report"]["candidate_summary"]["eligible_count"] == 0
+    assert (
+        "expected sandbox database is not an eligible catalog candidate"
+        in data["blockers"]
+    )
+    assert (
+        "sandbox database was not observed in the PostgreSQL catalog"
+        in data["blockers"]
+    )
+
+
 def test_evidence_goal_readiness_reports_tampered_sandbox_authorization(
     tmp_path: Path,
 ):

@@ -560,6 +560,11 @@ prevents a non-sandbox name from becoming the read runtime base.
 Use `--summary-only` when feeding a large PostgreSQL catalog to Pi Bridge or an
 operator dashboard; it omits the per-database list while keeping candidate
 counts, blocker counts, eligible names, and the selected database verdict.
+Retain the JSON output and pass it to the aggregate final gate with
+`--sandbox-database-candidates-report <SANDBOX_DATABASE_CANDIDATES_JSON>`.
+That retained report can serve as the catalog observation source for
+`goal-readiness`, including the eligible/rejected summary, while still failing
+closed when no clearly named dedicated sandbox database is present.
 
 If the selected sandbox database is not present, produce a read-only provision
 plan before any operator creates or clones PostgreSQL data:
