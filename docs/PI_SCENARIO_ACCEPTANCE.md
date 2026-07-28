@@ -120,6 +120,21 @@ must remain unaccepted for Pi end-to-end operation.
 After the Pi report is retained, bind it into the final aggregate check:
 
 ```bash
+bin/odoo-accounting-cli-v3 evidence pi-scenario-report-check \
+  --pi-scenario-report <REPORT_JSON> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
+```
+
+This standalone check performs no Odoo, PostgreSQL, Pi, LLM, or network call. It
+verifies the routed release identity and rejects any retained report whose
+`capture.v3_release_sha256` is not the current package SHA-256. Only a passing
+standalone check should be supplied to the final aggregate gate.
+
+```bash
 bin/odoo-accounting-cli-v3 evidence goal-readiness \
   --pi-scenario-report <REPORT_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \

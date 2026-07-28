@@ -2785,6 +2785,67 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
     )
 
 
+@evidence_group.command("pi-scenario-report-check")
+@click.option(
+    "--pi-scenario-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained tools/pi_scenario_gate.py report for the exact release.",
+)
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to verify before trusting the Pi report.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_pi_scenario_report_check(
+    pi_scenario_report: Path,
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Validate a retained Pi scenario report against the routed release."""
+
+    command = "evidence.pi-scenario-report-check"
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release,
+        expected_commit=expected_commit,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_package_sha256=expected_package_sha256,
+        expected_registry_digest=expected_registry_digest,
+    )
+    pi_report = _pi_scenario_acceptance_report_status(
+        pi_scenario_report,
+        command=command,
+        expected_release_identity=route_report["route_identity"],
+    )
+    blockers: list[str] = []
+    if not route_report["current_route_ready"]:
+        blockers.append("current release route is not ready")
+    if not pi_report["scenario_acceptance_ready"]:
+        blockers.extend(pi_report["blockers"])
+    data = {
+        "blockers": sorted(set(blockers)),
+        "pi_scenario": pi_report,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "route": route_report,
+        "scenario_acceptance_ready": not blockers,
+    }
+    _success(command, data, business_succeeded=False)
+
+
 @evidence_group.command("goal-readiness")
 @click.option(
     "--pi-scenario-report",

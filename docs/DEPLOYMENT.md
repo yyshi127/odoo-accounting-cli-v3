@@ -51,6 +51,9 @@ clarification, material-parameter transit, and verified business answer gates.
 `capture.v3_release_sha256` in the retained report must equal the current
 release package SHA-256. Corpus tests alone do not prove Pi end-to-end success,
 and a passing report from an older release must not be reused.
+Before using the report in `goal-readiness`, run
+`evidence pi-scenario-report-check` against the routed release and retain its
+read-only JSON output with the release evidence.
 
 ## Final goal-readiness aggregation
 

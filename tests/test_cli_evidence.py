@@ -3446,6 +3446,63 @@ def test_evidence_goal_readiness_rejects_pi_report_from_other_release(
     )
 
 
+def test_evidence_pi_scenario_report_check_accepts_current_release_report(
+    tmp_path: Path,
+):
+    pi_report = _ready_pi_scenario_report(tmp_path, package_sha256="3" * 64)
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "pi-scenario-report-check",
+                "--pi-scenario-report",
+                str(pi_report),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.pi-scenario-report-check"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["scenario_acceptance_ready"] is True
+    assert payload["data"]["blockers"] == []
+    assert payload["data"]["pi_scenario"]["scenario_acceptance_ready"] is True
+    assert payload["data"]["real_odoo_write_performed"] is False
+
+
+def test_evidence_pi_scenario_report_check_rejects_other_release_report(
+    tmp_path: Path,
+):
+    pi_report = _ready_pi_scenario_report(tmp_path, package_sha256="5" * 64)
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "pi-scenario-report-check",
+                "--pi-scenario-report",
+                str(pi_report),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["scenario_acceptance_ready"] is False
+    assert (
+        "Pi scenario report is not bound to the current release package"
+        in data["blockers"]
+    )
+
+
 def test_evidence_goal_readiness_reports_live_capacity_shortfall():
     expected_identity = {
         "commit": "1" * 40,
