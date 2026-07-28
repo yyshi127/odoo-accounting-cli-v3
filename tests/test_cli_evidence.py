@@ -3789,6 +3789,161 @@ def test_evidence_sandbox_prerequisite_handoff_maps_capacity_and_database_decisi
     ] is True
 
 
+def test_evidence_sandbox_prerequisite_handoff_check_validates_retained_handoff(
+    tmp_path: Path,
+):
+    handoff = tmp_path / "sandbox-prerequisite-handoff.json"
+    handoff.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.sandbox-prerequisite-handoff",
+                "data": {
+                    "blockers": [],
+                    "decision_count": 2,
+                    "decisions": [
+                        {
+                            "authorization_required": True,
+                            "business_reason": "Capacity is below the sandbox write floor.",
+                            "decision_id": "capacity_remediation",
+                            "evidence": {
+                                "capacity_shortfall_bytes": 123,
+                                "candidate_reclaimable_bytes": 10,
+                            },
+                            "required_operator_action": "expand capacity and rerun recheck",
+                            "requires_external_capacity": True,
+                            "status": "pending",
+                        },
+                        {
+                            "authorization_required": True,
+                            "business_reason": "A dedicated sandbox database is required.",
+                            "decision_id": "dedicated_sandbox_database",
+                            "evidence": {"eligible_count": 0},
+                            "required_operator_action": "create a dedicated sandbox database",
+                            "requires_external_database_action": True,
+                            "status": "pending",
+                        },
+                    ],
+                    "goal_readiness_report": "/tmp/goal-readiness.json",
+                    "goal_readiness_report_sha256": "8" * 64,
+                    "handoff_ready": True,
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "release_identity": {
+                        "commit": "1" * 40,
+                        "manifest_sha256": "2" * 64,
+                        "package_sha256": "3" * 64,
+                        "registry_digest": "4" * 64,
+                        "release": "0.1.0.dev244-test",
+                    },
+                    "schema_version": (
+                        "odoo-accounting-cli-v3.sandbox-prerequisite-handoff.v1"
+                    ),
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-prerequisite-handoff-check",
+            "--handoff-file",
+            str(handoff),
+            "--expected-release",
+            "0.1.0.dev244-test",
+            "--expected-commit",
+            "1" * 40,
+            "--expected-manifest-sha256",
+            "2" * 64,
+            "--expected-package-sha256",
+            "3" * 64,
+            "--expected-registry-digest",
+            "4" * 64,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.sandbox-prerequisite-handoff-check"
+    assert payload["business_succeeded"] is False
+    data = payload["data"]
+    assert data["handoff_check_ready"] is True
+    assert data["decision_count"] == 2
+    assert data["authorization_required_count"] == 2
+    assert data["decision_ids"] == [
+        "capacity_remediation",
+        "dedicated_sandbox_database",
+    ]
+    assert len(data["handoff_sha256"]) == 64
+    assert data["production_promotion_allowed"] is False
+    assert data["real_odoo_write_performed"] is False
+
+
+def test_evidence_sandbox_prerequisite_handoff_check_rejects_tampering(
+    tmp_path: Path,
+):
+    handoff = tmp_path / "tampered-handoff.json"
+    handoff.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": True,
+                "command": "evidence.sandbox-prerequisite-handoff",
+                "data": {
+                    "decision_count": 1,
+                    "decisions": [
+                        {
+                            "authorization_required": True,
+                            "business_reason": "bad",
+                            "decision_id": "capacity_remediation",
+                            "evidence": {},
+                            "required_operator_action": "bad",
+                            "status": "approved",
+                        },
+                    ],
+                    "production_promotion_allowed": True,
+                    "real_odoo_write_performed": True,
+                    "release_identity": {
+                        "commit": "1" * 40,
+                        "manifest_sha256": "2" * 64,
+                        "package_sha256": "3" * 64,
+                        "registry_digest": "4" * 64,
+                        "release": "0.1.0.dev244-test",
+                    },
+                    "schema_version": (
+                        "odoo-accounting-cli-v3.sandbox-prerequisite-handoff.v1"
+                    ),
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "evidence",
+            "sandbox-prerequisite-handoff-check",
+            "--handoff-file",
+            str(handoff),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["handoff_check_ready"] is False
+    assert "sandbox prerequisite handoff must not claim business success" in data["blockers"]
+    assert "sandbox prerequisite handoff must not authorize production" in data["blockers"]
+    assert "sandbox prerequisite handoff must not be a write receipt" in data["blockers"]
+    assert "sandbox prerequisite handoff decisions[0].status must remain pending" in data["blockers"]
+
+
 def test_evidence_goal_remediation_checklist_rejects_wrong_retained_command(
     tmp_path: Path,
 ):

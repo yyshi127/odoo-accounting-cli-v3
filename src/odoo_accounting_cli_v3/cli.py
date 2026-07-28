@@ -1358,6 +1358,88 @@ def _sandbox_prerequisite_handoff_report(
     }
 
 
+def _sandbox_prerequisite_handoff_check_report(
+    handoff_file: Path,
+    *,
+    command: str,
+    expected_release_identity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    retained = _load_retained_json_report(
+        handoff_file, command=command, label="sandbox prerequisite handoff"
+    )
+    blockers: list[str] = []
+    if retained.get("ok") is not True:
+        blockers.append("sandbox prerequisite handoff report is not successful")
+    if retained.get("command") != "evidence.sandbox-prerequisite-handoff":
+        blockers.append("sandbox prerequisite handoff report has the wrong command")
+    if retained.get("business_succeeded") is not False:
+        blockers.append("sandbox prerequisite handoff must not claim business success")
+    data = retained.get("data")
+    if not isinstance(data, dict):
+        blockers.append("sandbox prerequisite handoff data is invalid")
+        data = {}
+    if data.get("schema_version") != SANDBOX_PREREQUISITE_HANDOFF_SCHEMA:
+        blockers.append("sandbox prerequisite handoff schema is invalid")
+    if data.get("production_promotion_allowed") is not False:
+        blockers.append("sandbox prerequisite handoff must not authorize production")
+    if data.get("real_odoo_write_performed") is not False:
+        blockers.append("sandbox prerequisite handoff must not be a write receipt")
+    decisions = data.get("decisions")
+    if not isinstance(decisions, list):
+        blockers.append("sandbox prerequisite handoff decisions are invalid")
+        decisions = []
+    decision_ids: list[str] = []
+    authorization_required_count = 0
+    for index, raw_decision in enumerate(decisions):
+        location = f"sandbox prerequisite handoff decisions[{index}]"
+        if not isinstance(raw_decision, dict):
+            blockers.append(f"{location} must be an object")
+            continue
+        decision_id = raw_decision.get("decision_id")
+        if not isinstance(decision_id, str) or not decision_id:
+            blockers.append(f"{location}.decision_id is invalid")
+        else:
+            decision_ids.append(decision_id)
+        if raw_decision.get("authorization_required") is True:
+            authorization_required_count += 1
+        elif raw_decision.get("authorization_required") is not False:
+            blockers.append(f"{location}.authorization_required is invalid")
+        if raw_decision.get("status") != "pending":
+            blockers.append(f"{location}.status must remain pending")
+        if not isinstance(raw_decision.get("required_operator_action"), str) or not raw_decision.get("required_operator_action"):
+            blockers.append(f"{location}.required_operator_action is invalid")
+        if not isinstance(raw_decision.get("business_reason"), str) or not raw_decision.get("business_reason"):
+            blockers.append(f"{location}.business_reason is invalid")
+        if not isinstance(raw_decision.get("evidence"), dict):
+            blockers.append(f"{location}.evidence is invalid")
+    if len(decision_ids) != len(set(decision_ids)):
+        blockers.append("sandbox prerequisite handoff decision ids must be unique")
+    if data.get("decision_count") != len(decisions):
+        blockers.append("sandbox prerequisite handoff decision_count mismatch")
+    release_identity = data.get("release_identity")
+    if not isinstance(release_identity, dict):
+        if expected_release_identity is not None:
+            blockers.append("sandbox prerequisite handoff release identity is invalid")
+        release_identity = None
+    elif expected_release_identity is not None:
+        for field, expected in expected_release_identity.items():
+            if expected is not None and release_identity.get(field) != expected:
+                blockers.append(f"sandbox prerequisite handoff release {field} mismatch")
+    return {
+        "authorization_required_count": authorization_required_count,
+        "blockers": sorted(set(blockers)),
+        "decision_count": len(decisions),
+        "decision_ids": sorted(set(decision_ids)),
+        "handoff_check_ready": not blockers,
+        "handoff_file": str(handoff_file),
+        "handoff_sha256": _sha256_file(handoff_file),
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "release_identity": release_identity,
+        "schema_version": SANDBOX_PREREQUISITE_HANDOFF_SCHEMA,
+    }
+
+
 def _final_evidence_manifest_document(
     artifact_paths: dict[str, Path],
     *,
@@ -4018,6 +4100,51 @@ def evidence_sandbox_prerequisite_handoff(
         command,
         _sandbox_prerequisite_handoff_report(
             goal_readiness_report,
+            command=command,
+            expected_release_identity=(
+                expected_release_identity
+                if any(value is not None for value in expected_release_identity.values())
+                else None
+            ),
+        ),
+        business_succeeded=False,
+    )
+
+
+@evidence_group.command("sandbox-prerequisite-handoff-check")
+@click.option(
+    "--handoff-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.sandbox-prerequisite-handoff JSON output to validate.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
+def evidence_sandbox_prerequisite_handoff_check(
+    handoff_file: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
+) -> None:
+    """Validate a retained sandbox prerequisite handoff without granting authority."""
+
+    command = "evidence.sandbox-prerequisite-handoff-check"
+    expected_release_identity = {
+        "commit": expected_commit,
+        "manifest_sha256": expected_manifest_sha256,
+        "package_sha256": expected_package_sha256,
+        "registry_digest": expected_registry_digest,
+        "release": expected_release,
+    }
+    _success(
+        command,
+        _sandbox_prerequisite_handoff_check_report(
+            handoff_file,
             command=command,
             expected_release_identity=(
                 expected_release_identity

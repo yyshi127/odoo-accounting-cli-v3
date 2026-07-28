@@ -170,6 +170,22 @@ non-authorizing: it summarizes the retained capacity plan/recheck, sandbox
 database candidate report, and provisioning authorization status into explicit
 operator decisions without cleaning files, creating databases, or approving
 writes.
+Retain and validate the handoff before presenting it as an operator decision
+packet:
+
+```bash
+"$V3_CLI" evidence sandbox-prerequisite-handoff-check \
+  --handoff-file <SANDBOX_PREREQUISITE_HANDOFF_JSON> \
+  --expected-release <ROUTED_RELEASE> \
+  --expected-commit <FULL_GIT_COMMIT> \
+  --expected-manifest-sha256 <MANIFEST_SHA256> \
+  --expected-package-sha256 <PACKAGE_SHA256> \
+  --expected-registry-digest <REGISTRY_DIGEST>
+```
+
+The check rejects handoffs that claim business success, production authority,
+real Odoo writes, non-pending decisions, duplicate decision IDs, or a mismatched
+release identity.
 
 After the final gate and all prerequisite checks are retained, build a final
 evidence manifest with schema
