@@ -23,13 +23,26 @@ An extracted `/opt` directory is a verified artifact, not another source tree.
 Never patch an extracted release. A change requires a new commit, version, and
 archive.
 
+## Operational command convention
+
+Do not invoke the CLI through `/opt/odoo-accounting-cli-v3/current/bin/...`.
+The release launcher intentionally rejects symlink entry. Operators should run
+the exact immutable release member and use `--current-path` on route-bound
+evidence commands:
+
+```bash
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+```
+
 ## Capability-registry audit
 
 After every release install or route change, run the exact release member:
 
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
-"$RELEASE_DIR/bin/odoo-accounting-cli-v3" registry audit
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" registry audit
 ```
 
 Retain the JSON output with the release identity evidence. The audit must show
@@ -67,7 +80,8 @@ aggregate non-authorizing check:
 
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
-"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence goal-readiness \
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence goal-readiness \
   --current-path /opt/odoo-accounting-cli-v3/current \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
@@ -120,7 +134,8 @@ Assemble and validate the retained handoff manifest with:
 
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
-"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence final-evidence-manifest-assemble \
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence final-evidence-manifest-assemble \
   --current-path /opt/odoo-accounting-cli-v3/current \
   --output-file <FINAL_EVIDENCE_MANIFEST_JSON> \
   --pi-trace-capture-check <PI_TRACE_CAPTURE_CHECK_JSON> \
@@ -146,7 +161,8 @@ To independently recheck an already assembled manifest, run:
 
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
-"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence final-evidence-manifest-check \
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence final-evidence-manifest-check \
   --current-path /opt/odoo-accounting-cli-v3/current \
   --manifest-file <FINAL_EVIDENCE_MANIFEST_JSON> \
   --expected-release <ROUTED_RELEASE> \
@@ -337,13 +353,17 @@ at the new release, replace the symlink itself, not a directory reached through
 the existing symlink. On GNU/Linux use `ln -sfnT <release-dir>
 /opt/odoo-accounting-cli-v3/current`; do not use plain `ln -sfn`, because it can
 leave `current` pointing at the previous release when the destination is treated
-as a directory. Immediately run `release identity` from `current` and compare
-the reported commit, version, manifest SHA-256, package SHA-256, and registry
-digest with the intended release before reporting the route changed.
+as a directory. Immediately run the exact immutable release's
+`release current-route` verifier and compare the reported commit, version,
+manifest SHA-256, package SHA-256, and registry digest with the intended release
+before reporting the route changed.
 For machine-checkable evidence, run the exact current CLI route verifier:
 
 ```bash
-odoo-accounting-cli-v3 release current-route \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<version-commit12>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" release current-route \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --expected-release <version-commit12> \
   --expected-commit <full-commit> \
   --expected-manifest-sha256 <manifest-sha256> \
@@ -458,7 +478,9 @@ For the dedicated sandbox read runtime, first render a secret-free current
 schema candidate with:
 
 ```bash
-odoo-accounting-cli-v3 evidence sandbox-read-runtime-config-plan \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence sandbox-read-runtime-config-plan \
   --instance-id odoo19@sandbox \
   --database-name <SANDBOX_DATABASE_NAME> \
   --database-uuid <SANDBOX_DATABASE_UUID> \
@@ -486,7 +508,9 @@ Before selecting `<SANDBOX_DATABASE_NAME>`, classify the observed PostgreSQL
 catalog with the release command:
 
 ```bash
-odoo-accounting-cli-v3 evidence sandbox-database-candidates \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence sandbox-database-candidates \
   --database-name <OBSERVED_DATABASE> \
   --database-name <OBSERVED_DATABASE> \
   --protected-database-name <PRODUCTION_DATABASE> \
@@ -506,7 +530,9 @@ If the selected sandbox database is not present, produce a read-only provision
 plan before any operator creates or clones PostgreSQL data:
 
 ```bash
-odoo-accounting-cli-v3 evidence sandbox-database-provision-plan \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence sandbox-database-provision-plan \
   --sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
   --source-database-name <AUTHORIZED_SOURCE_DATABASE> \
   --protected-database-name <PRODUCTION_DATABASE>
@@ -524,14 +550,16 @@ Before setting `--authorization-recorded`, validate the authorization JSON with
 the exact release:
 
 ```bash
-odoo-accounting-cli-v3 evidence sandbox-provision-authorization-template \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence sandbox-provision-authorization-template \
   --sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
   --source-database-name <AUTHORIZED_SOURCE_DATABASE> \
   --company <AUTHORIZED_COMPANY> \
   --operator-id <OPERATOR_ID> \
   --retention-until <UTC_TIMESTAMP>
 
-odoo-accounting-cli-v3 evidence sandbox-provision-authorization-check \
+"$V3_CLI" evidence sandbox-provision-authorization-check \
   --authorization-file <AUTHORIZATION_JSON> \
   --expected-sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
   --expected-source-database-name <AUTHORIZED_SOURCE_DATABASE> \
@@ -553,7 +581,10 @@ onboarding gate so Pi and operators see one fail-closed verdict for route,
 capacity, database selection, and authorization state:
 
 ```bash
-odoo-accounting-cli-v3 evidence sandbox-onboarding-readiness \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence sandbox-onboarding-readiness \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --sandbox-database-name <PROPOSED_SANDBOX_DATABASE> \
   --source-database-name <AUTHORIZED_SOURCE_DATABASE> \
   --observed-database-name <OBSERVED_DATABASE> \
@@ -700,7 +731,10 @@ When the Dev29 closure builder reports insufficient space, an operator may run
 the release CLI to produce a read-only cleanup plan:
 
 ```bash
-odoo-accounting-cli-v3 evidence target-capacity-plan \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence target-capacity-plan \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --required-free-bytes 8589934592 \
   --keep-release <current-release> \
   --keep-release <last-known-good-release> \
@@ -720,13 +754,15 @@ If an operator chooses to clean V3-owned candidates, first render and retain a
 cleanup authorization record for the exact retained plan and selected paths:
 
 ```bash
-odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-template \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence target-capacity-cleanup-authorization-template \
   --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
   --candidate-path <V3_OWNED_CANDIDATE_PATH> \
   --operator-id <OPERATOR_ID> \
   --retention-until <UTC_TIMESTAMP>
 
-odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-check \
+"$V3_CLI" evidence target-capacity-cleanup-authorization-check \
   --authorization-file <TARGET_CAPACITY_CLEANUP_AUTHORIZATION_JSON> \
   --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
   --expected-candidate-path <V3_OWNED_CANDIDATE_PATH>
@@ -744,7 +780,9 @@ After an authorized cleanup, disk expansion, or relocation, rerun the immutable
 release's recheck command before continuing to sandbox runtime setup:
 
 ```bash
-odoo-accounting-cli-v3 evidence target-capacity-recheck \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence target-capacity-recheck \
   --path / \
   --required-free-bytes 8589934592
 ```
@@ -762,7 +800,9 @@ Before rendering the root-managed JSON by hand, run the release's read-only
 planning command:
 
 ```bash
-odoo-accounting-cli-v3 evidence write-runtime-config-plan \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence write-runtime-config-plan \
   --base-runtime-config /etc/odoo-accounting-cli-v3/runtime-sandbox.json \
   --socket-group-gid <BROKER_GROUP_GID> \
   --finalizer-service-uid <FINALIZER_UID> \
@@ -1013,7 +1053,7 @@ first retain the passing JSON output from
 `evidence sandbox-onboarding-readiness` as the onboarding receipt. Validate the
 retained receipt independently before using it in any write preflight:
 
-`odoo-accounting-cli-v3 evidence sandbox-onboarding-receipt-check --onboarding-receipt ... --expected-sandbox-database-name ... --expected-release ... --expected-commit ... --expected-manifest-sha256 ... --expected-package-sha256 ... --expected-registry-digest ...`
+`"$V3_CLI" evidence sandbox-onboarding-receipt-check --onboarding-receipt ... --expected-sandbox-database-name ... --expected-release ... --expected-commit ... --expected-manifest-sha256 ... --expected-package-sha256 ... --expected-registry-digest ...`
 
 The receipt check is read-only and non-authorizing. It must report
 `sandbox_write_preflight_receipt_acceptable:true` before a write preflight can
@@ -1022,7 +1062,7 @@ read-only invariant mismatch keeps the receipt unacceptable.
 
 Then run the read-only environment audit:
 
-`odoo-accounting-cli-v3 evidence sandbox-write-environment-audit --write-runtime-config ... --evidence-root ... --onboarding-receipt ...`
+`"$V3_CLI" evidence sandbox-write-environment-audit --write-runtime-config ... --evidence-root ... --onboarding-receipt ...`
 
 Use `--summary-only` for Pi Bridge preflight dashboards and operator checks that
 only need the environment verdict, runtime/evidence-root status, write-capability
@@ -1039,7 +1079,7 @@ admissible. A missing runtime, evidence root, or onboarding receipt must keep
 `environment_ready_for_sandbox_write_drills:false`.
 
 Then run the read-only static readiness gate for the target capability:
-`odoo-accounting-cli-v3 evidence write-capability-readiness --capability-id ...`.
+`"$V3_CLI" evidence write-capability-readiness --capability-id ...`.
 It checks that the exact release's registry entry is a write capability with
 strict schemas, approval, idempotency, recovery metadata, service model
 allowlist, and Odoo write-handler support. A passing report only admits the
@@ -1051,13 +1091,13 @@ reviewed, the same report must keep `sandbox_staging_promotion_ready:false` and
 list blockers such as declared-only registry evidence and missing retained
 sandbox write receipts.
 Before planning a batch of sandbox drills, run
-`odoo-accounting-cli-v3 evidence write-capabilities-readiness` to report the
+`"$V3_CLI" evidence write-capabilities-readiness` to report the
 same static readiness checks for every registered write capability in the exact
 release. Treat any non-admissible capability as closed until its registry,
 service allowlist, or Odoo handler gap is fixed and retested.
 
 Then run the read-only
-`odoo-accounting-cli-v3 evidence sandbox-write-preflight --capability-id ... --company-id ... --write-runtime-config ... --evidence-root ... --onboarding-receipt ...`
+`"$V3_CLI" evidence sandbox-write-preflight --capability-id ... --company-id ... --write-runtime-config ... --evidence-root ... --onboarding-receipt ...`
 gate for the exact registered write capability and Odoo company under test,
 then retain its `preflight_manifest` as a file inside the evidence root. The
 preflight command rejects non-write capabilities; one generic preflight cannot
@@ -1082,26 +1122,26 @@ bindings before hashing the artifact into the final evidence bundle, so a
 phase artifact from another capability, company, sandbox, release, or registry
 is rejected. To avoid hand-written envelopes, wrap each retained phase payload
 with
-`odoo-accounting-cli-v3 evidence build-sandbox-write-artifact --metadata-json ... --artifact-kind ... --artifact-json ...`
+`"$V3_CLI" evidence build-sandbox-write-artifact --metadata-json ... --artifact-kind ... --artifact-json ...`
 and save the command output under that phase's standard filename. The command
 checks the metadata against the currently anchored release and still reports
 `business_succeeded:false`. Build the metadata JSON from the retained
 preflight manifest, registry receipts, and lifecycle receipt ids with
-`odoo-accounting-cli-v3 evidence build-sandbox-write-metadata --preflight-json ... --registry-receipts-json ... --lifecycle-receipt-ids-json ...`.
+`"$V3_CLI" evidence build-sandbox-write-metadata --preflight-json ... --registry-receipts-json ... --lifecycle-receipt-ids-json ...`.
 The metadata builder derives the capability, company, database, sandbox, and
 release binding from the preflight manifest, validates all registry receipts
 against that binding, and still reports `business_succeeded:false`. Then run
-`odoo-accounting-cli-v3 evidence build-sandbox-write-input --metadata-json ...`.
+`"$V3_CLI" evidence build-sandbox-write-input --metadata-json ...`.
 The command builds the `--assemble-from` input manifest from the retained files,
 checks that it is bound to the currently anchored release and registry, and
 prevents hand-listed artifact paths from drifting.
 For an audit-friendly completeness report, run
-`odoo-accounting-cli-v3 evidence inspect-sandbox-write-root --metadata-json ...`.
+`"$V3_CLI" evidence inspect-sandbox-write-root --metadata-json ...`.
 That command recomputes the retained metadata, preflight manifest, and lifecycle
 artifact SHA-256 values, verifies that the directory can still assemble into a
 valid sandbox evidence bundle, and still reports `business_succeeded:false`.
 For an ordered handoff checklist, run
-`odoo-accounting-cli-v3 evidence inspect-sandbox-write-pipeline --metadata-json ...`.
+`"$V3_CLI" evidence inspect-sandbox-write-pipeline --metadata-json ...`.
 It verifies the same retained root, assembles the final evidence, builds the
 non-authorizing sandbox/staged promotion candidate, and emits a step-by-step
 hash chain for preflight, metadata, lifecycle artifacts, input manifest,
@@ -1109,13 +1149,13 @@ evidence, and promotion candidate. Treat that pipeline report as the minimum
 review packet before any registry-staging discussion.
 For a batch migration view across every registered write capability, arrange
 retained evidence as `<evidence-root>/<capability_id>/metadata.json` and run
-`odoo-accounting-cli-v3 evidence write-pipeline-readiness --evidence-root ...`.
+`"$V3_CLI" evidence write-pipeline-readiness --evidence-root ...`.
 The command validates each capability's pipeline against the current release
 and reports `verified`, `missing`, or `rejected` per capability. It is
 non-authorizing, reports `business_succeeded:false`, and must show every write
 capability as `verified` before a registry-wide sandbox-staging review.
 For a compact operator handoff index over the same retained root, run
-`odoo-accounting-cli-v3 evidence write-evidence-index --evidence-root ...`.
+`"$V3_CLI" evidence write-evidence-index --evidence-root ...`.
 The index contains one row per registered write capability with status,
 metadata path, rejection reason, and the SHA-256 of the exact verified pipeline
 summary. It is useful for issue trackers, release packets, and Pi operator
@@ -1142,7 +1182,7 @@ collection began.
 
 After collection, and before the bundle can be reviewed for registry promotion,
 validate its retained JSON bundle with the exact release's
-`odoo-accounting-cli-v3 evidence verify-sandbox-write --evidence-json ...`.
+`"$V3_CLI" evidence verify-sandbox-write --evidence-json ...`.
 When the retained phase artifacts have not yet been assembled into the final
 bundle, use `--assemble-from ...` with the sandbox-write evidence input
 manifest so the exact release computes each lifecycle artifact digest itself.
@@ -1159,12 +1199,12 @@ not a production authorization.
 
 For the next non-authorizing registry-promotion review step, build the
 candidate from the verified exact-release evidence instead of hand-writing it:
-`odoo-accounting-cli-v3 evidence build-write-promotion-candidate --evidence-json ...`.
+`"$V3_CLI" evidence build-write-promotion-candidate --evidence-json ...`.
 The command only emits a `sandbox`/`staged` candidate, binds it to the same
 capability, company, database, release manifest, and registry digest, and still
 reports `business_succeeded:false`. It rejects production targets and direct
 `enabled` targets. Review that generated candidate with
-`odoo-accounting-cli-v3 evidence review-write-promotion --evidence-json ... --candidate-json ...`.
+`"$V3_CLI" evidence review-write-promotion --evidence-json ... --candidate-json ...`.
 The review result is a sandbox-staging admission artifact only; it does not
 modify the registry and does not authorize any production write.
 

@@ -4541,10 +4541,8 @@ def evidence_sandbox_provision_authorization_template(
         "save_path_recommendation": "/etc/odoo-accounting-cli-v3/sandbox-provision-authorization.json",
         "template_only_not_authorized": True,
         "validation_command": (
-            "odoo-accounting-cli-v3 evidence sandbox-provision-authorization-check "
-            "--authorization-file /etc/odoo-accounting-cli-v3/sandbox-provision-authorization.json "
-            f"--expected-sandbox-database-name {sandbox_database_name} "
-            f"--expected-source-database-name {source_database_name}"
+            "Run the exact immutable release member with validation_command_args; "
+            "do not invoke the CLI through /opt/odoo-accounting-cli-v3/current/bin."
         ),
         "validation_command_args": [
             "evidence",
