@@ -36,7 +36,7 @@ fail closed. They never return a simulated Odoo success.
 /opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 registry audit
 /opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 registry get --capability-id acct.gl.trial_balance.v1
 /opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 release identity
-/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 evidence goal-readiness
+/opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 evidence goal-readiness --current-path /opt/odoo-accounting-cli-v3/current
 /opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 read --runtime-config /absolute/root-managed/runtime.json --request-json '{...}'
 /opt/odoo-accounting-cli-v3/releases/<release>/bin/odoo-accounting-cli-v3 operation prepare --request-json '{...}'
 ```

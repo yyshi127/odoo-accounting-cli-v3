@@ -28,8 +28,8 @@ archive.
 After every release install or route change, run the exact release member:
 
 ```bash
-cd /opt/odoo-accounting-cli-v3/current
-bin/odoo-accounting-cli-v3 registry audit
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" registry audit
 ```
 
 Retain the JSON output with the release identity evidence. The audit must show
@@ -66,8 +66,9 @@ authorization, and write-pipeline reports have each been retained, run the
 aggregate non-authorizing check:
 
 ```bash
-cd /opt/odoo-accounting-cli-v3/current
-bin/odoo-accounting-cli-v3 evidence goal-readiness \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence goal-readiness \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
   --sandbox-provision-authorization-file <SANDBOX_PROVISION_AUTHORIZATION_JSON> \
@@ -118,7 +119,9 @@ same release identity and SHA-256 digests for these retained artifacts:
 Validate the retained handoff manifest with:
 
 ```bash
-bin/odoo-accounting-cli-v3 evidence final-evidence-manifest-check \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence final-evidence-manifest-check \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --manifest-file <FINAL_EVIDENCE_MANIFEST_JSON> \
   --expected-release <ROUTED_RELEASE> \
   --expected-commit <FULL_GIT_COMMIT> \

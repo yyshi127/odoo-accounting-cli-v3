@@ -79,7 +79,9 @@ committed to the repository.
 Before scoring, validate the retained trace capture against the routed release:
 
 ```bash
-bin/odoo-accounting-cli-v3 evidence pi-trace-capture-check \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence pi-trace-capture-check \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --trace-file <NORMALIZED_PI_TRACE_CAPTURE_JSON> \
   --attestation-keys <TRUSTED_TRACE_ATTESTATION_KEYS_JSON> \
   --expected-release <ROUTED_RELEASE> \
@@ -138,7 +140,9 @@ must remain unaccepted for Pi end-to-end operation.
 After the Pi report is retained, bind it into the final aggregate check:
 
 ```bash
-bin/odoo-accounting-cli-v3 evidence pi-scenario-report-check \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence pi-scenario-report-check \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --pi-scenario-report <REPORT_JSON> \
   --expected-release <ROUTED_RELEASE> \
   --expected-commit <FULL_GIT_COMMIT> \
@@ -153,7 +157,9 @@ verifies the routed release identity and rejects any retained report whose
 standalone check should be supplied to the final aggregate gate.
 
 ```bash
-bin/odoo-accounting-cli-v3 evidence goal-readiness \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence goal-readiness \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --pi-scenario-report <REPORT_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
   --sandbox-provision-authorization-file <SANDBOX_PROVISION_AUTHORIZATION_JSON> \

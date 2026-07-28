@@ -21,8 +21,9 @@ The retained target-host audit that introduced this command was run against:
 The target route was verified with:
 
 ```bash
-cd /opt/odoo-accounting-cli-v3/current
-bin/odoo-accounting-cli-v3 release current-route \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/0.1.0.dev218-c68fd23c7ef8
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" release current-route \
+  --current-path /opt/odoo-accounting-cli-v3/current \
   --expected-release 0.1.0.dev218-c68fd23c7ef8 \
   --expected-commit c68fd23c7ef8d71f4c258adce176934596762496 \
   --expected-manifest-sha256 6d2fb03112ca414ee98f4270e221e041ac8b71d08d60ee8c5bf89a022579ada0 \
@@ -37,8 +38,8 @@ registry digest shown above.
 Run the exact release member, not a developer checkout:
 
 ```bash
-cd /opt/odoo-accounting-cli-v3/current
-bin/odoo-accounting-cli-v3 registry audit
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" registry audit
 ```
 
 The command is read-only. It loads the packaged `capabilities.json`, reuses the

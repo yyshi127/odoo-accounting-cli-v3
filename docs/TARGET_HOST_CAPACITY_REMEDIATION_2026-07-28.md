@@ -32,7 +32,8 @@ The full goal-readiness blocker set observed on this release is:
 The release-bound read-only command:
 
 ```bash
-bin/odoo-accounting-cli-v3 evidence target-capacity-plan \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/0.1.0.dev224-f8fedaa69548
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence target-capacity-plan \
   --root / \
   --required-free-bytes 8589934592 \
   --keep-release 0.1.0.dev224-f8fedaa69548 \
@@ -101,7 +102,8 @@ Before V3 can proceed to real sandbox write drills, one of these must happen:
 After remediation, rerun:
 
 ```bash
-bin/odoo-accounting-cli-v3 evidence target-capacity-recheck \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence target-capacity-recheck \
   --path / \
   --required-free-bytes 8589934592
 ```
@@ -114,13 +116,14 @@ retained `target-capacity-plan` output, first bind that decision to a saved
 authorization record with:
 
 ```bash
-bin/odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-template \
+RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence target-capacity-cleanup-authorization-template \
   --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
   --candidate-path <SELECTED_V3_OWNED_CANDIDATE_PATH> \
   --operator-id <OPERATOR_ID> \
   --retention-until <UTC_TIMESTAMP>
 
-bin/odoo-accounting-cli-v3 evidence target-capacity-cleanup-authorization-check \
+"$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence target-capacity-cleanup-authorization-check \
   --authorization-file <TARGET_CAPACITY_CLEANUP_AUTHORIZATION_JSON> \
   --capacity-plan-file <TARGET_CAPACITY_PLAN_JSON> \
   --expected-candidate-path <SELECTED_V3_OWNED_CANDIDATE_PATH>
