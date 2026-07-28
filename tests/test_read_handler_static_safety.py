@@ -114,7 +114,7 @@ READ_BOOTSTRAP_SOURCE_SHA256 = (
     "6ac313f7406873448a83c07b405610d6e91e0d973e7e45eb8083bad1f02b40be"
 )
 READ_EXECUTOR_SOURCE_SHA256 = (
-    "18179e9e02d036ecf1beefd755d1e1e20a45f265ace913b70d618706ce84361a"
+    "9fc8cdec7e58295948b23b3915abf8c3b1e9df2b7aa4c28a5bad77276659fec2"
 )
 REVIEWED_INITIALIZER_ATTRIBUTES = {
     ("odoo_accounting_cli_v3.gateway", "CapabilityGateway"): frozenset(
@@ -548,6 +548,32 @@ def _executor_dispatch_contract() -> dict[str, str]:
         assert key.value not in dispatch
         assert value.attr in methods
         dispatch[key.value] = value.attr
+
+    allowlist_assignments = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "_CAPABILITIES"
+    ]
+    assert len(allowlist_assignments) == 1
+    allowlist_call = allowlist_assignments[0].value
+    assert (
+        isinstance(allowlist_call, ast.Call)
+        and isinstance(allowlist_call.func, ast.Name)
+        and allowlist_call.func.id == "frozenset"
+        and len(allowlist_call.args) == 1
+        and not allowlist_call.keywords
+        and isinstance(allowlist_call.args[0], ast.Set)
+    )
+    allowlist = {
+        item.value
+        for item in allowlist_call.args[0].elts
+        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+    }
+    assert len(allowlist) == len(allowlist_call.args[0].elts)
+    assert allowlist == set(dispatch)
 
     handler_assignments = [
         node

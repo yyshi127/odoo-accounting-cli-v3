@@ -33,8 +33,19 @@ from .odoo.runner import (
     run_read_boundary_evidence,
     run_odoo_shell,
 )
-from .receipts import ReceiptError, verify_read_receipt
-from .registry import Capability, load_registry, registry_digest, validate_registry
+from .receipts import (
+    READ_RECEIPT_PURPOSE,
+    SIGNATURE_VERSION as READ_RECEIPT_SIGNATURE_VERSION,
+    ReceiptError,
+    verify_read_receipt,
+)
+from .registry import (
+    PRODUCTION_READ_EVIDENCE,
+    Capability,
+    load_registry,
+    registry_digest,
+    validate_registry,
+)
 from .release import ReleaseError, verify_manifest
 from .write_api import WriteApiError, parse_write_api_request
 from .write_runtime import (
@@ -852,11 +863,12 @@ def _target_capacity_recheck_report_status(
     }
 
 
-FINAL_EVIDENCE_MANIFEST_SCHEMA = "odoo-accounting-cli-v3.final-evidence-manifest.v1"
+FINAL_EVIDENCE_MANIFEST_SCHEMA = "odoo-accounting-cli-v3.final-evidence-manifest.v2"
 FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
     "goal_readiness_report": "evidence.goal-readiness",
     "pi_scenario_report_check": "evidence.pi-scenario-report-check",
     "pi_trace_capture_check": "evidence.pi-trace-capture-check",
+    "read_capabilities_readiness_report": "evidence.read-capabilities-readiness",
     "sandbox_database_candidates_report": "evidence.sandbox-database-candidates",
     "sandbox_onboarding_receipt": "evidence.sandbox-onboarding-readiness",
     "sandbox_onboarding_receipt_check": "evidence.sandbox-onboarding-receipt-check",
@@ -1105,6 +1117,21 @@ GOAL_REMEDIATION_ACTIONS = (
             ("evidence", "write-evidence-index", "--evidence-root", "<SANDBOX_WRITE_EVIDENCE_ROOT>"),
         ),
         "authorization_required": True,
+    },
+    {
+        "action_id": "read_trusted_execution",
+        "blocker_patterns": (
+            "read capability",
+            "read evidence",
+            "read static readiness",
+        ),
+        "description": "Implement every registered read capability behind an explicit trusted handler and retain exact-release live Odoo, accounting oracle, Pi E2E, release identity, and security-negative evidence.",
+        "required_artifacts": ("read_capabilities_readiness_report",),
+        "operator_command": "evidence read-capabilities-readiness",
+        "command_args_template": (
+            ("evidence", "read-capabilities-readiness"),
+        ),
+        "authorization_required": False,
     },
 )
 
@@ -1509,6 +1536,38 @@ def _final_evidence_manifest_document(
     }
 
 
+def _assert_final_checker_is_routed(
+    route_report: dict[str, Any],
+    *,
+    command: str,
+) -> None:
+    routed_path = route_report.get("resolved_release_path")
+    if not isinstance(routed_path, str) or not routed_path:
+        raise CliFailure(
+            command=command,
+            code="final_evidence_checker_release_mismatch",
+            message="The routed release path is unavailable to bind the final evidence checker.",
+            exit_code=5,
+        )
+    try:
+        resolved_routed_path = Path(routed_path).resolve(strict=True)
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="final_evidence_checker_release_mismatch",
+            message="The routed release path is unavailable to bind the final evidence checker.",
+            exit_code=5,
+        ) from exc
+    executing_release_path = Path(__file__).resolve().parents[2]
+    if executing_release_path != resolved_routed_path:
+        raise CliFailure(
+            command=command,
+            code="final_evidence_checker_release_mismatch",
+            message="The final evidence checker is not executing from the routed release.",
+            exit_code=5,
+        )
+
+
 def _final_evidence_manifest_report(
     manifest_path: Path,
     *,
@@ -1542,6 +1601,18 @@ def _final_evidence_manifest_report(
     missing = sorted(set(FINAL_EVIDENCE_REQUIRED_ARTIFACTS) - set(artifacts))
     if missing:
         blockers.append("final evidence manifest is missing required artifacts")
+    unexpected_artifacts = sorted(
+        set(artifacts) - set(FINAL_EVIDENCE_REQUIRED_ARTIFACTS)
+    )
+    if unexpected_artifacts:
+        blockers.append("final evidence manifest contains unexpected artifacts")
+    unexpected_digests = sorted(
+        set(artifact_sha256) - set(FINAL_EVIDENCE_REQUIRED_ARTIFACTS)
+    )
+    if unexpected_digests:
+        blockers.append(
+            "final evidence manifest contains unexpected artifact digests"
+        )
     artifact_reports: dict[str, Any] = {}
     for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS:
         raw_path = artifacts.get(name)
@@ -1590,6 +1661,154 @@ def _final_evidence_manifest_report(
                     artifact_blockers.append("sandbox onboarding receipt check is not acceptable")
                 if not isinstance(onboarding, dict) or onboarding.get("ready") is not True:
                     artifact_blockers.append("sandbox onboarding receipt check is not ready")
+        if name == "goal_readiness_report" and isinstance(document, dict):
+            data = document.get("data")
+            if document.get("ok") is not True:
+                artifact_blockers.append(
+                    "goal readiness report is not a successful CLI report"
+                )
+            if document.get("business_succeeded") is not False:
+                artifact_blockers.append(
+                    "goal readiness report business status is invalid"
+                )
+            if not isinstance(data, dict):
+                artifact_blockers.append("goal readiness report data is invalid")
+            else:
+                if data.get("goal_readiness_ready") is not True:
+                    artifact_blockers.append("goal readiness report is not ready")
+                if data.get("blockers") != []:
+                    artifact_blockers.append(
+                        "goal readiness report retains blockers"
+                    )
+                if data.get("production_promotion_allowed") is not False:
+                    artifact_blockers.append(
+                        "goal readiness report must not authorize production"
+                    )
+                if data.get("real_odoo_write_performed") is not False:
+                    artifact_blockers.append(
+                        "goal readiness report must not be a real Odoo write receipt"
+                    )
+                retained_release_identity = data.get("release_identity")
+                if not isinstance(retained_release_identity, dict):
+                    artifact_blockers.append(
+                        "goal readiness report release identity is invalid"
+                    )
+                else:
+                    for field, expected in expected_release_identity.items():
+                        if (
+                            expected is not None
+                            and retained_release_identity.get(field) != expected
+                        ):
+                            artifact_blockers.append(
+                                f"goal readiness report release {field} mismatch"
+                            )
+                readiness_paths = {
+                    "capacity": ("sandbox_write_capacity_ready",),
+                    "pi_scenario": ("scenario_acceptance_ready",),
+                    "read_capabilities_readiness": (
+                        "read_static_readiness_ready",
+                        "read_goal_readiness_ready",
+                    ),
+                    "registry": ("registry_audit_ready",),
+                    "route": ("current_route_ready",),
+                    "sandbox_database": ("sandbox_database_ready",),
+                    "sandbox_onboarding": ("ready",),
+                    "sandbox_provision_authorization": (
+                        "authorization_record_ready",
+                    ),
+                    "write_evidence_index": ("index_ready",),
+                    "write_pipeline": ("write_pipeline_ready",),
+                    "write_static_readiness": (
+                        "write_static_readiness_ready",
+                    ),
+                }
+                for section_name, ready_fields in readiness_paths.items():
+                    section = data.get(section_name)
+                    if not isinstance(section, dict) or any(
+                        section.get(field) is not True for field in ready_fields
+                    ):
+                        artifact_blockers.append(
+                            f"goal readiness report {section_name} is not ready"
+                        )
+        if (
+            name == "read_capabilities_readiness_report"
+            and isinstance(document, dict)
+        ):
+            data = document.get("data")
+            if document.get("ok") is not True:
+                artifact_blockers.append(
+                    "read capabilities readiness report is not a successful CLI report"
+                )
+            if document.get("business_succeeded") is not False:
+                artifact_blockers.append(
+                    "read capabilities readiness report business status is invalid"
+                )
+            if not isinstance(data, dict):
+                artifact_blockers.append(
+                    "read capabilities readiness report data is invalid"
+                )
+            else:
+                retained_release_identity = data.get("release_identity")
+                if not isinstance(retained_release_identity, dict):
+                    artifact_blockers.append(
+                        "read capabilities readiness report release identity is invalid"
+                    )
+                else:
+                    for field, expected in expected_release_identity.items():
+                        if (
+                            expected is not None
+                            and retained_release_identity.get(field) != expected
+                        ):
+                            artifact_blockers.append(
+                                f"read capabilities readiness report release {field} mismatch"
+                            )
+                if data.get("read_static_readiness_ready") is not True:
+                    artifact_blockers.append(
+                        "read capabilities static readiness is not ready"
+                    )
+                if data.get("read_goal_readiness_ready") is not True:
+                    artifact_blockers.append(
+                        "read capabilities goal evidence readiness is not ready"
+                    )
+                if data.get("real_odoo_write_performed") is not False:
+                    artifact_blockers.append(
+                        "read capabilities readiness report must not be a real Odoo write receipt"
+                    )
+                if data.get("production_promotion_allowed") is not False:
+                    artifact_blockers.append(
+                        "read capabilities readiness report must not authorize production"
+                    )
+                try:
+                    expected_read_report = _read_capabilities_readiness_report(
+                        _load_capabilities(),
+                        trusted_read_handlers=_load_read_capability_implementation(
+                            command
+                        ),
+                    )
+                except CliFailure:
+                    expected_read_report = None
+                    artifact_blockers.append(
+                        "current release read capability readiness cannot be recomputed"
+                    )
+                if expected_read_report is not None:
+                    expected_fields = {
+                        **expected_read_report,
+                        "release_identity": retained_release_identity,
+                    }
+                    if (
+                        set(data) != set(expected_fields)
+                        or any(
+                            data.get(field) != expected
+                            for field, expected in expected_read_report.items()
+                        )
+                    ):
+                        artifact_blockers.append(
+                            "read capabilities readiness report does not match the current release"
+                        )
+                    if expected_read_report["read_goal_readiness_ready"] is not True:
+                        artifact_blockers.append(
+                            "current release read capability readiness is incomplete"
+                        )
         if name == "sandbox_database_candidates_report" and isinstance(document, dict):
             data = document.get("data")
             if not isinstance(data, dict):
@@ -3637,6 +3856,291 @@ def evidence_inspect_sandbox_write_pipeline(metadata_json: Path) -> None:
     )
 
 
+_READ_RECEIPT_PROPERTY_SCHEMAS: dict[str, dict[str, Any]] = {
+    "id": {"type": "string", "minLength": 1},
+    "odoo_instance_id": {"type": "string", "minLength": 1},
+    "database_name": {"type": "string", "minLength": 1},
+    "database_uuid": {"type": "string", "minLength": 1},
+    "company_id": {"type": "integer", "minimum": 1},
+    "user_id": {"type": "integer", "minimum": 1},
+    "capability_id": {"type": "string", "minLength": 1},
+    "environment": {"type": "string", "enum": ["test", "sandbox", "production"]},
+    "capability_channel": {"type": "string", "enum": ["staged", "enabled"]},
+    "request_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "result_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "registry_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "release_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "record_count": {"type": "integer", "minimum": 0},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "signature_version": {
+        "type": "integer",
+        "enum": [READ_RECEIPT_SIGNATURE_VERSION],
+    },
+    "signature_purpose": {
+        "type": "string",
+        "enum": [READ_RECEIPT_PURPOSE],
+    },
+    "signature_key_id": {"type": "string", "minLength": 1},
+    "signature": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+}
+_READ_RECEIPT_FIELDS = frozenset(_READ_RECEIPT_PROPERTY_SCHEMAS)
+_REQUIRED_READ_CAPABILITY_IDS = frozenset(
+    {
+        "acct.ap.open_items.v1",
+        "acct.ar.open_items.v1",
+        "acct.diagnostics.operation_read.v1",
+        "acct.gl.trial_balance.v1",
+        "acct.move.draft_cancel_eligibility.v1",
+        "acct.multicompany.consolidated_read.v1",
+        "acct.multicurrency.balance_read.v1",
+        "acct.registry.list.v1",
+        "acct.report.financial_read.v1",
+        "acct.tax.report_read.v1",
+    }
+)
+
+
+def _load_read_capability_implementation(command: str) -> dict[str, str]:
+    try:
+        from .odoo.executor import _CAPABILITIES as odoo_read_capabilities
+    except Exception as exc:
+        raise CliFailure(
+            command=command,
+            code="read_capability_runtime_unavailable",
+            message="The trusted read capability implementation allowlist is unavailable.",
+            exit_code=5,
+        ) from exc
+    if (
+        not isinstance(odoo_read_capabilities, frozenset)
+        or not odoo_read_capabilities
+        or any(
+            not isinstance(capability_id, str) or not capability_id
+            for capability_id in odoo_read_capabilities
+        )
+    ):
+        raise CliFailure(
+            command=command,
+            code="read_capability_runtime_invalid",
+            message="The trusted read capability implementation allowlist is invalid.",
+            exit_code=5,
+        )
+    return {
+        capability_id: "odoo"
+        for capability_id in sorted(odoo_read_capabilities)
+    }
+
+
+def _read_capability_readiness_report(
+    capability: Capability,
+    *,
+    trusted_read_handlers: dict[str, str],
+) -> dict[str, Any]:
+    data = capability.data
+    output_schema = data["output_schema"]
+    output_properties = output_schema.get("properties", {})
+    output_required = output_schema.get("required", [])
+    page_schema = output_properties.get("page")
+    page_properties = (
+        page_schema.get("properties", {}) if isinstance(page_schema, dict) else {}
+    )
+    total_count_schema = page_properties.get("total_count")
+    receipt_schema = output_properties.get("receipt")
+    receipt_properties = (
+        receipt_schema.get("properties", {})
+        if isinstance(receipt_schema, dict)
+        else {}
+    )
+    receipt_required = (
+        receipt_schema.get("required", [])
+        if isinstance(receipt_schema, dict)
+        else []
+    )
+    evidence = data["evidence"]
+    evidence_level = evidence.get("level")
+    evidence_receipts = evidence.get("receipts", [])
+    registry_claimed_receipts = [
+        receipt
+        for receipt in evidence_receipts
+        if isinstance(receipt, dict)
+    ]
+    registry_claimed_receipt_kinds = sorted(
+        {
+            receipt["kind"]
+            for receipt in registry_claimed_receipts
+            if isinstance(receipt.get("kind"), str)
+        }
+    )
+    missing_goal_evidence_kinds = sorted(
+        PRODUCTION_READ_EVIDENCE - set(registry_claimed_receipt_kinds)
+    )
+    routed_environments = set(data.get("staged_environments", [])) | set(
+        data.get("enabled_environments", [])
+    )
+    checks = {
+        "contract_evidence_present": evidence_level != "declared",
+        "trusted_handler_supported": capability.id in trusted_read_handlers,
+        "page_total_count_contract": (
+            isinstance(page_schema, dict)
+            and page_schema.get("type") == "object"
+            and page_schema.get("additionalProperties") is False
+            and isinstance(output_required, list)
+            and "page" in output_required
+            and "total_count" in page_schema.get("required", [])
+            and isinstance(total_count_schema, dict)
+            and total_count_schema.get("type") == "integer"
+            and type(total_count_schema.get("minimum")) is int
+            and total_count_schema["minimum"] >= 0
+        ),
+        "read_policy_closed": (
+            data["approval"].get("required") is False
+            and data["idempotency"].get("required") is False
+        ),
+        "read_receipt_v2_contract": (
+            isinstance(receipt_schema, dict)
+            and receipt_schema.get("type") == "object"
+            and receipt_schema.get("additionalProperties") is False
+            and isinstance(output_required, list)
+            and "receipt" in output_required
+            and receipt_properties == _READ_RECEIPT_PROPERTY_SCHEMAS
+            and set(receipt_required) == _READ_RECEIPT_FIELDS
+        ),
+        "strict_input_schema": _is_strict_object_schema(data["input_schema"]),
+        "strict_output_schema": _is_strict_object_schema(output_schema),
+        "test_execution_routed": "test" in routed_environments,
+        "verification_method_present": (
+            isinstance(data["verification"].get("method"), str)
+            and bool(data["verification"]["method"].strip())
+        ),
+    }
+    blockers = [
+        name.replace("_", " ")
+        for name, ready in checks.items()
+        if ready is not True
+    ]
+    goal_evidence_blockers = [
+        "trusted external read evidence has not been independently verified"
+    ]
+    goal_evidence_ready = False
+    trusted_read_admissible = not blockers
+    return {
+        "blockers": blockers,
+        "capability": {
+            "access": data["access"],
+            "enabled_environments": data["enabled_environments"],
+            "evidence_level": evidence_level,
+            "id": capability.id,
+            "staged_environments": data.get("staged_environments", []),
+        },
+        "checks": checks,
+        "external_read_evidence_verified": False,
+        "goal_evidence_blockers": goal_evidence_blockers,
+        "goal_evidence_ready": goal_evidence_ready,
+        "missing_goal_evidence_kinds": missing_goal_evidence_kinds,
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+        "trusted_handler_kind": trusted_read_handlers.get(capability.id),
+        "trusted_read_admissible": trusted_read_admissible,
+        "read_completion_ready": (
+            trusted_read_admissible and goal_evidence_ready
+        ),
+        "registry_claimed_receipt_count": len(registry_claimed_receipts),
+        "registry_claimed_receipt_kinds": registry_claimed_receipt_kinds,
+        "registry_receipts_authoritative_for_goal": False,
+    }
+
+
+def _read_capabilities_readiness_report(
+    capabilities: tuple[Capability, ...],
+    *,
+    trusted_read_handlers: dict[str, str],
+) -> dict[str, Any]:
+    read_capabilities = sorted(
+        (item for item in capabilities if item.data["access"] == "read"),
+        key=lambda item: item.id,
+    )
+    reports = [
+        _read_capability_readiness_report(
+            capability,
+            trusted_read_handlers=trusted_read_handlers,
+        )
+        for capability in read_capabilities
+    ]
+    registered_read_capability_ids = [
+        report["capability"]["id"] for report in reports
+    ]
+    missing_required_read_capability_ids = sorted(
+        _REQUIRED_READ_CAPABILITY_IDS - set(registered_read_capability_ids)
+    )
+    admissible_ids = [
+        report["capability"]["id"]
+        for report in reports
+        if report["trusted_read_admissible"] is True
+    ]
+    unready_ids = [
+        report["capability"]["id"]
+        for report in reports
+        if report["trusted_read_admissible"] is not True
+    ]
+    goal_evidence_ready_ids = [
+        report["capability"]["id"]
+        for report in reports
+        if report["goal_evidence_ready"] is True
+    ]
+    goal_evidence_unready_ids = [
+        report["capability"]["id"]
+        for report in reports
+        if report["goal_evidence_ready"] is not True
+    ]
+    completion_ready_ids = [
+        report["capability"]["id"]
+        for report in reports
+        if report["read_completion_ready"] is True
+    ]
+    blockers = []
+    if not reports:
+        blockers.append("capability registry has no registered read capabilities")
+    if missing_required_read_capability_ids:
+        blockers.append(
+            "capability registry is missing required read capabilities"
+        )
+    if unready_ids:
+        blockers.append(
+            "not every registered read capability is statically admissible for trusted execution"
+        )
+    if reports:
+        blockers.append(
+            "trusted external read evidence is not independently verified for every registered read capability"
+        )
+    return {
+        "admissible_count": len(admissible_ids),
+        "admissible_ids": admissible_ids,
+        "blockers": blockers,
+        "capabilities": reports,
+        "completion_ready_count": len(completion_ready_ids),
+        "completion_ready_ids": completion_ready_ids,
+        "external_read_evidence_verifier_ready": False,
+        "goal_evidence_ready_count": len(goal_evidence_ready_ids),
+        "goal_evidence_ready_ids": goal_evidence_ready_ids,
+        "goal_evidence_unready_capability_ids": goal_evidence_unready_ids,
+        "production_promotion_allowed": False,
+        "read_goal_readiness_ready": False,
+        "read_static_readiness_ready": (
+            bool(reports)
+            and not unready_ids
+            and not missing_required_read_capability_ids
+        ),
+        "real_odoo_write_performed": False,
+        "registered_read_capability_ids": registered_read_capability_ids,
+        "missing_required_read_capability_ids": (
+            missing_required_read_capability_ids
+        ),
+        "required_read_capability_ids": sorted(_REQUIRED_READ_CAPABILITY_IDS),
+        "required_goal_evidence_kinds": sorted(PRODUCTION_READ_EVIDENCE),
+        "total_read_capabilities": len(reports),
+        "unready_capability_ids": unready_ids,
+    }
+
+
 def _load_write_capability_implementation(command: str) -> tuple[Any, Any]:
     try:
         from .odoo.write_handlers import _CAPABILITIES as odoo_write_capabilities
@@ -3740,6 +4244,28 @@ def _write_capability_readiness_report(
             len(evidence_receipts) if isinstance(evidence_receipts, list) else 0
         ),
     }
+
+
+@evidence_group.command("read-capabilities-readiness")
+def evidence_read_capabilities_readiness() -> None:
+    """Check trusted execution readiness for every registered read capability."""
+
+    command = "evidence.read-capabilities-readiness"
+    identity = _load_release_identity(command=command)
+    capabilities = _load_capabilities()
+    trusted_read_handlers = _load_read_capability_implementation(command)
+    report = _read_capabilities_readiness_report(
+        capabilities,
+        trusted_read_handlers=trusted_read_handlers,
+    )
+    _success(
+        command,
+        {
+            **report,
+            "release_identity": identity,
+        },
+        business_succeeded=False,
+    )
 
 
 @evidence_group.command("write-capability-readiness")
@@ -4302,6 +4828,12 @@ def evidence_sandbox_prerequisite_handoff_check(
     help="Retained evidence.sandbox-onboarding-readiness JSON.",
 )
 @click.option(
+    "--read-capabilities-readiness-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.read-capabilities-readiness JSON.",
+)
+@click.option(
     "--sandbox-database-candidates-report",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
@@ -4389,6 +4921,7 @@ def evidence_final_evidence_manifest_assemble(
     pi_trace_capture_check: Path,
     pi_scenario_report: Path,
     pi_scenario_report_check: Path,
+    read_capabilities_readiness_report: Path,
     sandbox_database_candidates_report: Path,
     sandbox_onboarding_receipt: Path,
     sandbox_onboarding_receipt_check: Path,
@@ -4424,6 +4957,7 @@ def evidence_final_evidence_manifest_assemble(
         "pi_scenario_report": pi_scenario_report,
         "pi_scenario_report_check": pi_scenario_report_check,
         "pi_trace_capture_check": pi_trace_capture_check,
+        "read_capabilities_readiness_report": read_capabilities_readiness_report,
         "sandbox_database_candidates_report": sandbox_database_candidates_report,
         "sandbox_onboarding_receipt": sandbox_onboarding_receipt,
         "sandbox_onboarding_receipt_check": sandbox_onboarding_receipt_check,
@@ -4469,6 +5003,7 @@ def evidence_final_evidence_manifest_assemble(
         expected_package_sha256=expected_package_sha256,
         expected_registry_digest=expected_registry_digest,
     )
+    _assert_final_checker_is_routed(route_report, command=command)
     expected_release_identity = {
         "commit": expected_commit or route_report["route_identity"].get("commit"),
         "manifest_sha256": expected_manifest_sha256
@@ -4541,6 +5076,7 @@ def evidence_final_evidence_manifest_check(
         expected_package_sha256=expected_package_sha256,
         expected_registry_digest=expected_registry_digest,
     )
+    _assert_final_checker_is_routed(route_report, command=command)
     expected_release_identity = {
         "commit": expected_commit or route_report["route_identity"].get("commit"),
         "manifest_sha256": expected_manifest_sha256
@@ -4724,6 +5260,11 @@ def evidence_goal_readiness(
     )
     capabilities = _load_capabilities()
     registry_report = _registry_audit_report(capabilities)
+    trusted_read_handlers = _load_read_capability_implementation(command)
+    read_capabilities_report = _read_capabilities_readiness_report(
+        capabilities,
+        trusted_read_handlers=trusted_read_handlers,
+    )
     write_capabilities = sorted(
         (item for item in capabilities if item.data["access"] == "write"),
         key=lambda item: item.id,
@@ -4874,6 +5415,8 @@ def evidence_goal_readiness(
         blockers.extend(retained_capacity_recheck["blockers"])
     if not registry_report["registry_audit_ready"]:
         blockers.append("capability registry audit is not ready")
+    if not read_capabilities_report["read_goal_readiness_ready"]:
+        blockers.extend(read_capabilities_report["blockers"])
     if static_write_admissible_count != len(static_write_reports):
         blockers.append("not every write capability is statically admissible for sandbox drills")
     if not pi_report["scenario_acceptance_ready"]:
@@ -4900,6 +5443,7 @@ def evidence_goal_readiness(
             "goal_readiness_ready": not blockers,
             "pi_scenario": pi_report,
             "production_promotion_allowed": False,
+            "read_capabilities_readiness": read_capabilities_report,
             "real_odoo_write_performed": False,
             "registry": registry_report,
             "release_identity": identity,

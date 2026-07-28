@@ -561,7 +561,26 @@ At the current local development checkpoint:
 - every current registry `evidence.receipts` array is empty: zero capabilities
   are enabled and zero write capabilities are staged. E00b, a real sandbox
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox
-  or production write is authorized.
+  or production write is authorized;
+- dev250 adds a non-authorizing readiness gate for the exact ten registered
+  read capabilities. It locks the six reviewed Odoo dispatch handlers to their
+  real executor mapping, requires top-level `page` and `receipt`, the complete
+  `read_receipt_v2` JSON Schema, strict input/output contracts, test routing,
+  and the versioned required-read inventory. The current result is six
+  statically admissible reads and four declared-only gaps: tax report,
+  financial report, multi-company consolidation, and operation diagnostics.
+  Registry-embedded evidence receipt claims cannot satisfy final Goal evidence:
+  current-release receipt hashes would self-reference both the registry digest
+  and release manifest, and their metadata alone does not independently verify
+  artifacts or signatures. Until a release-external, independently verified
+  read-evidence index covers all ten capabilities, dev250 reports zero
+  completion-ready reads and keeps Goal readiness false. The final evidence
+  manifest now revalidates this report against the installed registry/handler
+  set and rejects an unready, stale, inconsistent, or incomplete Goal report.
+  Final-manifest schema v2 also rejects unexpected artifact keys and requires
+  the checker itself to execute from the release resolved by `current`, so a
+  retained pre-dev250 checker cannot validate a dev250 handoff. These checks
+  perform no real Odoo or PostgreSQL write and do not authorize production.
 
 The 2026-07-22 Dev29 pre-release worktree validation executed 4,289 tests:
 4,017 passed, 272 platform/external-environment cases skipped, and none failed
@@ -571,6 +590,13 @@ and strict-schema binding gate executed its exact 55 cases with zero skips.
 These are local development results, not clean-commit GitHub Actions evidence,
 an exact-release target receipt, or a sandbox-write authorization. The Linux
 root-only gates must still execute in CI before this release is publishable.
+
+The 2026-07-28 Dev250 pre-commit Windows regression executed 4,042 collected
+cases: 3,758 passed, 284 platform/external-environment cases were skipped, 593
+subtests passed, and none failed or errored. The Pi Bridge suite separately
+executed 115 tests: 113 passed and 2 Linux-only cases were skipped. These
+results prove the local fail-closed contracts only; they are not real Odoo
+read evidence, sandbox write evidence, or production authorization.
 
 The normal local unit command is:
 

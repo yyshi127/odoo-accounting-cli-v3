@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -7,7 +8,14 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from odoo_accounting_cli_v3.cli import main
+import odoo_accounting_cli_v3.cli as cli_module
+from odoo_accounting_cli_v3.cli import (
+    _load_capabilities,
+    _read_capabilities_readiness_report,
+    _read_capability_readiness_report,
+    main,
+)
+from odoo_accounting_cli_v3.registry import Capability
 from odoo_accounting_cli_v3.odoo.runner import OdooRunnerError
 
 from test_odoo_read_boundary_evidence_runner import (
@@ -41,7 +49,7 @@ READY_CURRENT_ROUTE = {
         "release": None,
     },
     "real_odoo_write_performed": False,
-    "resolved_release_path": "/opt/odoo-accounting-cli-v3/releases/0.1.0.dev207-a0af30bff17c",
+    "resolved_release_path": str(Path(cli_module.__file__).resolve().parents[2]),
     "route_identity": {
         "commit": "1" * 40,
         "manifest_sha256": "2" * 64,
@@ -51,6 +59,87 @@ READY_CURRENT_ROUTE = {
         "verified": True,
     },
 }
+
+READ_CAPABILITY_IDS = [
+    "acct.ap.open_items.v1",
+    "acct.ar.open_items.v1",
+    "acct.diagnostics.operation_read.v1",
+    "acct.gl.trial_balance.v1",
+    "acct.move.draft_cancel_eligibility.v1",
+    "acct.multicompany.consolidated_read.v1",
+    "acct.multicurrency.balance_read.v1",
+    "acct.registry.list.v1",
+    "acct.report.financial_read.v1",
+    "acct.tax.report_read.v1",
+]
+READ_GOAL_EVIDENCE_KINDS = [
+    "accounting_oracle",
+    "live_odoo",
+    "pi_e2e",
+    "release_identity",
+    "security_negative",
+]
+
+
+def _ready_read_capabilities_report() -> dict:
+    capabilities = [
+        {
+            "blockers": [],
+            "capability": {
+                "access": "read",
+                "enabled_environments": [],
+                "evidence_level": "test_verified",
+                "id": capability_id,
+                "staged_environments": ["test"],
+            },
+            "checks": {
+                "contract_evidence_present": True,
+                "page_total_count_contract": True,
+                "read_policy_closed": True,
+                "read_receipt_v2_contract": True,
+                "strict_input_schema": True,
+                "strict_output_schema": True,
+                "test_execution_routed": True,
+                "trusted_handler_supported": True,
+                "verification_method_present": True,
+            },
+            "external_read_evidence_verified": True,
+            "goal_evidence_blockers": [],
+            "goal_evidence_ready": True,
+            "missing_goal_evidence_kinds": [],
+            "production_promotion_allowed": False,
+            "read_completion_ready": True,
+            "real_odoo_write_performed": False,
+            "trusted_handler_kind": "odoo",
+            "trusted_read_admissible": True,
+            "registry_claimed_receipt_count": 0,
+            "registry_claimed_receipt_kinds": [],
+            "registry_receipts_authoritative_for_goal": False,
+        }
+        for capability_id in READ_CAPABILITY_IDS
+    ]
+    return {
+        "admissible_count": len(READ_CAPABILITY_IDS),
+        "admissible_ids": READ_CAPABILITY_IDS,
+        "blockers": [],
+        "capabilities": capabilities,
+        "completion_ready_count": len(READ_CAPABILITY_IDS),
+        "completion_ready_ids": READ_CAPABILITY_IDS,
+        "external_read_evidence_verifier_ready": True,
+        "goal_evidence_ready_count": len(READ_CAPABILITY_IDS),
+        "goal_evidence_ready_ids": READ_CAPABILITY_IDS,
+        "goal_evidence_unready_capability_ids": [],
+        "production_promotion_allowed": False,
+        "read_goal_readiness_ready": True,
+        "read_static_readiness_ready": True,
+        "real_odoo_write_performed": False,
+        "registered_read_capability_ids": READ_CAPABILITY_IDS,
+        "missing_required_read_capability_ids": [],
+        "required_goal_evidence_kinds": READ_GOAL_EVIDENCE_KINDS,
+        "required_read_capability_ids": READ_CAPABILITY_IDS,
+        "total_read_capabilities": len(READ_CAPABILITY_IDS),
+        "unready_capability_ids": [],
+    }
 
 
 def _ready_onboarding_receipt(
@@ -225,6 +314,24 @@ def _ready_final_evidence_manifest(
     )
     artifacts["write_evidence_index"] = _ready_write_evidence_index(
         tmp_path, release_identity
+    )
+    artifacts["read_capabilities_readiness_report"] = (
+        tmp_path / "read-capabilities-readiness.json"
+    )
+    artifacts["read_capabilities_readiness_report"].write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.read-capabilities-readiness",
+                "data": {
+                    **_ready_read_capabilities_report(),
+                    "release_identity": release_identity,
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
     )
     artifacts["sandbox_database_candidates_report"] = tmp_path / "sandbox-database-candidates.json"
     artifacts["sandbox_database_candidates_report"].write_text(
@@ -409,8 +516,45 @@ def _ready_final_evidence_manifest(
         encoding="utf-8",
     )
     artifacts["sandbox_prerequisite_handoff_check"] = handoff_check_path
+    goal_readiness_path = tmp_path / "goal_readiness_report.json"
+    goal_readiness_path.write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.goal-readiness",
+                "data": {
+                    "blockers": [],
+                    "capacity": {"sandbox_write_capacity_ready": True},
+                    "goal_readiness_ready": True,
+                    "pi_scenario": {"scenario_acceptance_ready": True},
+                    "production_promotion_allowed": False,
+                    "read_capabilities_readiness": {
+                        "read_goal_readiness_ready": True,
+                        "read_static_readiness_ready": True,
+                    },
+                    "real_odoo_write_performed": False,
+                    "registry": {"registry_audit_ready": True},
+                    "release_identity": release_identity,
+                    "route": {"current_route_ready": True},
+                    "sandbox_database": {"sandbox_database_ready": True},
+                    "sandbox_onboarding": {"ready": True},
+                    "sandbox_provision_authorization": {
+                        "authorization_record_ready": True
+                    },
+                    "write_evidence_index": {"index_ready": True},
+                    "write_pipeline": {"write_pipeline_ready": True},
+                    "write_static_readiness": {
+                        "write_static_readiness_ready": True
+                    },
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    artifacts["goal_readiness_report"] = goal_readiness_path
     for name, command in {
-        "goal_readiness_report": "evidence.goal-readiness",
         "pi_scenario_report_check": "evidence.pi-scenario-report-check",
         "pi_trace_capture_check": "evidence.pi-trace-capture-check",
     }.items():
@@ -446,7 +590,7 @@ def _ready_final_evidence_manifest(
                 "release",
             )
         },
-        "schema_version": "odoo-accounting-cli-v3.final-evidence-manifest.v1",
+        "schema_version": "odoo-accounting-cli-v3.final-evidence-manifest.v2",
     }
     manifest_path = tmp_path / "final-evidence-manifest.json"
     manifest_path.write_text(
@@ -3373,6 +3517,187 @@ def test_evidence_write_runtime_config_plan_reports_base_runtime_scope_blocker(
     ]
 
 
+def test_evidence_read_capabilities_readiness_exposes_declared_handler_gaps():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev250",
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "read-capabilities-readiness",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    data = payload["data"]
+    assert payload["command"] == "evidence.read-capabilities-readiness"
+    assert payload["business_succeeded"] is False
+    assert data["read_static_readiness_ready"] is False
+    assert data["admissible_count"] == 6
+    assert data["total_read_capabilities"] == 10
+    assert data["unready_capability_ids"] == [
+        "acct.diagnostics.operation_read.v1",
+        "acct.multicompany.consolidated_read.v1",
+        "acct.report.financial_read.v1",
+        "acct.tax.report_read.v1",
+    ]
+    assert data["blockers"] == [
+        "not every registered read capability is statically admissible for trusted execution",
+        "trusted external read evidence is not independently verified for every registered read capability",
+    ]
+    assert data["read_goal_readiness_ready"] is False
+    assert data["goal_evidence_ready_count"] == 0
+    assert data["goal_evidence_unready_capability_ids"] == READ_CAPABILITY_IDS
+    assert data["required_goal_evidence_kinds"] == READ_GOAL_EVIDENCE_KINDS
+    assert data["real_odoo_write_performed"] is False
+    assert data["production_promotion_allowed"] is False
+    tax_report = next(
+        item
+        for item in data["capabilities"]
+        if item["capability"]["id"] == "acct.tax.report_read.v1"
+    )
+    assert tax_report["trusted_handler_kind"] is None
+    assert tax_report["checks"]["contract_evidence_present"] is False
+    assert tax_report["checks"]["trusted_handler_supported"] is False
+    assert tax_report["checks"]["read_receipt_v2_contract"] is False
+    assert tax_report["checks"]["test_execution_routed"] is False
+    assert tax_report["goal_evidence_ready"] is False
+    assert tax_report["missing_goal_evidence_kinds"] == READ_GOAL_EVIDENCE_KINDS
+
+
+def test_read_capabilities_readiness_rejects_empty_registry():
+    report = _read_capabilities_readiness_report(
+        (),
+        trusted_read_handlers={},
+    )
+
+    assert report["total_read_capabilities"] == 0
+    assert report["read_static_readiness_ready"] is False
+    assert report["read_goal_readiness_ready"] is False
+    assert report["blockers"] == [
+        "capability registry has no registered read capabilities",
+        "capability registry is missing required read capabilities",
+    ]
+
+
+def test_read_capabilities_readiness_rejects_required_inventory_shrink():
+    capabilities = tuple(
+        capability
+        for capability in _load_capabilities()
+        if capability.id != "acct.tax.report_read.v1"
+    )
+    report = _read_capabilities_readiness_report(
+        capabilities,
+        trusted_read_handlers={},
+    )
+
+    assert report["missing_required_read_capability_ids"] == [
+        "acct.tax.report_read.v1"
+    ]
+    assert (
+        "capability registry is missing required read capabilities"
+        in report["blockers"]
+    )
+    assert report["read_static_readiness_ready"] is False
+    assert report["read_goal_readiness_ready"] is False
+
+
+@pytest.mark.parametrize(
+    ("required_field", "failed_check"),
+    [
+        ("page", "page_total_count_contract"),
+        ("receipt", "read_receipt_v2_contract"),
+    ],
+)
+def test_read_capability_readiness_requires_page_and_receipt_outputs(
+    required_field: str,
+    failed_check: str,
+):
+    source = next(
+        capability
+        for capability in _load_capabilities()
+        if capability.id == "acct.gl.trial_balance.v1"
+    )
+    data = deepcopy(source.data)
+    data["output_schema"]["required"].remove(required_field)
+    capability = Capability.from_dict(data)
+
+    report = _read_capability_readiness_report(
+        capability,
+        trusted_read_handlers={capability.id: "odoo"},
+    )
+
+    assert report["checks"][failed_check] is False
+    assert report["trusted_read_admissible"] is False
+
+
+def test_read_capability_readiness_rejects_mutated_receipt_property_contract():
+    source = next(
+        capability
+        for capability in _load_capabilities()
+        if capability.id == "acct.gl.trial_balance.v1"
+    )
+    data = deepcopy(source.data)
+    data["output_schema"]["properties"]["receipt"]["properties"][
+        "capability_id"
+    ] = {"type": "string"}
+    capability = Capability.from_dict(data)
+
+    report = _read_capability_readiness_report(
+        capability,
+        trusted_read_handlers={capability.id: "odoo"},
+    )
+
+    assert report["checks"]["read_receipt_v2_contract"] is False
+    assert report["trusted_read_admissible"] is False
+
+
+def test_registry_receipt_claims_cannot_satisfy_real_read_evidence():
+    source = next(
+        capability
+        for capability in _load_capabilities()
+        if capability.id == "acct.gl.trial_balance.v1"
+    )
+    data = deepcopy(source.data)
+    data["evidence"] = {
+        "level": "test_verified",
+        "receipts": [
+            {
+                "kind": kind,
+                "registry_sha256": "2" * 64,
+                "release_sha256": "1" * 64,
+            }
+            for kind in READ_GOAL_EVIDENCE_KINDS
+        ],
+    }
+    capability = Capability.from_dict(data)
+
+    report = _read_capability_readiness_report(
+        capability,
+        trusted_read_handlers={capability.id: "odoo"},
+    )
+
+    assert report["goal_evidence_ready"] is False
+    assert report["missing_goal_evidence_kinds"] == []
+    assert report["registry_claimed_receipt_kinds"] == READ_GOAL_EVIDENCE_KINDS
+    assert report["registry_receipts_authoritative_for_goal"] is False
+    assert report["external_read_evidence_verified"] is False
+    assert report["read_completion_ready"] is False
+
+
 def test_evidence_write_capability_readiness_accepts_registered_write():
     expected_identity = {
         "commit": "1" * 40,
@@ -3731,7 +4056,24 @@ def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
     assert data["production_promotion_allowed"] is False
     assert data["real_odoo_write_performed"] is False
     assert data["registry"]["registry_audit_ready"] is True
+    assert (
+        data["read_capabilities_readiness"]["read_static_readiness_ready"]
+        is False
+    )
+    assert data["read_capabilities_readiness"]["admissible_count"] == 6
+    assert (
+        data["read_capabilities_readiness"]["read_goal_readiness_ready"]
+        is False
+    )
     assert data["write_static_readiness"]["write_static_readiness_ready"] is True
+    assert (
+        "not every registered read capability is statically admissible for trusted execution"
+        in data["blockers"]
+    )
+    assert (
+        "trusted external read evidence is not independently verified for every registered read capability"
+        in data["blockers"]
+    )
     assert "Pi scenario acceptance report was not supplied" in data["blockers"]
     assert "sandbox onboarding readiness receipt was not supplied" in data["blockers"]
     assert "sandbox provision authorization file was not supplied" in data["blockers"]
@@ -3750,6 +4092,8 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
                 "data": {
                     "blockers": [
                         "Pi scenario acceptance report was not supplied",
+                        "not every registered read capability is statically admissible for trusted execution",
+                        "trusted external read evidence is not independently verified for every registered read capability",
                         "sandbox database was not observed in the PostgreSQL catalog",
                         "sandbox onboarding readiness receipt was not supplied",
                         "sandbox provision authorization file was not supplied",
@@ -3803,13 +4147,14 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         "odoo-accounting-cli-v3.goal-remediation-checklist.v1"
     )
     assert data["goal_readiness_ready"] is False
-    assert data["ordered_action_count"] == 7
+    assert data["ordered_action_count"] == 8
     assert data["unmatched_blockers"] == []
     assert data["real_odoo_write_performed"] is False
     assert {
         action["action_id"] for action in data["actions"]
     } == {
         "pi_scenario_acceptance",
+        "read_trusted_execution",
         "sandbox_capacity",
         "sandbox_database_catalog",
         "sandbox_onboarding_receipt",
@@ -3821,8 +4166,9 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
         assert isinstance(action["command_args_template"], list)
         assert action["command_args_template"]
         assert isinstance(action["required_placeholders"], list)
-        assert action["required_placeholders"]
-        assert set(action["placeholder_schema"]) == set(action["required_placeholders"])
+        assert set(action["placeholder_schema"]) == set(
+            action["required_placeholders"]
+        )
         for placeholder, schema in action["placeholder_schema"].items():
             assert schema["description"]
             assert schema["format"]
@@ -3861,6 +4207,17 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
     assert prerequisite_handoff["placeholder_schema"]["GOAL_READINESS_JSON"][
         "format"
     ] == "json_file"
+    read_action = next(
+        action
+        for action in data["actions"]
+        if action["action_id"] == "read_trusted_execution"
+    )
+    assert read_action["authorization_required"] is False
+    assert read_action["required_placeholders"] == []
+    assert read_action["placeholder_schema"] == {}
+    assert read_action["command_args_template"] == [
+        ["evidence", "read-capabilities-readiness"]
+    ]
 
 
 def test_evidence_sandbox_prerequisite_handoff_maps_capacity_and_database_decisions(
@@ -4247,6 +4604,9 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     ), patch(
         "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
         return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
     ):
         result = CliRunner().invoke(
             main,
@@ -4287,6 +4647,15 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     assert data["sandbox_database"]["sandbox_database_ready"] is True
     assert data["write_pipeline"]["write_pipeline_ready"] is True
     assert data["write_evidence_index"]["index_ready"] is True
+    assert (
+        data["read_capabilities_readiness"]["read_static_readiness_ready"]
+        is True
+    )
+    assert (
+        data["read_capabilities_readiness"]["read_goal_readiness_ready"]
+        is True
+    )
+    assert data["read_capabilities_readiness"]["admissible_count"] == 10
     assert data["write_static_readiness"]["admissible_count"] == 14
 
 
@@ -4536,6 +4905,9 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     with patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
     ):
         result = CliRunner().invoke(
             main,
@@ -4553,14 +4925,237 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     assert payload["business_succeeded"] is False
     data = payload["data"]
     assert data["final_evidence_manifest_ready"] is True
-    assert data["artifact_count"] == 15
+    assert data["artifact_count"] == 16
     assert data["blockers"] == []
     assert data["real_odoo_write_performed"] is False
 
 
 @pytest.mark.parametrize(
+    ("mutation", "expected_blocker"),
+    [
+        (
+            "cross_release",
+            "read_capabilities_readiness_report: read capabilities readiness report release commit mismatch",
+        ),
+        (
+            "inconsistent_ids",
+            "read_capabilities_readiness_report: read capabilities readiness report does not match the current release",
+        ),
+    ],
+)
+def test_final_evidence_manifest_rejects_unbound_or_inconsistent_read_report(
+    tmp_path: Path,
+    mutation: str,
+    expected_blocker: str,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev250-test",
+        "verified": True,
+        "version": "0.1.0.dev250",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    manifest_document = __import__("json").loads(
+        manifest.read_text(encoding="utf-8")
+    )
+    artifact_name = "read_capabilities_readiness_report"
+    artifact_path = tmp_path / manifest_document["artifacts"][artifact_name]
+    artifact = __import__("json").loads(artifact_path.read_text(encoding="utf-8"))
+    if mutation == "cross_release":
+        artifact["data"]["release_identity"]["commit"] = "9" * 40
+    else:
+        artifact["data"]["admissible_ids"] = READ_CAPABILITY_IDS[:-1]
+    artifact_path.write_text(
+        __import__("json").dumps(artifact, sort_keys=True),
+        encoding="utf-8",
+    )
+    manifest_document["artifact_sha256"][artifact_name] = _sha256_path(
+        artifact_path
+    )
+    manifest.write_text(
+        __import__("json").dumps(manifest_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert expected_blocker in data["blockers"]
+
+
+def test_final_evidence_manifest_rejects_stale_checker_release(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev250-test",
+        "verified": True,
+        "version": "0.1.0.dev250",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    stale_release = tmp_path / "stale-release"
+    stale_release.mkdir()
+    route = {
+        **READY_CURRENT_ROUTE,
+        "resolved_release_path": str(stale_release),
+        "route_identity": release_identity,
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "final_evidence_checker_release_mismatch"
+
+
+def test_final_evidence_manifest_rejects_unexpected_artifact_keys(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev250-test",
+        "verified": True,
+        "version": "0.1.0.dev250",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    document["artifacts"]["unexpected"] = document["artifacts"][
+        "goal_readiness_report"
+    ]
+    document["artifact_sha256"]["unexpected"] = document["artifact_sha256"][
+        "goal_readiness_report"
+    ]
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert "final evidence manifest contains unexpected artifacts" in data["blockers"]
+    assert (
+        "final evidence manifest contains unexpected artifact digests"
+        in data["blockers"]
+    )
+
+
+def test_final_evidence_manifest_rejects_legacy_v1_schema(tmp_path: Path):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev250-test",
+        "verified": True,
+        "version": "0.1.0.dev250",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    document["schema_version"] = (
+        "odoo-accounting-cli-v3.final-evidence-manifest.v1"
+    )
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert "final evidence manifest has the wrong schema" in data["blockers"]
+
+
+@pytest.mark.parametrize(
     ("artifact_name", "field_path", "value", "expected_blocker"),
     [
+        (
+            "goal_readiness_report",
+            ("data", "goal_readiness_ready"),
+            False,
+            "goal_readiness_report: goal readiness report is not ready",
+        ),
+        (
+            "read_capabilities_readiness_report",
+            ("data", "read_static_readiness_ready"),
+            False,
+            "read_capabilities_readiness_report: read capabilities static readiness is not ready",
+        ),
         (
             "sandbox_database_candidates_report",
             ("data", "selected_database_eligible"),
@@ -4623,6 +5218,9 @@ def test_evidence_final_evidence_manifest_check_rejects_unready_prerequisite_art
     with patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
     ):
         result = CliRunner().invoke(
             main,
@@ -4663,6 +5261,9 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
     with patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
     ):
         result = CliRunner().invoke(
             main,
@@ -4677,6 +5278,8 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
                 str(artifacts["pi_scenario_report"]),
                 "--pi-scenario-report-check",
                 str(artifacts["pi_scenario_report_check"]),
+                "--read-capabilities-readiness-report",
+                str(artifacts["read_capabilities_readiness_report"]),
                 "--sandbox-onboarding-receipt",
                 str(artifacts["sandbox_onboarding_receipt"]),
                 "--sandbox-database-candidates-report",
@@ -4713,7 +5316,7 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
     assert data["final_evidence_manifest_ready"] is True
     assembled = __import__("json").loads(output_file.read_text(encoding="utf-8"))
     assert assembled["schema_version"] == (
-        "odoo-accounting-cli-v3.final-evidence-manifest.v1"
+        "odoo-accounting-cli-v3.final-evidence-manifest.v2"
     )
     assert assembled["release_identity"]["release"] == "0.1.0.dev234-test"
 
@@ -4750,6 +5353,8 @@ def test_evidence_final_evidence_manifest_assemble_rejects_duplicate_artifact(
             str(artifacts["pi_scenario_report"]),
             "--pi-scenario-report-check",
             str(artifacts["pi_scenario_report_check"]),
+            "--read-capabilities-readiness-report",
+            str(artifacts["read_capabilities_readiness_report"]),
             "--sandbox-onboarding-receipt",
             str(artifacts["sandbox_onboarding_receipt"]),
             "--sandbox-database-candidates-report",

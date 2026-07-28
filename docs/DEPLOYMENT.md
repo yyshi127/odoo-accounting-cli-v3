@@ -81,6 +81,8 @@ aggregate non-authorizing check:
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
 V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+"$V3_CLI" evidence read-capabilities-readiness \
+  > <READ_CAPABILITIES_READINESS_JSON>
 "$V3_CLI" evidence goal-readiness \
   --current-path /opt/odoo-accounting-cli-v3/current \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
@@ -105,10 +107,21 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
 This command performs no Odoo or PostgreSQL write. It aggregates blockers from
 the current-route gate, live filesystem capacity recheck, supplied PostgreSQL
 catalog observations for the expected sandbox database name, `registry audit`,
-static write readiness, the retained Pi scenario report, the retained sandbox
-onboarding receipt, the retained sandbox provision authorization record, and the
-retained write-pipeline readiness report. If a write evidence index is supplied,
-the aggregate also cross-checks it against the retained write-pipeline report for
+read capability and static write readiness, the retained Pi scenario report,
+the retained sandbox onboarding receipt, the retained sandbox provision
+authorization record, and the retained write-pipeline readiness report. The
+read gate requires every registered read capability to have a reviewed trusted
+handler, a strict `page.total_count`, the exact `read_receipt_v2` contract, a
+test execution route, and an external independently verified evidence index
+covering exact-release `live_odoo`, `accounting_oracle`, `pi_e2e`,
+`release_identity`, and `security_negative` artifacts. Registry-embedded
+receipt metadata is diagnostic only: it cannot authorize Goal completion
+because it is neither an independent artifact verification nor a constructible
+current-release trust anchor. Dev250 therefore keeps final read-evidence
+readiness false until the external read-evidence verifier/index is implemented.
+Contract-tested handlers remain executable only in their staged channel. If a
+write evidence index is supplied, the aggregate also cross-checks it against
+the retained write-pipeline report for
 matching evidence root, release identity, readiness flag, and verified/missing/
 rejected write-capability counts. It reports `goal_readiness_ready:false` until
 all supplied evidence is present, bound to the exact release and intended
@@ -190,12 +203,15 @@ release identity.
 
 After the final gate and all prerequisite checks are retained, build a final
 evidence manifest with schema
-`odoo-accounting-cli-v3.final-evidence-manifest.v1`. The manifest must bind the
+`odoo-accounting-cli-v3.final-evidence-manifest.v2`. The v2 checker must execute
+from the same resolved release that `current` routes to, and it rejects both
+missing and unexpected artifact keys. The manifest must bind the
 same release identity and SHA-256 digests for these retained artifacts:
 
 - `pi_trace_capture_check`
 - `pi_scenario_report`
 - `pi_scenario_report_check`
+- `read_capabilities_readiness_report`
 - `sandbox_database_candidates_report`
 - `sandbox_onboarding_receipt`
 - `sandbox_onboarding_receipt_check`
@@ -220,6 +236,7 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
   --pi-trace-capture-check <PI_TRACE_CAPTURE_CHECK_JSON> \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --pi-scenario-report-check <PI_SCENARIO_REPORT_CHECK_JSON> \
+  --read-capabilities-readiness-report <READ_CAPABILITIES_READINESS_JSON> \
   --sandbox-database-candidates-report <SANDBOX_DATABASE_CANDIDATES_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
   --sandbox-onboarding-receipt-check <SANDBOX_ONBOARDING_RECEIPT_CHECK_JSON> \
@@ -343,7 +360,22 @@ Before transfer, record the archive name, sidecar trusted-artifact name, byte
 sizes, archive SHA-256, trusted-artifact SHA-256, manifest SHA-256, registry
 digest, version, commit, builder, and UTC time. Transfer both files to temporary
 server paths and recompute both SHA-256 values on the server before extracting
-the archive or installing the anchor.
+the archive or installing the anchor. All new uploads and generated temporary
+release inputs must use
+`/opt/odoo-accounting-cli-v3/upload-sources/incoming/`; do not create new
+release inputs below `/root`. Historical files migrated from
+`/root/odoo-v3-upload`, `/root/odoo-accounting-cli-v3-*.tar.gz`, or
+`install-release-dev*.py` belong only in
+`/opt/odoo-accounting-cli-v3/upload-sources/legacy-root-20260728/` and must not
+be selected as current installation inputs.
+
+The 2026-07-28 target-host migration moved 27 confirmed V3 objects (7 legacy
+installers, 7 packages, and 13 upload directories; 125,584,659 bytes) without
+deleting them. The before/after manifests in that directory match byte-for-byte;
+`migration-after.tsv` has SHA-256
+`46fefbf03259e09dc5038f047393f0e878e6eefaac80bc91dcc258d00b3b74e4`.
+The two durable release trust-key files remain outside this temporary-artifact
+archive until a separately reviewed trust-store migration is available.
 
 ## Side-by-side installation
 
@@ -358,14 +390,16 @@ none is inferred as an external trust decision from the archive being
 installed:
 
 ```bash
-sudo install -d -o root -g root -m 0700 /root/odoo-v3-upload
+sudo install -d -o root -g root -m 0700 \
+  /opt/odoo-accounting-cli-v3/upload-sources/incoming
 sudo install -o root -g root -m 0444 \
   <exact-target-commit-checkout>/deployment/install-release.py \
-  /root/odoo-v3-upload/install-release.py
-test "$(sudo /usr/bin/sha256sum /root/odoo-v3-upload/install-release.py)" = \
-  "<expected-installer-sha256>  /root/odoo-v3-upload/install-release.py"
-sudo /usr/bin/python3 /root/odoo-v3-upload/install-release.py \
-  --archive /root/odoo-v3-upload/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz \
+  /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py
+test "$(sudo /usr/bin/sha256sum /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py)" = \
+  "<expected-installer-sha256>  /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py"
+sudo /usr/bin/python3 \
+  /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py \
+  --archive /opt/odoo-accounting-cli-v3/upload-sources/incoming/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz \
   --expected-package-sha256 <64-lowercase-hex> \
   --expected-manifest-sha256 <64-lowercase-hex> \
   --expected-version <version> \
