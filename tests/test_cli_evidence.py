@@ -226,6 +226,85 @@ def _ready_final_evidence_manifest(
     artifacts["write_evidence_index"] = _ready_write_evidence_index(
         tmp_path, release_identity
     )
+    artifacts["sandbox_database_candidates_report"] = tmp_path / "sandbox-database-candidates.json"
+    artifacts["sandbox_database_candidates_report"].write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.sandbox-database-candidates",
+                "data": {
+                    "blockers": [],
+                    "candidate_summary": {
+                        "blocker_counts": {},
+                        "candidate_count": 1,
+                        "eligible_count": 1,
+                        "rejected_count": 0,
+                    },
+                    "eligible_database_names": ["odoo_v3_sandbox"],
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "selected_database": {"name": "odoo_v3_sandbox"},
+                    "selected_database_eligible": True,
+                    "selected_database_name": "odoo_v3_sandbox",
+                    "sandbox_database_selection_ready": True,
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    artifacts["target_capacity_plan_report"] = tmp_path / "target-capacity-plan.json"
+    artifacts["target_capacity_plan_report"].write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.target-capacity-plan",
+                "data": {
+                    "authorization_required_before_cleanup": True,
+                    "blockers": [],
+                    "cleanup_executed": False,
+                    "plan": {
+                        "candidate_count": 0,
+                        "candidate_reclaimable_bytes": 0,
+                        "candidates_truncated": False,
+                        "cleanup_executed": False,
+                        "kind": "odoo-accounting-cli-v3.target-capacity-plan.v1",
+                        "required_free_bytes": 8,
+                        "retained_candidate_count": 0,
+                        "shortfall_bytes": 0,
+                    },
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "sandbox_write_capacity_ready": True,
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    artifacts["target_capacity_recheck_report"] = tmp_path / "target-capacity-recheck.json"
+    artifacts["target_capacity_recheck_report"].write_text(
+        __import__("json").dumps(
+            {
+                "business_succeeded": False,
+                "command": "evidence.target-capacity-recheck",
+                "data": {
+                    "available_bytes": 16,
+                    "cleanup_executed": False,
+                    "production_promotion_allowed": False,
+                    "real_odoo_write_performed": False,
+                    "required_free_bytes": 8,
+                    "sandbox_write_capacity_ready": True,
+                    "shortfall_bytes": 0,
+                },
+                "ok": True,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     artifacts["sandbox_provision_authorization"] = tmp_path / "sandbox-auth.json"
     artifacts["sandbox_provision_authorization"].write_text(
         __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
@@ -4474,9 +4553,91 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     assert payload["business_succeeded"] is False
     data = payload["data"]
     assert data["final_evidence_manifest_ready"] is True
-    assert data["artifact_count"] == 12
+    assert data["artifact_count"] == 15
     assert data["blockers"] == []
     assert data["real_odoo_write_performed"] is False
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "field_path", "value", "expected_blocker"),
+    [
+        (
+            "sandbox_database_candidates_report",
+            ("data", "selected_database_eligible"),
+            False,
+            "sandbox_database_candidates_report: sandbox database selected candidate is not eligible",
+        ),
+        (
+            "target_capacity_plan_report",
+            ("data", "plan", "kind"),
+            "unexpected",
+            "target_capacity_plan_report: target capacity plan kind is invalid",
+        ),
+        (
+            "target_capacity_recheck_report",
+            ("data", "sandbox_write_capacity_ready"),
+            False,
+            "target_capacity_recheck_report: target capacity recheck report is not ready",
+        ),
+    ],
+)
+def test_evidence_final_evidence_manifest_check_rejects_unready_prerequisite_artifact(
+    tmp_path: Path,
+    artifact_name: str,
+    field_path: tuple[str, ...],
+    value: object,
+    expected_blocker: str,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev249-test",
+        "verified": True,
+        "version": "0.1.0.dev249",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    manifest_document = __import__("json").loads(
+        manifest.read_text(encoding="utf-8")
+    )
+    artifact_path = tmp_path / manifest_document["artifacts"][artifact_name]
+    artifact_document = __import__("json").loads(
+        artifact_path.read_text(encoding="utf-8")
+    )
+    target = artifact_document
+    for field in field_path[:-1]:
+        target = target[field]
+    target[field_path[-1]] = value
+    artifact_path.write_text(
+        __import__("json").dumps(artifact_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    manifest_document["artifact_sha256"][artifact_name] = _sha256_path(artifact_path)
+    manifest.write_text(
+        __import__("json").dumps(manifest_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert expected_blocker in data["blockers"]
 
 
 def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
@@ -4518,6 +4679,8 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
                 str(artifacts["pi_scenario_report_check"]),
                 "--sandbox-onboarding-receipt",
                 str(artifacts["sandbox_onboarding_receipt"]),
+                "--sandbox-database-candidates-report",
+                str(artifacts["sandbox_database_candidates_report"]),
                 "--sandbox-onboarding-receipt-check",
                 str(artifacts["sandbox_onboarding_receipt_check"]),
                 "--sandbox-provision-authorization",
@@ -4528,6 +4691,10 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
                 str(artifacts["sandbox_prerequisite_handoff"]),
                 "--sandbox-prerequisite-handoff-check",
                 str(artifacts["sandbox_prerequisite_handoff_check"]),
+                "--target-capacity-plan-report",
+                str(artifacts["target_capacity_plan_report"]),
+                "--target-capacity-recheck-report",
+                str(artifacts["target_capacity_recheck_report"]),
                 "--write-pipeline-report",
                 str(artifacts["write_pipeline_report"]),
                 "--write-evidence-index",
@@ -4585,6 +4752,8 @@ def test_evidence_final_evidence_manifest_assemble_rejects_duplicate_artifact(
             str(artifacts["pi_scenario_report_check"]),
             "--sandbox-onboarding-receipt",
             str(artifacts["sandbox_onboarding_receipt"]),
+            "--sandbox-database-candidates-report",
+            str(artifacts["sandbox_database_candidates_report"]),
             "--sandbox-onboarding-receipt-check",
             str(artifacts["sandbox_onboarding_receipt_check"]),
             "--sandbox-provision-authorization",
@@ -4595,6 +4764,10 @@ def test_evidence_final_evidence_manifest_assemble_rejects_duplicate_artifact(
             str(artifacts["sandbox_prerequisite_handoff"]),
             "--sandbox-prerequisite-handoff-check",
             str(artifacts["sandbox_prerequisite_handoff_check"]),
+            "--target-capacity-plan-report",
+            str(artifacts["target_capacity_plan_report"]),
+            "--target-capacity-recheck-report",
+            str(artifacts["target_capacity_recheck_report"]),
             "--write-pipeline-report",
             str(artifacts["write_pipeline_report"]),
             "--write-evidence-index",

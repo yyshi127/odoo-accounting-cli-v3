@@ -857,11 +857,14 @@ FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
     "goal_readiness_report": "evidence.goal-readiness",
     "pi_scenario_report_check": "evidence.pi-scenario-report-check",
     "pi_trace_capture_check": "evidence.pi-trace-capture-check",
+    "sandbox_database_candidates_report": "evidence.sandbox-database-candidates",
     "sandbox_onboarding_receipt": "evidence.sandbox-onboarding-readiness",
     "sandbox_onboarding_receipt_check": "evidence.sandbox-onboarding-receipt-check",
     "sandbox_prerequisite_handoff": "evidence.sandbox-prerequisite-handoff",
     "sandbox_prerequisite_handoff_check": "evidence.sandbox-prerequisite-handoff-check",
     "sandbox_provision_authorization_check": "evidence.sandbox-provision-authorization-check",
+    "target_capacity_plan_report": "evidence.target-capacity-plan",
+    "target_capacity_recheck_report": "evidence.target-capacity-recheck",
     "write_evidence_index": "evidence.write-evidence-index",
     "write_pipeline_report": "evidence.write-pipeline-readiness",
 }
@@ -1587,6 +1590,44 @@ def _final_evidence_manifest_report(
                     artifact_blockers.append("sandbox onboarding receipt check is not acceptable")
                 if not isinstance(onboarding, dict) or onboarding.get("ready") is not True:
                     artifact_blockers.append("sandbox onboarding receipt check is not ready")
+        if name == "sandbox_database_candidates_report" and isinstance(document, dict):
+            data = document.get("data")
+            if not isinstance(data, dict):
+                artifact_blockers.append("sandbox database candidates report data is invalid")
+            else:
+                if data.get("sandbox_database_selection_ready") is not True:
+                    artifact_blockers.append("sandbox database candidates report is not ready")
+                if data.get("selected_database_eligible") is not True:
+                    artifact_blockers.append("sandbox database selected candidate is not eligible")
+                if data.get("real_odoo_write_performed") is not False:
+                    artifact_blockers.append("sandbox database candidates must not be a real Odoo write receipt")
+        if name == "target_capacity_plan_report" and isinstance(document, dict):
+            data = document.get("data")
+            if not isinstance(data, dict):
+                artifact_blockers.append("target capacity plan report data is invalid")
+            else:
+                plan = data.get("plan")
+                if not isinstance(plan, dict):
+                    artifact_blockers.append("target capacity plan report is missing data.plan")
+                elif plan.get("kind") != "odoo-accounting-cli-v3.target-capacity-plan.v1":
+                    artifact_blockers.append("target capacity plan kind is invalid")
+                if data.get("sandbox_write_capacity_ready") is not True:
+                    artifact_blockers.append("target capacity plan report is not ready")
+                if data.get("cleanup_executed") is not False:
+                    artifact_blockers.append("target capacity plan must be read-only and unexecuted")
+                if data.get("real_odoo_write_performed") is not False:
+                    artifact_blockers.append("target capacity plan must not be a real Odoo write receipt")
+        if name == "target_capacity_recheck_report" and isinstance(document, dict):
+            data = document.get("data")
+            if not isinstance(data, dict):
+                artifact_blockers.append("target capacity recheck report data is invalid")
+            else:
+                if data.get("sandbox_write_capacity_ready") is not True:
+                    artifact_blockers.append("target capacity recheck report is not ready")
+                if data.get("cleanup_executed") is not False:
+                    artifact_blockers.append("target capacity recheck must be read-only and unexecuted")
+                if data.get("real_odoo_write_performed") is not False:
+                    artifact_blockers.append("target capacity recheck must not be a real Odoo write receipt")
         if name == "sandbox_prerequisite_handoff" and isinstance(document, dict):
             data = document.get("data")
             if not isinstance(data, dict):
@@ -4261,6 +4302,12 @@ def evidence_sandbox_prerequisite_handoff_check(
     help="Retained evidence.sandbox-onboarding-readiness JSON.",
 )
 @click.option(
+    "--sandbox-database-candidates-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.sandbox-database-candidates JSON.",
+)
+@click.option(
     "--sandbox-onboarding-receipt-check",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
@@ -4297,6 +4344,18 @@ def evidence_sandbox_prerequisite_handoff_check(
     help="Retained evidence.write-pipeline-readiness JSON.",
 )
 @click.option(
+    "--target-capacity-plan-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.target-capacity-plan JSON.",
+)
+@click.option(
+    "--target-capacity-recheck-report",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.target-capacity-recheck JSON.",
+)
+@click.option(
     "--write-evidence-index",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
@@ -4330,12 +4389,15 @@ def evidence_final_evidence_manifest_assemble(
     pi_trace_capture_check: Path,
     pi_scenario_report: Path,
     pi_scenario_report_check: Path,
+    sandbox_database_candidates_report: Path,
     sandbox_onboarding_receipt: Path,
     sandbox_onboarding_receipt_check: Path,
     sandbox_provision_authorization: Path,
     sandbox_provision_authorization_check: Path,
     sandbox_prerequisite_handoff: Path,
     sandbox_prerequisite_handoff_check: Path,
+    target_capacity_plan_report: Path,
+    target_capacity_recheck_report: Path,
     write_pipeline_report: Path,
     write_evidence_index: Path,
     goal_readiness_report: Path,
@@ -4362,12 +4424,15 @@ def evidence_final_evidence_manifest_assemble(
         "pi_scenario_report": pi_scenario_report,
         "pi_scenario_report_check": pi_scenario_report_check,
         "pi_trace_capture_check": pi_trace_capture_check,
+        "sandbox_database_candidates_report": sandbox_database_candidates_report,
         "sandbox_onboarding_receipt": sandbox_onboarding_receipt,
         "sandbox_onboarding_receipt_check": sandbox_onboarding_receipt_check,
         "sandbox_provision_authorization": sandbox_provision_authorization,
         "sandbox_provision_authorization_check": sandbox_provision_authorization_check,
         "sandbox_prerequisite_handoff": sandbox_prerequisite_handoff,
         "sandbox_prerequisite_handoff_check": sandbox_prerequisite_handoff_check,
+        "target_capacity_plan_report": target_capacity_plan_report,
+        "target_capacity_recheck_report": target_capacity_recheck_report,
         "write_evidence_index": write_evidence_index,
         "write_pipeline_report": write_pipeline_report,
     }

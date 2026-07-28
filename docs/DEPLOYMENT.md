@@ -196,12 +196,15 @@ same release identity and SHA-256 digests for these retained artifacts:
 - `pi_trace_capture_check`
 - `pi_scenario_report`
 - `pi_scenario_report_check`
+- `sandbox_database_candidates_report`
 - `sandbox_onboarding_receipt`
 - `sandbox_onboarding_receipt_check`
 - `sandbox_provision_authorization`
 - `sandbox_provision_authorization_check`
 - `sandbox_prerequisite_handoff`
 - `sandbox_prerequisite_handoff_check`
+- `target_capacity_plan_report`
+- `target_capacity_recheck_report`
 - `write_pipeline_report`
 - `write_evidence_index`
 - `goal_readiness_report`
@@ -217,12 +220,15 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
   --pi-trace-capture-check <PI_TRACE_CAPTURE_CHECK_JSON> \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --pi-scenario-report-check <PI_SCENARIO_REPORT_CHECK_JSON> \
+  --sandbox-database-candidates-report <SANDBOX_DATABASE_CANDIDATES_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
   --sandbox-onboarding-receipt-check <SANDBOX_ONBOARDING_RECEIPT_CHECK_JSON> \
   --sandbox-provision-authorization <SANDBOX_PROVISION_AUTHORIZATION_JSON> \
   --sandbox-provision-authorization-check <SANDBOX_PROVISION_AUTHORIZATION_CHECK_JSON> \
   --sandbox-prerequisite-handoff <SANDBOX_PREREQUISITE_HANDOFF_JSON> \
   --sandbox-prerequisite-handoff-check <SANDBOX_PREREQUISITE_HANDOFF_CHECK_JSON> \
+  --target-capacity-plan-report <TARGET_CAPACITY_PLAN_JSON> \
+  --target-capacity-recheck-report <TARGET_CAPACITY_RECHECK_JSON> \
   --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
   --write-evidence-index <WRITE_EVIDENCE_INDEX_JSON> \
   --goal-readiness-report <GOAL_READINESS_JSON> \
