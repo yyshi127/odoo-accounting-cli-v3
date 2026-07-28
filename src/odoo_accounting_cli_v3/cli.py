@@ -2494,6 +2494,19 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
     default=Path("/opt/odoo-accounting-cli-v3/current"),
     show_default=True,
 )
+@click.option(
+    "--capacity-path",
+    type=click.Path(path_type=Path),
+    default=Path("/"),
+    show_default=True,
+    help="Path whose filesystem capacity should be checked for sandbox writes.",
+)
+@click.option(
+    "--required-free-bytes",
+    type=click.IntRange(min=1),
+    default=8 * 1024 * 1024 * 1024,
+    show_default=True,
+)
 @click.option("--expected-release", help="Expected routed release name.")
 @click.option("--expected-commit", help="Expected full Git commit.")
 @click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
@@ -2505,6 +2518,8 @@ def evidence_goal_readiness(
     write_pipeline_report: Path | None,
     expected_sandbox_database_name: str | None,
     current_path: Path,
+    capacity_path: Path,
+    required_free_bytes: int,
     expected_release: str | None,
     expected_commit: str | None,
     expected_manifest_sha256: str | None,
@@ -2531,6 +2546,18 @@ def evidence_goal_readiness(
         expected_package_sha256=expected_release_identity["package_sha256"],
         expected_registry_digest=expected_release_identity["registry_digest"],
     )
+    try:
+        capacity_report = _target_capacity_recheck_report(
+            capacity_path,
+            required_free_bytes=required_free_bytes,
+        )
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="goal_readiness_capacity_rejected",
+            message="The goal-readiness capacity path is unavailable.",
+            exit_code=5,
+        ) from exc
     capabilities = _load_capabilities()
     registry_report = _registry_audit_report(capabilities)
     write_capabilities = sorted(
@@ -2568,6 +2595,8 @@ def evidence_goal_readiness(
     blockers: list[str] = []
     if not route_report["current_route_ready"]:
         blockers.append("current release route is not ready")
+    if not capacity_report["sandbox_write_capacity_ready"]:
+        blockers.append("sandbox write capacity gate is not ready")
     if not registry_report["registry_audit_ready"]:
         blockers.append("capability registry audit is not ready")
     if static_write_admissible_count != len(static_write_reports):
@@ -2582,6 +2611,7 @@ def evidence_goal_readiness(
         command,
         {
             "blockers": sorted(set(blockers)),
+            "capacity": capacity_report,
             "goal_readiness_ready": not blockers,
             "pi_scenario": pi_report,
             "production_promotion_allowed": False,

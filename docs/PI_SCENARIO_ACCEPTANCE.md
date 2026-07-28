@@ -123,7 +123,9 @@ bin/odoo-accounting-cli-v3 evidence goal-readiness \
   --pi-scenario-report <REPORT_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
   --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
-  --expected-sandbox-database-name <SANDBOX_DATABASE_NAME>
+  --expected-sandbox-database-name <SANDBOX_DATABASE_NAME> \
+  --capacity-path / \
+  --required-free-bytes 8589934592
 ```
 
 If the report is absent or fails any gate, `goal-readiness` keeps the release
