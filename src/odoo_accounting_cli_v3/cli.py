@@ -858,8 +858,10 @@ FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
     "pi_scenario_report_check": "evidence.pi-scenario-report-check",
     "pi_trace_capture_check": "evidence.pi-trace-capture-check",
     "sandbox_onboarding_receipt": "evidence.sandbox-onboarding-readiness",
+    "sandbox_onboarding_receipt_check": "evidence.sandbox-onboarding-receipt-check",
     "sandbox_prerequisite_handoff": "evidence.sandbox-prerequisite-handoff",
     "sandbox_prerequisite_handoff_check": "evidence.sandbox-prerequisite-handoff-check",
+    "sandbox_provision_authorization_check": "evidence.sandbox-provision-authorization-check",
     "write_evidence_index": "evidence.write-evidence-index",
     "write_pipeline_report": "evidence.write-pipeline-readiness",
 }
@@ -1569,6 +1571,22 @@ def _final_evidence_manifest_report(
         if name == "sandbox_provision_authorization" and isinstance(document, dict):
             if document.get("purpose") != "sandbox_database_provision":
                 artifact_blockers.append("sandbox provision authorization purpose is invalid")
+        if name == "sandbox_provision_authorization_check" and isinstance(document, dict):
+            data = document.get("data")
+            if not isinstance(data, dict):
+                artifact_blockers.append("sandbox provision authorization check data is invalid")
+            elif data.get("authorization_record_ready") is not True:
+                artifact_blockers.append("sandbox provision authorization check is not ready")
+        if name == "sandbox_onboarding_receipt_check" and isinstance(document, dict):
+            data = document.get("data")
+            if not isinstance(data, dict):
+                artifact_blockers.append("sandbox onboarding receipt check data is invalid")
+            else:
+                onboarding = data.get("onboarding")
+                if data.get("sandbox_write_preflight_receipt_acceptable") is not True:
+                    artifact_blockers.append("sandbox onboarding receipt check is not acceptable")
+                if not isinstance(onboarding, dict) or onboarding.get("ready") is not True:
+                    artifact_blockers.append("sandbox onboarding receipt check is not ready")
         if name == "sandbox_prerequisite_handoff" and isinstance(document, dict):
             data = document.get("data")
             if not isinstance(data, dict):
@@ -4243,10 +4261,22 @@ def evidence_sandbox_prerequisite_handoff_check(
     help="Retained evidence.sandbox-onboarding-readiness JSON.",
 )
 @click.option(
+    "--sandbox-onboarding-receipt-check",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.sandbox-onboarding-receipt-check JSON.",
+)
+@click.option(
     "--sandbox-provision-authorization",
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
     help="Retained sandbox provision authorization JSON.",
+)
+@click.option(
+    "--sandbox-provision-authorization-check",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Retained evidence.sandbox-provision-authorization-check JSON.",
 )
 @click.option(
     "--sandbox-prerequisite-handoff",
@@ -4301,7 +4331,9 @@ def evidence_final_evidence_manifest_assemble(
     pi_scenario_report: Path,
     pi_scenario_report_check: Path,
     sandbox_onboarding_receipt: Path,
+    sandbox_onboarding_receipt_check: Path,
     sandbox_provision_authorization: Path,
+    sandbox_provision_authorization_check: Path,
     sandbox_prerequisite_handoff: Path,
     sandbox_prerequisite_handoff_check: Path,
     write_pipeline_report: Path,
@@ -4331,7 +4363,9 @@ def evidence_final_evidence_manifest_assemble(
         "pi_scenario_report_check": pi_scenario_report_check,
         "pi_trace_capture_check": pi_trace_capture_check,
         "sandbox_onboarding_receipt": sandbox_onboarding_receipt,
+        "sandbox_onboarding_receipt_check": sandbox_onboarding_receipt_check,
         "sandbox_provision_authorization": sandbox_provision_authorization,
+        "sandbox_provision_authorization_check": sandbox_provision_authorization_check,
         "sandbox_prerequisite_handoff": sandbox_prerequisite_handoff,
         "sandbox_prerequisite_handoff_check": sandbox_prerequisite_handoff_check,
         "write_evidence_index": write_evidence_index,

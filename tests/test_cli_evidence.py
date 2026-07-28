@@ -231,6 +231,46 @@ def _ready_final_evidence_manifest(
         __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
         encoding="utf-8",
     )
+    onboarding_check = {
+        "business_succeeded": False,
+        "command": "evidence.sandbox-onboarding-receipt-check",
+        "data": {
+            "onboarding": {
+                "blockers": [],
+                "ready": True,
+            },
+            "postgresql_write_performed": False,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "sandbox_write_preflight_receipt_acceptable": True,
+        },
+        "ok": True,
+    }
+    onboarding_check_path = tmp_path / "sandbox_onboarding_receipt_check.json"
+    onboarding_check_path.write_text(
+        __import__("json").dumps(onboarding_check, sort_keys=True),
+        encoding="utf-8",
+    )
+    artifacts["sandbox_onboarding_receipt_check"] = onboarding_check_path
+    authorization_check = {
+        "business_succeeded": False,
+        "command": "evidence.sandbox-provision-authorization-check",
+        "data": {
+            "authorization_record_ready": True,
+            "blockers": [],
+            "business_write_authorized": False,
+            "postgresql_write_performed": False,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+        },
+        "ok": True,
+    }
+    authorization_check_path = tmp_path / "sandbox_provision_authorization_check.json"
+    authorization_check_path.write_text(
+        __import__("json").dumps(authorization_check, sort_keys=True),
+        encoding="utf-8",
+    )
+    artifacts["sandbox_provision_authorization_check"] = authorization_check_path
     handoff = {
         "business_succeeded": False,
         "command": "evidence.sandbox-prerequisite-handoff",
@@ -4434,7 +4474,7 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     assert payload["business_succeeded"] is False
     data = payload["data"]
     assert data["final_evidence_manifest_ready"] is True
-    assert data["artifact_count"] == 10
+    assert data["artifact_count"] == 12
     assert data["blockers"] == []
     assert data["real_odoo_write_performed"] is False
 
@@ -4478,8 +4518,12 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
                 str(artifacts["pi_scenario_report_check"]),
                 "--sandbox-onboarding-receipt",
                 str(artifacts["sandbox_onboarding_receipt"]),
+                "--sandbox-onboarding-receipt-check",
+                str(artifacts["sandbox_onboarding_receipt_check"]),
                 "--sandbox-provision-authorization",
                 str(artifacts["sandbox_provision_authorization"]),
+                "--sandbox-provision-authorization-check",
+                str(artifacts["sandbox_provision_authorization_check"]),
                 "--sandbox-prerequisite-handoff",
                 str(artifacts["sandbox_prerequisite_handoff"]),
                 "--sandbox-prerequisite-handoff-check",
@@ -4541,8 +4585,12 @@ def test_evidence_final_evidence_manifest_assemble_rejects_duplicate_artifact(
             str(artifacts["pi_scenario_report_check"]),
             "--sandbox-onboarding-receipt",
             str(artifacts["sandbox_onboarding_receipt"]),
+            "--sandbox-onboarding-receipt-check",
+            str(artifacts["sandbox_onboarding_receipt_check"]),
             "--sandbox-provision-authorization",
             str(artifacts["sandbox_provision_authorization"]),
+            "--sandbox-provision-authorization-check",
+            str(artifacts["sandbox_provision_authorization_check"]),
             "--sandbox-prerequisite-handoff",
             str(artifacts["sandbox_prerequisite_handoff"]),
             "--sandbox-prerequisite-handoff-check",

@@ -197,7 +197,9 @@ same release identity and SHA-256 digests for these retained artifacts:
 - `pi_scenario_report`
 - `pi_scenario_report_check`
 - `sandbox_onboarding_receipt`
+- `sandbox_onboarding_receipt_check`
 - `sandbox_provision_authorization`
+- `sandbox_provision_authorization_check`
 - `sandbox_prerequisite_handoff`
 - `sandbox_prerequisite_handoff_check`
 - `write_pipeline_report`
@@ -216,7 +218,9 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --pi-scenario-report-check <PI_SCENARIO_REPORT_CHECK_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
+  --sandbox-onboarding-receipt-check <SANDBOX_ONBOARDING_RECEIPT_CHECK_JSON> \
   --sandbox-provision-authorization <SANDBOX_PROVISION_AUTHORIZATION_JSON> \
+  --sandbox-provision-authorization-check <SANDBOX_PROVISION_AUTHORIZATION_CHECK_JSON> \
   --sandbox-prerequisite-handoff <SANDBOX_PREREQUISITE_HANDOFF_JSON> \
   --sandbox-prerequisite-handoff-check <SANDBOX_PREREQUISITE_HANDOFF_CHECK_JSON> \
   --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
