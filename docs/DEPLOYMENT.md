@@ -52,16 +52,20 @@ Corpus tests alone do not prove Pi end-to-end success.
 
 ## Final goal-readiness aggregation
 
-After route, registry, Pi scenario, sandbox onboarding, and write-pipeline
-reports have each been retained, run the aggregate non-authorizing check:
+After route, registry, Pi scenario, sandbox onboarding, sandbox provision
+authorization, and write-pipeline reports have each been retained, run the
+aggregate non-authorizing check:
 
 ```bash
 cd /opt/odoo-accounting-cli-v3/current
 bin/odoo-accounting-cli-v3 evidence goal-readiness \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
+  --sandbox-provision-authorization-file <SANDBOX_PROVISION_AUTHORIZATION_JSON> \
   --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
   --expected-sandbox-database-name <SANDBOX_DATABASE_NAME> \
+  --expected-source-database-name <AUTHORIZED_SOURCE_DATABASE> \
+  --expected-company <AUTHORIZED_COMPANY> \
   --observed-database-name <OBSERVED_DATABASE> \
   --protected-database-name <PRODUCTION_DATABASE> \
   --capacity-path / \
@@ -77,10 +81,12 @@ This command performs no Odoo or PostgreSQL write. It aggregates blockers from
 the current-route gate, live filesystem capacity recheck, supplied PostgreSQL
 catalog observations for the expected sandbox database name, `registry audit`,
 static write readiness, the retained Pi scenario report, the retained sandbox
-onboarding receipt, and the retained write-pipeline readiness report. It reports
-`goal_readiness_ready:false` until all supplied evidence is present, bound to
-the exact release, and independently passing. A passing aggregate report is a
-final checklist input; it still does not itself authorize production writes.
+onboarding receipt, the retained sandbox provision authorization record, and the
+retained write-pipeline readiness report. It reports `goal_readiness_ready:false`
+until all supplied evidence is present, bound to the exact release and intended
+sandbox/source/company scope, and independently passing. A passing aggregate
+report is a final checklist input; it still does not itself authorize production
+writes.
 
 ## Fixed server layout
 

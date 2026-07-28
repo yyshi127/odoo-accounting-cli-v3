@@ -3147,6 +3147,7 @@ def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
     assert data["write_static_readiness"]["write_static_readiness_ready"] is True
     assert "Pi scenario acceptance report was not supplied" in data["blockers"]
     assert "sandbox onboarding readiness receipt was not supplied" in data["blockers"]
+    assert "sandbox provision authorization file was not supplied" in data["blockers"]
     assert "sandbox write pipeline readiness report was not supplied" in data["blockers"]
 
 
@@ -3165,6 +3166,11 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         tmp_path, release_identity=expected_identity
     )
     write_pipeline_report = _ready_write_pipeline_report(tmp_path, expected_identity)
+    authorization = tmp_path / "authorization.json"
+    authorization.write_text(
+        __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
+        encoding="utf-8",
+    )
 
     with patch(
         "odoo_accounting_cli_v3.cli._load_release_identity",
@@ -3187,10 +3193,18 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
                 str(onboarding_receipt),
                 "--write-pipeline-report",
                 str(write_pipeline_report),
+                "--sandbox-provision-authorization-file",
+                str(authorization),
                 "--expected-sandbox-database-name",
                 "odoo_v3_sandbox",
+                "--expected-source-database-name",
+                "odoo_sg",
+                "--expected-company",
+                "SG Company",
                 "--observed-database-name",
                 "odoo_v3_sandbox",
+                "--now",
+                "2026-07-27T12:30:00Z",
             ],
         )
 
@@ -3201,6 +3215,7 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     assert data["blockers"] == []
     assert data["pi_scenario"]["scenario_acceptance_ready"] is True
     assert data["sandbox_onboarding"]["ready"] is True
+    assert data["sandbox_provision_authorization"]["authorization_record_ready"] is True
     assert data["sandbox_database"]["sandbox_database_ready"] is True
     assert data["write_pipeline"]["write_pipeline_ready"] is True
     assert data["write_static_readiness"]["admissible_count"] == 14
@@ -3284,6 +3299,63 @@ def test_evidence_goal_readiness_reports_missing_sandbox_database_observation():
         "sandbox database was not observed in the PostgreSQL catalog"
         in data["blockers"]
     )
+
+
+def test_evidence_goal_readiness_reports_tampered_sandbox_authorization(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev224",
+    }
+    authorization = tmp_path / "authorization.json"
+    document = _sandbox_authorization_document()
+    document["immutable_summary"]["source_database_name"] = "odoo"
+    authorization.write_text(
+        __import__("json").dumps(document, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--sandbox-provision-authorization-file",
+                str(authorization),
+                "--expected-sandbox-database-name",
+                "odoo_v3_sandbox",
+                "--expected-source-database-name",
+                "odoo_sg",
+                "--expected-company",
+                "SG Company",
+                "--observed-database-name",
+                "odoo_v3_sandbox",
+                "--now",
+                "2026-07-28T12:30:00Z",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["sandbox_provision_authorization"]["authorization_record_ready"] is False
+    assert "immutable_summary_sha256 does not match immutable_summary" in data["blockers"]
+    assert "source database name is not bound to this authorization" in data["blockers"]
 
 
 def test_evidence_sandbox_write_preflight_rejects_demo_database_name(

@@ -2485,8 +2485,22 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
     help="Retained evidence.write-pipeline-readiness JSON report.",
 )
 @click.option(
+    "--sandbox-provision-authorization-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Retained sandbox provision authorization JSON to validate.",
+)
+@click.option(
     "--expected-sandbox-database-name",
     help="Sandbox database name the retained onboarding receipt must bind.",
+)
+@click.option(
+    "--expected-source-database-name",
+    help="Source database name the sandbox provision authorization must bind.",
+)
+@click.option(
+    "--expected-company",
+    multiple=True,
+    help="Company scope entry that the sandbox provision authorization must include.",
 )
 @click.option(
     "--observed-database-name",
@@ -2522,11 +2536,18 @@ def evidence_write_pipeline_readiness(evidence_root: Path) -> None:
 @click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
 @click.option("--expected-package-sha256", help="Expected package SHA-256.")
 @click.option("--expected-registry-digest", help="Expected capability registry digest.")
+@click.option(
+    "--now",
+    help="UTC timestamp used for deterministic sandbox authorization validation.",
+)
 def evidence_goal_readiness(
     pi_scenario_report: Path | None,
     sandbox_onboarding_receipt: Path | None,
     write_pipeline_report: Path | None,
+    sandbox_provision_authorization_file: Path | None,
     expected_sandbox_database_name: str | None,
+    expected_source_database_name: str | None,
+    expected_company: tuple[str, ...],
     observed_database_name: tuple[str, ...],
     protected_database_name: tuple[str, ...],
     current_path: Path,
@@ -2537,6 +2558,7 @@ def evidence_goal_readiness(
     expected_manifest_sha256: str | None,
     expected_package_sha256: str | None,
     expected_registry_digest: str | None,
+    now: str | None,
 ) -> None:
     """Aggregate final-goal evidence without executing Odoo or mutating state."""
 
@@ -2599,6 +2621,40 @@ def evidence_goal_readiness(
         expected_database_name=expected_sandbox_database_name,
         expected_release_identity=expected_release_identity,
     )
+    if sandbox_provision_authorization_file is None:
+        authorization_report = {
+            "authorization_file": None,
+            "authorization_record_ready": False,
+            "blockers": ["sandbox provision authorization file was not supplied"],
+        }
+    elif expected_sandbox_database_name is None or expected_source_database_name is None:
+        authorization_report = {
+            "authorization_file": str(sandbox_provision_authorization_file),
+            "authorization_record_ready": False,
+            "blockers": [
+                "expected sandbox and source database names are required to validate authorization"
+            ],
+        }
+    else:
+        try:
+            authorization_document = json.loads(
+                sandbox_provision_authorization_file.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CliFailure(
+                command=command,
+                code="sandbox_provision_authorization_rejected",
+                message="The sandbox provision authorization file is unavailable or invalid JSON.",
+                exit_code=5,
+            ) from exc
+        authorization_report = _sandbox_provision_authorization_report(
+            authorization_document,
+            authorization_file=sandbox_provision_authorization_file,
+            expected_sandbox_database_name=expected_sandbox_database_name,
+            expected_source_database_name=expected_source_database_name,
+            expected_company=expected_company,
+            now=now,
+        )
     pipeline_report = _write_pipeline_report_status(
         write_pipeline_report,
         command=command,
@@ -2647,6 +2703,8 @@ def evidence_goal_readiness(
         blockers.extend(pi_report["blockers"])
     if not onboarding_report["ready"]:
         blockers.extend(onboarding_report["blockers"])
+    if not authorization_report["authorization_record_ready"]:
+        blockers.extend(authorization_report["blockers"])
     if not pipeline_report["write_pipeline_ready"]:
         blockers.extend(pipeline_report["blockers"])
     if not sandbox_database_report["sandbox_database_ready"]:
@@ -2665,6 +2723,7 @@ def evidence_goal_readiness(
             "route": route_report,
             "sandbox_database": sandbox_database_report,
             "sandbox_onboarding": onboarding_report,
+            "sandbox_provision_authorization": authorization_report,
             "write_pipeline": pipeline_report,
             "write_static_readiness": {
                 "admissible_count": static_write_admissible_count,
