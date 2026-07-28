@@ -1288,18 +1288,45 @@ def evidence_group() -> None:
     type=click.IntRange(min=0),
     help="Limit the retained candidate list for bounded Pi/operator output.",
 )
+@click.option(
+    "--current-path",
+    type=click.Path(path_type=Path),
+    default=Path("/opt/odoo-accounting-cli-v3/current"),
+    show_default=True,
+    help="Current release symlink to verify before trusting the capacity plan.",
+)
+@click.option("--expected-release", help="Expected routed release name.")
+@click.option("--expected-commit", help="Expected full Git commit.")
+@click.option("--expected-manifest-sha256", help="Expected manifest SHA-256.")
+@click.option("--expected-package-sha256", help="Expected package SHA-256.")
+@click.option("--expected-registry-digest", help="Expected capability registry digest.")
 def evidence_target_capacity_plan(
     root: Path,
     required_free_bytes: int,
     keep_release: tuple[str, ...],
     summary_only: bool,
     max_candidates: int | None,
+    current_path: Path,
+    expected_release: str | None,
+    expected_commit: str | None,
+    expected_manifest_sha256: str | None,
+    expected_package_sha256: str | None,
+    expected_registry_digest: str | None,
 ) -> None:
     """Plan V3-owned capacity remediation without deleting or mutating files."""
 
     from tools import target_capacity_plan
 
     command = "evidence.target-capacity-plan"
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release,
+        expected_commit=expected_commit,
+        expected_manifest_sha256=expected_manifest_sha256,
+        expected_package_sha256=expected_package_sha256,
+        expected_registry_digest=expected_registry_digest,
+    )
     try:
         plan = target_capacity_plan.build_plan(
             root=root,
@@ -1324,6 +1351,8 @@ def evidence_target_capacity_plan(
     plan["candidates_truncated"] = retained_candidate_count < int(plan["candidate_count"])
     plan["retained_candidate_count"] = retained_candidate_count
     blockers: list[str] = []
+    if not route_report["current_route_ready"]:
+        blockers.append("current release route is not ready")
     if int(plan["shortfall_bytes"]) > 0:
         blockers.append("target filesystem free space is below the configured floor")
     if int(plan["shortfall_bytes"]) > int(plan["candidate_reclaimable_bytes"]):
@@ -1337,6 +1366,7 @@ def evidence_target_capacity_plan(
         "plan": plan,
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
+        "route": route_report,
         "sandbox_write_capacity_ready": not blockers,
     }
     _success(command, data, business_succeeded=False)

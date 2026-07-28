@@ -217,6 +217,13 @@ A valid but insufficient observation exits
 `1`; invalid or digest-mismatched evidence exits `2`. Even exit `0` must report
 all provisioning and accounting-write authorizations as false.
 
+`evidence target-capacity-plan` is a separate read-only operator aid for the
+same prerequisite. It may list reviewable V3-owned cleanup candidates, but it
+never deletes files, never authorizes cleanup, and never substitutes for E00a.
+The plan must bind the current release route, commit, package, manifest, and
+registry digest; a route mismatch fails the capacity-plan evidence even when
+filesystem free space is otherwise sufficient.
+
 The Ubuntu deployment-toolchain job must execute exactly 167 Dev18 capacity,
 resource, configuration/socket, and attested-runner tests with zero skips,
 failures, or errors. CI additionally executes thirteen PostgreSQL 16 integration

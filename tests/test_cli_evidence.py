@@ -2504,21 +2504,28 @@ def test_evidence_target_capacity_plan_reports_ready_v3_owned_candidates(tmp_pat
     candidate.parent.mkdir(parents=True, exist_ok=True)
     candidate.write_bytes(b"x" * 10)
 
-    result = CliRunner().invoke(
-        main,
-        [
-            "evidence",
-            "target-capacity-plan",
-            "--root",
-            str(tmp_path),
-            "--required-free-bytes",
-            "1",
-            "--keep-release",
-            "0.1.0.dev198-keep",
-        ],
-    )
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ) as route_report:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "target-capacity-plan",
+                "--root",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+                "--keep-release",
+                "0.1.0.dev198-keep",
+                "--expected-release",
+                READY_CURRENT_ROUTE["route_identity"]["release"],
+            ],
+        )
 
     assert result.exit_code == 0, result.output
+    route_report.assert_called_once()
     payload = __import__("json").loads(result.output)
     assert payload["command"] == "evidence.target-capacity-plan"
     assert payload["business_succeeded"] is False
@@ -2527,6 +2534,7 @@ def test_evidence_target_capacity_plan_reports_ready_v3_owned_candidates(tmp_pat
     assert payload["data"]["authorization_required_before_cleanup"] is True
     assert payload["data"]["sandbox_write_capacity_ready"] is True
     assert payload["data"]["blockers"] == []
+    assert payload["data"]["route"]["current_route_ready"] is True
     assert payload["data"]["plan"]["cleanup_executed"] is False
     assert payload["data"]["plan"]["keep_releases"] == ["0.1.0.dev198-keep"]
     assert (
@@ -2536,17 +2544,21 @@ def test_evidence_target_capacity_plan_reports_ready_v3_owned_candidates(tmp_pat
 
 
 def test_evidence_target_capacity_plan_reports_shortfall_without_cleanup(tmp_path):
-    result = CliRunner().invoke(
-        main,
-        [
-            "evidence",
-            "target-capacity-plan",
-            "--root",
-            str(tmp_path),
-            "--required-free-bytes",
-            str(1024**5),
-        ],
-    )
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "target-capacity-plan",
+                "--root",
+                str(tmp_path),
+                "--required-free-bytes",
+                str(1024**5),
+            ],
+        )
 
     assert result.exit_code == 0, result.output
     payload = __import__("json").loads(result.output)
@@ -2564,18 +2576,22 @@ def test_evidence_target_capacity_plan_summary_omits_candidates(tmp_path):
     candidate.parent.mkdir(parents=True, exist_ok=True)
     candidate.write_bytes(b"x" * 10)
 
-    result = CliRunner().invoke(
-        main,
-        [
-            "evidence",
-            "target-capacity-plan",
-            "--root",
-            str(tmp_path),
-            "--required-free-bytes",
-            "1",
-            "--summary-only",
-        ],
-    )
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "target-capacity-plan",
+                "--root",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+                "--summary-only",
+            ],
+        )
 
     assert result.exit_code == 0, result.output
     payload = __import__("json").loads(result.output)
@@ -2594,19 +2610,23 @@ def test_evidence_target_capacity_plan_limits_candidates(tmp_path):
         candidate.parent.mkdir(parents=True, exist_ok=True)
         candidate.write_bytes(b"x" * (10 + index))
 
-    result = CliRunner().invoke(
-        main,
-        [
-            "evidence",
-            "target-capacity-plan",
-            "--root",
-            str(tmp_path),
-            "--required-free-bytes",
-            "1",
-            "--max-candidates",
-            "2",
-        ],
-    )
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=READY_CURRENT_ROUTE,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "target-capacity-plan",
+                "--root",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+                "--max-candidates",
+                "2",
+            ],
+        )
 
     assert result.exit_code == 0, result.output
     payload = __import__("json").loads(result.output)
@@ -2614,6 +2634,38 @@ def test_evidence_target_capacity_plan_limits_candidates(tmp_path):
     assert payload["data"]["plan"]["candidate_count"] == 3
     assert payload["data"]["plan"]["retained_candidate_count"] == 2
     assert payload["data"]["plan"]["candidates_truncated"] is True
+
+
+def test_evidence_target_capacity_plan_fails_closed_on_bad_current_route(tmp_path):
+    bad_route = {
+        **READY_CURRENT_ROUTE,
+        "blockers": ["current route package_sha256 does not match expected value"],
+        "current_route_ready": False,
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=bad_route,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "target-capacity-plan",
+                "--root",
+                str(tmp_path),
+                "--required-free-bytes",
+                "1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["sandbox_write_capacity_ready"] is False
+    assert payload["data"]["blockers"] == ["current release route is not ready"]
+    assert payload["data"]["route"]["current_route_ready"] is False
+    assert payload["data"]["cleanup_executed"] is False
+    assert payload["data"]["real_odoo_write_performed"] is False
 
 
 def test_evidence_target_capacity_recheck_reports_ready(tmp_path):
