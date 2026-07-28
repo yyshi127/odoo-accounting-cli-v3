@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from tools import target_capacity_plan
+from odoo_accounting_cli_v3 import capacity_plan as target_capacity_plan
+from tools import target_capacity_plan as target_capacity_plan_script
 
 
 def _write(path: Path, size: int) -> None:
@@ -85,7 +86,7 @@ def test_cli_outputs_canonical_read_only_json(tmp_path, capsys):
         10,
     )
 
-    code = target_capacity_plan.main(
+    code = target_capacity_plan_script.main(
         ["--root", str(tmp_path), "--required-free-bytes", "1"]
     )
 
@@ -94,3 +95,20 @@ def test_cli_outputs_canonical_read_only_json(tmp_path, capsys):
     assert payload["kind"] == target_capacity_plan.PLAN_KIND
     assert payload["cleanup_executed"] is False
     assert payload["candidates"][0]["category"] == "stale_dependency_build_stage"
+
+
+def test_legacy_script_uses_packaged_capacity_plan(tmp_path, capsys):
+    _write(
+        tmp_path / "opt/odoo-accounting-cli-v3/upload-sources/source.tar.gz",
+        10,
+    )
+
+    code = target_capacity_plan_script.main(
+        ["--root", str(tmp_path), "--required-free-bytes", "1"]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == target_capacity_plan.PLAN_KIND
+    assert payload["cleanup_executed"] is False
+    assert payload["candidates"][0]["category"] == "uploaded_release_source"

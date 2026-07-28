@@ -114,6 +114,7 @@ DEV9_SECURITY_RELEASE_MEMBERS = frozenset(
         "pi_bridge/tests/tool-policy.test.mjs",
         "pi_bridge/tool-policy.mjs",
         "src/odoo_accounting_cli_v3/broker_audit.py",
+        "src/odoo_accounting_cli_v3/capacity_plan.py",
         "src/odoo_accounting_cli_v3/historical_router.py",
         "src/odoo_accounting_cli_v3/monotonic_deadline.py",
         "src/odoo_accounting_cli_v3/odoo_approver_authorizer.py",

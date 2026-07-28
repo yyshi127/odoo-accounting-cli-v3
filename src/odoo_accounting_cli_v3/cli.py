@@ -1315,7 +1315,7 @@ def evidence_target_capacity_plan(
 ) -> None:
     """Plan V3-owned capacity remediation without deleting or mutating files."""
 
-    from tools import target_capacity_plan
+    from . import capacity_plan as target_capacity_plan
 
     command = "evidence.target-capacity-plan"
     route_report = _current_route_report(
@@ -1331,7 +1331,7 @@ def evidence_target_capacity_plan(
         plan = target_capacity_plan.build_plan(
             root=root,
             required_free_bytes=required_free_bytes,
-            keep_releases=target_capacity_plan._validate_keep_releases(keep_release),
+            keep_releases=target_capacity_plan.validate_keep_releases(keep_release),
         )
     except target_capacity_plan.CapacityPlanError as exc:
         raise CliFailure(
