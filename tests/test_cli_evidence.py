@@ -3375,6 +3375,48 @@ def test_evidence_write_pipeline_readiness_reports_verified_and_missing(
     assert invoice["status"] == "verified"
     assert invoice["pipeline_ready"] is True
     assert invoice["pipeline"]["scope"] == "odoo-accounting-cli-v3.sandbox-write-evidence-pipeline.v1"
+    required = invoice["required_evidence"]
+    assert required["environment"] == "sandbox"
+    assert required["production_promotion_allowed"] is False
+    metadata_json = required["metadata_json"].replace("\\", "/")
+    preflight_manifest = required["preflight_manifest"].replace("\\", "/")
+    assert metadata_json.endswith(
+        "acct.invoice.customer_create.v1/metadata.json"
+    )
+    assert preflight_manifest.endswith(
+        "acct.invoice.customer_create.v1/preflight_manifest.json"
+    )
+    assert sorted(required["lifecycle_receipt_id_fields"]) == [
+        "execution_receipt_id",
+        "final_audit_receipt_id",
+        "odoo_record_receipt_id",
+        "prepare_receipt_id",
+        "verification_receipt_id",
+    ]
+    assert set(required["lifecycle_artifact_files"]) == {
+        "approval_digest",
+        "failure_case_digest",
+        "idempotency_replay_digest",
+        "parameter_roundtrip_sha256",
+        "pi_e2e_digest",
+        "preview_digest",
+        "recovery_case_digest",
+        "security_negative_digest",
+    }
+    assert "live_odoo" in required["required_real_odoo_receipt_kinds"]
+    missing = next(
+        item
+        for item in data["capabilities"]
+        if item["capability_id"] == "acct.payment.register.v1"
+    )
+    assert missing["status"] == "missing"
+    missing_metadata_json = missing["required_evidence"]["metadata_json"].replace(
+        "\\",
+        "/",
+    )
+    assert missing_metadata_json.endswith(
+        "acct.payment.register.v1/metadata.json"
+    )
 
 
 def test_evidence_write_pipeline_readiness_reports_rejected_release_mismatch(
@@ -3474,6 +3516,8 @@ def test_evidence_write_evidence_index_reports_compact_handoff(tmp_path: Path):
     assert invoice["status"] == "verified"
     assert invoice["pipeline_ready"] is True
     assert len(invoice["pipeline_sha256"]) == 64
+    assert invoice["required_evidence"]["environment"] == "sandbox"
+    assert "registry_receipts" in invoice["required_evidence"]["metadata_required_fields"]
     assert invoice["rejection"] is None
 
 

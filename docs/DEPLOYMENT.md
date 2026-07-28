@@ -1189,11 +1189,17 @@ The command validates each capability's pipeline against the current release
 and reports `verified`, `missing`, or `rejected` per capability. It is
 non-authorizing, reports `business_succeeded:false`, and must show every write
 capability as `verified` before a registry-wide sandbox-staging review.
+Each capability row also includes `required_evidence`: the expected
+`metadata.json`, `preflight_manifest.json`, digest lifecycle artifact files,
+lifecycle receipt ID fields, metadata fields, required real-Odoo receipt kinds,
+and sandbox-only promotion flags. Use that field as the per-capability
+collection checklist before claiming a missing or rejected write-pipeline item
+has been remediated.
 For a compact operator handoff index over the same retained root, run
 `"$V3_CLI" evidence write-evidence-index --evidence-root ...`.
 The index contains one row per registered write capability with status,
-metadata path, rejection reason, and the SHA-256 of the exact verified pipeline
-summary. It is useful for issue trackers, release packets, and Pi operator
+metadata path, required evidence checklist, rejection reason, and the SHA-256
+of the exact verified pipeline summary. It is useful for issue trackers, release packets, and Pi operator
 dashboards that need to prove which capability evidence is missing without
 copying the full retained pipeline details into every checklist. When supplied
 to `goal-readiness`, the index is treated as an additional consistency check

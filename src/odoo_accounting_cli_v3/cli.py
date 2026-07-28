@@ -1392,6 +1392,51 @@ def _load_sandbox_write_evidence_verifier() -> Any:
     return module
 
 
+def _sandbox_write_required_evidence(
+    verifier: Any,
+    *,
+    capability_root: Path,
+    metadata_path: Path,
+) -> dict[str, Any]:
+    lifecycle_artifacts = getattr(verifier, "DEFAULT_LIFECYCLE_ARTIFACTS", {})
+    lifecycle_receipt_id_fields = sorted(
+        getattr(verifier, "ID_LIFECYCLE_FIELDS", ())
+    )
+    return {
+        "environment": "sandbox",
+        "lifecycle_artifact_files": {
+            field: str(capability_root / filename)
+            for field, filename in sorted(lifecycle_artifacts.items())
+        },
+        "lifecycle_receipt_id_fields": lifecycle_receipt_id_fields,
+        "metadata_json": str(metadata_path),
+        "metadata_required_fields": [
+            "capability_id",
+            "company_id",
+            "database_uuid",
+            "environment",
+            "lifecycle_receipt_ids",
+            "production_promotion_allowed",
+            "registry_receipts",
+            "release_identity",
+            "schema_version",
+            "scope",
+        ],
+        "preflight_manifest": str(
+            capability_root
+            / getattr(
+                verifier,
+                "DEFAULT_PREFLIGHT_MANIFEST",
+                "preflight_manifest.json",
+            )
+        ),
+        "production_promotion_allowed": False,
+        "required_real_odoo_receipt_kinds": sorted(
+            getattr(verifier, "REQUIRED_KINDS", ())
+        ),
+    }
+
+
 def _load_pi_scenario_gate() -> Any:
     path = Path(__file__).resolve().parents[2] / "tools" / "pi_scenario_gate.py"
     spec = util.spec_from_file_location(
@@ -3283,7 +3328,13 @@ def _write_pipeline_readiness_data(evidence_root: Path, *, command: str) -> dict
             allowed_models_by_capability=allowed_models_by_capability,
             odoo_write_capabilities=odoo_write_capabilities,
         )
-        metadata_path = evidence_root / capability.id / "metadata.json"
+        capability_root = evidence_root / capability.id
+        metadata_path = capability_root / "metadata.json"
+        required_evidence = _sandbox_write_required_evidence(
+            verifier,
+            capability_root=capability_root,
+            metadata_path=metadata_path,
+        )
         pipeline: dict[str, Any] | None = None
         rejection: str | None = None
         status = "missing"
@@ -3312,6 +3363,7 @@ def _write_pipeline_readiness_data(evidence_root: Path, *, command: str) -> dict
                 "metadata_path": str(metadata_path),
                 "pipeline": pipeline,
                 "pipeline_ready": status == "verified",
+                "required_evidence": required_evidence,
                 "rejection": rejection,
                 "static_readiness": static_report,
                 "status": status,
@@ -3373,6 +3425,7 @@ def evidence_write_evidence_index(evidence_root: Path) -> None:
                 "metadata_path": report["metadata_path"],
                 "pipeline_ready": report["pipeline_ready"],
                 "pipeline_sha256": _sha256_json(pipeline) if pipeline else None,
+                "required_evidence": report["required_evidence"],
                 "rejection": report["rejection"],
                 "status": report["status"],
             }
