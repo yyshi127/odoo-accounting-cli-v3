@@ -174,6 +174,36 @@ def _ready_write_pipeline_report(tmp_path: Path, release_identity: dict) -> Path
     return path
 
 
+def _ready_write_evidence_index(
+    tmp_path: Path,
+    release_identity: dict,
+    *,
+    evidence_root: str | None = None,
+    verified_count: int = 14,
+) -> Path:
+    index = {
+        "business_succeeded": False,
+        "command": "evidence.write-evidence-index",
+        "data": {
+            "capabilities": [],
+            "evidence_root": evidence_root or str(tmp_path / "pipelines"),
+            "index_kind": "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1",
+            "missing_count": 0,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "rejected_count": 0,
+            "release_identity": release_identity,
+            "sandbox_pipeline_ready": True,
+            "total_write_capabilities": 14,
+            "verified_count": verified_count,
+        },
+        "ok": True,
+    }
+    path = tmp_path / "write-evidence-index.json"
+    path.write_text(__import__("json").dumps(index, sort_keys=True), encoding="utf-8")
+    return path
+
+
 def _ready_pi_trace_capture(tmp_path: Path) -> tuple[Path, Path]:
     helper = PiScenarioGateTest()
     helper.setUp()
@@ -3430,6 +3460,7 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         tmp_path, release_identity=expected_identity
     )
     write_pipeline_report = _ready_write_pipeline_report(tmp_path, expected_identity)
+    write_evidence_index = _ready_write_evidence_index(tmp_path, expected_identity)
     authorization = tmp_path / "authorization.json"
     authorization.write_text(
         __import__("json").dumps(_sandbox_authorization_document(), sort_keys=True),
@@ -3457,6 +3488,8 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
                 str(onboarding_receipt),
                 "--write-pipeline-report",
                 str(write_pipeline_report),
+                "--write-evidence-index",
+                str(write_evidence_index),
                 "--sandbox-provision-authorization-file",
                 str(authorization),
                 "--expected-sandbox-database-name",
@@ -3482,7 +3515,60 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     assert data["sandbox_provision_authorization"]["authorization_record_ready"] is True
     assert data["sandbox_database"]["sandbox_database_ready"] is True
     assert data["write_pipeline"]["write_pipeline_ready"] is True
+    assert data["write_evidence_index"]["index_ready"] is True
     assert data["write_static_readiness"]["admissible_count"] == 14
+
+
+def test_evidence_goal_readiness_rejects_mismatched_write_evidence_index(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev231",
+    }
+    pipeline_report = _ready_write_pipeline_report(tmp_path, expected_identity)
+    write_evidence_index = _ready_write_evidence_index(
+        tmp_path, expected_identity, verified_count=13
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--write-pipeline-report",
+                str(pipeline_report),
+                "--write-evidence-index",
+                str(write_evidence_index),
+                "--observed-database-name",
+                "odoo_v3_sandbox",
+                "--expected-sandbox-database-name",
+                "odoo_v3_sandbox",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["write_evidence_index"]["index_ready"] is False
+    assert (
+        "sandbox write evidence index verified_count does not match pipeline report"
+        in data["blockers"]
+    )
 
 
 def test_evidence_goal_readiness_rejects_pi_report_from_other_release(

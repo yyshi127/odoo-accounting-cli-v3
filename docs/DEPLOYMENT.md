@@ -72,6 +72,7 @@ bin/odoo-accounting-cli-v3 evidence goal-readiness \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
   --sandbox-provision-authorization-file <SANDBOX_PROVISION_AUTHORIZATION_JSON> \
   --write-pipeline-report <WRITE_PIPELINE_READINESS_JSON> \
+  --write-evidence-index <WRITE_EVIDENCE_INDEX_JSON> \
   --expected-sandbox-database-name <SANDBOX_DATABASE_NAME> \
   --expected-source-database-name <AUTHORIZED_SOURCE_DATABASE> \
   --expected-company <AUTHORIZED_COMPANY> \
@@ -91,8 +92,11 @@ the current-route gate, live filesystem capacity recheck, supplied PostgreSQL
 catalog observations for the expected sandbox database name, `registry audit`,
 static write readiness, the retained Pi scenario report, the retained sandbox
 onboarding receipt, the retained sandbox provision authorization record, and the
-retained write-pipeline readiness report. It reports `goal_readiness_ready:false`
-until all supplied evidence is present, bound to the exact release and intended
+retained write-pipeline readiness report. If a write evidence index is supplied,
+the aggregate also cross-checks it against the retained write-pipeline report for
+matching evidence root, release identity, readiness flag, and verified/missing/
+rejected write-capability counts. It reports `goal_readiness_ready:false` until
+all supplied evidence is present, bound to the exact release and intended
 sandbox/source/company scope, and independently passing. A passing aggregate
 report is a final checklist input; it still does not itself authorize production
 writes.
@@ -1056,7 +1060,9 @@ The index contains one row per registered write capability with status,
 metadata path, rejection reason, and the SHA-256 of the exact verified pipeline
 summary. It is useful for issue trackers, release packets, and Pi operator
 dashboards that need to prove which capability evidence is missing without
-copying the full retained pipeline details into every checklist.
+copying the full retained pipeline details into every checklist. When supplied
+to `goal-readiness`, the index is treated as an additional consistency check
+against the full write-pipeline readiness report.
 
 The `--assemble-from` input manifest references the retained
 `preflight_manifest` file; the exact release computes

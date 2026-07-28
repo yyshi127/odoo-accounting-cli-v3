@@ -614,6 +614,87 @@ def _write_pipeline_report_status(
     }
 
 
+def _write_evidence_index_status(
+    write_evidence_index: Path | None,
+    *,
+    command: str,
+    expected_release_identity: dict[str, Any],
+    pipeline_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if write_evidence_index is None:
+        return {
+            "blockers": [],
+            "index_path": None,
+            "index_ready": None,
+            "index_sha256": None,
+            "supplied": False,
+            "summary": None,
+        }
+    try:
+        raw = write_evidence_index.read_bytes()
+    except OSError as exc:
+        raise CliFailure(
+            command=command,
+            code="retained_report_rejected",
+            message="The retained sandbox write evidence index is unavailable.",
+            exit_code=5,
+        ) from exc
+    report = _load_retained_json_report(
+        write_evidence_index, command=command, label="sandbox write evidence index"
+    )
+    data = report.get("data")
+    if report.get("ok") is not True:
+        blockers.append("sandbox write evidence index is not successful")
+    if report.get("command") != "evidence.write-evidence-index":
+        blockers.append("sandbox write evidence index has the wrong command")
+    if not isinstance(data, dict):
+        blockers.append("sandbox write evidence index data is invalid")
+        summary = None
+    else:
+        release = data.get("release_identity")
+        if data.get("index_kind") != "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1":
+            blockers.append("sandbox write evidence index has the wrong kind")
+        if data.get("sandbox_pipeline_ready") is not True:
+            blockers.append("sandbox write evidence index is not ready")
+        for field, expected in expected_release_identity.items():
+            if (
+                expected is not None
+                and isinstance(release, dict)
+                and release.get(field) != expected
+            ):
+                blockers.append(f"sandbox write evidence index release {field} mismatch")
+        summary = {
+            "evidence_root": data.get("evidence_root"),
+            "missing_count": data.get("missing_count"),
+            "rejected_count": data.get("rejected_count"),
+            "sandbox_pipeline_ready": data.get("sandbox_pipeline_ready"),
+            "total_write_capabilities": data.get("total_write_capabilities"),
+            "verified_count": data.get("verified_count"),
+        }
+        if pipeline_summary is not None:
+            for field in (
+                "evidence_root",
+                "missing_count",
+                "rejected_count",
+                "sandbox_pipeline_ready",
+                "total_write_capabilities",
+                "verified_count",
+            ):
+                if summary.get(field) != pipeline_summary.get(field):
+                    blockers.append(
+                        f"sandbox write evidence index {field} does not match pipeline report"
+                    )
+    return {
+        "blockers": sorted(set(blockers)),
+        "index_path": str(write_evidence_index),
+        "index_ready": not blockers,
+        "index_sha256": _sha256_bytes(raw),
+        "supplied": True,
+        "summary": summary,
+    }
+
+
 def _load_release_identity(
     root: Path | None = None, *, command: str = "release.identity"
 ) -> dict[str, Any]:
@@ -3045,6 +3126,11 @@ def evidence_pi_trace_capture_check(
     help="Retained evidence.write-pipeline-readiness JSON report.",
 )
 @click.option(
+    "--write-evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Optional retained evidence.write-evidence-index JSON handoff index.",
+)
+@click.option(
     "--sandbox-provision-authorization-file",
     type=click.Path(path_type=Path, dir_okay=False),
     help="Retained sandbox provision authorization JSON to validate.",
@@ -3104,6 +3190,7 @@ def evidence_goal_readiness(
     pi_scenario_report: Path | None,
     sandbox_onboarding_receipt: Path | None,
     write_pipeline_report: Path | None,
+    write_evidence_index: Path | None,
     sandbox_provision_authorization_file: Path | None,
     expected_sandbox_database_name: str | None,
     expected_source_database_name: str | None,
@@ -3222,6 +3309,12 @@ def evidence_goal_readiness(
         command=command,
         expected_release_identity=expected_release_identity,
     )
+    write_index_report = _write_evidence_index_status(
+        write_evidence_index,
+        command=command,
+        expected_release_identity=expected_release_identity,
+        pipeline_summary=pipeline_report["summary"],
+    )
     observed_names = sorted(set(observed_database_name))
     if expected_sandbox_database_name is None:
         sandbox_database_report = {
@@ -3269,6 +3362,8 @@ def evidence_goal_readiness(
         blockers.extend(authorization_report["blockers"])
     if not pipeline_report["write_pipeline_ready"]:
         blockers.extend(pipeline_report["blockers"])
+    if write_index_report["index_ready"] is False:
+        blockers.extend(write_index_report["blockers"])
     if not sandbox_database_report["sandbox_database_ready"]:
         blockers.extend(sandbox_database_report["blockers"])
     _success(
@@ -3287,6 +3382,7 @@ def evidence_goal_readiness(
             "sandbox_onboarding": onboarding_report,
             "sandbox_provision_authorization": authorization_report,
             "write_pipeline": pipeline_report,
+            "write_evidence_index": write_index_report,
             "write_static_readiness": {
                 "admissible_count": static_write_admissible_count,
                 "total_write_capabilities": len(static_write_reports),
