@@ -77,6 +77,8 @@ class Record:
         self.writes = []
         self.contexts = []
         self.action_post_calls = 0
+        self.lock_date_checks = []
+        self.tax_effect_checks = 0
         for key, value in values.items():
             setattr(self, key, value)
 
@@ -112,6 +114,14 @@ class Record:
         self.action_post_calls += 1
         self.state = "posted"
         return False
+
+    def _get_violated_lock_dates(self, accounting_date, *args):
+        self.lock_date_checks.append((accounting_date, *args))
+        return list(getattr(self, "violated_lock_dates", []))
+
+    def _affect_tax_report(self):
+        self.tax_effect_checks += 1
+        return getattr(self, "affects_tax_report", False)
 
 
 class Model:
@@ -193,6 +203,7 @@ def company(**values):
         "tax_lock_date": None,
         "sale_lock_date": None,
         "purchase_lock_date": None,
+        "violated_lock_dates": [],
     }
     defaults.update(values)
     return Record(7, **defaults)
@@ -561,14 +572,36 @@ def test_source_has_no_privilege_or_transaction_escape_and_no_private_orm_calls(
     assert "._post(" not in source
 
 
-def test_all_fourteen_registered_write_capabilities_have_three_real_dispatch_phases():
+def test_all_seventeen_registered_write_capabilities_have_three_real_dispatch_phases():
+    baseline_identifiers = {
+        "acct.invoice.customer_create.v1",
+        "acct.bill.vendor_create.v1",
+        "acct.refund.create.v1",
+        "acct.payment.register.v1",
+        "acct.bank.statement_import.v1",
+        "acct.reconciliation.apply.v1",
+        "acct.asset.create.v1",
+        "acct.depreciation.post.v1",
+        "acct.accrual.create.v1",
+        "acct.deferred.create.v1",
+        "acct.period.adjustment_create.v1",
+        "acct.move.reverse.v1",
+        "acct.move.draft_cancel.v1",
+        "acct.recovery.execute.v1",
+    }
+    phase_b_identifiers = {
+        "acct.journal.entry_create.v1",
+        "acct.move.post.v1",
+        "acct.move.draft_cancel.v2",
+    }
     identifiers = {
         capability.id
         for capability in load_registry(ROOT / "registry" / "capabilities.json")
         if capability.data["access"] == "write"
     }
-    assert len(identifiers) == 14
-    assert "acct.move.draft_cancel.v1" in identifiers
+    assert len(baseline_identifiers) == 14
+    assert len(phase_b_identifiers) == 3
+    assert identifiers == baseline_identifiers | phase_b_identifiers
     for identifier in sorted(identifiers):
         for phase in ("precheck", "execute", "verify"):
             assert callable(getattr(OdooWriteHandlers, OdooWriteHandlers.dispatch_name(identifier, phase)))
@@ -5796,6 +5829,735 @@ def draft_cancel_parameters(*, vendor=False):
     }
 
 
+def journal_entry_create_parameters():
+    return {
+        "company_id": 7,
+        "journal_id": 2,
+        "posting_date": "2026-07-10",
+        "currency_id": 1,
+        "reference": "MANUAL-ENTRY-1",
+        "reason": "Approved reclassification",
+        "posting_mode": "draft",
+        "lines": [
+            {
+                "line_reference": "manual-debit",
+                "account_id": 10,
+                "partner_id": None,
+                "currency_id": 1,
+                "name": "Manual debit",
+                "side": "debit",
+                "amount": "100",
+                "amount_currency": "100",
+                "tax_ids": [],
+            },
+            {
+                "line_reference": "manual-credit",
+                "account_id": 11,
+                "partner_id": None,
+                "currency_id": 1,
+                "name": "Manual credit",
+                "side": "credit",
+                "amount": "100",
+                "amount_currency": "-100",
+                "tax_ids": [],
+            },
+        ],
+        "idempotency_key": "manual-entry-1",
+    }
+
+
+def move_post_parameters():
+    source = journal_entry_create_parameters()
+    return {
+        "company_id": 7,
+        "move_id": 1201,
+        "expected_move_type": "entry",
+        "expected_document_binding": OdooWriteHandlers.document_binding(
+            "journal_entry", source
+        ),
+        "expected_business_binding": OdooWriteHandlers.business_binding(
+            "journal_entry", source
+        ),
+        "expected_journal_id": 2,
+        "expected_currency_id": 1,
+        "expected_posting_date": "2026-07-10",
+        "expected_reference": "MANUAL-ENTRY-1",
+        "expected_total_debit": "100",
+        "expected_total_credit": "100",
+        "expected_line_count": 2,
+        "reason": "Approved posting",
+        "idempotency_key": "post-manual-entry-1201",
+    }
+
+
+def draft_cancel_v2_entry_parameters():
+    source = journal_entry_create_parameters()
+    return {
+        "company_id": 7,
+        "move_id": 1201,
+        "expected_move_type": "entry",
+        "expected_document_binding": OdooWriteHandlers.document_binding(
+            "journal_entry", source
+        ),
+        "expected_business_binding": OdooWriteHandlers.business_binding(
+            "journal_entry", source
+        ),
+        "expected_line_ids": [1202, 1203],
+        "reason": "Cancel duplicate pristine manual entry",
+        "idempotency_key": "cancel-manual-entry-1201",
+    }
+
+
+def pristine_manual_entry_fixture(
+    *,
+    document_binding=None,
+    business_binding=None,
+    reason="Approved reclassification",
+):
+    source = journal_entry_create_parameters()
+    document_binding = document_binding or OdooWriteHandlers.document_binding(
+        "journal_entry", source
+    )
+    business_binding = business_binding or OdooWriteHandlers.business_binding(
+        "journal_entry", source
+    )
+    currency = Record(1, active=True, rounding=0.01)
+    comp = company(currency_id=currency)
+    journal = Record(
+        2,
+        company_id=comp,
+        type="general",
+        active=True,
+        currency_id=currency,
+    )
+    debit_account = Record(
+        10,
+        company_id=comp,
+        company_ids=[comp],
+        deprecated=False,
+        account_type="expense",
+    )
+    credit_account = Record(
+        11,
+        company_id=comp,
+        company_ids=[comp],
+        deprecated=False,
+        account_type="income",
+    )
+    move = Record(
+        1201,
+        state="draft",
+        name="/",
+        move_type="entry",
+        company_id=comp,
+        journal_id=journal,
+        currency_id=currency,
+        date="2026-07-10",
+        ref="MANUAL-ENTRY-1",
+        line_ids=[],
+        auto_post="no",
+        auto_post_until=None,
+        posted_before=False,
+        sequence_prefix=None,
+        sequence_number=0,
+        secure_sequence_number=0,
+        made_sequence_gap=False,
+        checked=False,
+        inalterable_hash=False,
+        need_cancel_request=False,
+        is_manually_modified=False,
+        odoo_cli_v3_reason=reason,
+        odoo_cli_v3_document_binding=document_binding,
+        odoo_cli_v3_business_binding=business_binding,
+        create_uid=Record(42),
+        create_date="2026-07-10 09:00:00",
+        write_uid=Record(42),
+        write_date="2026-07-10 09:00:00",
+        narration=False,
+        message_ids=[],
+    )
+    debit = Record(
+        1202,
+        state="unknown",
+        parent_state="draft",
+        move_id=move,
+        company_id=comp,
+        account_id=debit_account,
+        partner_id=None,
+        currency_id=currency,
+        name="Manual debit",
+        odoo_cli_v3_line_reference="manual-debit",
+        debit=100,
+        credit=0,
+        balance=100,
+        amount_currency=100,
+        reconciled=False,
+        full_reconcile_id=None,
+        matched_debit_ids=[],
+        matched_credit_ids=[],
+        tax_ids=[],
+        tax_line_id=None,
+        tax_tag_ids=[],
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        display_type="product",
+        create_uid=Record(42),
+        create_date="2026-07-10 09:00:00",
+        write_uid=Record(42),
+        write_date="2026-07-10 09:00:00",
+    )
+    credit = Record(
+        1203,
+        state="unknown",
+        parent_state="draft",
+        move_id=move,
+        company_id=comp,
+        account_id=credit_account,
+        partner_id=None,
+        currency_id=currency,
+        name="Manual credit",
+        odoo_cli_v3_line_reference="manual-credit",
+        debit=0,
+        credit=100,
+        balance=-100,
+        amount_currency=-100,
+        reconciled=False,
+        full_reconcile_id=None,
+        matched_debit_ids=[],
+        matched_credit_ids=[],
+        tax_ids=[],
+        tax_line_id=None,
+        tax_tag_ids=[],
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        display_type="product",
+        create_uid=Record(42),
+        create_date="2026-07-10 09:00:00",
+        write_uid=Record(42),
+        write_date="2026-07-10 09:00:00",
+    )
+    move.line_ids = [debit, credit]
+    move.snapshot_values = {
+        "state": "draft",
+        "name": "/",
+        "move_type": "entry",
+        "company_id": 7,
+        "journal_id": 2,
+        "currency_id": 1,
+        "date": "2026-07-10",
+        "ref": "MANUAL-ENTRY-1",
+        "line_ids": [1202, 1203],
+        "auto_post": "no",
+        "posted_before": False,
+        "sequence_prefix": False,
+        "sequence_number": 0,
+        "secure_sequence_number": 0,
+        "inalterable_hash": False,
+        "checked": False,
+        "odoo_cli_v3_reason": reason,
+        "odoo_cli_v3_document_binding": document_binding,
+        "odoo_cli_v3_business_binding": business_binding,
+        "narration": False,
+        "message_ids": [],
+        "create_uid": [42, "V3 Executor"],
+        "create_date": "2026-07-10 09:00:00",
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-10 09:00:00",
+    }
+    for line in (debit, credit):
+        line.snapshot_values = {
+            "move_id": [1201, "Draft Entry MANUAL-ENTRY-1"],
+            "parent_state": "draft",
+            "company_id": 7,
+            "account_id": line.account_id.id,
+            "currency_id": 1,
+            "name": line.name,
+            "debit": str(line.debit),
+            "credit": str(line.credit),
+            "balance": str(line.balance),
+            "amount_currency": str(line.amount_currency),
+            "tax_ids": [],
+            "tax_line_id": False,
+            "tax_tag_ids": [],
+            "analytic_distribution": False,
+            "analytic_line_ids": [],
+            "odoo_cli_v3_line_reference": line.odoo_cli_v3_line_reference,
+            "create_uid": [42, "V3 Executor"],
+            "create_date": "2026-07-10 09:00:00",
+            "write_uid": [42, "V3 Executor"],
+            "write_date": "2026-07-10 09:00:00",
+        }
+    records = {
+        ("res.currency", 1): currency,
+        ("account.journal", 2): journal,
+        ("account.account", 10): debit_account,
+        ("account.account", 11): credit_account,
+        ("account.move", 1201): move,
+        ("account.move.line", 1202): debit,
+        ("account.move.line", 1203): credit,
+    }
+    return comp, move, debit, credit, records
+
+
+def install_exact_manual_entry_post(
+    move,
+    lines,
+    *,
+    material_drift=False,
+    date_drift=False,
+    chatter_drift=False,
+):
+    def action_post():
+        move.action_post_calls += 1
+        move.state = "posted"
+        move.name = "MISC/2026/0001"
+        move.posted_before = True
+        move.sequence_prefix = "MISC/2026/"
+        move.sequence_number = 1
+        move.checked = True
+        move.write_uid = Record(42)
+        move.write_date = "2026-07-10 09:01:00"
+        move.snapshot_values.update(
+            {
+                "state": "posted",
+                "name": "MISC/2026/0001",
+                "posted_before": True,
+                "sequence_prefix": "MISC/2026/",
+                "sequence_number": 1,
+                "checked": True,
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:01:00",
+            }
+        )
+        if material_drift:
+            move.narration = "unapproved posting side effect"
+            move.snapshot_values["narration"] = move.narration
+        if date_drift:
+            move.date = "2026-07-16"
+            move.snapshot_values["date"] = move.date
+        if chatter_drift:
+            move.message_ids = [Record(9001)]
+            move.snapshot_values["message_ids"] = [9001]
+        for line in lines:
+            line.parent_state = "posted"
+            line.write_uid = Record(42)
+            line.write_date = "2026-07-10 09:01:00"
+            line.snapshot_values.update(
+                {
+                    "move_id": [1201, "MISC/2026/0001"],
+                    "parent_state": "posted",
+                    "write_uid": [42, "V3 Executor"],
+                    "write_date": "2026-07-10 09:01:00",
+                }
+            )
+        return False
+
+    move.action_post = action_post
+
+
+def install_exact_manual_entry_cancel(move, lines):
+    def write(values):
+        move.writes.append(values)
+        assert values == {"state": "cancel"}
+        move.state = "cancel"
+        move.write_uid = Record(42)
+        move.write_date = "2026-07-10 09:01:00"
+        move.snapshot_values.update(
+            {
+                "state": "cancel",
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:01:00",
+            }
+        )
+        for line in lines:
+            line.parent_state = "cancel"
+            line.write_uid = Record(42)
+            line.write_date = "2026-07-10 09:01:00"
+            line.snapshot_values.update(
+                {
+                    "move_id": [1201, "Cancelled Entry MANUAL-ENTRY-1"],
+                    "parent_state": "cancel",
+                    "write_uid": [42, "V3 Executor"],
+                    "write_date": "2026-07-10 09:01:00",
+                }
+            )
+        return True
+
+    move.write = write
+    move.button_cancel = lambda: pytest.fail("button_cancel must not be called")
+    move.button_draft = lambda: pytest.fail("button_draft must not be called")
+    move.unlink = lambda: pytest.fail("unlink must not be called")
+
+
+@pytest.mark.parametrize(
+    "account_type",
+    ["asset_receivable", "liability_payable", "off_balance"],
+)
+def test_journal_entry_create_rejects_restricted_account_types(
+    account_type,
+):
+    parameters = journal_entry_create_parameters()
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture()
+    records[("account.account", 10)].account_type = account_type
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        records=records,
+    )
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="cannot use a receivable, payable, or off-balance account",
+    ):
+        handler.precheck("acct.journal.entry_create.v1", parameters)
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.journal.entry_create.v1", "acct.move.post.v1"],
+)
+def test_phaseb_manual_entry_writes_reject_effective_odoo_lock_date(
+    capability_id,
+):
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture()
+    lock_subject = (
+        comp
+        if capability_id == "acct.journal.entry_create.v1"
+        else move
+    )
+    lock_subject.violated_lock_dates = [
+        (date(2026, 7, 10), "fiscalyear_lock_date")
+    ]
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        records=records,
+    )
+    handler.test_company = comp
+    parameters = (
+        journal_entry_create_parameters()
+        if capability_id == "acct.journal.entry_create.v1"
+        else move_post_parameters()
+    )
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match=(
+            "violates effective Odoo lock dates: "
+            "fiscalyear_lock_date=2026-07-10"
+        ),
+    ):
+        handler.precheck(capability_id, parameters)
+
+    expected_call = (
+        (date(2026, 7, 10), False, records[("account.journal", 2)])
+        if capability_id == "acct.journal.entry_create.v1"
+        else (date(2026, 7, 10), False)
+    )
+    assert lock_subject.lock_date_checks == [expected_call]
+    assert move.tax_effect_checks == (
+        0 if capability_id == "acct.journal.entry_create.v1" else 1
+    )
+
+
+def test_move_post_rejects_an_unexpected_live_odoo_tax_effect():
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture()
+    move.affects_tax_report = True
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="manual journal entry has an unexpected Odoo tax effect",
+    ):
+        handler.precheck("acct.move.post.v1", move_post_parameters())
+
+    assert move.tax_effect_checks == 1
+    assert move.lock_date_checks == []
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    ["acct.journal.entry_create.v1", "acct.move.post.v1"],
+)
+def test_phaseb_manual_entry_writes_use_effective_lock_result_not_raw_soft_lock(
+    capability_id,
+):
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture()
+    comp.fiscalyear_lock_date = date(2026, 7, 10)
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        records=records,
+    )
+    handler.test_company = comp
+    parameters = (
+        journal_entry_create_parameters()
+        if capability_id == "acct.journal.entry_create.v1"
+        else move_post_parameters()
+    )
+
+    checked = handler.precheck(capability_id, parameters)
+
+    assert "effective_odoo_lock_dates_open" in checked["checks"] or (
+        capability_id == "acct.move.post.v1"
+        and "posting_date_open" in checked["checks"]
+    )
+
+
+def test_journal_entry_create_rechecks_effective_lock_before_create():
+    parameters = journal_entry_create_parameters()
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture()
+    move_model = Model(factory=lambda values: move)
+    handler = Harness(models={"account.move": move_model}, records=records)
+    handler.test_company = comp
+    checked = handler.precheck(
+        "acct.journal.entry_create.v1", parameters
+    )
+    comp.violated_lock_dates = [
+        (date(2026, 7, 10), "fiscalyear_lock_date")
+    ]
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="violates effective Odoo lock dates",
+    ):
+        handler.execute_prechecked(
+            "acct.journal.entry_create.v1", parameters, checked
+        )
+
+    assert move_model.creates == []
+    assert len(comp.lock_date_checks) == 2
+
+
+@pytest.mark.parametrize(
+    ("drift", "error"),
+    (
+        ("tax", "unexpected Odoo tax effect"),
+        ("lock", "violates effective Odoo lock dates"),
+    ),
+)
+def test_move_post_rechecks_live_tax_and_lock_state_before_action(
+    drift,
+    error,
+):
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture()
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = move_post_parameters()
+    checked = handler.precheck("acct.move.post.v1", parameters)
+    if drift == "tax":
+        move.affects_tax_report = True
+    else:
+        move.violated_lock_dates = [
+            (date(2026, 7, 10), "fiscalyear_lock_date")
+        ]
+
+    with pytest.raises(OdooWriteHandlerError, match=error):
+        handler.execute_prechecked(
+            "acct.move.post.v1", parameters, checked
+        )
+
+    assert move.action_post_calls == 0
+    assert move.tax_effect_checks == 2
+    assert len(move.lock_date_checks) == (1 if drift == "tax" else 2)
+
+
+def test_journal_entry_create_stays_draft_and_persists_both_bindings():
+    parameters = journal_entry_create_parameters()
+    document_binding = OdooWriteHandlers.document_binding(
+        "journal_entry", parameters
+    )
+    business_binding = OdooWriteHandlers.business_binding(
+        "journal_entry", parameters
+    )
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture(
+        document_binding=document_binding,
+        business_binding=business_binding,
+    )
+    move_model = Model(factory=lambda values: move)
+    handler = Harness(models={"account.move": move_model}, records=records)
+    handler.test_company = comp
+
+    checked = handler.precheck(
+        "acct.journal.entry_create.v1", parameters
+    )
+    execution = handler.execute_prechecked(
+        "acct.journal.entry_create.v1", parameters, checked
+    )
+    verification = handler.verify(
+        "acct.journal.entry_create.v1", parameters, execution
+    )
+
+    created = move_model.creates[0]
+    assert created["move_type"] == "entry"
+    assert created["odoo_cli_v3_document_binding"] == document_binding
+    assert created["odoo_cli_v3_business_binding"] == business_binding
+    assert created["odoo_cli_v3_reason"] == parameters["reason"]
+    assert move_model.contexts == [
+        (
+            (),
+            {
+                "tracking_disable": True,
+                "mail_notrack": True,
+            },
+        )
+    ]
+    assert move.state == "draft"
+    assert move.action_post_calls == 0
+    assert len(comp.lock_date_checks) == 3
+    assert verification["passed"] is True
+    assert "draft_sequence_absent" in verification["checks"]
+    assert execution["recovery"]["status"] == "manual_escalation"
+
+
+def test_move_post_calls_action_post_once_and_accepts_only_exact_posting_delta():
+    comp, move, debit, credit, records = pristine_manual_entry_fixture()
+    install_exact_manual_entry_post(move, [debit, credit])
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = move_post_parameters()
+
+    checked = handler.precheck("acct.move.post.v1", parameters)
+    execution = handler.execute_prechecked(
+        "acct.move.post.v1", parameters, checked
+    )
+    verification = handler.verify(
+        "acct.move.post.v1", parameters, execution
+    )
+
+    assert move.action_post_calls == 1
+    assert move.tax_effect_checks == 2
+    assert move.lock_date_checks == [
+        (date(2026, 7, 10), False),
+        (date(2026, 7, 10), False),
+    ]
+    assert move.contexts[-1] == {
+        "tracking_disable": True,
+        "mail_notrack": True,
+    }
+    assert move.writes == []
+    assert move.state == "posted"
+    assert verification["passed"] is True
+    assert "posting_delta_allowlist_matches" in verification["checks"]
+    assert "business_lines_unchanged" in verification["checks"]
+
+
+def test_move_post_rejects_material_drift_outside_the_posting_allowlist():
+    comp, move, debit, credit, records = pristine_manual_entry_fixture()
+    install_exact_manual_entry_post(
+        move, [debit, credit], material_drift=True
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = move_post_parameters()
+
+    checked = handler.precheck("acct.move.post.v1", parameters)
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="outside the approved posting allowlist",
+    ):
+        handler.execute_prechecked(
+            "acct.move.post.v1", parameters, checked
+        )
+    assert move.action_post_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "error"),
+    (
+        ("date", "graph or identity differs"),
+        ("chatter", "outside the approved posting allowlist"),
+    ),
+)
+def test_move_post_rejects_date_or_chatter_drift_before_execution_returns(
+    side_effect,
+    error,
+):
+    comp, move, debit, credit, records = pristine_manual_entry_fixture()
+    install_exact_manual_entry_post(
+        move,
+        [debit, credit],
+        date_drift=side_effect == "date",
+        chatter_drift=side_effect == "chatter",
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = move_post_parameters()
+
+    checked = handler.precheck("acct.move.post.v1", parameters)
+    with pytest.raises(OdooWriteHandlerError, match=error):
+        handler.execute_prechecked(
+            "acct.move.post.v1", parameters, checked
+        )
+
+    assert move.action_post_calls == 1
+
+
+def test_draft_cancel_v2_cancels_pristine_manual_entry_exactly():
+    comp, move, debit, credit, records = pristine_manual_entry_fixture()
+    install_exact_manual_entry_cancel(move, [debit, credit])
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = draft_cancel_v2_entry_parameters()
+
+    checked = handler.precheck("acct.move.draft_cancel.v2", parameters)
+    execution = handler.execute_prechecked(
+        "acct.move.draft_cancel.v2", parameters, checked
+    )
+    verification = handler.verify(
+        "acct.move.draft_cancel.v2", parameters, execution
+    )
+
+    assert move.writes == [{"state": "cancel"}]
+    assert move.contexts[-1] == {
+        "tracking_disable": True,
+        "skip_account_move_synchronization": True,
+        "skip_invoice_sync": True,
+        "skip_is_manually_modified": True,
+    }
+    assert move.state == "cancel"
+    assert verification["passed"] is True
+    assert (
+        "draft_manual_journal_entry_cancelled_exactly"
+        in verification["checks"]
+    )
+    assert execution["recovery"] == {
+        "status": "not_applicable",
+        "method": "draft_cancel_v2_completed",
+        "targets": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("drift", "error"),
+    (
+        ("line_ids", "line graph differs"),
+        ("document_binding", "immutable binding differs"),
+        ("business_binding", "immutable binding differs"),
+    ),
+)
+def test_draft_cancel_v2_rejects_line_or_binding_drift_after_precheck(
+    drift,
+    error,
+):
+    comp, move, _debit, _credit, records = pristine_manual_entry_fixture()
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = draft_cancel_v2_entry_parameters()
+    checked = handler.precheck("acct.move.draft_cancel.v2", parameters)
+
+    if drift == "line_ids":
+        move.line_ids = move.line_ids[:1]
+    elif drift == "document_binding":
+        move.odoo_cli_v3_document_binding = "c" * 64
+    else:
+        move.odoo_cli_v3_business_binding = "c" * 64
+
+    with pytest.raises(OdooWriteHandlerError, match=error):
+        handler.execute_prechecked(
+            "acct.move.draft_cancel.v2", parameters, checked
+        )
+
+
 @pytest.mark.parametrize("vendor", [False, True])
 def test_draft_cancel_is_normal_exact_verified_write_without_recovery_plan(
     vendor,
@@ -5805,6 +6567,7 @@ def test_draft_cancel_is_normal_exact_verified_write_without_recovery_plan(
     )
     handler = Harness(records=records_by_key, recovery_plan=None)
     parameters = draft_cancel_parameters(vendor=vendor)
+    assert "expected_line_ids" not in parameters
 
     checked = handler.precheck("acct.move.draft_cancel.v1", parameters)
     assert checked["semantic_precheck"]["computed"] == {

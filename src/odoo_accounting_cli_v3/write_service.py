@@ -139,10 +139,19 @@ _ALLOWED_MODELS = {
     "acct.period.adjustment_create.v1": frozenset(
         {"account.move", "account.move.line"}
     ),
+    "acct.journal.entry_create.v1": frozenset(
+        {"account.move", "account.move.line"}
+    ),
+    "acct.move.post.v1": frozenset(
+        {"account.move", "account.move.line"}
+    ),
     "acct.move.reverse.v1": frozenset(
         {"account.move", "account.move.line"}
     ),
     "acct.move.draft_cancel.v1": frozenset(
+        {"account.move", "account.move.line"}
+    ),
+    "acct.move.draft_cancel.v2": frozenset(
         {"account.move", "account.move.line"}
     ),
     "acct.recovery.execute.v1": frozenset(

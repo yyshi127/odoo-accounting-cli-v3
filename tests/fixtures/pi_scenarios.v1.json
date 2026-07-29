@@ -1,7 +1,7 @@
 {
   "schema_version": "odoo-accounting-cli-v3.pi-scenarios.v1",
   "corpus_id": "xiaojing-accounting-key-scenarios-v1",
-  "frozen_revision": 2,
+  "frozen_revision": 3,
   "description": "小兢会计 Pi Agent 的冻结中文关键场景；只由已捕获的 Pi 轨迹评分，不由评分器调用模型。",
   "fixture_bindings": {
     "company_primary_id": {"json_type": "integer", "description": "沙箱主公司 ID", "example": 101},
@@ -39,6 +39,13 @@
     "draft_customer_business_binding": {"json_type": "string", "description": "可信候选读取返回的客户草稿发票业务绑定", "example": "66713f00d613883faf5cb31dbd7e65592ab077abc9bebfd8e68b4b5f48f76494"},
     "draft_vendor_document_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单单据绑定", "example": "5828176ca525d57db393e36e306d6518b40c83a21ea8048b93017782cf8ba121"},
     "draft_vendor_business_binding": {"json_type": "string", "description": "可信候选读取返回的供应商草稿账单业务绑定", "example": "65b15a94f0a9e28aa4feb90507403971b302c68311acd2475985f18b57f9e098"},
+    "draft_manual_entry_post_id": {"json_type": "integer", "description": "可信候选读取返回的待单独过账 V3 手工分录草稿 ID", "example": 1404},
+    "draft_manual_entry_post_document_binding": {"json_type": "string", "description": "可信候选读取返回的待单独过账 V3 手工分录单据绑定", "example": "81e39a4b5c787a0ab48a0cd6512482f12349903d9856cc34e508adc2db1b9d7f"},
+    "draft_manual_entry_post_business_binding": {"json_type": "string", "description": "可信候选读取返回的待单独过账 V3 手工分录业务绑定", "example": "e5271e4b7fb376c421537305be33a73237f387fde9d076cccd9fb9dbb815dcb0"},
+    "draft_manual_entry_cancel_id": {"json_type": "integer", "description": "可信候选读取返回的待取消 V3 手工分录草稿 ID", "example": 1405},
+    "draft_manual_entry_cancel_document_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 手工分录单据绑定", "example": "9bef9ff60ca971676105c4def52b6d5de1e71f97ba88db2e6fd44f120bbcdf8b"},
+    "draft_manual_entry_cancel_business_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 手工分录业务绑定", "example": "67819435e13b74e033805f70ecf1aee39a3afeb56ff04bf2d4a7fc95c06b1c5d"},
+    "draft_manual_entry_cancel_line_ids": {"json_type": "array", "description": "可信候选读取返回的待取消 V3 手工分录完整行 ID", "example": [1406, 1407]},
     "failed_operation_id": {"json_type": "string", "description": "沙箱失败操作 ID", "example": "op-failed-001"},
     "recovery_plan_digest": {"json_type": "string", "description": "沙箱已验证恢复计划摘要", "example": "91e3271c8ebb67c97f1e8acbbe8e7e798a9309cee0911e8e8e1c425f8d5f4ed3"}
   },
@@ -107,6 +114,23 @@
           "posting_mode": "draft", "reference": "PI-CINV-001",
           "lines": [{"line_reference": "cinv-line-1", "name": "咨询服务", "product_id": null, "account_id": {"$fixture": "revenue_account_id"}, "quantity": "1", "price_unit": "1000.00", "tax_ids": [{"$fixture": "tax_output_id"}]}],
           "idempotency_key": "pi-v1-customer-invoice"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-customer-invoice-create-and-post-route",
+      "category": "ordinary",
+      "input": "在主公司给这个客户新建并过账发票，不是手工分录：发票日、会计日都是 2026-06-16，到期日 2026-07-16，销售日记账，人民币咨询服务 1 件、单价 300 元、不含税，参考号 PI-CINV-POST-001。请走客户发票创建能力，不得选择仅供 V3 手工分录使用的单独过账能力。",
+      "expected": {
+        "capability_id": "acct.invoice.customer_create.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "partner_id": {"$fixture": "customer_id"},
+          "invoice_date": "2026-06-16", "accounting_date": "2026-06-16", "due_date": "2026-07-16",
+          "currency_id": {"$fixture": "currency_cny_id"}, "journal_id": {"$fixture": "sales_journal_id"},
+          "posting_mode": "post", "reference": "PI-CINV-POST-001",
+          "lines": [{"line_reference": "cinv-post-line-1", "name": "咨询服务", "product_id": null, "account_id": {"$fixture": "revenue_account_id"}, "quantity": "1", "price_unit": "300.00", "tax_ids": []}],
+          "idempotency_key": "pi-v1-customer-invoice-create-and-post"
         }
       }
     },
@@ -427,6 +451,59 @@
           "reversal_date": "2026-07-01", "journal_id": {"$fixture": "general_journal_id"}, "currency_id": {"$fixture": "currency_cny_id"},
           "expected_total_amount": "300.00", "reason": "期末调整错误", "posting_mode": "post",
           "idempotency_key": "pi-v1-move-reverse"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-journal-entry-create",
+      "category": "ordinary",
+      "input": "在主公司杂项日记账建立一笔 2026-06-30 的人民币手工分录草稿，参考号 PI-MANUAL-202606-001，原因是月末费用重分类：借记费用 300 元、贷记预提 300 元；不含税，只创建草稿，过账必须另行审批。",
+      "expected": {
+        "capability_id": "acct.journal.entry_create.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "journal_id": {"$fixture": "general_journal_id"},
+          "posting_date": "2026-06-30", "currency_id": {"$fixture": "currency_cny_id"},
+          "reference": "PI-MANUAL-202606-001", "reason": "月末费用重分类", "posting_mode": "draft",
+          "lines": [
+            {"line_reference": "manual-debit-1", "account_id": {"$fixture": "expense_account_id"}, "partner_id": null, "currency_id": {"$fixture": "currency_cny_id"}, "name": "月末费用重分类", "side": "debit", "amount": "300.00", "amount_currency": "300.00", "tax_ids": []},
+            {"line_reference": "manual-credit-1", "account_id": {"$fixture": "accrual_account_id"}, "partner_id": null, "currency_id": {"$fixture": "currency_cny_id"}, "name": "月末费用重分类", "side": "credit", "amount": "300.00", "amount_currency": "-300.00", "tax_ids": []}
+          ],
+          "idempotency_key": "pi-v1-journal-entry-create"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-manual-entry-post",
+      "category": "ordinary",
+      "input": "单独过账主公司这笔由 V3 创建且已由可信候选读取复核的手工分录草稿，不是客户发票或供应商账单。草稿 ID、entry、单据与业务绑定、杂项日记账、人民币、2026-06-30、参考号 PI-MANUAL-POST-001、借贷各 300 元和两行均已核对；原因是月末重分类复核完成。请先预览并等待审批。",
+      "expected": {
+        "capability_id": "acct.move.post.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "move_id": {"$fixture": "draft_manual_entry_post_id"},
+          "expected_move_type": "entry", "expected_document_binding": {"$fixture": "draft_manual_entry_post_document_binding"},
+          "expected_business_binding": {"$fixture": "draft_manual_entry_post_business_binding"},
+          "expected_journal_id": {"$fixture": "general_journal_id"}, "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_posting_date": "2026-06-30", "expected_reference": "PI-MANUAL-POST-001",
+          "expected_total_debit": "300.00", "expected_total_credit": "300.00", "expected_line_count": 2,
+          "reason": "月末重分类复核完成", "idempotency_key": "pi-v1-manual-entry-post"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-manual-entry-draft-cancel",
+      "category": "ordinary",
+      "input": "取消主公司这笔由 V3 创建、从未过账并经可信候选读取复核的手工分录草稿。候选读取已返回草稿 ID、entry、单据绑定、业务绑定和完整两条分录行 ID；取消原因是手工分录重复录入。请使用新版安全取消契约，先预览并等待审批。",
+      "expected": {
+        "capability_id": "acct.move.draft_cancel.v2",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "move_id": {"$fixture": "draft_manual_entry_cancel_id"},
+          "expected_move_type": "entry", "expected_document_binding": {"$fixture": "draft_manual_entry_cancel_document_binding"},
+          "expected_business_binding": {"$fixture": "draft_manual_entry_cancel_business_binding"},
+          "expected_line_ids": {"$fixture": "draft_manual_entry_cancel_line_ids"}, "reason": "手工分录重复录入",
+          "idempotency_key": "pi-v1-manual-entry-draft-cancel"
         }
       }
     },

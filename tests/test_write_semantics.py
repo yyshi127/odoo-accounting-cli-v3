@@ -238,6 +238,39 @@ def adjustment_parameters() -> dict:
     return result
 
 
+def journal_entry_create_parameters() -> dict:
+    return {
+        "company_id": 7,
+        "journal_id": 4,
+        "posting_date": "2026-07-31",
+        "currency_id": 12,
+        "reference": "Manual reclassification 2026-07",
+        "reason": "Approved reclassification",
+        "posting_mode": "draft",
+        "lines": journal_lines(),
+        "idempotency_key": "journal-entry-july-reclassification",
+    }
+
+
+def move_post_parameters() -> dict:
+    return {
+        "company_id": 7,
+        "move_id": 882,
+        "expected_move_type": "entry",
+        "expected_document_binding": "d" * 64,
+        "expected_business_binding": "e" * 64,
+        "expected_journal_id": 4,
+        "expected_currency_id": 12,
+        "expected_posting_date": "2026-07-31",
+        "expected_reference": "Manual reclassification 2026-07",
+        "expected_total_debit": "100.00",
+        "expected_total_credit": "100.00",
+        "expected_line_count": 2,
+        "reason": "Approved posting",
+        "idempotency_key": "post-move-882",
+    }
+
+
 def reversal_parameters() -> dict:
     return {
         "company_id": 7,
@@ -264,6 +297,18 @@ def draft_cancel_parameters() -> dict:
     }
 
 
+def draft_cancel_v2_parameters() -> dict:
+    result = draft_cancel_parameters()
+    result.update(
+        {
+            "expected_move_type": "entry",
+            "expected_line_ids": [2001, 2002],
+            "idempotency_key": "cancel-draft-entry-881",
+        }
+    )
+    return result
+
+
 def recovery_parameters() -> dict:
     return {
         "company_id": 7,
@@ -287,8 +332,11 @@ VALID_CASES = {
     "acct.accrual.create.v1": accrual_parameters,
     "acct.deferred.create.v1": deferred_parameters,
     "acct.period.adjustment_create.v1": adjustment_parameters,
+    "acct.journal.entry_create.v1": journal_entry_create_parameters,
+    "acct.move.post.v1": move_post_parameters,
     "acct.move.reverse.v1": reversal_parameters,
     "acct.move.draft_cancel.v1": draft_cancel_parameters,
+    "acct.move.draft_cancel.v2": draft_cancel_v2_parameters,
     "acct.recovery.execute.v1": recovery_parameters,
 }
 
@@ -395,6 +443,7 @@ def test_reconciliation_writeoff_and_partial_rules_are_consistent():
     (
         ("acct.accrual.create.v1", accrual_parameters),
         ("acct.period.adjustment_create.v1", adjustment_parameters),
+        ("acct.journal.entry_create.v1", journal_entry_create_parameters),
     ),
 )
 def test_manual_entries_require_balanced_company_and_transaction_currency(
@@ -421,6 +470,74 @@ def test_manual_entries_require_signed_currency_amounts_and_unique_lines():
     parameters["lines"][1]["line_reference"] = "debit"
     with pytest.raises(WriteSemanticError, match="line_reference"):
         validate_write_semantics("acct.accrual.create.v1", parameters)
+
+
+def test_journal_entry_create_is_draft_only_tax_free_and_explicit():
+    parameters = journal_entry_create_parameters()
+    parameters["posting_mode"] = "post"
+    with pytest.raises(WriteSemanticError, match="posting_mode must be draft"):
+        validate_write_semantics("acct.journal.entry_create.v1", parameters)
+
+    parameters = journal_entry_create_parameters()
+    parameters["lines"][0]["tax_ids"] = [31]
+    with pytest.raises(WriteSemanticError, match="tax_ids must be empty"):
+        validate_write_semantics("acct.journal.entry_create.v1", parameters)
+
+    parameters = journal_entry_create_parameters()
+    parameters["lines"][0]["account_id"] = 0
+    with pytest.raises(WriteSemanticError, match=r"lines\[0\]\.account_id"):
+        validate_write_semantics("acct.journal.entry_create.v1", parameters)
+
+    parameters = journal_entry_create_parameters()
+    parameters["lines"][0]["partner_id"] = 0
+    with pytest.raises(WriteSemanticError, match=r"lines\[0\]\.partner_id"):
+        validate_write_semantics("acct.journal.entry_create.v1", parameters)
+
+    parameters = journal_entry_create_parameters()
+    parameters["reference"] = "   "
+    with pytest.raises(WriteSemanticError, match="reference"):
+        validate_write_semantics("acct.journal.entry_create.v1", parameters)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("move_id", 0, "move_id"),
+        ("expected_move_type", "out_invoice", "expected_move_type"),
+        ("expected_document_binding", "not-a-digest", "document_binding"),
+        ("expected_business_binding", "A" * 64, "business_binding"),
+        ("expected_journal_id", 0, "expected_journal_id"),
+        ("expected_currency_id", False, "expected_currency_id"),
+        ("expected_posting_date", "2026-02-30", "expected_posting_date"),
+        ("expected_total_debit", "0", "expected_total_debit"),
+        ("expected_total_credit", "1e2", "expected_total_credit"),
+        ("expected_line_count", 1, "expected_line_count"),
+        ("expected_reference", " ", "expected_reference"),
+        ("reason", "", "reason"),
+    ),
+)
+def test_move_post_binds_exact_pristine_manual_entry(field, value, error):
+    parameters = move_post_parameters()
+    parameters[field] = value
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.move.post.v1", parameters)
+
+
+def test_move_post_requires_equal_positive_totals_and_bounded_line_count():
+    parameters = move_post_parameters()
+    parameters["expected_total_credit"] = "99.99"
+    with pytest.raises(WriteSemanticError, match="must equal"):
+        validate_write_semantics("acct.move.post.v1", parameters)
+
+    parameters = move_post_parameters()
+    parameters["expected_line_count"] = 251
+    with pytest.raises(WriteSemanticError, match="expected_line_count"):
+        validate_write_semantics("acct.move.post.v1", parameters)
+
+    result = validate_write_semantics("acct.move.post.v1", move_post_parameters())
+    assert result["computed"]["expected_total_debit"] == "100.00"
+    assert result["computed"]["expected_total_credit"] == "100.00"
+    assert result["computed"]["expected_line_count"] == 2
 
 
 def test_dates_for_accrual_depreciation_deferred_and_period_adjustment():
@@ -479,6 +596,58 @@ def test_draft_cancel_semantics_bind_exact_pristine_document(
     parameters[field] = value
     with pytest.raises(WriteSemanticError, match=error):
         validate_write_semantics("acct.move.draft_cancel.v1", parameters)
+
+
+@pytest.mark.parametrize("move_type", ("entry", "out_invoice", "in_invoice"))
+def test_draft_cancel_v2_accepts_only_supported_pristine_move_types(move_type):
+    parameters = draft_cancel_v2_parameters()
+    parameters["expected_move_type"] = move_type
+
+    result = validate_write_semantics("acct.move.draft_cancel.v2", parameters)
+
+    assert result["computed"]["expected_move_type"] == move_type
+    assert result["computed"]["expected_line_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error"),
+    (
+        (
+            lambda value: value.update(expected_move_type="out_refund"),
+            "expected_move_type",
+        ),
+        (
+            lambda value: value.update(expected_document_binding="not-a-digest"),
+            "document_binding",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=[2001]),
+            "expected_line_ids",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=[2001, 2001]),
+            "expected_line_ids must be unique",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=[2001, 0]),
+            "expected_line_ids",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=list(range(1, 1002))),
+            "expected_line_ids",
+        ),
+        (
+            lambda value: value.update(reason=" "),
+            "reason",
+        ),
+    ),
+)
+def test_draft_cancel_v2_requires_exact_bindings_and_line_set(mutate, error):
+    parameters = draft_cancel_v2_parameters()
+    mutate(parameters)
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.move.draft_cancel.v2", parameters)
 
 
 def test_depreciation_requires_real_asset_move_reference():

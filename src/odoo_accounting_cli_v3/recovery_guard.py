@@ -35,7 +35,11 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MODEL = re.compile(r"^[a-z][a-z0-9_.]{0,127}$")
 _NON_PRODUCTION_ENVIRONMENTS = frozenset({"test", "sandbox"})
 _TERMINAL_CAPABILITY_IDS = frozenset(
-    {"acct.move.draft_cancel.v1", "acct.recovery.execute.v1"}
+    {
+        "acct.move.draft_cancel.v1",
+        "acct.move.draft_cancel.v2",
+        "acct.recovery.execute.v1",
+    }
 )
 _TARGET_FIELDS = frozenset(
     {

@@ -164,6 +164,14 @@ METADATA_SCOPE_MODULE = (
 )
 EXECUTOR_GROUP = "odoo_accounting_cli_v3_control.group_executor"
 APPROVER_GROUP = "odoo_accounting_cli_v3_control.group_approver"
+EXCLUSIVE_BEFORE_LOCK_CAPABILITIES = frozenset(
+    {
+        "acct.move.draft_cancel.v1",
+        "acct.move.draft_cancel.v2",
+        "acct.move.post.v1",
+        "acct.recovery.execute.v1",
+    }
+)
 ANCHOR_RESULT_FIELDS = frozenset(
     {
         "capability_id",
@@ -254,12 +262,15 @@ def _resource_lock_digests(
     elif capability_id == "acct.deferred.create.v1":
         add("account.move.line", parameters.get("source_move_line_id"))
     elif capability_id in {
+        "acct.move.draft_cancel.v2",
+        "acct.move.post.v1",
         "acct.move.reverse.v1",
         "acct.move.draft_cancel.v1",
     }:
         add("account.move", parameters.get("move_id"))
     elif capability_id in {
         "acct.invoice.customer_create.v1",
+        "acct.journal.entry_create.v1",
         "acct.accrual.create.v1",
         "acct.period.adjustment_create.v1",
     }:
@@ -2276,10 +2287,7 @@ def execute_write_from_odoo_shell(
                 company_id=operation.company_id,
                 exclusive_before=(
                     operation.capability_id
-                    in {
-                        "acct.move.draft_cancel.v1",
-                        "acct.recovery.execute.v1",
-                    }
+                    in EXCLUSIVE_BEFORE_LOCK_CAPABILITIES
                 ),
             )
         except Exception as exc:

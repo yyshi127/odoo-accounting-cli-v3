@@ -52,6 +52,7 @@ from odoo_accounting_cli_v3.write_protocol import (
     trusted_result_from_mapping,
 )
 from odoo_accounting_cli_v3.write_receipts import create_recovery_plan_v2
+from odoo_accounting_cli_v3.write_service import _ALLOWED_MODELS
 
 
 NOW = datetime(2026, 7, 15, 4, 0, tzinfo=timezone.utc)
@@ -128,6 +129,50 @@ def test_draft_cancel_uses_the_same_move_resource_lock_as_move_reversal():
 
     assert draft_cancel == reversal
     assert len(draft_cancel) == 1
+
+
+def test_phase_b_move_capabilities_have_exact_move_model_allowlists():
+    expected = frozenset({"account.move", "account.move.line"})
+
+    assert _ALLOWED_MODELS["acct.journal.entry_create.v1"] == expected
+    assert _ALLOWED_MODELS["acct.move.post.v1"] == expected
+    assert _ALLOWED_MODELS["acct.move.draft_cancel.v2"] == expected
+
+
+def test_phase_b_journal_entry_create_locks_the_journal_reference():
+    parameters = {"journal_id": 5, "reference": "ENTRY-2026-001"}
+
+    phase_b = _resource_lock_digests(
+        "acct.journal.entry_create.v1", 7, parameters, None
+    )
+    existing = _resource_lock_digests(
+        "acct.period.adjustment_create.v1", 7, parameters, None
+    )
+
+    assert phase_b == existing
+    assert len(phase_b) == 1
+
+
+def test_phase_b_post_and_cancel_share_the_existing_move_resource_lock():
+    parameters = {"move_id": 501}
+    expected = _resource_lock_digests(
+        "acct.move.reverse.v1", 7, parameters, None
+    )
+
+    assert _resource_lock_digests(
+        "acct.move.post.v1", 7, parameters, None
+    ) == expected
+    assert _resource_lock_digests(
+        "acct.move.draft_cancel.v2", 7, parameters, None
+    ) == expected
+    assert len(expected) == 1
+
+
+def test_phase_b_post_and_cancel_require_exclusive_before_graph_locks():
+    assert {
+        "acct.move.post.v1",
+        "acct.move.draft_cancel.v2",
+    } <= write_bootstrap.EXCLUSIVE_BEFORE_LOCK_CAPABILITIES
 
 
 def test_difference_marks_every_created_record_absent_before_it_exists():

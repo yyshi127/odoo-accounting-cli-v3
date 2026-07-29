@@ -31,6 +31,21 @@ where practical, then record actual execution evidence separately.
   PostgreSQL read-only transaction. Both remain `contract_tested` and
   `test`-staged only; neither is production-enabled.
 - No capability is enabled and no write capability is staged.
+- The current registry contains 17 write capabilities: the original 14-capability
+  baseline plus `acct.journal.entry_create.v1`, `acct.move.post.v1`, and
+  `acct.move.draft_cancel.v2`. These three Phase B additions remain
+  `declared`, have no retained evidence receipts, and are neither staged nor
+  enabled. `tests/test_phaseb_move_write_capability_closure.py` is an offline
+  schema, semantics, idempotency, signed-failure, tamper, and dispatch test; it
+  does not execute Odoo and is not real-Odoo sandbox or production evidence.
+- The three Phase B handlers currently scope `tracking_disable` to their Odoo
+  create/write/post call so uncontrolled mail-thread records cannot escape the
+  exact accounting graph. The signed V3 operation anchor and receipts are the
+  intended audit authority, but this is not yet promotion evidence. Before any
+  staging, real Odoo must prove the complete user/company/request/approval/move
+  trace (including `create_uid`, `write_uid`, `write_date`, immutable bindings,
+  control anchor, and signed receipts), and either explicitly accept suppressed
+  chatter or replace it with an exact verified mail tracking graph.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not

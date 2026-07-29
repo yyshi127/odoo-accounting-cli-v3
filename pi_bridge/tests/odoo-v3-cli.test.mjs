@@ -599,6 +599,46 @@ function writeParameterFixtures() {
 			})),
 			idempotency_key: "adjustment-2026-07-0001",
 		},
+		"acct.journal.entry_create.v1": {
+			company_id: 7,
+			journal_id: 33,
+			posting_date: "2026-07-31",
+			currency_id: 12,
+			reference: "MANUAL/2026/0001",
+			reason: "Create a reviewed manual reclassification entry in draft",
+			posting_mode: "draft",
+			lines: balancedLines.map((line, index) => ({
+				...line,
+				line_reference: `manual-entry-${index + 1}`,
+			})),
+			idempotency_key: "manual-entry-2026-0001",
+		},
+		"acct.move.post.v1": {
+			company_id: 7,
+			move_id: 6003,
+			expected_move_type: "entry",
+			expected_document_binding: "81e39a4b5c787a0ab48a0cd6512482f12349903d9856cc34e508adc2db1b9d7f",
+			expected_business_binding: "e5271e4b7fb376c421537305be33a73237f387fde9d076cccd9fb9dbb815dcb0",
+			expected_journal_id: 33,
+			expected_currency_id: 12,
+			expected_posting_date: "2026-07-31",
+			expected_reference: "MANUAL/2026/0002",
+			expected_total_debit: "125.00",
+			expected_total_credit: "125.00",
+			expected_line_count: 2,
+			reason: "Post the separately approved V3 manual entry",
+			idempotency_key: "manual-entry-post-6003",
+		},
+		"acct.move.draft_cancel.v2": {
+			company_id: 7,
+			move_id: 6004,
+			expected_move_type: "entry",
+			expected_document_binding: "9bef9ff60ca971676105c4def52b6d5de1e71f97ba88db2e6fd44f120bbcdf8b",
+			expected_business_binding: "67819435e13b74e033805f70ecf1aee39a3afeb56ff04bf2d4a7fc95c06b1c5d",
+			expected_line_ids: [6101, 6102],
+			reason: "Cancel the explicitly bound pristine V3 manual entry draft",
+			idempotency_key: "manual-entry-draft-cancel-6004",
+		},
 		"acct.move.reverse.v1": {
 			company_id: 7,
 			move_id: 6001,
@@ -1205,12 +1245,12 @@ test("complex financial parameters are retained byte-for-byte through the test b
 	assert.deepEqual(result.data.argv, ["operation", "prepare"]);
 });
 
-test("all 14 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
+test("all 17 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
 	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
 	const registry = JSON.parse(await readFile(registryPath, "utf8"));
 	const writeCapabilities = registry.capabilities.filter((item) => item.access === "write");
 	const fixtures = writeParameterFixtures();
-	assert.equal(writeCapabilities.length, 14);
+	assert.equal(writeCapabilities.length, 17);
 	assert.deepEqual(Object.keys(fixtures).sort(), writeCapabilities.map((item) => item.id).sort());
 
 	const run = createBoundRunner({

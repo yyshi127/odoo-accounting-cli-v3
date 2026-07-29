@@ -381,6 +381,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "tests/test_odoo_write_runner.py",
         "tests/test_operations.py",
         "tests/test_persistence.py",
+        "tests/test_phaseb_move_write_capability_closure.py",
         "tests/test_pi_bridge_source.py",
         "tests/test_registry.py",
         "tests/test_source_boundary.py",
@@ -436,6 +437,13 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
 
 
 class ReleaseArchiveTest(unittest.TestCase):
+    def test_phase_b_move_closure_is_an_explicit_release_member(self) -> None:
+        name = "tests/test_phaseb_move_write_capability_closure.py"
+
+        self.assertTrue((PROJECT_ROOT / name).is_file())
+        self.assertIn(name, WRITE_RUNTIME_RELEASE_MEMBERS)
+        self.assertIn(name, REQUIRED_WRITE_RELEASE_MEMBERS)
+
     def test_release_capacity_constants_match_installer_contract(self) -> None:
         self.assertEqual(release_builder.MAX_ARCHIVE_MEMBERS, 10_000)
         self.assertEqual(

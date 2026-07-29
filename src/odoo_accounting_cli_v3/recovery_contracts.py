@@ -26,7 +26,11 @@ _EXECUTABLE_GUARD_OUTCOMES = frozenset(
 )
 _NON_PRODUCTION_ENVIRONMENTS = frozenset({"test", "sandbox"})
 _TERMINAL_CAPABILITY_IDS = frozenset(
-    {"acct.move.draft_cancel.v1", "acct.recovery.execute.v1"}
+    {
+        "acct.move.draft_cancel.v1",
+        "acct.move.draft_cancel.v2",
+        "acct.recovery.execute.v1",
+    }
 )
 _LOOKUP_ERROR = (
     "recovery action contract does not match the requested origin, method, "

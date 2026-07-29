@@ -29,6 +29,18 @@ def _positive_id(value: Any, field: str) -> int:
     return value
 
 
+def _non_empty_text(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise WriteSemanticError(f"{field} must be non-empty text")
+    return value
+
+
+def _sha256_digest(value: Any, field: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise WriteSemanticError(f"{field} must be a SHA-256 digest")
+    return value
+
+
 def _date(value: Any, field: str) -> date:
     if not isinstance(value, str):
         raise WriteSemanticError(f"{field} must be an ISO date")
@@ -421,6 +433,113 @@ def _validate_adjustment(parameters: dict[str, Any]) -> dict[str, Any]:
     return _validate_journal_lines(parameters)
 
 
+def _validate_journal_entry_create(parameters: dict[str, Any]) -> dict[str, Any]:
+    journal_id = _positive_id(_field(parameters, "journal_id"), "journal_id")
+    posting_date = _date(_field(parameters, "posting_date"), "posting_date")
+    if _field(parameters, "posting_mode") != "draft":
+        raise WriteSemanticError("posting_mode must be draft for journal entry creation")
+    _non_empty_text(_field(parameters, "reference"), "reference")
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    lines = _lines(_field(parameters, "lines"))
+    for index, line in enumerate(lines):
+        _positive_id(_field(line, "account_id"), f"lines[{index}].account_id")
+        partner_id = _field(line, "partner_id")
+        if partner_id is not None:
+            _positive_id(partner_id, f"lines[{index}].partner_id")
+        if _field(line, "tax_ids") != []:
+            raise WriteSemanticError(
+                f"lines[{index}].tax_ids must be empty for a manual journal entry"
+            )
+    journal_result = _validate_journal_lines(parameters)
+    return {
+        "checks": (
+            "journal_entry_draft_only",
+            "journal_entry_reference_and_reason_explicit",
+            "journal_entry_accounts_and_partners_explicit",
+            "journal_entry_tax_free",
+            *journal_result["checks"],
+        ),
+        "computed": {
+            "journal_id": journal_id,
+            "posting_date": posting_date.isoformat(),
+            "posting_mode": "draft",
+            **journal_result["computed"],
+        },
+    }
+
+
+def _validate_move_post(parameters: dict[str, Any]) -> dict[str, Any]:
+    move_id = _positive_id(_field(parameters, "move_id"), "move_id")
+    move_type = _field(parameters, "expected_move_type")
+    if move_type != "entry":
+        raise WriteSemanticError("expected_move_type must be entry")
+    document_binding = _sha256_digest(
+        _field(parameters, "expected_document_binding"),
+        "expected_document_binding",
+    )
+    business_binding = _sha256_digest(
+        _field(parameters, "expected_business_binding"),
+        "expected_business_binding",
+    )
+    journal_id = _positive_id(
+        _field(parameters, "expected_journal_id"), "expected_journal_id"
+    )
+    currency_id = _positive_id(
+        _field(parameters, "expected_currency_id"), "expected_currency_id"
+    )
+    posting_date = _date(
+        _field(parameters, "expected_posting_date"), "expected_posting_date"
+    )
+    reference = _non_empty_text(
+        _field(parameters, "expected_reference"), "expected_reference"
+    )
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    debit = _decimal(
+        _field(parameters, "expected_total_debit"),
+        "expected_total_debit",
+        positive=True,
+    )
+    credit = _decimal(
+        _field(parameters, "expected_total_credit"),
+        "expected_total_credit",
+        positive=True,
+    )
+    if debit != credit:
+        raise WriteSemanticError(
+            "expected_total_debit must equal expected_total_credit"
+        )
+    line_count = _field(parameters, "expected_line_count")
+    if (
+        isinstance(line_count, bool)
+        or not isinstance(line_count, int)
+        or not 2 <= line_count <= 250
+    ):
+        raise WriteSemanticError(
+            "expected_line_count must be an integer between 2 and 250"
+        )
+    return {
+        "checks": (
+            "move_post_target_is_manual_entry",
+            "move_post_bindings_explicit",
+            "move_post_graph_expectations_explicit",
+            "move_post_totals_balanced",
+        ),
+        "computed": {
+            "move_id": move_id,
+            "expected_move_type": move_type,
+            "expected_document_binding": document_binding,
+            "expected_business_binding": business_binding,
+            "expected_journal_id": journal_id,
+            "expected_currency_id": currency_id,
+            "expected_posting_date": posting_date.isoformat(),
+            "expected_reference": reference,
+            "expected_total_debit": _format(debit),
+            "expected_total_credit": _format(credit),
+            "expected_line_count": line_count,
+        },
+    }
+
+
 def _validate_reversal(parameters: dict[str, Any]) -> dict[str, Any]:
     _date(_field(parameters, "reversal_date"), "reversal_date")
     if _field(parameters, "posting_mode") != "post":
@@ -452,13 +571,7 @@ def _validate_draft_cancel(parameters: dict[str, Any]) -> dict[str, Any]:
         "expected_document_binding",
         "expected_business_binding",
     ):
-        digest = _field(parameters, field)
-        if (
-            not isinstance(digest, str)
-            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-        ):
-            raise WriteSemanticError(f"{field} must be a SHA-256 digest")
-        computed[field] = digest
+        computed[field] = _sha256_digest(_field(parameters, field), field)
     return {
         "checks": (
             "draft_cancel_target_explicit",
@@ -467,6 +580,49 @@ def _validate_draft_cancel(parameters: dict[str, Any]) -> dict[str, Any]:
             "draft_cancel_business_binding_explicit",
         ),
         "computed": computed,
+    }
+
+
+def _validate_draft_cancel_v2(parameters: dict[str, Any]) -> dict[str, Any]:
+    move_id = _positive_id(_field(parameters, "move_id"), "move_id")
+    move_type = _field(parameters, "expected_move_type")
+    if move_type not in {"entry", "out_invoice", "in_invoice"}:
+        raise WriteSemanticError(
+            "expected_move_type must be entry, out_invoice, or in_invoice"
+        )
+    document_binding = _sha256_digest(
+        _field(parameters, "expected_document_binding"),
+        "expected_document_binding",
+    )
+    business_binding = _sha256_digest(
+        _field(parameters, "expected_business_binding"),
+        "expected_business_binding",
+    )
+    line_ids = _field(parameters, "expected_line_ids")
+    if not isinstance(line_ids, list) or not 2 <= len(line_ids) <= 1000:
+        raise WriteSemanticError(
+            "expected_line_ids must contain between 2 and 1000 lines"
+        )
+    for item in line_ids:
+        _positive_id(item, "expected_line_ids")
+    if len(line_ids) != len(set(line_ids)):
+        raise WriteSemanticError("expected_line_ids must be unique")
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    return {
+        "checks": (
+            "draft_cancel_v2_target_explicit",
+            "draft_cancel_v2_move_type_supported",
+            "draft_cancel_v2_bindings_explicit",
+            "draft_cancel_v2_line_set_explicit",
+        ),
+        "computed": {
+            "move_id": move_id,
+            "expected_move_type": move_type,
+            "expected_document_binding": document_binding,
+            "expected_business_binding": business_binding,
+            "expected_line_ids": list(line_ids),
+            "expected_line_count": len(line_ids),
+        },
     }
 
 
@@ -493,8 +649,11 @@ _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.accrual.create.v1": _validate_accrual,
     "acct.deferred.create.v1": _validate_deferred,
     "acct.period.adjustment_create.v1": _validate_adjustment,
+    "acct.journal.entry_create.v1": _validate_journal_entry_create,
+    "acct.move.post.v1": _validate_move_post,
     "acct.move.reverse.v1": _validate_reversal,
     "acct.move.draft_cancel.v1": _validate_draft_cancel,
+    "acct.move.draft_cancel.v2": _validate_draft_cancel_v2,
     "acct.recovery.execute.v1": _validate_recovery,
 }
 

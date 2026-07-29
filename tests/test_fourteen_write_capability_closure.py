@@ -407,7 +407,10 @@ REGISTRY = load_registry(ROOT / "registry" / "capabilities.json")
 WRITE_CAPABILITIES = {
     capability.id: capability
     for capability in REGISTRY
-    if capability.data["access"] == "write"
+    if (
+        capability.data["access"] == "write"
+        and capability.id in CAPABILITY_IDS
+    )
 }
 REGISTRY_DIGEST = registry_digest(REGISTRY)
 

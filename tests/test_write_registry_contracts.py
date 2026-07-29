@@ -12,7 +12,7 @@ from odoo_accounting_cli_v3.write_service import _ALLOWED_MODELS
 
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
 SHA256 = "a" * 64
-WRITE_IDS = (
+BASELINE_WRITE_IDS = (
     "acct.invoice.customer_create.v1",
     "acct.bill.vendor_create.v1",
     "acct.refund.create.v1",
@@ -27,6 +27,16 @@ WRITE_IDS = (
     "acct.move.reverse.v1",
     "acct.move.draft_cancel.v1",
     "acct.recovery.execute.v1",
+)
+PHASE_B_WRITE_IDS = (
+    "acct.journal.entry_create.v1",
+    "acct.move.post.v1",
+    "acct.move.draft_cancel.v2",
+)
+WRITE_IDS = (
+    *BASELINE_WRITE_IDS[:13],
+    *PHASE_B_WRITE_IDS,
+    BASELINE_WRITE_IDS[13],
 )
 
 EXPECTED_INPUT_FIELDS = {
@@ -87,6 +97,17 @@ EXPECTED_INPUT_FIELDS = {
         "currency_id", "reference", "reason", "posting_mode", "lines",
         "idempotency_key",
     },
+    "acct.journal.entry_create.v1": {
+        "company_id", "journal_id", "posting_date", "currency_id", "reference",
+        "reason", "posting_mode", "lines", "idempotency_key",
+    },
+    "acct.move.post.v1": {
+        "company_id", "move_id", "expected_move_type",
+        "expected_document_binding", "expected_business_binding",
+        "expected_journal_id", "expected_currency_id", "expected_posting_date",
+        "expected_reference", "expected_total_debit", "expected_total_credit",
+        "expected_line_count", "reason", "idempotency_key",
+    },
     "acct.move.reverse.v1": {
         "company_id", "move_id", "reversal_date", "journal_id", "currency_id",
         "expected_total_amount", "reason", "posting_mode", "idempotency_key",
@@ -95,6 +116,11 @@ EXPECTED_INPUT_FIELDS = {
         "company_id", "move_id", "expected_move_type",
         "expected_document_binding", "expected_business_binding", "reason",
         "idempotency_key",
+    },
+    "acct.move.draft_cancel.v2": {
+        "company_id", "move_id", "expected_move_type",
+        "expected_document_binding", "expected_business_binding",
+        "expected_line_ids", "reason", "idempotency_key",
     },
     "acct.recovery.execute.v1": {
         "company_id", "origin_operation_id", "expected_recovery_plan_digest",
@@ -332,6 +358,34 @@ VALID_INPUTS = {
         "expected_recovery_plan_digest": SHA256, "recovery_date": "2026-07-15",
         "reason": "Execute approved compensation", "idempotency_key": "recovery-1",
     },
+    "acct.journal.entry_create.v1": {
+        "company_id": 7, "journal_id": 8, "posting_date": "2026-07-31",
+        "currency_id": 12, "reference": "Manual reclassification 2026-07",
+        "reason": "Approved reclassification", "posting_mode": "draft",
+        "lines": [
+            _journal_line("journal-entry-1", "debit"),
+            _journal_line("journal-entry-2", "credit"),
+        ],
+        "idempotency_key": "journal-entry-july-reclassification",
+    },
+    "acct.move.post.v1": {
+        "company_id": 7, "move_id": 882, "expected_move_type": "entry",
+        "expected_document_binding": "d" * 64,
+        "expected_business_binding": "e" * 64, "expected_journal_id": 8,
+        "expected_currency_id": 12, "expected_posting_date": "2026-07-31",
+        "expected_reference": "Manual reclassification 2026-07",
+        "expected_total_debit": "100.00",
+        "expected_total_credit": "100.00", "expected_line_count": 2,
+        "reason": "Approved posting", "idempotency_key": "post-move-882",
+    },
+    "acct.move.draft_cancel.v2": {
+        "company_id": 7, "move_id": 883, "expected_move_type": "entry",
+        "expected_document_binding": "f" * 64,
+        "expected_business_binding": "0" * 64,
+        "expected_line_ids": [2001, 2002],
+        "reason": "Cancel duplicate pristine draft entry",
+        "idempotency_key": "cancel-draft-entry-883",
+    },
 }
 
 
@@ -442,10 +496,228 @@ def _valid_v2_output(capability_id):
 def test_exact_write_capability_set_and_safety_gates_remain_closed():
     writes = _writes()
     assert tuple(writes) == WRITE_IDS
+    assert len(BASELINE_WRITE_IDS) == 14
+    assert tuple(
+        capability_id
+        for capability_id in WRITE_IDS
+        if capability_id in BASELINE_WRITE_IDS
+    ) == BASELINE_WRITE_IDS
+    assert tuple(
+        capability_id
+        for capability_id in WRITE_IDS
+        if capability_id in PHASE_B_WRITE_IDS
+    ) == PHASE_B_WRITE_IDS
     for item in writes.values():
         assert item["evidence"] == {"level": "declared", "receipts": []}
         assert item.get("staged_environments", []) == []
         assert item["enabled_environments"] == []
+
+
+def test_phase_b_journal_entry_create_contract_is_exact_draft_only_and_tax_free():
+    writes = _writes()
+    capability = writes["acct.journal.entry_create.v1"]
+    schema = capability["input_schema"]
+    properties = schema["properties"]
+
+    assert capability["risk_level"] == "high"
+    assert capability["odoo_permissions"] == ["account.group_account_user"]
+    assert capability["idempotency"] == {
+        "required": True, "scope": "company_capability",
+    }
+    assert set(properties) == EXPECTED_INPUT_FIELDS[
+        "acct.journal.entry_create.v1"
+    ]
+    for name in ("company_id", "journal_id", "currency_id"):
+        assert properties[name] == {"type": "integer", "minimum": 1}
+    assert properties["posting_mode"] == {
+        "type": "string", "enum": ["draft"], "minLength": 5,
+        "maxLength": 5, "pattern": "^draft$",
+    }
+    assert properties["posting_date"] == {
+        "type": "string", "format": "date", "minLength": 10,
+        "maxLength": 10, "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+    }
+    assert properties["reference"] == {
+        "type": "string", "minLength": 1, "maxLength": 256,
+        "pattern": r"^.*\S.*$",
+    }
+    assert properties["reason"] == {
+        "type": "string", "minLength": 1, "maxLength": 512,
+        "pattern": r"^.*\S.*$",
+    }
+    assert properties["idempotency_key"] == {
+        "type": "string", "minLength": 1, "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    }
+    lines = properties["lines"]
+    assert {
+        "minItems": lines["minItems"],
+        "maxItems": lines["maxItems"],
+        "uniqueItems": lines["uniqueItems"],
+    } == {"minItems": 2, "maxItems": 250, "uniqueItems": True}
+    line = lines["items"]
+    assert set(line["properties"]) == {
+        "line_reference", "account_id", "partner_id", "currency_id", "name",
+        "side", "amount", "amount_currency", "tax_ids",
+    }
+    assert set(line["required"]) == set(line["properties"])
+    assert line["additionalProperties"] is False
+    assert line["properties"]["tax_ids"] == {
+        "type": "array", "minItems": 0, "maxItems": 0,
+        "uniqueItems": True, "items": {"type": "integer", "minimum": 1},
+    }
+    assert capability["output_schema"] == writes[
+        BASELINE_WRITE_IDS[0]
+    ]["output_schema"]
+
+    invalid = copy.deepcopy(VALID_INPUTS["acct.journal.entry_create.v1"])
+    invalid["posting_mode"] = "post"
+    with pytest.raises(ContractError):
+        validate_value(invalid, schema)
+    invalid = copy.deepcopy(VALID_INPUTS["acct.journal.entry_create.v1"])
+    invalid["lines"][0]["tax_ids"] = [31]
+    with pytest.raises(ContractError):
+        validate_value(invalid, schema)
+
+
+def test_phase_b_move_post_contract_binds_one_exact_manual_entry_graph():
+    writes = _writes()
+    capability = writes["acct.move.post.v1"]
+    schema = capability["input_schema"]
+    properties = schema["properties"]
+
+    assert capability["risk_level"] == "critical"
+    assert capability["odoo_permissions"] == [
+        "account.group_account_user", "account.group_account_invoice",
+    ]
+    assert capability["idempotency"] == {
+        "required": True, "scope": "company_origin_move",
+    }
+    assert set(properties) == EXPECTED_INPUT_FIELDS["acct.move.post.v1"]
+    for name in (
+        "company_id", "move_id", "expected_journal_id",
+        "expected_currency_id",
+    ):
+        assert properties[name] == {"type": "integer", "minimum": 1}
+    assert properties["expected_move_type"] == {
+        "type": "string", "enum": ["entry"], "minLength": 5,
+        "maxLength": 5, "pattern": "^entry$",
+    }
+    digest_schema = {
+        "type": "string", "minLength": 64, "maxLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+    }
+    assert properties["expected_document_binding"] == digest_schema
+    assert properties["expected_business_binding"] == digest_schema
+    assert properties["expected_posting_date"] == {
+        "type": "string", "format": "date", "minLength": 10,
+        "maxLength": 10, "pattern": r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+    }
+    positive_amount_schema = {
+        "type": "string", "minLength": 1, "maxLength": 128,
+        "pattern": (
+            r"^(?:0\.(?:0*[1-9][0-9]*)|"
+            r"[1-9][0-9]*(?:\.[0-9]+)?)$"
+        ),
+    }
+    assert properties["expected_total_debit"] == positive_amount_schema
+    assert properties["expected_total_credit"] == positive_amount_schema
+    assert properties["expected_line_count"] == {
+        "type": "integer", "minimum": 2, "maximum": 250,
+    }
+    assert properties["expected_reference"] == {
+        "type": "string", "minLength": 1, "maxLength": 256,
+        "pattern": r"^.*\S.*$",
+    }
+    assert properties["reason"] == {
+        "type": "string", "minLength": 1, "maxLength": 512,
+        "pattern": r"^.*\S.*$",
+    }
+    assert properties["idempotency_key"] == {
+        "type": "string", "minLength": 1, "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    }
+    assert capability["output_schema"] == writes[
+        BASELINE_WRITE_IDS[0]
+    ]["output_schema"]
+
+    for field, value in (
+        ("expected_move_type", "out_invoice"),
+        ("expected_document_binding", "A" * 64),
+        ("expected_total_debit", "0"),
+        ("expected_line_count", 1),
+        ("expected_line_count", 251),
+    ):
+        invalid = copy.deepcopy(VALID_INPUTS["acct.move.post.v1"])
+        invalid[field] = value
+        with pytest.raises(ContractError):
+            validate_value(invalid, schema)
+
+
+def test_phase_b_draft_cancel_v2_contract_binds_supported_type_and_exact_line_set():
+    writes = _writes()
+    capability = writes["acct.move.draft_cancel.v2"]
+    schema = capability["input_schema"]
+    properties = schema["properties"]
+
+    assert capability["risk_level"] == "high"
+    assert capability["odoo_permissions"] == [
+        "account.group_account_user", "account.group_account_invoice",
+    ]
+    assert capability["idempotency"] == {
+        "required": True, "scope": "company_origin_move",
+    }
+    assert capability["recovery"] == {
+        "method": "not_applicable_pristine_draft_cancel_is_terminal",
+    }
+    assert set(properties) == EXPECTED_INPUT_FIELDS[
+        "acct.move.draft_cancel.v2"
+    ]
+    for name in ("company_id", "move_id"):
+        assert properties[name] == {"type": "integer", "minimum": 1}
+    assert properties["expected_move_type"] == {
+        "type": "string",
+        "enum": ["entry", "out_invoice", "in_invoice"],
+        "minLength": 5,
+        "maxLength": 11,
+        "pattern": "^(?:entry|out_invoice|in_invoice)$",
+    }
+    assert properties["expected_line_ids"] == {
+        "type": "array", "minItems": 2, "maxItems": 1000,
+        "uniqueItems": True, "items": {"type": "integer", "minimum": 1},
+    }
+    assert properties["expected_document_binding"] == {
+        "type": "string", "minLength": 64, "maxLength": 64,
+        "pattern": "^[0-9a-f]{64}$",
+    }
+    assert properties["expected_business_binding"] == properties[
+        "expected_document_binding"
+    ]
+    assert properties["reason"] == {
+        "type": "string", "minLength": 1, "maxLength": 512,
+        "pattern": r"^.*\S.*$",
+    }
+    assert properties["idempotency_key"] == {
+        "type": "string", "minLength": 1, "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    }
+    assert capability["output_schema"] == writes[
+        BASELINE_WRITE_IDS[0]
+    ]["output_schema"]
+    assert writes["acct.move.draft_cancel.v1"]["input_schema"]["properties"][
+        "expected_move_type"
+    ]["enum"] == ["out_invoice", "in_invoice"]
+
+    for field, value in (
+        ("expected_move_type", "out_refund"),
+        ("expected_line_ids", [2001]),
+        ("expected_line_ids", [2001, 2001]),
+        ("expected_line_ids", list(range(1, 1002))),
+    ):
+        invalid = copy.deepcopy(VALID_INPUTS["acct.move.draft_cancel.v2"])
+        invalid[field] = value
+        with pytest.raises(ContractError):
+            validate_value(invalid, schema)
 
 
 def test_write_inputs_have_exact_complete_fields_and_no_placeholders():
@@ -609,7 +881,11 @@ def test_domain_line_contracts_and_cross_field_inputs_are_explicit():
     assert "null" in bank_line["properties"]["foreign_currency_id"]["type"]
     assert "null" in bank_line["properties"]["foreign_amount"]["type"]
 
-    for capability_id in ("acct.accrual.create.v1", "acct.period.adjustment_create.v1"):
+    for capability_id in (
+        "acct.accrual.create.v1",
+        "acct.period.adjustment_create.v1",
+        "acct.journal.entry_create.v1",
+    ):
         line = writes[capability_id]["input_schema"]["properties"]["lines"]["items"]
         assert set(line["properties"]) == {
             "line_reference", "account_id", "partner_id", "currency_id", "name",
@@ -810,6 +1086,7 @@ def test_write_batch_limits_fit_the_precommit_audit_graph_budget():
     for capability_id in (
         "acct.accrual.create.v1",
         "acct.period.adjustment_create.v1",
+        "acct.journal.entry_create.v1",
     ):
         assert writes[capability_id]["input_schema"]["properties"]["lines"][
             "maxItems"

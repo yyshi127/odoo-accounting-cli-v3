@@ -84,8 +84,11 @@ _CAPABILITIES = frozenset(
         "acct.accrual.create.v1",
         "acct.deferred.create.v1",
         "acct.period.adjustment_create.v1",
+        "acct.journal.entry_create.v1",
+        "acct.move.post.v1",
         "acct.move.reverse.v1",
         "acct.move.draft_cancel.v1",
+        "acct.move.draft_cancel.v2",
         "acct.recovery.execute.v1",
     }
 )
@@ -518,6 +521,12 @@ def _decimal(value: Any, field: str) -> Decimal:
     return result
 
 
+def _canonical_decimal(value: Any, field: str) -> str:
+    normalized = _decimal(value, field).normalize()
+    result = format(normalized, "f")
+    return "0" if result in {"-0", ""} else result
+
+
 def _primitive(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
@@ -719,6 +728,89 @@ class OdooWriteHandlers:
                 raise OdooWriteHandlerError(f"{field} violates {lock_field}")
         return posting_date
 
+    def assert_effective_open_date(
+        self,
+        company: Any,
+        value: Any,
+        field: str,
+        *,
+        journal: Any,
+        taxes: bool = False,
+        move: Any | None = None,
+    ) -> date:
+        posting_date = _as_date(value, field)
+        if posting_date > self.context.today:
+            raise OdooWriteHandlerError(
+                f"{field} is in a future accounting period"
+            )
+        if move is None:
+            checker = getattr(company, "_get_violated_lock_dates", None)
+            checker_args = (posting_date, taxes, journal)
+        else:
+            tax_checker = getattr(move, "_affect_tax_report", None)
+            checker = getattr(move, "_get_violated_lock_dates", None)
+            if not callable(tax_checker):
+                raise OdooWriteHandlerError(
+                    "Odoo move tax-effect API is unavailable"
+                )
+            try:
+                affects_tax_report = tax_checker()
+            except Exception as exc:
+                raise OdooWriteHandlerError(
+                    "Odoo move tax-effect check failed"
+                ) from exc
+            if (
+                not isinstance(affects_tax_report, bool)
+                or affects_tax_report is not taxes
+            ):
+                raise OdooWriteHandlerError(
+                    "manual journal entry has an unexpected Odoo tax effect"
+                )
+            checker_args = (posting_date, affects_tax_report)
+        if not callable(checker):
+            raise OdooWriteHandlerError(
+                "Odoo effective lock-date API is unavailable"
+            )
+        try:
+            violations = checker(*checker_args)
+        except Exception as exc:
+            raise OdooWriteHandlerError(
+                "Odoo effective lock-date check failed"
+            ) from exc
+        if not isinstance(violations, list):
+            raise OdooWriteHandlerError(
+                "Odoo effective lock-date result is invalid"
+            )
+        normalized: list[tuple[date, str]] = []
+        for violation in violations:
+            if (
+                not isinstance(violation, (list, tuple))
+                or len(violation) != 2
+                or not isinstance(violation[1], str)
+                or not violation[1]
+            ):
+                raise OdooWriteHandlerError(
+                    "Odoo effective lock-date result is invalid"
+                )
+            try:
+                lock_date = _as_date(
+                    violation[0], f"effective {violation[1]}"
+                )
+            except OdooWriteHandlerError as exc:
+                raise OdooWriteHandlerError(
+                    "Odoo effective lock-date result is invalid"
+                ) from exc
+            normalized.append((lock_date, violation[1]))
+        if normalized:
+            detail = ", ".join(
+                f"{lock_field}={lock_date.isoformat()}"
+                for lock_date, lock_field in normalized
+            )
+            raise OdooWriteHandlerError(
+                f"{field} violates effective Odoo lock dates: {detail}"
+            )
+        return posting_date
+
     def assert_currency(self, currency_id: int, company: Any, journal: Any | None = None) -> Any:
         currency = self.record("res.currency", currency_id, company, shared=True)
         if getattr(currency, "active", True) is False:
@@ -743,6 +835,20 @@ class OdooWriteHandlers:
         )
         if actual_units != expected_units:
             raise OdooWriteHandlerError(f"{field} differs from the approved amount")
+
+    def assert_currency_precision(
+        self, value: Any, currency: Any, field: str
+    ) -> None:
+        rounding = _decimal(
+            getattr(currency, "rounding", "0.01"), "currency.rounding"
+        )
+        if rounding <= 0:
+            raise OdooWriteHandlerError("currency rounding is invalid")
+        units = _decimal(value, field) / rounding
+        if units != units.quantize(Decimal("1")):
+            raise OdooWriteHandlerError(
+                f"{field} exceeds the approved currency precision"
+            )
 
     def snapshot(
         self,
@@ -1181,8 +1287,10 @@ class OdooWriteHandlers:
             "acct.asset.create.v1",
             "acct.depreciation.post.v1",
             "acct.deferred.create.v1",
+            "acct.move.post.v1",
             "acct.move.reverse.v1",
             "acct.move.draft_cancel.v1",
+            "acct.move.draft_cancel.v2",
             "acct.recovery.execute.v1",
         }:
             verification_result = method(
@@ -1317,8 +1425,11 @@ class OdooWriteHandlers:
             "acct.accrual.create.v1": "accrual",
             "acct.deferred.create.v1": "deferred",
             "acct.period.adjustment_create.v1": "adjustment",
+            "acct.journal.entry_create.v1": "journal_entry_create",
+            "acct.move.post.v1": "move_post",
             "acct.move.reverse.v1": "reversal",
             "acct.move.draft_cancel.v1": "draft_cancel",
+            "acct.move.draft_cancel.v2": "draft_cancel_v2",
             "acct.recovery.execute.v1": "recovery",
         }[capability_id]
         return f"{phase}_{key}"
@@ -5341,16 +5452,28 @@ class OdooWriteHandlers:
             "schedule_retained", "record_graph_exact",
         ]
 
-    def precheck_journal_entry(self, p: dict[str, Any], company: Any, *, adjustment: bool) -> dict[str, Any]:
+    def precheck_journal_entry(
+        self,
+        p: dict[str, Any],
+        company: Any,
+        *,
+        adjustment: bool,
+        raw_lock_dates: bool = True,
+    ) -> dict[str, Any]:
         if any(line.get("tax_ids") for line in p["lines"]):
             raise OdooWriteHandlerError(
                 "tax-bearing period entries are disabled until their generated tax graph can be verified exactly"
             )
         journal = self.check_journal(p, company, {"general"})
         currency = self.assert_currency(p["currency_id"], company, journal)
-        self.assert_open_date(
-            company, p["posting_date"], "posting_date", journal=journal, taxes=False
-        )
+        if raw_lock_dates:
+            self.assert_open_date(
+                company,
+                p["posting_date"],
+                "posting_date",
+                journal=journal,
+                taxes=False,
+            )
         dependencies: list[tuple[str, Any]] = [
             ("res.company", company),
             ("res.currency", currency),
@@ -5385,7 +5508,9 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "accrual reversal_date must be future-dated for Odoo auto-post"
             )
-        result = self.precheck_journal_entry(p, company, adjustment=False)
+        result = self.precheck_journal_entry(
+            p, company, adjustment=False
+        )
         document_binding = self.document_binding("accrual", p)
         business_binding = self.business_binding("accrual", p)
         if self.search_records(
@@ -5427,6 +5552,115 @@ class OdooWriteHandlers:
     def precheck_adjustment(self, p, company):
         return self.precheck_journal_entry(p, company, adjustment=True)
 
+    def precheck_journal_entry_create(
+        self, p: dict[str, Any], company: Any
+    ) -> dict[str, Any]:
+        if p["posting_mode"] != "draft":
+            raise OdooWriteHandlerError(
+                "manual journal entry creation is restricted to draft mode"
+            )
+        result = self.precheck_journal_entry(
+            p,
+            company,
+            adjustment=False,
+            raw_lock_dates=False,
+        )
+        journal = self.check_journal(p, company, {"general"})
+        self.assert_effective_open_date(
+            company,
+            p["posting_date"],
+            "posting_date",
+            journal=journal,
+            taxes=False,
+        )
+        transaction_currency = self.assert_currency(
+            p["currency_id"], company
+        )
+        company_currency_id = _record_id(
+            getattr(company, "currency_id", None)
+        )
+        if company_currency_id is None:
+            raise OdooWriteHandlerError(
+                "company currency is not configured"
+            )
+        company_currency = self.assert_currency(
+            company_currency_id, company
+        )
+        if not any(
+            item.get("model") == "res.currency"
+            and item.get("record_id") == company_currency_id
+            for item in result["dependencies"]
+        ):
+            result["dependencies"].append(
+                self.snapshot(
+                    "res.currency", company_currency, company
+                )
+            )
+            result["dependencies"].sort(
+                key=lambda item: (item["model"], item["record_id"])
+            )
+        for line in p["lines"]:
+            account = self.record(
+                "account.account", line["account_id"], company
+            )
+            if str(getattr(account, "account_type", "")) in {
+                "asset_receivable",
+                "liability_payable",
+                "off_balance",
+            }:
+                raise OdooWriteHandlerError(
+                    "manual journal entry cannot use a receivable, payable, "
+                    "or off-balance account"
+                )
+            self.assert_currency_precision(
+                line["amount"],
+                company_currency,
+                "manual journal entry company amount",
+            )
+            self.assert_currency_precision(
+                line["amount_currency"],
+                transaction_currency,
+                "manual journal entry transaction amount",
+            )
+        document_binding = self.document_binding("journal_entry", p)
+        business_binding = self.business_binding("journal_entry", p)
+        for field, binding, label in (
+            (
+                "odoo_cli_v3_document_binding",
+                document_binding,
+                "approved journal entry content",
+            ),
+            (
+                "odoo_cli_v3_business_binding",
+                business_binding,
+                "journal and reference business key",
+            ),
+        ):
+            if self.search_records(
+                "account.move",
+                [
+                    ("company_id", "=", company.id),
+                    ("move_type", "=", "entry"),
+                    (field, "=", binding),
+                ],
+                company,
+                limit=1,
+            ):
+                raise OdooWriteHandlerError(
+                    f"manual journal entry {label} already exists"
+                )
+        result["checks"].extend(
+            [
+                "draft_only",
+                "effective_odoo_lock_dates_open",
+                "restricted_accounts_absent",
+                "currency_precision_matches",
+                "journal_entry_content_binding_unique",
+                "journal_entry_business_binding_unique",
+            ]
+        )
+        return result
+
     @staticmethod
     def journal_line_values(lines: list[dict[str, Any]]) -> list[tuple[int, int, dict[str, Any]]]:
         result = []
@@ -5453,6 +5687,44 @@ class OdooWriteHandlers:
             return customer_invoice_document_binding(parameters)
         if kind == "vendor_bill":
             return vendor_bill_document_binding(parameters)
+        if kind == "journal_entry":
+            normalized = {
+                "company_id": parameters["company_id"],
+                "journal_id": parameters["journal_id"],
+                "posting_date": parameters["posting_date"],
+                "currency_id": parameters["currency_id"],
+                "reference": parameters["reference"],
+                "reason": parameters["reason"],
+                "posting_mode": "draft",
+                "lines": sorted(
+                    (
+                        {
+                            "line_reference": line["line_reference"],
+                            "account_id": line["account_id"],
+                            "partner_id": line["partner_id"],
+                            "currency_id": line["currency_id"],
+                            "name": line["name"],
+                            "side": line["side"],
+                            "amount": _canonical_decimal(
+                                line["amount"], "amount"
+                            ),
+                            "amount_currency": _canonical_decimal(
+                                line["amount_currency"],
+                                "amount_currency",
+                            ),
+                            "tax_ids": sorted(line["tax_ids"]),
+                        }
+                        for line in parameters["lines"]
+                    ),
+                    key=lambda item: item["line_reference"],
+                ),
+            }
+            return _digest(
+                {
+                    "capability_kind": kind,
+                    "parameters": normalized,
+                }
+            )
         return _digest(
             {
                 "capability_kind": kind,
@@ -5480,9 +5752,142 @@ class OdooWriteHandlers:
             }
         elif kind in {"accrual", "accrual_scheduled_reversal"}:
             identity = {"reference": parameters["reference"]}
+        elif kind == "journal_entry":
+            identity = {
+                "journal_id": parameters["journal_id"],
+                "reference": parameters["reference"],
+            }
         else:
             raise OdooWriteHandlerError("unsupported business binding kind")
         return _digest({"business_kind": kind, "identity": identity})
+
+    def journal_entry_parameters_from_graph(
+        self,
+        move: Any,
+        lines: list[Any],
+        company: Any,
+    ) -> dict[str, Any]:
+        normalized_lines: list[dict[str, Any]] = []
+        seen_references: set[str] = set()
+        for line in lines:
+            reference = str(
+                getattr(line, "odoo_cli_v3_line_reference", "") or ""
+            )
+            if not reference or reference in seen_references:
+                raise OdooWriteHandlerError(
+                    "manual journal entry line reference is missing or duplicated"
+                )
+            seen_references.add(reference)
+            debit = _decimal(getattr(line, "debit", None), "debit")
+            credit = _decimal(getattr(line, "credit", None), "credit")
+            if debit > 0 and credit == 0:
+                side = "debit"
+                amount = debit
+            elif credit > 0 and debit == 0:
+                side = "credit"
+                amount = credit
+            else:
+                raise OdooWriteHandlerError(
+                    "manual journal entry line side is ambiguous"
+                )
+            normalized_lines.append(
+                {
+                    "line_reference": reference,
+                    "account_id": _record_id(line.account_id),
+                    "partner_id": _record_id(
+                        getattr(line, "partner_id", None)
+                    ),
+                    "currency_id": _record_id(line.currency_id),
+                    "name": str(getattr(line, "name", "") or ""),
+                    "side": side,
+                    "amount": _canonical_decimal(amount, "amount"),
+                    "amount_currency": _canonical_decimal(
+                        getattr(line, "amount_currency", None),
+                        "amount_currency",
+                    ),
+                    "tax_ids": _ids(getattr(line, "tax_ids", [])),
+                }
+            )
+        parameters = {
+            "company_id": company.id,
+            "journal_id": _record_id(move.journal_id),
+            "posting_date": str(move.date),
+            "currency_id": _record_id(move.currency_id),
+            "reference": str(move.ref or ""),
+            "reason": str(
+                getattr(move, "odoo_cli_v3_reason", "") or ""
+            ),
+            "posting_mode": "draft",
+            "lines": normalized_lines,
+        }
+        if (
+            parameters["journal_id"] is None
+            or parameters["currency_id"] is None
+            or not parameters["reference"]
+            or not parameters["reason"]
+            or any(
+                line["account_id"] is None
+                or line["currency_id"] is None
+                or not line["name"]
+                for line in normalized_lines
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry graph cannot reproduce its immutable binding"
+            )
+        return parameters
+
+    def execute_journal_entry_create(self, p, company, checked):
+        journal = self.check_journal(p, company, {"general"})
+        self.assert_effective_open_date(
+            company,
+            p["posting_date"],
+            "posting_date",
+            journal=journal,
+            taxes=False,
+        )
+        values = {
+            "move_type": "entry",
+            "company_id": p["company_id"],
+            "journal_id": p["journal_id"],
+            "date": p["posting_date"],
+            "ref": p["reference"],
+            "odoo_cli_v3_reason": p["reason"],
+            "odoo_cli_v3_document_binding": self.document_binding(
+                "journal_entry", p
+            ),
+            "odoo_cli_v3_business_binding": self.business_binding(
+                "journal_entry", p
+            ),
+            "line_ids": self.journal_line_values(p["lines"]),
+        }
+        move = self.create_model(
+            "account.move",
+            company,
+            context={
+                "tracking_disable": True,
+                "mail_notrack": True,
+            },
+        ).create(values)
+        self.require_created(move, "account.move", company)
+        if str(getattr(move, "state", "")) != "draft":
+            raise OdooWriteHandlerError(
+                "manual journal entry was not created in draft state"
+        )
+        records = self.move_records(move, company)
+        self.verify_journal_entry_create(p, company, records)
+        self.assert_effective_open_date(
+            company,
+            p["posting_date"],
+            "posting_date",
+            journal=journal,
+            taxes=False,
+        )
+        return records, _recovery(
+            "manual_escalation",
+            "manual_review_pristine_journal_entry",
+            [{"model": "account.move", "record_id": move.id}],
+        )
 
     def execute_journal_entry(self, p, company, *, accrual: bool):
         kind = "accrual" if accrual else "period_adjustment"
@@ -5715,6 +6120,54 @@ class OdooWriteHandlers:
         ):
             raise OdooWriteHandlerError("period adjustment document binding differs")
         return [*checks, "document_binding_matches"]
+
+    def verify_journal_entry_create(self, p, company, records):
+        checks = self.verify_journal_entry(p, company, records)
+        move = self.only_record(records, "account.move")
+        if (
+            p["posting_mode"] != "draft"
+            or str(getattr(move, "name", "") or "") not in {"", "/"}
+            or getattr(move, "posted_before", None) is not False
+            or str(getattr(move, "auto_post", "")) != "no"
+            or str(getattr(move, "odoo_cli_v3_reason", "") or "")
+            != p["reason"]
+            or str(
+                getattr(move, "odoo_cli_v3_document_binding", "") or ""
+            )
+            != self.document_binding("journal_entry", p)
+            or str(
+                getattr(move, "odoo_cli_v3_business_binding", "") or ""
+            )
+            != self.business_binding("journal_entry", p)
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry immutable metadata differs"
+            )
+        for _model_name, record in records:
+            if (
+                _model_name == "account.move.line"
+                and (
+                    _record_id(getattr(record, "tax_line_id", None))
+                    is not None
+                    or _ids(getattr(record, "tax_ids", []))
+                    or _ids(getattr(record, "tax_tag_ids", []))
+                    or getattr(record, "analytic_distribution", False)
+                    not in (False, None, {})
+                    or _ids(getattr(record, "analytic_line_ids", []))
+                )
+            ):
+                raise OdooWriteHandlerError(
+                    "manual journal entry generated an unapproved tax or analytic graph"
+                )
+        return [
+            *checks,
+            "draft_sequence_absent",
+            "never_posted",
+            "reason_matches",
+            "document_binding_matches",
+            "business_binding_matches",
+            "tax_and_analytic_graph_absent",
+        ]
 
     def precheck_deferred(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
         source = self.record("account.move.line", p["source_move_line_id"], company, write=True)
@@ -6111,6 +6564,499 @@ class OdooWriteHandlers:
             "generated_states_match", "generated_moves_balanced",
             "generated_accounts_match", "initial_transfer_matches",
             "recognition_total_matches", "record_graph_exact",
+        ]
+
+    def _pristine_v3_draft_entry_graph(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+        *,
+        require_expected_lines: bool,
+    ) -> tuple[Any, list[Any], list[tuple[str, Any]]]:
+        if self.context.trusted_recovery_plan is not None:
+            raise OdooWriteHandlerError(
+                "trusted recovery plan must be null for a normal move operation"
+            )
+        move = self.record("account.move", p["move_id"], company, write=True)
+        line_ids = _ids(getattr(move, "line_ids", []))
+        if not line_ids:
+            raise OdooWriteHandlerError(
+                "manual journal entry requires a complete non-empty line graph"
+            )
+        if require_expected_lines and line_ids != sorted(p["expected_line_ids"]):
+            raise OdooWriteHandlerError(
+                "manual journal entry line graph differs from the approved IDs"
+            )
+        lines = [
+            self.record(
+                "account.move.line", record_id, company, write=True
+            )
+            for record_id in line_ids
+        ]
+        if (
+            str(getattr(move, "state", "")) != "draft"
+            or str(getattr(move, "move_type", "")) != "entry"
+            or getattr(move, "name", None) not in {False, "/"}
+            or getattr(move, "posted_before", None) is not False
+            or str(getattr(move, "auto_post", "")) != "no"
+            or getattr(move, "auto_post_until", None) not in {False, None}
+            or getattr(move, "sequence_prefix", None) not in {False, None, ""}
+            or getattr(move, "sequence_number", None) not in {False, 0}
+            or getattr(move, "secure_sequence_number", 0) not in {False, 0}
+            or getattr(move, "made_sequence_gap", None) is not False
+            or getattr(move, "checked", None) is not False
+            or bool(getattr(move, "inalterable_hash", False))
+            or bool(getattr(move, "need_cancel_request", False))
+            or bool(getattr(move, "is_manually_modified", False))
+            or _record_id(getattr(move, "company_id", None)) != company.id
+        ):
+            raise OdooWriteHandlerError(
+                "move target is not a pristine V3 draft manual journal entry"
+            )
+        journal = getattr(move, "journal_id", None)
+        currency = getattr(move, "currency_id", None)
+        if (
+            _record_id(journal) is None
+            or _record_id(getattr(journal, "company_id", None)) != company.id
+            or str(getattr(journal, "type", "")) != "general"
+            or getattr(journal, "active", True) is False
+            or _record_id(currency) is None
+            or getattr(currency, "active", True) is False
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry journal or currency is not eligible"
+            )
+        if (
+            str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
+            != p["expected_document_binding"]
+            or str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
+            != p["expected_business_binding"]
+            or not self._valid_sha_binding(
+                getattr(move, "odoo_cli_v3_document_binding", None)
+            )
+            or not self._valid_sha_binding(
+                getattr(move, "odoo_cli_v3_business_binding", None)
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry immutable binding differs"
+            )
+        graph_parameters = self.journal_entry_parameters_from_graph(
+            move, lines, company
+        )
+        if (
+            self.document_binding("journal_entry", graph_parameters)
+            != p["expected_document_binding"]
+            or self.business_binding("journal_entry", graph_parameters)
+            != p["expected_business_binding"]
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry content no longer matches its immutable binding"
+            )
+        move_links = (
+            "auto_post_origin_id",
+            "origin_payment_id",
+            "statement_line_id",
+            "statement_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "reversed_entry_id",
+            "asset_id",
+            "closing_return_id",
+            "transfer_model_id",
+            "purchase_id",
+            "debit_origin_id",
+            "invoice_pdf_report_id",
+            "invoice_vendor_bill_id",
+            "purchase_vendor_bill_id",
+            "ubl_cii_xml_id",
+            "l10n_es_edi_facturae_xml_id",
+            "signing_user",
+            "message_main_attachment_id",
+        )
+        move_link_sets = (
+            "payment_ids",
+            "matched_payment_ids",
+            "reconciled_payment_ids",
+            "tax_cash_basis_created_move_ids",
+            "reversal_move_ids",
+            "adjusting_entry_origin_move_ids",
+            "adjusting_entries_move_ids",
+            "exchange_diff_partial_ids",
+            "deferred_move_ids",
+            "deferred_original_move_ids",
+            "edi_document_ids",
+            "expense_ids",
+            "pos_order_ids",
+            "statement_line_ids",
+            "transaction_ids",
+            "authorized_transaction_ids",
+            "asset_ids",
+            "stock_move_ids",
+            "landed_costs_ids",
+            "debit_note_ids",
+            "attachment_ids",
+        )
+        if any(
+            _record_id(getattr(move, field, None)) is not None
+            for field in move_links
+        ) or any(_ids(getattr(move, field, [])) for field in move_link_sets):
+            raise OdooWriteHandlerError(
+                "manual journal entry has an external accounting or business link"
+            )
+        if (
+            bool(getattr(move, "signature", False))
+            or any(
+                _is_present(getattr(move, field, False))
+                for field in (
+                    "access_token",
+                    "invoice_pdf_report_file",
+                    "l10n_es_edi_facturae_xml_file",
+                    "ubl_cii_xml_file",
+                )
+            )
+            or bool(getattr(move, "is_move_sent", False))
+            or getattr(move, "sending_data", False) not in (False, None, {})
+            or bool(getattr(move, "is_being_sent", False))
+            or getattr(move, "invoice_source_email", False)
+            not in (False, None, "")
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry has a sending, signature, or attachment effect"
+            )
+        total_debit = Decimal("0")
+        total_credit = Decimal("0")
+        for line in lines:
+            account = getattr(line, "account_id", None)
+            if (
+                _record_id(getattr(line, "move_id", None)) != move.id
+                or _record_id(getattr(line, "company_id", None)) != company.id
+                or str(getattr(line, "parent_state", "")) != "draft"
+                or _record_id(account) is None
+                or getattr(account, "deprecated", False)
+                or str(getattr(account, "account_type", ""))
+                in {"asset_receivable", "liability_payable", "off_balance"}
+                or bool(getattr(line, "reconciled", False))
+                or _record_id(getattr(line, "full_reconcile_id", None))
+                is not None
+                or _ids(getattr(line, "matched_debit_ids", []))
+                or _ids(getattr(line, "matched_credit_ids", []))
+                or _record_id(getattr(line, "statement_line_id", None))
+                is not None
+                or _record_id(getattr(line, "payment_id", None)) is not None
+                or _record_id(getattr(line, "statement_id", None)) is not None
+                or _record_id(getattr(line, "purchase_order_id", None))
+                is not None
+                or _record_id(getattr(line, "reconcile_model_id", None))
+                is not None
+                or _ids(getattr(line, "asset_ids", []))
+                or _ids(getattr(line, "sale_line_ids", []))
+                or _ids(getattr(line, "distribution_analytic_account_ids", []))
+                or _ids(getattr(line, "reconciled_lines_ids", []))
+                or _record_id(getattr(line, "purchase_line_id", None))
+                is not None
+                or _record_id(getattr(line, "expense_id", None)) is not None
+                or _record_id(getattr(line, "cogs_origin_id", None)) is not None
+                or bool(getattr(line, "is_landed_costs_line", False))
+                or _ids(getattr(line, "move_attachment_ids", []))
+                or bool(getattr(line, "is_imported", False))
+                or bool(getattr(line, "is_downpayment", False))
+                or getattr(line, "analytic_distribution", False)
+                not in (False, None, {})
+                or _ids(getattr(line, "analytic_line_ids", []))
+                or _record_id(getattr(line, "tax_line_id", None)) is not None
+                or _ids(getattr(line, "tax_ids", []))
+                or _ids(getattr(line, "tax_tag_ids", []))
+                or getattr(line, "deferred_start_date", None)
+                not in {None, False}
+                or getattr(line, "deferred_end_date", None)
+                not in {None, False}
+                or getattr(line, "display_type", None)
+                not in {None, False, "product"}
+            ):
+                raise OdooWriteHandlerError(
+                    "manual journal entry line has a restricted account, tax, "
+                    "analytic, reconciliation, or external effect"
+                )
+            debit = _decimal(getattr(line, "debit", None), "debit")
+            credit = _decimal(getattr(line, "credit", None), "credit")
+            if debit < 0 or credit < 0 or (debit > 0) == (credit > 0):
+                raise OdooWriteHandlerError(
+                    "manual journal entry line has invalid debit and credit"
+                )
+            total_debit += debit
+            total_credit += credit
+        self.assert_amount(
+            total_debit, total_credit, currency, "manual entry balance"
+        )
+        records = [
+            ("account.move", move),
+            *(("account.move.line", line) for line in lines),
+        ]
+        return move, lines, records
+
+    def precheck_move_post(
+        self, p: dict[str, Any], company: Any
+    ) -> dict[str, Any]:
+        move, lines, records = self._pristine_v3_draft_entry_graph(
+            p, company, require_expected_lines=False
+        )
+        if (
+            p["expected_move_type"] != "entry"
+            or _record_id(move.journal_id) != p["expected_journal_id"]
+            or _record_id(move.currency_id) != p["expected_currency_id"]
+            or str(move.date) != p["expected_posting_date"]
+            or str(move.ref or "") != p["expected_reference"]
+            or len(lines) != p["expected_line_count"]
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry posting identity differs"
+            )
+        self.assert_effective_open_date(
+            company,
+            p["expected_posting_date"],
+            "expected_posting_date",
+            journal=move.journal_id,
+            taxes=False,
+            move=move,
+        )
+        total_debit = sum(
+            _decimal(line.debit, "debit") for line in lines
+        )
+        total_credit = sum(
+            _decimal(line.credit, "credit") for line in lines
+        )
+        company_currency = getattr(company, "currency_id", None)
+        if _record_id(company_currency) is None:
+            raise OdooWriteHandlerError(
+                "company currency is not configured"
+            )
+        self.assert_amount(
+            total_debit,
+            p["expected_total_debit"],
+            company_currency,
+            "expected_total_debit",
+        )
+        self.assert_amount(
+            total_credit,
+            p["expected_total_credit"],
+            company_currency,
+            "expected_total_credit",
+        )
+        return {
+            "checks": [
+                "pristine_v3_draft_manual_entry",
+                "move_identity_matches",
+                "document_and_business_bindings_match",
+                "posting_date_open",
+                "journal_currency_and_totals_match",
+                "restricted_accounts_absent",
+                "tax_analytic_reconciliation_graph_absent",
+                "external_effect_graph_absent",
+                "complete_line_graph",
+                "write_acl",
+            ],
+            "before": self.snapshots(records, company),
+            "dependencies": self.snapshots(
+                self.unique_records(
+                    [
+                        ("account.journal", move.journal_id),
+                        ("res.currency", move.currency_id),
+                        ("res.currency", company.currency_id),
+                        *(
+                            ("account.account", line.account_id)
+                            for line in lines
+                        ),
+                    ]
+                ),
+                company,
+            ),
+        }
+
+    def execute_move_post(self, p, company, checked):
+        move, _lines, _records = self._pristine_v3_draft_entry_graph(
+            p, company, require_expected_lines=False
+        )
+        self.assert_effective_open_date(
+            company,
+            p["expected_posting_date"],
+            "expected_posting_date",
+            journal=move.journal_id,
+            taxes=False,
+            move=move,
+        )
+        move.with_context(
+            tracking_disable=True,
+            mail_notrack=True,
+        ).action_post()
+        if str(getattr(move, "state", "")) != "posted":
+            raise OdooWriteHandlerError(
+                "manual journal entry action_post did not post the move"
+            )
+        records = self.move_records(move, company)
+        self.verify_move_post(
+            p,
+            company,
+            records,
+            self.trusted_before_values(checked, company),
+        )
+        return records, _recovery(
+            "manual_escalation",
+            "manual_review_move_reversal",
+            [{"model": "account.move", "record_id": move.id}],
+        )
+
+    def verify_move_post(self, p, company, records, before):
+        keyed = {
+            (model_name, record.id): record
+            for model_name, record in records
+        }
+        move_key = ("account.move", p["move_id"])
+        move = keyed.get(move_key)
+        if move is None:
+            raise OdooWriteHandlerError(
+                "posted manual journal entry read-back move is missing"
+            )
+        line_ids = _ids(getattr(move, "line_ids", []))
+        expected_keys = {
+            move_key,
+            *(("account.move.line", record_id) for record_id in line_ids),
+        }
+        if (
+            len(keyed) != len(records)
+            or set(keyed) != expected_keys
+            or set(before) != expected_keys
+            or len(line_ids) != p["expected_line_count"]
+            or str(getattr(move, "state", "")) != "posted"
+            or str(getattr(move, "move_type", "")) != "entry"
+            or str(getattr(move, "name", "") or "") in {"", "/"}
+            or getattr(move, "posted_before", None) is not True
+            or _record_id(move.journal_id) != p["expected_journal_id"]
+            or _record_id(move.currency_id) != p["expected_currency_id"]
+            or str(move.date) != p["expected_posting_date"]
+            or str(move.ref or "") != p["expected_reference"]
+            or str(
+                getattr(move, "odoo_cli_v3_document_binding", "") or ""
+            )
+            != p["expected_document_binding"]
+            or str(
+                getattr(move, "odoo_cli_v3_business_binding", "") or ""
+            )
+            != p["expected_business_binding"]
+        ):
+            raise OdooWriteHandlerError(
+                "posted manual journal entry graph or identity differs"
+            )
+        move_before = before.get(move_key)
+        if (
+            not isinstance(move_before, Mapping)
+            or move_before.get("state") != "draft"
+            or move_before.get("posted_before") is not False
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry posting approval snapshot is invalid"
+            )
+        move_current = self.assert_approved_record_delta(
+            "account.move",
+            move,
+            company,
+            move_before,
+            allowed_changed_fields=frozenset(
+                {
+                    "state",
+                    "name",
+                    "posted_before",
+                    "sequence_prefix",
+                    "sequence_number",
+                    "secure_sequence_number",
+                    "inalterable_hash",
+                    "checked",
+                    "write_uid",
+                    "write_date",
+                }
+            ),
+            label="posted manual journal entry",
+        )
+        transaction_write_date = self.assert_controlled_log_access_delta(
+            move_current,
+            move_before,
+            label="posted manual journal entry",
+        )
+        for line_id in line_ids:
+            line = keyed[("account.move.line", line_id)]
+            approved = before.get(("account.move.line", line_id))
+            if not isinstance(approved, Mapping):
+                raise OdooWriteHandlerError(
+                    "manual journal entry line approval snapshot is missing"
+                )
+            current = self.snapshot(
+                "account.move.line", line, company
+            )["values"]
+            if (
+                set(current) != set(approved)
+                or classic_read_many2one_id(approved.get("move_id"))
+                != move.id
+                or classic_read_many2one_id(current.get("move_id"))
+                != move.id
+                or approved.get("parent_state") != "draft"
+                or current.get("parent_state") != "posted"
+                or any(
+                    current[field] != approved[field]
+                    for field in set(current)
+                    - {"move_id", "parent_state", "write_uid", "write_date"}
+                )
+            ):
+                raise OdooWriteHandlerError(
+                    "manual journal entry line changed outside the posting allowlist"
+                )
+            if self.assert_controlled_log_access_delta(
+                current,
+                approved,
+                label="posted manual journal entry line",
+            ) != transaction_write_date:
+                raise OdooWriteHandlerError(
+                    "manual journal entry posting audit timestamps differ"
+                )
+        total_debit = sum(
+            _decimal(
+                keyed[("account.move.line", line_id)].debit, "debit"
+            )
+            for line_id in line_ids
+        )
+        total_credit = sum(
+            _decimal(
+                keyed[("account.move.line", line_id)].credit, "credit"
+            )
+            for line_id in line_ids
+        )
+        company_currency = getattr(company, "currency_id", None)
+        if _record_id(company_currency) is None:
+            raise OdooWriteHandlerError(
+                "company currency is not configured"
+            )
+        self.assert_amount(
+            total_debit,
+            p["expected_total_debit"],
+            company_currency,
+            "expected_total_debit",
+        )
+        self.assert_amount(
+            total_credit,
+            p["expected_total_credit"],
+            company_currency,
+            "expected_total_credit",
+        )
+        self.assert_move_balanced(move, company)
+        return [
+            "move_posted",
+            "receipt_number_assigned",
+            "posted_before_set",
+            "identity_and_bindings_preserved",
+            "business_lines_unchanged",
+            "posting_delta_allowlist_matches",
+            "tax_analytic_reconciliation_graph_absent",
+            "debit_credit_balanced",
+            "record_graph_exact",
         ]
 
     def precheck_reversal(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
@@ -6694,6 +7640,208 @@ class OdooWriteHandlers:
             "document_and_business_bindings_preserved",
             "payment_reconciliation_and_external_links_absent",
             "unpaid_residual_and_payment_state_preserved",
+            "line_guard_graph_matched_approved_allowed_delta",
+            "no_delete_or_button_cancel_path_used",
+        ]
+
+    def precheck_draft_cancel_v2(
+        self, p: dict[str, Any], company: Any
+    ) -> dict[str, Any]:
+        if p["expected_move_type"] == "entry":
+            move, _lines, records = self._pristine_v3_draft_entry_graph(
+                p, company, require_expected_lines=True
+            )
+            checks = [
+                "single_pristine_v3_draft_manual_entry",
+                "never_posted_or_hashed",
+                "no_tax_analytic_reconciliation_or_external_effects",
+                "complete_approved_line_guard_graph",
+                "immutable_document_bindings_match",
+                "write_acl",
+            ]
+        else:
+            move, lines, records, vendor = self._draft_cancel_graph(
+                p, company
+            )
+            if _ids(move.line_ids) != sorted(p["expected_line_ids"]):
+                raise OdooWriteHandlerError(
+                    "draft document line graph differs from the approved IDs"
+                )
+            checks = [
+                "single_pristine_v3_draft_document",
+                (
+                    "draft_vendor_bill_target"
+                    if vendor
+                    else "draft_customer_invoice_target"
+                ),
+                "never_posted_or_hashed",
+                "no_payment_reconciliation_or_external_effects",
+                "fully_unpaid_residual_matches_total",
+                "complete_approved_line_guard_graph",
+                "immutable_document_bindings_match",
+                "write_acl",
+            ]
+        return {
+            "checks": checks,
+            "before": self.snapshots(records, company),
+            "dependencies": self.snapshots(
+                [("account.journal", move.journal_id)], company
+            ),
+        }
+
+    def _assert_entry_cancel_exact_delta(
+        self,
+        p: Mapping[str, Any],
+        move: Any,
+        lines: list[Any],
+        company: Any,
+        before: Mapping[tuple[str, int], dict[str, Any]],
+    ) -> None:
+        expected_line_ids = sorted(p["expected_line_ids"])
+        if (
+            str(getattr(move, "state", "")) != "cancel"
+            or str(getattr(move, "move_type", "")) != "entry"
+            or _ids(getattr(move, "line_ids", [])) != expected_line_ids
+            or getattr(move, "name", None) not in {False, "/"}
+            or getattr(move, "posted_before", None) is not False
+            or str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
+            != p["expected_document_binding"]
+            or str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
+            != p["expected_business_binding"]
+        ):
+            raise OdooWriteHandlerError(
+                "cancelled manual journal entry graph or binding differs"
+            )
+        expected_keys = {
+            ("account.move", move.id),
+            *(("account.move.line", line_id) for line_id in expected_line_ids),
+        }
+        if set(before) != expected_keys:
+            raise OdooWriteHandlerError(
+                "manual journal entry cancellation approval graph differs"
+            )
+        move_before = before.get(("account.move", move.id))
+        if (
+            not isinstance(move_before, Mapping)
+            or move_before.get("state") != "draft"
+            or move_before.get("posted_before") is not False
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry cancellation before evidence is invalid"
+            )
+        move_current = self.assert_approved_record_delta(
+            "account.move",
+            move,
+            company,
+            move_before,
+            allowed_changed_fields=frozenset(
+                {"state", "write_uid", "write_date"}
+            ),
+            label="cancelled manual journal entry",
+        )
+        transaction_write_date = self.assert_controlled_log_access_delta(
+            move_current,
+            move_before,
+            label="cancelled manual journal entry",
+        )
+        keyed_lines = {line.id: line for line in lines}
+        if set(keyed_lines) != set(expected_line_ids):
+            raise OdooWriteHandlerError(
+                "cancelled manual journal entry line graph differs"
+            )
+        for line_id in expected_line_ids:
+            line_write_date = self._assert_recovery_line_exact_delta(
+                keyed_lines[line_id],
+                company,
+                before.get(("account.move.line", line_id)),
+                move_id=move.id,
+            )
+            if line_write_date != transaction_write_date:
+                raise OdooWriteHandlerError(
+                    "manual journal entry cancellation audit timestamps differ"
+                )
+
+    def execute_draft_cancel_v2(self, p, company, checked):
+        if p["expected_move_type"] != "entry":
+            move, lines, records, vendor = self._draft_cancel_graph(
+                p, company
+            )
+            if _ids(move.line_ids) != sorted(p["expected_line_ids"]):
+                raise OdooWriteHandlerError(
+                    "draft document line graph differs from the approved IDs"
+                )
+            return self._execute_pristine_draft_cancel(
+                move,
+                lines,
+                records,
+                company,
+                checked,
+                vendor=vendor,
+                completion_method="draft_cancel_v2_completed",
+            )
+        move, lines, records = self._pristine_v3_draft_entry_graph(
+            p, company, require_expected_lines=True
+        )
+        result = move.with_context(
+            tracking_disable=True,
+            skip_account_move_synchronization=True,
+            skip_invoice_sync=True,
+            skip_is_manually_modified=True,
+        ).write({"state": "cancel"})
+        if result is not True or str(getattr(move, "state", "")) != "cancel":
+            raise OdooWriteHandlerError(
+                "manual journal entry cancellation returned no exact result"
+            )
+        self._assert_entry_cancel_exact_delta(
+            p,
+            move,
+            lines,
+            company,
+            self.trusted_before_values(
+                {"before": checked.get("before")}, company
+            ),
+        )
+        return records, _recovery(
+            "not_applicable", "draft_cancel_v2_completed", []
+        )
+
+    def verify_draft_cancel_v2(self, p, company, records, before):
+        if p["expected_move_type"] != "entry":
+            checks = self.verify_draft_cancel(
+                p, company, records, before
+            )
+            move = self.only_record(records, "account.move")
+            if _ids(move.line_ids) != sorted(p["expected_line_ids"]):
+                raise OdooWriteHandlerError(
+                    "cancelled draft document line graph differs"
+                )
+            return [*checks, "approved_line_ids_preserved"]
+        keyed = {
+            (model_name, record.id): record
+            for model_name, record in records
+        }
+        move = keyed.get(("account.move", p["move_id"]))
+        if move is None or len(keyed) != len(records):
+            raise OdooWriteHandlerError(
+                "cancelled manual journal entry result graph is invalid"
+            )
+        lines = [
+            keyed.get(("account.move.line", line_id))
+            for line_id in sorted(p["expected_line_ids"])
+        ]
+        if any(line is None for line in lines):
+            raise OdooWriteHandlerError(
+                "cancelled manual journal entry line graph is incomplete"
+            )
+        self._assert_entry_cancel_exact_delta(
+            p, move, lines, company, before
+        )
+        return [
+            "draft_manual_journal_entry_cancelled_exactly",
+            "never_posted_evidence_preserved",
+            "document_and_business_bindings_preserved",
+            "approved_line_ids_preserved",
+            "tax_analytic_reconciliation_and_external_links_absent",
             "line_guard_graph_matched_approved_allowed_delta",
             "no_delete_or_button_cancel_path_used",
         ]
