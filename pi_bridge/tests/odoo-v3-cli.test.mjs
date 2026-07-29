@@ -539,6 +539,20 @@ function writeParameterFixtures() {
 			}],
 			idempotency_key: "bank-import-2026-0001",
 		},
+		"acct.bank.statement_compensate.v1": {
+			company_id: 7,
+			origin_operation_id: "op-bank-statement-import-0001",
+			expected_origin_revision: 8,
+			expected_origin_final_receipt_body_digest: "c".repeat(64),
+			expected_recovery_plan_digest: "d".repeat(64),
+			expected_statement_id: 8001,
+			expected_journal_id: 41,
+			expected_currency_id: 12,
+			expected_source_digest: "a".repeat(64),
+			compensation_date: "2026-07-16",
+			reason: "Post the approved whole-batch compensating bank statement",
+			idempotency_key: "bank-statement-compensate-op-0001",
+		},
 		"acct.reconciliation.apply.v1": {
 			company_id: 7,
 			line_ids: [2001, 2002],
@@ -1274,12 +1288,12 @@ test("complex financial parameters are retained byte-for-byte through the test b
 	assert.deepEqual(result.data.argv, ["operation", "prepare"]);
 });
 
-test("all 19 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
+test("all 20 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
 	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
 	const registry = JSON.parse(await readFile(registryPath, "utf8"));
 	const writeCapabilities = registry.capabilities.filter((item) => item.access === "write");
 	const fixtures = writeParameterFixtures();
-	assert.equal(writeCapabilities.length, 19);
+	assert.equal(writeCapabilities.length, 20);
 	assert.deepEqual(Object.keys(fixtures).sort(), writeCapabilities.map((item) => item.id).sort());
 
 	const run = createBoundRunner({

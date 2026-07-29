@@ -1,7 +1,7 @@
 {
     "name": "Odoo Accounting CLI V3 Control",
     "summary": "Server-side trusted sessions and controlled CLI accounting writes",
-    "version": "19.0.0.6.0",
+    "version": "19.0.0.7.0",
     "category": "Accounting/Accounting",
     "license": "LGPL-3",
     "depends": ["base", "account"],

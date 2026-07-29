@@ -66,6 +66,26 @@ _RECONCILIATION_UNDO_PARAMETER_FIELDS = frozenset(
         "recovery_date",
     }
 )
+_BANK_STATEMENT_COMPENSATION_CAPABILITY = (
+    "acct.bank.statement_compensate.v1"
+)
+_BANK_STATEMENT_IMPORT_CAPABILITY = "acct.bank.statement_import.v1"
+_BANK_STATEMENT_COMPENSATION_PARAMETER_FIELDS = frozenset(
+    {
+        "company_id",
+        "compensation_date",
+        "expected_currency_id",
+        "expected_journal_id",
+        "expected_origin_final_receipt_body_digest",
+        "expected_origin_revision",
+        "expected_recovery_plan_digest",
+        "expected_source_digest",
+        "expected_statement_id",
+        "idempotency_key",
+        "origin_operation_id",
+        "reason",
+    }
+)
 
 _BUSINESS_FIELDS: dict[str, frozenset[str]] = {
     "read": frozenset({"capability_id", "parameters"}),
@@ -465,7 +485,11 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
     authority_check = request
     if (
         action == "operation.prepare"
-        and request.get("capability_id") == _RECONCILIATION_UNDO_CAPABILITY
+        and request.get("capability_id")
+        in {
+            _RECONCILIATION_UNDO_CAPABILITY,
+            _BANK_STATEMENT_COMPENSATION_CAPABILITY,
+        }
         and isinstance(request.get("parameters"), dict)
     ):
         # This field is receipt-bound business input for the undo facade, not
@@ -534,6 +558,65 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
                     )
                     or parsed_date.isoformat()
                     != parameters["recovery_date"]
+                    or not isinstance(reason, str)
+                    or reason != reason.strip()
+                    or not reason
+                    or len(reason) > 512
+                ):
+                    raise TrustedBrokerError(
+                        "broker_business_request_rejected",
+                        status_code=400,
+                    )
+            if (
+                request["capability_id"]
+                == _BANK_STATEMENT_COMPENSATION_CAPABILITY
+            ):
+                parameters = request["parameters"]
+                try:
+                    parsed_date = date.fromisoformat(
+                        parameters["compensation_date"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise TrustedBrokerError(
+                        "broker_business_request_rejected",
+                        status_code=400,
+                    ) from exc
+                reason = parameters.get("reason")
+                revision = parameters.get("expected_origin_revision")
+                positive_ids = (
+                    parameters.get("company_id"),
+                    parameters.get("expected_statement_id"),
+                    parameters.get("expected_journal_id"),
+                    parameters.get("expected_currency_id"),
+                )
+                if (
+                    set(parameters)
+                    != _BANK_STATEMENT_COMPENSATION_PARAMETER_FIELDS
+                    or not isinstance(
+                        parameters.get("origin_operation_id"), str
+                    )
+                    or _IDENTIFIER.fullmatch(
+                        parameters["origin_operation_id"]
+                    ) is None
+                    or any(
+                        type(value) is not int or value <= 0
+                        for value in positive_ids
+                    )
+                    or type(revision) is not int
+                    or not 1 <= revision <= 2147483647
+                    or not _is_digest(
+                        parameters.get(
+                            "expected_origin_final_receipt_body_digest"
+                        )
+                    )
+                    or not _is_digest(
+                        parameters.get("expected_recovery_plan_digest")
+                    )
+                    or not _is_digest(
+                        parameters.get("expected_source_digest")
+                    )
+                    or parsed_date.isoformat()
+                    != parameters["compensation_date"]
                     or not isinstance(reason, str)
                     or reason != reason.strip()
                     or not reason
@@ -1755,6 +1838,46 @@ class TrustedBroker:
                     ):
                         raise TrustedBrokerError(
                             "broker_reconciliation_undo_origin_rejected",
+                            status_code=409,
+                        )
+                    return (
+                        origin.release_digest,
+                        origin.registry_digest,
+                    ), None
+                if (
+                    request["capability_id"]
+                    == _BANK_STATEMENT_COMPENSATION_CAPABILITY
+                ):
+                    parameters = request["parameters"]
+                    origin = self._operation(
+                        parameters["origin_operation_id"]
+                    )
+                    if not (
+                        origin.principal == trusted_session.principal
+                        and origin.odoo_instance_id
+                        == trusted_session.odoo_instance_id
+                        and origin.database_name
+                        == trusted_session.database_name
+                        and origin.database_uuid
+                        == trusted_session.database_uuid
+                        and origin.user_id == trusted_session.user_id
+                        and origin.company_id
+                        == trusted_session.company_id
+                        == parameters["company_id"]
+                        and origin.company_id
+                        in trusted_session.allowed_company_ids
+                        and origin.environment
+                        == trusted_session.environment
+                        and origin.capability_id
+                        == _BANK_STATEMENT_IMPORT_CAPABILITY
+                        and origin.state == State.COMPLETED
+                        and origin.revision
+                        == parameters["expected_origin_revision"]
+                        and _is_digest(origin.release_digest)
+                        and _is_digest(origin.registry_digest)
+                    ):
+                        raise TrustedBrokerError(
+                            "broker_bank_statement_compensation_origin_rejected",
                             status_code=409,
                         )
                     return (

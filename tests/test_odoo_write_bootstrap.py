@@ -22,6 +22,7 @@ from odoo_accounting_cli_v3.draft_invoice_recovery import (
 )
 from odoo_accounting_cli_v3.odoo.write_bootstrap import (
     OdooWriteBootstrapError,
+    _bank_recovery_journal_from_precheck,
     _default_handler_factory,
     _difference,
     _execution_evidence,
@@ -111,6 +112,139 @@ def test_overlapping_accounting_resources_share_a_stable_advisory_lock():
     assert len(set(first) & set(overlapping)) == 1
     assert first == sorted(first)
     assert all(len(value) == 64 for value in first)
+
+
+def test_generic_bank_recovery_combines_graph_and_sequence_locks_once():
+    action = {
+        "model": "account.bank.statement",
+        "record_id": 100,
+        "company_id": 7,
+        "record_state": "posted",
+        "record_fingerprint": "a" * 64,
+    }
+    guard = {
+        "model": "account.bank.statement.line",
+        "record_id": 101,
+        "company_id": 7,
+        "record_state": "posted",
+        "record_fingerprint": "b" * 64,
+        "expected_outcome": "survive_exact",
+    }
+    plan = create_recovery_plan_v2(
+        origin_operation_id="bank-import-op",
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method="post_compensating_bank_statement_v1",
+        requires_approval=True,
+        action_targets=[action],
+        guard_records=[guard],
+        oracle_id="post_compensating_bank_statement_exact_v1",
+        parameters={"company_id": 7},
+    )
+    parameters = {
+        "company_id": 7,
+        "origin_operation_id": "bank-import-op",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "recovery_date": "2026-07-29",
+        "reason": "approved compensation",
+        "idempotency_key": "bank-recovery-1",
+    }
+    graph_only = _resource_lock_digests(
+        "acct.recovery.execute.v1", 7, parameters, plan
+    )
+    combined = _resource_lock_digests(
+        "acct.recovery.execute.v1",
+        7,
+        parameters,
+        plan,
+        bank_statement_journal_id=2,
+    )
+    specialized = _resource_lock_digests(
+        "acct.bank.statement_compensate.v1",
+        7,
+        {"expected_journal_id": 2},
+        plan,
+    )
+
+    assert len(graph_only) == 2
+    assert combined == specialized
+    assert len(combined) == 3
+    assert combined == sorted(set(combined))
+
+    def snapshot(model, record_id, values):
+        return {
+            "model": model,
+            "record_id": record_id,
+            "company_id": 7,
+            "state": "posted",
+            "values": values,
+            "values_digest": hashlib.sha256(
+                canonical_json(values)
+            ).hexdigest(),
+        }
+
+    evidence = {
+        "handler_details": {
+            "before": [
+                snapshot(
+                    "account.bank.statement",
+                    100,
+                    {"journal_id": [2, "Bank"]},
+                ),
+                snapshot(
+                    "account.bank.statement.line",
+                    101,
+                    {"journal_id": [2, "Bank"]},
+                ),
+            ],
+            "dependencies": [],
+            "strict_dependencies": [
+                snapshot(
+                    "account.journal",
+                    2,
+                    {"company_id": [7, "Company"]},
+                )
+            ],
+        }
+    }
+    assert _bank_recovery_journal_from_precheck(
+        evidence, company_id=7, trusted_recovery_plan=plan
+    ) == 2
+
+    missing = copy.deepcopy(evidence)
+    missing["handler_details"]["strict_dependencies"] = []
+    with pytest.raises(
+        OdooWriteBootstrapError, match="dependency is not exact"
+    ):
+        _bank_recovery_journal_from_precheck(
+            missing, company_id=7, trusted_recovery_plan=plan
+        )
+
+    duplicate = copy.deepcopy(evidence)
+    duplicate["handler_details"]["strict_dependencies"].append(
+        snapshot(
+            "account.journal",
+            3,
+            {"company_id": [7, "Company"]},
+        )
+    )
+    with pytest.raises(
+        OdooWriteBootstrapError, match="dependency is not exact"
+    ):
+        _bank_recovery_journal_from_precheck(
+            duplicate, company_id=7, trusted_recovery_plan=plan
+        )
+
+    cross_company = copy.deepcopy(evidence)
+    cross_company["handler_details"]["strict_dependencies"][0][
+        "company_id"
+    ] = 8
+    with pytest.raises(
+        OdooWriteBootstrapError, match="binding is invalid"
+    ):
+        _bank_recovery_journal_from_precheck(
+            cross_company, company_id=7, trusted_recovery_plan=plan
+        )
 
 
 def test_draft_cancel_uses_the_same_move_resource_lock_as_move_reversal():
@@ -2159,6 +2293,148 @@ def test_first_write_commits_atomic_execution_then_verified_readback():
         CAPABILITIES[0].data["verification"]["method"]
     )
     assert result["execution"]["evidence"]["odoo_records"][0]["record_id"] == 501
+
+
+def test_generic_bank_recovery_locks_graph_and_sequence_before_row_locks():
+    action = {
+        "model": "account.bank.statement",
+        "record_id": 100,
+        "company_id": 7,
+        "record_state": "posted",
+        "record_fingerprint": "a" * 64,
+    }
+    guard = {
+        "model": "account.bank.statement.line",
+        "record_id": 101,
+        "company_id": 7,
+        "record_state": "posted",
+        "record_fingerprint": "b" * 64,
+        "expected_outcome": "survive_exact",
+    }
+    plan = create_recovery_plan_v2(
+        origin_operation_id="bank-import-op-lock-order",
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method="post_compensating_bank_statement_v1",
+        requires_approval=True,
+        action_targets=[action],
+        guard_records=[guard],
+        oracle_id="post_compensating_bank_statement_exact_v1",
+        parameters={"company_id": 7},
+    )
+    parameters = {
+        "company_id": 7,
+        "origin_operation_id": "bank-import-op-lock-order",
+        "expected_recovery_plan_digest": plan["plan_digest"],
+        "recovery_date": "2026-07-15",
+        "reason": "Approved bank recovery",
+        "idempotency_key": "bank-recovery-lock-order",
+    }
+
+    def snapshot(model, record_id, values):
+        return {
+            "model": model,
+            "record_id": record_id,
+            "company_id": 7,
+            "state": "posted",
+            "values": values,
+            "values_digest": hashlib.sha256(
+                canonical_json(values)
+            ).hexdigest(),
+        }
+
+    raw_precheck = _raw_precheck("acct.recovery.execute.v1", parameters)
+    raw_precheck["before"] = [
+        snapshot(
+            "account.bank.statement",
+            100,
+            {
+                "company_id": [7, "Company"],
+                "journal_id": [2, "Bank"],
+            },
+        ),
+        snapshot(
+            "account.bank.statement.line",
+            101,
+            {
+                "company_id": [7, "Company"],
+                "journal_id": [2, "Bank"],
+            },
+        ),
+    ]
+    raw_precheck["strict_dependencies"] = [
+        snapshot(
+            "account.journal",
+            2,
+            {"company_id": [7, "Company"]},
+        )
+    ]
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.recovery.execute.v1",
+        operation_id="generic-bank-resource-lock-order",
+        raw_precheck=raw_precheck,
+    )
+
+    class BankHandler(Handler):
+        def precheck(self, capability_id, received_parameters):
+            assert capability_id == "acct.recovery.execute.v1"
+            assert received_parameters == parameters
+            self.precheck_calls += 1
+            return copy.deepcopy(raw_precheck)
+
+    handler = BankHandler()
+    root, _cr, anchors, _selected, kwargs = _harness(handler=handler)
+    expected_locks = _resource_lock_digests(
+        operation.capability_id,
+        operation.company_id,
+        operation.parameters,
+        plan,
+        bank_statement_journal_id=2,
+    )
+
+    def assert_resource_locks_precede_rows(_record):
+        anchor = next(iter(anchors.by_scope.values()))
+        assert anchor.resource_locks == expected_locks
+
+    statement = LockableRecordset(
+        100, on_lock=assert_resource_locks_precede_rows
+    )
+    line = LockableRecordset(
+        101, on_lock=assert_resource_locks_precede_rows
+    )
+    journal = LockableRecordset(
+        2, on_lock=assert_resource_locks_precede_rows
+    )
+    anchors.bound_env._models.update(
+        {
+            "account.bank.statement": LockableModel(statement),
+            "account.bank.statement.line": LockableModel(line),
+            "account.journal": LockableModel(journal),
+        }
+    )
+
+    result = execute_write_from_odoo_shell(
+        root,
+        _request(
+            context,
+            operation,
+            approval,
+            trusted_recovery_plan=plan,
+        ),
+        **kwargs,
+    )
+
+    anchor = next(iter(anchors.by_scope.values()))
+    assert anchor.resource_locks == expected_locks
+    assert len(anchor.resource_locks) == len(set(anchor.resource_locks)) == 3
+    assert statement.lock_calls == [False]
+    assert line.lock_calls == [False]
+    assert journal.lock_calls == [False]
+    assert handler.precheck_calls == 2
+    assert trusted_result_from_mapping(
+        result["execution"]["result"]
+    ).succeeded is True
 
 
 def test_default_execution_path_locks_reads_and_reverifies_live_module_graph(

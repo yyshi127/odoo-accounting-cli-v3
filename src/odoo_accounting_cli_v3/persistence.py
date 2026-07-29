@@ -53,6 +53,7 @@ from .write_receipts import (
     WriteReceiptError,
     index_recovery_guard_graph,
     validate_executable_recovery_plan,
+    validate_record_snapshot,
     validate_recovery_plan,
 )
 
@@ -72,6 +73,13 @@ _RECOVERY_BINDING_VERSION = 2
 _RECONCILIATION_UNDO_BINDING_EVENT_PREFIX = "reconciliation-undo-binding:"
 _RECONCILIATION_UNDO_BINDING_EVENT_TYPE = "reconciliation.undo.binding.created"
 _RECONCILIATION_UNDO_BINDING_VERSION = 1
+_BANK_STATEMENT_COMPENSATION_BINDING_EVENT_PREFIX = (
+    "bank-statement-compensation-binding:"
+)
+_BANK_STATEMENT_COMPENSATION_BINDING_EVENT_TYPE = (
+    "bank.statement.compensation.binding.created"
+)
+_BANK_STATEMENT_COMPENSATION_BINDING_VERSION = 1
 _RECOVERY_BINDING_FIELDS = frozenset(
     {
         "binding_version",
@@ -129,6 +137,36 @@ _RECONCILIATION_UNDO_BINDING_FIELDS = frozenset(
         "undo_operation_id",
         "undo_operation_revision",
         "undo_request_id",
+        "user_id",
+    }
+)
+_BANK_STATEMENT_COMPENSATION_BINDING_FIELDS = frozenset(
+    {
+        "binding_version",
+        "company_id",
+        "compensation_operation_digest",
+        "compensation_operation_id",
+        "compensation_operation_revision",
+        "compensation_request_id",
+        "database_name",
+        "database_uuid",
+        "environment",
+        "odoo_instance_id",
+        "origin_database_finalization_digest",
+        "origin_execution_evidence_digest",
+        "origin_execution_result_id",
+        "origin_final_receipt_body_digest",
+        "origin_final_receipt_id",
+        "origin_operation_digest",
+        "origin_operation_id",
+        "origin_operation_revision",
+        "origin_request_id",
+        "origin_verification_evidence_digest",
+        "origin_verification_result_id",
+        "plan_digest",
+        "principal",
+        "registry_digest",
+        "release_digest",
         "user_id",
     }
 )
@@ -398,6 +436,38 @@ class StoredReconciliationUndoBinding:
     undo_request_id: str
     undo_operation_digest: str
     undo_operation_revision: int
+    plan_digest: str
+    principal: str
+    user_id: int
+    company_id: int
+    odoo_instance_id: str
+    database_name: str
+    database_uuid: str
+    environment: str
+    registry_digest: str
+    release_digest: str
+    audit_event: StoredAuditEvent
+
+
+@dataclass(frozen=True)
+class StoredBankStatementCompensationBinding:
+    binding_id: str
+    binding_version: int
+    origin_operation_id: str
+    origin_request_id: str
+    origin_operation_digest: str
+    origin_operation_revision: int
+    origin_final_receipt_id: str
+    origin_final_receipt_body_digest: str
+    origin_execution_result_id: str
+    origin_execution_evidence_digest: str
+    origin_verification_result_id: str
+    origin_verification_evidence_digest: str
+    origin_database_finalization_digest: str
+    compensation_operation_id: str
+    compensation_request_id: str
+    compensation_operation_digest: str
+    compensation_operation_revision: int
     plan_digest: str
     principal: str
     user_id: int
@@ -2493,6 +2563,76 @@ def _reconciliation_undo_binding_payload(
     }
 
 
+def _bank_statement_compensation_binding_event_id(
+    origin_operation_id: str,
+) -> str:
+    origin_operation_id = _required_text(
+        origin_operation_id, "origin_operation_id"
+    )
+    digest = hashlib.sha256(
+        canonical_json(
+            {
+                "namespace": "bank_statement_compensation_binding_v1",
+                "origin_operation_id": origin_operation_id,
+            }
+        )
+    ).hexdigest()
+    return f"{_BANK_STATEMENT_COMPENSATION_BINDING_EVENT_PREFIX}{digest}"
+
+
+def _bank_statement_compensation_binding_payload(
+    *,
+    origin: Operation,
+    compensation: Operation,
+    origin_receipt: StoredFinalWriteReceipt,
+    origin_execution: StoredTrustedResultRecord,
+    origin_verification: StoredTrustedResultRecord,
+    plan_digest: str,
+) -> dict[str, Any]:
+    receipt_details = origin_receipt.body.get("receipt_details")
+    database_finalization = (
+        receipt_details.get("database_finalization")
+        if type(receipt_details) is dict
+        else None
+    )
+    _, database_finalization_digest = _canonical_object_digest(
+        database_finalization,
+        "origin database finalization",
+    )
+    return {
+        "binding_version": _BANK_STATEMENT_COMPENSATION_BINDING_VERSION,
+        "company_id": origin.company_id,
+        "compensation_operation_digest": compensation.digest,
+        "compensation_operation_id": compensation.operation_id,
+        "compensation_operation_revision": 0,
+        "compensation_request_id": compensation.request_id,
+        "database_name": origin.database_name,
+        "database_uuid": origin.database_uuid,
+        "environment": origin.environment,
+        "odoo_instance_id": origin.odoo_instance_id,
+        "origin_database_finalization_digest": database_finalization_digest,
+        "origin_execution_evidence_digest": (
+            origin_execution.evidence_digest
+        ),
+        "origin_execution_result_id": origin_execution.result_id,
+        "origin_final_receipt_body_digest": origin_receipt.body_digest,
+        "origin_final_receipt_id": origin_receipt.receipt_id,
+        "origin_operation_digest": origin.digest,
+        "origin_operation_id": origin.operation_id,
+        "origin_operation_revision": origin.revision,
+        "origin_request_id": origin.request_id,
+        "origin_verification_evidence_digest": (
+            origin_verification.evidence_digest
+        ),
+        "origin_verification_result_id": origin_verification.result_id,
+        "plan_digest": plan_digest,
+        "principal": origin.principal,
+        "registry_digest": origin.registry_digest,
+        "release_digest": origin.release_digest,
+        "user_id": origin.user_id,
+    }
+
+
 def _result_audit_payload(
     operation: Operation,
     approval_record: StoredApprovalRecord,
@@ -3449,6 +3589,33 @@ class SQLitePersistence:
                     connection, event
                 )
                 continue
+            bank_compensation_binding_id = event.event_id.startswith(
+                _BANK_STATEMENT_COMPENSATION_BINDING_EVENT_PREFIX
+            )
+            bank_compensation_binding_type = event.event_type.startswith(
+                "bank.statement.compensation.binding."
+            )
+            if bank_compensation_binding_id or bank_compensation_binding_type:
+                if (
+                    not bank_compensation_binding_id
+                    or event.event_type
+                    != _BANK_STATEMENT_COMPENSATION_BINDING_EVENT_TYPE
+                ):
+                    raise PersistenceIntegrityError(
+                        "stored bank statement compensation binding "
+                        "namespace is ambiguous"
+                    )
+                if not cls._table_exists(
+                    connection, "final_write_receipts"
+                ):
+                    raise PersistenceIntegrityError(
+                        "legacy bank statement compensation binding cannot "
+                        "be migrated"
+                    )
+                cls._load_bank_statement_compensation_binding_event(
+                    connection, event
+                )
+                continue
             if event.event_type == "operation.approved.legacy":
                 if (
                     event.event_id.startswith(("operation.", "read:"))
@@ -3563,6 +3730,7 @@ class SQLitePersistence:
                     "read:",
                     _RECOVERY_BINDING_EVENT_PREFIX,
                     _RECONCILIATION_UNDO_BINDING_EVENT_PREFIX,
+                    _BANK_STATEMENT_COMPENSATION_BINDING_EVENT_PREFIX,
                 )
             )
             reserved_type = event.event_type.startswith(
@@ -3571,6 +3739,7 @@ class SQLitePersistence:
                     "read.",
                     "recovery.binding.",
                     "reconciliation.undo.binding.",
+                    "bank.statement.compensation.binding.",
                 )
             )
             if event.event_type == "operation.approved.legacy":
@@ -5144,6 +5313,264 @@ class SQLitePersistence:
             database_finalization_digest,
         )
 
+    @staticmethod
+    def _validate_bank_statement_compensation_runtime_binding(
+        origin: Operation,
+        compensation: Operation,
+    ) -> None:
+        if origin.operation_id == compensation.operation_id:
+            raise PersistenceIntegrityError(
+                "bank statement compensation binding must use a distinct "
+                "operation"
+            )
+        if (
+            origin.capability_id != "acct.bank.statement_import.v1"
+            or compensation.capability_id
+            != "acct.bank.statement_compensate.v1"
+        ):
+            raise PersistenceIntegrityError(
+                "bank statement compensation binding capability is invalid"
+            )
+        runtime_fields = (
+            "principal",
+            "user_id",
+            "company_id",
+            "odoo_instance_id",
+            "database_name",
+            "database_uuid",
+            "environment",
+            "registry_digest",
+            "release_digest",
+        )
+        if any(
+            getattr(origin, field) != getattr(compensation, field)
+            for field in runtime_fields
+        ):
+            raise PersistenceIntegrityError(
+                "bank statement compensation has a different runtime or "
+                "release binding from its origin"
+            )
+
+    @staticmethod
+    def _validate_bank_statement_compensation_parameters(
+        origin: Operation,
+        compensation: Operation,
+        origin_receipt: StoredFinalWriteReceipt,
+        origin_execution: StoredTrustedResultRecord,
+        plan: dict[str, Any],
+        *,
+        plan_digest: str,
+    ) -> None:
+        parameters = compensation.parameters
+        actions = plan.get("action_targets")
+        statement_ids = (
+            [
+                target.get("record_id")
+                for target in actions
+                if type(target) is dict
+                and target.get("model") == "account.bank.statement"
+            ]
+            if type(actions) is list
+            else []
+        )
+        origin_parameters = origin.parameters
+        difference = origin_execution.evidence.get("difference")
+        after = (
+            difference.get("after")
+            if type(difference) is dict
+            else None
+        )
+        statement_snapshots = (
+            [
+                snapshot
+                for snapshot in after
+                if type(snapshot) is dict
+                and snapshot.get("model") == "account.bank.statement"
+            ]
+            if type(after) is list
+            else []
+        )
+        statement_values: dict[str, Any] | None = None
+        if len(statement_snapshots) == 1:
+            try:
+                validate_record_snapshot(statement_snapshots[0])
+                decoded = json.loads(statement_snapshots[0]["values_json"])
+                if type(decoded) is dict:
+                    statement_values = decoded
+            except (WriteReceiptError, TypeError, json.JSONDecodeError):
+                statement_values = None
+        if (
+            set(parameters)
+            != {
+                "company_id",
+                "compensation_date",
+                "expected_currency_id",
+                "expected_journal_id",
+                "expected_origin_final_receipt_body_digest",
+                "expected_origin_revision",
+                "expected_recovery_plan_digest",
+                "expected_source_digest",
+                "expected_statement_id",
+                "idempotency_key",
+                "origin_operation_id",
+                "reason",
+            }
+            or parameters.get("company_id") != origin.company_id
+            or parameters.get("origin_operation_id") != origin.operation_id
+            or parameters.get("expected_origin_revision") != origin.revision
+            or parameters.get("expected_origin_final_receipt_body_digest")
+            != origin_receipt.body_digest
+            or parameters.get("expected_recovery_plan_digest") != plan_digest
+            or parameters.get("expected_journal_id")
+            != origin_parameters.get("journal_id")
+            or parameters.get("expected_currency_id")
+            != origin_parameters.get("currency_id")
+            or parameters.get("expected_source_digest")
+            != origin_parameters.get("source_digest")
+            or len(statement_ids) != 1
+            or parameters.get("expected_statement_id") != statement_ids[0]
+            or len(statement_snapshots) != 1
+            or statement_snapshots[0].get("record_id")
+            != parameters.get("expected_statement_id")
+            or statement_values is None
+            or statement_values.get("company_id")
+            != parameters.get("company_id")
+            or statement_values.get("journal_id")
+            != parameters.get("expected_journal_id")
+            or statement_values.get("currency_id")
+            != parameters.get("expected_currency_id")
+            or statement_values.get("odoo_cli_v3_source_digest")
+            != parameters.get("expected_source_digest")
+        ):
+            raise PersistenceIntegrityError(
+                "bank statement compensation parameters do not match the "
+                "origin receipt"
+            )
+
+    @classmethod
+    def _validated_bank_statement_compensation_origin(
+        cls,
+        connection: sqlite3.Connection,
+        origin: Operation,
+        origin_receipt: StoredFinalWriteReceipt,
+        *,
+        expected_plan_digest: str,
+    ) -> tuple[
+        StoredTrustedResultRecord,
+        StoredTrustedResultRecord,
+        dict[str, Any],
+        str,
+    ]:
+        if (
+            origin.capability_id != "acct.bank.statement_import.v1"
+            or origin.state != State.COMPLETED
+            or origin_receipt.operation_id != origin.operation_id
+            or origin_receipt.operation_revision != origin.revision
+            or origin_receipt.terminal_state != State.COMPLETED.value
+            or origin_receipt.result_succeeded is not True
+        ):
+            raise PersistenceIntegrityError(
+                "bank statement compensation requires a completed bank "
+                "statement import origin"
+            )
+        rows = tuple(
+            connection.execute(
+                "SELECT result_id FROM trusted_result_records "
+                "WHERE operation_id = ? ORDER BY operation_revision",
+                (origin.operation_id,),
+            )
+        )
+        records = tuple(
+            cls._load_trusted_result_record(
+                connection, row["result_id"]
+            )
+            for row in rows
+        )
+        executions = tuple(
+            record for record in records if record.kind == "execution"
+        )
+        verifications = tuple(
+            record for record in records if record.kind == "verification"
+        )
+        if (
+            len(records) != 2
+            or len(executions) != 1
+            or len(verifications) != 1
+            or executions[0].succeeded is not True
+            or verifications[0].succeeded is not True
+            or origin.execution_result_digest
+            != executions[0].evidence_digest
+            or origin.verification_result_digest
+            != verifications[0].evidence_digest
+            or verifications[0].prior_evidence_digest
+            != executions[0].evidence_digest
+            or origin_receipt.result_id != verifications[0].result_id
+            or origin_receipt.evidence_digest
+            != verifications[0].evidence_digest
+            or verifications[0].evidence.get("passed") is not True
+        ):
+            raise PersistenceIntegrityError(
+                "bank statement compensation origin trusted results are "
+                "incomplete"
+            )
+        details = origin_receipt.body.get("receipt_details")
+        plan = (
+            details.get("recovery_plan")
+            if type(details) is dict
+            else None
+        )
+        database_finalization = (
+            details.get("database_finalization")
+            if type(details) is dict
+            else None
+        )
+        if type(database_finalization) is not dict or not database_finalization:
+            raise PersistenceIntegrityError(
+                "bank statement compensation origin is not "
+                "database-finalized"
+            )
+        try:
+            validate_executable_recovery_plan(plan)
+            index_recovery_guard_graph(
+                plan, expected_company_id=origin.company_id
+            )
+            _, database_finalization_digest = _canonical_object_digest(
+                database_finalization,
+                "origin database finalization",
+            )
+        except (PersistenceError, WriteReceiptError) as exc:
+            raise PersistenceIntegrityError(
+                "bank statement compensation origin receipt evidence is "
+                "invalid"
+            ) from exc
+        if (
+            plan["plan_version"] != 2
+            or plan["origin_operation_id"] != origin.operation_id
+            or plan["recovery_capability_id"]
+            != "acct.recovery.execute.v1"
+            or plan["method"] != "post_compensating_bank_statement_v1"
+            or plan["oracle_id"]
+            != "post_compensating_bank_statement_exact_v1"
+            or plan["requires_approval"] is not True
+            or not hmac.compare_digest(
+                plan["plan_digest"], expected_plan_digest
+            )
+            or canonical_json(
+                executions[0].evidence.get("recovery_plan")
+            )
+            != canonical_json(plan)
+        ):
+            raise PersistenceIntegrityError(
+                "bank statement compensation plan does not match its "
+                "signed origin"
+            )
+        return (
+            executions[0],
+            verifications[0],
+            json.loads(canonical_json(plan)),
+            database_finalization_digest,
+        )
+
     @classmethod
     def _validated_receipt_recovery_plan(
         cls,
@@ -5806,6 +6233,244 @@ class SQLitePersistence:
         except (PersistenceError, TypeError, ValueError) as exc:
             raise PersistenceIntegrityError(
                 "stored reconciliation undo binding is invalid"
+            ) from exc
+
+    @classmethod
+    def _load_bank_statement_compensation_binding_event(
+        cls,
+        connection: sqlite3.Connection,
+        event: StoredAuditEvent,
+    ) -> StoredBankStatementCompensationBinding:
+        try:
+            payload = event.payload
+            if (
+                type(payload) is not dict
+                or set(payload)
+                != _BANK_STATEMENT_COMPENSATION_BINDING_FIELDS
+                or payload.get("binding_version")
+                != _BANK_STATEMENT_COMPENSATION_BINDING_VERSION
+            ):
+                raise PersistenceIntegrityError(
+                    "stored bank statement compensation binding fields are "
+                    "invalid"
+                )
+            origin_operation_id = _required_text(
+                payload["origin_operation_id"], "origin_operation_id"
+            )
+            compensation_operation_id = _required_text(
+                payload["compensation_operation_id"],
+                "compensation_operation_id",
+            )
+            plan_digest = _required_digest(
+                payload["plan_digest"], "plan_digest"
+            )
+            if (
+                event.event_id
+                != _bank_statement_compensation_binding_event_id(
+                    origin_operation_id
+                )
+                or event.event_type
+                != _BANK_STATEMENT_COMPENSATION_BINDING_EVENT_TYPE
+                or event.operation_id != compensation_operation_id
+                or type(payload["origin_operation_revision"]) is not int
+                or payload["origin_operation_revision"] <= 0
+                or type(payload["compensation_operation_revision"])
+                is not int
+                or payload["compensation_operation_revision"] != 0
+            ):
+                raise PersistenceIntegrityError(
+                    "stored bank statement compensation binding identity is "
+                    "invalid"
+                )
+            for field in (
+                "compensation_operation_digest",
+                "origin_database_finalization_digest",
+                "origin_execution_evidence_digest",
+                "origin_final_receipt_body_digest",
+                "origin_operation_digest",
+                "origin_verification_evidence_digest",
+                "registry_digest",
+                "release_digest",
+            ):
+                _required_digest(payload[field], field)
+            for field in (
+                "compensation_request_id",
+                "database_name",
+                "database_uuid",
+                "environment",
+                "odoo_instance_id",
+                "origin_execution_result_id",
+                "origin_final_receipt_id",
+                "origin_request_id",
+                "origin_verification_result_id",
+                "principal",
+            ):
+                _required_text(payload[field], field)
+            if (
+                type(payload["user_id"]) is not int
+                or payload["user_id"] <= 0
+                or type(payload["company_id"]) is not int
+                or payload["company_id"] <= 0
+            ):
+                raise PersistenceIntegrityError(
+                    "stored bank statement compensation binding actor is "
+                    "invalid"
+                )
+
+            origin = cls._load_operation_with_evidence(
+                connection, origin_operation_id
+            )
+            compensation = cls._load_operation_with_evidence(
+                connection, compensation_operation_id
+            )
+            cls._validate_bank_statement_compensation_runtime_binding(
+                origin, compensation
+            )
+            if compensation.protocol_version != SCHEMA_VERSION:
+                raise PersistenceIntegrityError(
+                    "stored bank statement compensation protocol is invalid"
+                )
+            origin_receipt = cls._load_origin_receipt_for_recovery_binding(
+                connection,
+                origin,
+                receipt_id=payload["origin_final_receipt_id"],
+                operation_revision=payload["origin_operation_revision"],
+                terminal_state=State.COMPLETED.value,
+            )
+            (
+                origin_execution,
+                origin_verification,
+                plan,
+                database_finalization_digest,
+            ) = cls._validated_bank_statement_compensation_origin(
+                connection,
+                origin,
+                origin_receipt,
+                expected_plan_digest=plan_digest,
+            )
+            cls._validate_bank_statement_compensation_parameters(
+                origin,
+                compensation,
+                origin_receipt,
+                origin_execution,
+                plan,
+                plan_digest=plan_digest,
+            )
+            if event.occurred_at < origin_receipt.recorded_at:
+                raise PersistenceIntegrityError(
+                    "stored bank statement compensation binding predates "
+                    "its origin receipt"
+                )
+            lifecycle_events = tuple(
+                item
+                for item in cls._load_audit_events(connection)
+                if item.operation_id == compensation.operation_id
+                and item.event_type.startswith("operation.")
+            )
+            if compensation.revision == 0:
+                if compensation.state != State.PREPARED or lifecycle_events:
+                    raise PersistenceIntegrityError(
+                        "stored bank statement compensation was not pristine "
+                        "when bound"
+                    )
+            elif (
+                not lifecycle_events
+                or lifecycle_events[0].event_type
+                != "operation.prechecked"
+                or any(
+                    item.sequence <= event.sequence
+                    for item in lifecycle_events
+                )
+                or any(
+                    item.occurred_at < event.occurred_at
+                    for item in lifecycle_events
+                )
+            ):
+                raise PersistenceIntegrityError(
+                    "stored bank statement compensation binding does not "
+                    "precede its lifecycle"
+                )
+            expected_payload = (
+                _bank_statement_compensation_binding_payload(
+                    origin=origin,
+                    compensation=compensation,
+                    origin_receipt=origin_receipt,
+                    origin_execution=origin_execution,
+                    origin_verification=origin_verification,
+                    plan_digest=plan_digest,
+                )
+            )
+            if (
+                database_finalization_digest
+                != payload["origin_database_finalization_digest"]
+                or canonical_json(payload)
+                != canonical_json(expected_payload)
+            ):
+                raise PersistenceIntegrityError(
+                    "stored bank statement compensation binding content is "
+                    "invalid"
+                )
+            return StoredBankStatementCompensationBinding(
+                binding_id=event.event_id,
+                binding_version=payload["binding_version"],
+                origin_operation_id=payload["origin_operation_id"],
+                origin_request_id=payload["origin_request_id"],
+                origin_operation_digest=payload[
+                    "origin_operation_digest"
+                ],
+                origin_operation_revision=payload[
+                    "origin_operation_revision"
+                ],
+                origin_final_receipt_id=payload[
+                    "origin_final_receipt_id"
+                ],
+                origin_final_receipt_body_digest=payload[
+                    "origin_final_receipt_body_digest"
+                ],
+                origin_execution_result_id=payload[
+                    "origin_execution_result_id"
+                ],
+                origin_execution_evidence_digest=payload[
+                    "origin_execution_evidence_digest"
+                ],
+                origin_verification_result_id=payload[
+                    "origin_verification_result_id"
+                ],
+                origin_verification_evidence_digest=payload[
+                    "origin_verification_evidence_digest"
+                ],
+                origin_database_finalization_digest=payload[
+                    "origin_database_finalization_digest"
+                ],
+                compensation_operation_id=payload[
+                    "compensation_operation_id"
+                ],
+                compensation_request_id=payload[
+                    "compensation_request_id"
+                ],
+                compensation_operation_digest=payload[
+                    "compensation_operation_digest"
+                ],
+                compensation_operation_revision=payload[
+                    "compensation_operation_revision"
+                ],
+                plan_digest=payload["plan_digest"],
+                principal=payload["principal"],
+                user_id=payload["user_id"],
+                company_id=payload["company_id"],
+                odoo_instance_id=payload["odoo_instance_id"],
+                database_name=payload["database_name"],
+                database_uuid=payload["database_uuid"],
+                environment=payload["environment"],
+                registry_digest=payload["registry_digest"],
+                release_digest=payload["release_digest"],
+                audit_event=event,
+            )
+        except PersistenceIntegrityError:
+            raise
+        except (PersistenceError, TypeError, ValueError) as exc:
+            raise PersistenceIntegrityError(
+                "stored bank statement compensation binding is invalid"
             ) from exc
 
     @classmethod
@@ -7619,6 +8284,230 @@ class SQLitePersistence:
                 )
             return binding
 
+    def bind_bank_statement_compensation_operation(
+        self,
+        *,
+        origin_operation_id: str,
+        compensation_operation_id: str,
+        expected_origin_revision: int,
+        expected_origin_final_receipt_body_digest: str,
+        plan_digest: str,
+        occurred_at: datetime,
+    ) -> StoredBankStatementCompensationBinding:
+        """Bind one compensation write to one immutable completed import."""
+
+        origin_operation_id = _required_text(
+            origin_operation_id, "origin_operation_id"
+        )
+        compensation_operation_id = _required_text(
+            compensation_operation_id, "compensation_operation_id"
+        )
+        expected_origin_final_receipt_body_digest = _required_digest(
+            expected_origin_final_receipt_body_digest,
+            "expected_origin_final_receipt_body_digest",
+        )
+        plan_digest = _required_digest(plan_digest, "plan_digest")
+        if (
+            type(expected_origin_revision) is not int
+            or expected_origin_revision <= 0
+        ):
+            raise PersistenceError(
+                "expected_origin_revision must be a positive integer"
+            )
+        occurred_text = _utc_text(occurred_at, "occurred_at")
+        normalized_occurred_at = _parse_datetime(
+            occurred_text, "occurred_at"
+        )
+        event_id = _bank_statement_compensation_binding_event_id(
+            origin_operation_id
+        )
+        with self._transaction() as connection:
+            self._verify_audit_chain_connection(connection)
+            self._verify_reserved_audit_namespaces(connection)
+            existing_event = next(
+                (
+                    event
+                    for event in self._load_audit_events(connection)
+                    if event.event_id == event_id
+                ),
+                None,
+            )
+            if existing_event is not None:
+                binding = (
+                    self._load_bank_statement_compensation_binding_event(
+                        connection, existing_event
+                    )
+                )
+                if (
+                    binding.origin_operation_id != origin_operation_id
+                    or binding.compensation_operation_id
+                    != compensation_operation_id
+                    or binding.origin_operation_revision
+                    != expected_origin_revision
+                    or not hmac.compare_digest(
+                        binding.origin_final_receipt_body_digest,
+                        expected_origin_final_receipt_body_digest,
+                    )
+                    or not hmac.compare_digest(
+                        binding.plan_digest, plan_digest
+                    )
+                ):
+                    raise IdempotencyConflict(
+                        "bank statement import origin is already bound to a "
+                        "different compensation operation"
+                    )
+                return binding
+
+            origin = self._load_operation_with_evidence(
+                connection, origin_operation_id
+            )
+            if origin.revision != expected_origin_revision:
+                raise ConcurrentUpdate(
+                    "bank statement import origin operation revision has "
+                    "changed"
+                )
+            if (
+                origin.capability_id != "acct.bank.statement_import.v1"
+                or origin.state != State.COMPLETED
+            ):
+                raise PersistenceIntegrityError(
+                    "bank statement compensation origin must be a completed "
+                    "bank statement import"
+                )
+            compensation = self._load_operation_with_evidence(
+                connection, compensation_operation_id
+            )
+            if (
+                compensation.state != State.PREPARED
+                or compensation.revision != 0
+                or compensation.protocol_version != SCHEMA_VERSION
+                or compensation.precheck_digest is not None
+            ):
+                raise PersistenceIntegrityError(
+                    "bank statement compensation operation must be pristine "
+                    "prepared revision zero"
+                )
+            self._validate_bank_statement_compensation_runtime_binding(
+                origin, compensation
+            )
+            origin_receipt = (
+                self._load_origin_receipt_for_recovery_binding(
+                    connection,
+                    origin,
+                    operation_revision=origin.revision,
+                    terminal_state=State.COMPLETED.value,
+                )
+            )
+            if not hmac.compare_digest(
+                origin_receipt.body_digest,
+                expected_origin_final_receipt_body_digest,
+            ):
+                raise PersistenceIntegrityError(
+                    "bank statement compensation origin receipt digest "
+                    "changed"
+                )
+            (
+                origin_execution,
+                origin_verification,
+                plan,
+                _database_finalization_digest,
+            ) = self._validated_bank_statement_compensation_origin(
+                connection,
+                origin,
+                origin_receipt,
+                expected_plan_digest=plan_digest,
+            )
+            self._validate_bank_statement_compensation_parameters(
+                origin,
+                compensation,
+                origin_receipt,
+                origin_execution,
+                plan,
+                plan_digest=plan_digest,
+            )
+            if normalized_occurred_at < origin_receipt.recorded_at:
+                raise PersistenceIntegrityError(
+                    "bank statement compensation binding predates its origin "
+                    "receipt"
+                )
+            event = self._append_audit_event(
+                connection,
+                event_id=event_id,
+                event_type=(
+                    _BANK_STATEMENT_COMPENSATION_BINDING_EVENT_TYPE
+                ),
+                operation_id=compensation.operation_id,
+                occurred_at=normalized_occurred_at,
+                payload=_bank_statement_compensation_binding_payload(
+                    origin=origin,
+                    compensation=compensation,
+                    origin_receipt=origin_receipt,
+                    origin_execution=origin_execution,
+                    origin_verification=origin_verification,
+                    plan_digest=plan_digest,
+                ),
+            )
+            return self._load_bank_statement_compensation_binding_event(
+                connection, event
+            )
+
+    def get_bank_statement_compensation_operation_binding(
+        self,
+        compensation_operation_id: str,
+    ) -> StoredBankStatementCompensationBinding:
+        compensation_operation_id = _required_text(
+            compensation_operation_id, "compensation_operation_id"
+        )
+        with self._transaction() as connection:
+            self._verify_audit_chain_connection(connection)
+            self._verify_reserved_audit_namespaces(connection)
+            compensation = self._load_operation_with_evidence(
+                connection, compensation_operation_id
+            )
+            if (
+                compensation.capability_id
+                != "acct.bank.statement_compensate.v1"
+            ):
+                raise OperationNotFound(
+                    "bank statement compensation binding does not exist"
+                )
+            origin_operation_id = compensation.parameters.get(
+                "origin_operation_id"
+            )
+            if not isinstance(origin_operation_id, str):
+                raise PersistenceIntegrityError(
+                    "bank statement compensation origin identity is invalid"
+                )
+            event_id = _bank_statement_compensation_binding_event_id(
+                origin_operation_id
+            )
+            event = next(
+                (
+                    item
+                    for item in self._load_audit_events(connection)
+                    if item.event_id == event_id
+                ),
+                None,
+            )
+            if event is None:
+                raise OperationNotFound(
+                    "bank statement compensation binding does not exist"
+                )
+            binding = (
+                self._load_bank_statement_compensation_binding_event(
+                    connection, event
+                )
+            )
+            if (
+                binding.compensation_operation_id
+                != compensation_operation_id
+            ):
+                raise IdempotencyConflict(
+                    "bank statement import origin is bound to a different "
+                    "compensation operation"
+                )
+            return binding
+
     def get_trusted_result_records(
         self, operation_id: str
     ) -> tuple[StoredTrustedResultRecord, ...]:
@@ -8005,6 +8894,7 @@ __all__ = [
     "SQLitePersistence",
     "StoredApprovalRecord",
     "StoredAuditEvent",
+    "StoredBankStatementCompensationBinding",
     "StoredFinalWriteReceipt",
     "StoredPrecheckRecord",
     "StoredReconciliationUndoBinding",

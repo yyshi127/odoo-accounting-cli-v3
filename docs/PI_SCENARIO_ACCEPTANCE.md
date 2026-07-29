@@ -28,15 +28,24 @@ The current corpus is `tests/fixtures/pi_scenarios.v1.json`:
 
 | Property | Value |
 | --- | ---: |
-| Scenario count | 28 |
-| Registered capability count covered | 24 |
-| Write capability count covered | 14 |
+| Frozen revision | 6 |
+| Scenario count | 38 |
+| Registered capability count covered | 30 |
+| Write capability count covered | 20 |
 | Required categories | ordinary, ambiguous, adversarial, multi_company, multi_currency, recovery |
 
 The corpus is validated by `tests/test_pi_scenario_gate.py`. Corpus validation
 proves that expected capabilities, clarification fields, and material
 parameters are well-formed; it does not prove that Pi selected them correctly in
 a live conversation.
+
+The bank-statement compensation slice contains one fully bound positive
+scenario and three forced-refusal scenarios for deletion, subset/partial
+compensation, and already matched/reconciled source graphs. The positive case
+requires all 12 registered parameters and describes a separate whole-batch
+opposite-signed statement while preserving the original statement, lines, and
+moves. These frozen expectations are offline contracts, not captured Pi
+selection evidence or real Odoo receipts.
 
 ## Required gates
 

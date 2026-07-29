@@ -494,12 +494,13 @@ passing composite Odoo receipt. The current target capacity and service-
 continuity gates have not passed, so production promotion remains blocked.
 
 Runtime configuration never enables a capability by itself. The registry must
-contain the same environment in the selected channel. All 14 registered write
-capabilities remain closed by default. They may move to staged only in a
-dedicated sandbox after their local contract gate passes, and may advance again
-only from retained capability-specific real Odoo lifecycle evidence. Nothing
-in this document is evidence that such a run has occurred. Production writes
-require separate explicit authorization and production-safety review.
+contain the same environment in the selected channel. All 20 currently
+registered write capabilities remain closed by default. They may move to staged
+only in a dedicated sandbox after their local contract gate passes, and may
+advance again only from retained capability-specific real Odoo lifecycle
+evidence. Nothing in this document is evidence that such a run has occurred.
+Production writes require separate explicit authorization and production-safety
+review.
 
 In particular, `acct.move.draft_cancel.v1` has no enabled or staged environment.
 Its two 64-character inputs are not caller-generated secrets: the trusted value
@@ -532,9 +533,14 @@ operation binding are all required. Historical version-1 bindings remain
 readable for frozen-route audit but are rejected by the current executor.
 
 The local implementation registers 16 state-dependent recovery contracts for
-the 12 non-terminal business-write capabilities. The two remaining write
-capabilities, `acct.move.draft_cancel.v1` and `acct.recovery.execute.v1`, are
-terminal and deliberately register no further recovery. Every contract is
+the 12 original non-terminal source-write capabilities. This recovery-catalog
+count is independent of the current registry's 20 write capabilities. The
+original `acct.move.draft_cancel.v1` and `acct.recovery.execute.v1` do not add
+follow-on contracts. The six later writes also do not expand that catalog:
+manual-entry creation and posting require separately approved draft-cancel or
+reversal operations; `acct.move.draft_cancel.v2` is terminal; and payment
+cancellation, reconciliation undo, and bank-statement compensation retain
+explicit manual-escalation recovery policies. Every executable contract is
 restricted to `test` and `sandbox`, has a public-ORM action and an independent
 fresh-read oracle, and rejects production execution. Payment and reconciliation
 results that already contain a prior partial or full reconciliation graph are

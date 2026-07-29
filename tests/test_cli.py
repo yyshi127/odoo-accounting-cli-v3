@@ -64,10 +64,10 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert payload["command"] == "registry.audit"
     assert data["registry_audit_ready"] is True
     assert data["blockers"] == []
-    assert data["total_count"] == 29
-    assert data["access_counts"] == {"read": 10, "write": 19}
+    assert data["total_count"] == 30
+    assert data["access_counts"] == {"read": 10, "write": 20}
     assert data["read_count"] == 10
-    assert data["write_count"] == 19
+    assert data["write_count"] == 20
     assert data["strict_schema"]["input_strict_count"] == data["total_count"]
     assert data["strict_schema"]["output_strict_count"] == data["total_count"]
     assert data["policy_counts"]["write_approval_required"] == data["write_count"]

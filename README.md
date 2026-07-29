@@ -24,6 +24,25 @@ staged or enabled;
 sandbox and production remain closed until their approval, idempotency,
 verification, recovery, and evidence gates pass.
 
+Dev257 adds the declared, disabled
+`acct.bank.statement_compensate.v1` contract. It preserves a completed,
+verified, database-finalized bank-import graph and creates a separate
+whole-batch opposite-signed statement from the exact retained available plan;
+it is not a delete, partial correction, or implicit unreconciliation path.
+Control add-on version `19.0.0.7.0` serializes supported ORM mutations of bank
+statements, statement lines, their linked moves and journal items, and their
+reconciliation records on the same company-and-journal transaction lock.
+Specialized compensation and generic recovery acquire the complete ordered
+graph-and-sequence lock set before strict row locks. The execution transaction
+rejects unexpected source-to-compensation activity before commit; fresh
+verification reacquires the sequence lock and revalidates the receipt-bound
+source and compensation graphs without treating business-date ordering as
+transaction ordering.
+Current production-routed imports do not provide the required qualifying plan,
+no real two-connection Odoo concurrency test or sandbox receipt exists, and the
+capability is neither staged nor enabled. The add-on and offline tests therefore
+do not establish a production concurrency or accounting-write result.
+
 ## CLI boundary
 
 The wheel-installed `odoo-accounting-cli-v3` command provides development and
@@ -141,7 +160,9 @@ python tools/check_source_boundary.py
 ```
 
 The acceptance gates and current evidence limits are in `tests/TEST.md` and
-`docs/BASELINE.md`. The current machine-checkable capability-registry audit is
-recorded in `docs/CAPABILITY_AUDIT.md`. Pi natural-language scenario scoring is
-defined in `docs/PI_SCENARIO_ACCEPTANCE.md`. Deployment, upgrade, promotion,
-and rollback are defined in `docs/DEPLOYMENT.md`.
+`docs/BASELINE.md`. The machine-checkable capability-registry audit procedure
+and its retained Dev218 target-host example are recorded in
+`docs/CAPABILITY_AUDIT.md`; current counts must come from the exact release's
+`registry audit` result. Pi natural-language scenario scoring is defined in
+`docs/PI_SCENARIO_ACCEPTANCE.md`. Deployment, upgrade, promotion, and rollback
+are defined in `docs/DEPLOYMENT.md`.

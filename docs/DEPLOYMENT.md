@@ -586,6 +586,30 @@ publication contract, not permission to replace it with ad hoc extraction.
    Bridge, a development directory, or a shared production add-ons tree. A
    production Odoo configuration change requires separate authorization.
 
+Dev257's control add-on uses the same company-and-journal advisory-lock digest
+as the V3 bank-statement executor. It acquires that transaction lock before
+supported ORM create, write, unlink, post, reset-to-draft, cancel, or
+reconciliation mutations that can affect a bank statement graph. Installing the
+add-on does not prove the lock works across real Odoo workers and does not stage
+`acct.bank.statement_compensate.v1`. Before any sandbox staging, retain a real
+two-connection Odoo/PostgreSQL test showing all of the following:
+
+- an external mutation that locks first commits before V3's locked precheck,
+  which then sees the change and refuses an ineligible source;
+- when V3 locks first, external statement, line, linked move, journal-item, and
+  reconciliation mutations wait until the V3 transaction ends;
+- a normal transaction committed after compensation, including one with a
+  backfilled business date, is accepted by restart verification, while
+  unexpected source-to-compensation activity detected inside the execution
+  transaction is rejected before commit;
+- reverse-order operations spanning two journals complete without deadlock; and
+- rollback and savepoint failure release the transaction locks without leaving
+  an accounting effect.
+
+Direct SQL that bypasses the Odoo ORM is outside this control contract. The
+sandbox and production database roles must not grant application users an
+alternate direct-write route.
+
 Do not extract into the V2 directory, Pi Bridge, Odoo add-ons, a developer home,
 or the historical `/mnt/.../odoo_accounting_agent_cli_v3` evidence root.
 
@@ -1112,19 +1136,23 @@ and negative-test results. A command exit code alone is not evidence.
 
 ## Dedicated write-sandbox candidate verification
 
-All 14 registered write capabilities are closed by default. Local contracts,
-handlers, and tests do not authorize staging. After the complete local gate,
-create a new reviewed release that stages only the selected capabilities for a
-dedicated sandbox. The sandbox must have its own database UUID, filestore,
-database filter, disabled scheduled jobs, non-superuser executor, separately
-authorized approver, and isolated write state. Do not reuse a production clone
-whose UUID, filestore, cron workers, or live connections are shared.
+All 20 currently registered write capabilities are closed by default. Local
+contracts, handlers, and tests do not authorize staging. After the complete
+local gate, create a new reviewed release that stages only the selected
+capabilities for a dedicated sandbox. The sandbox must have its own database
+UUID, filestore, database filter, disabled scheduled jobs, non-superuser
+executor, separately authorized approver, and isolated write state. Do not
+reuse a production clone whose UUID, filestore, cron workers, or live
+connections are shared.
 
-The local recovery implementation covers the 12 non-terminal business writes
-with 16 state-dependent contracts; draft versus posted invoice, bill, refund,
-and period-adjustment results intentionally select different actions. The
-draft-cancel and recovery-execute capabilities are terminal. A local passing
-test must prove the exact action/guard graph, pre-action fingerprints,
+The local recovery implementation covers the 12 original non-terminal source
+writes with 16 state-dependent contracts; draft versus posted invoice, bill,
+refund, and period-adjustment results intentionally select different actions.
+That catalog count is not the current write-capability count. The original
+draft-cancel and recovery-execute paths add no follow-on contracts, and the six
+later writes use their separately approved cancellation/reversal capability or
+their explicit terminal/manual-escalation policy. A local passing test must
+prove the exact action/guard graph, pre-action fingerprints,
 ACL/company binding, tombstone absence, action-specific financial oracle, and
 that every allowed-delta guard was consumed by a field allowlist. This is only
 the prerequisite for a sandbox drill. It is not permission to stage a write,

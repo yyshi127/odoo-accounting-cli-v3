@@ -763,6 +763,76 @@ def _validate_reconciliation_undo(parameters: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_bank_statement_compensate(
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    origin_operation_id = _non_empty_text(
+        _field(parameters, "origin_operation_id"), "origin_operation_id"
+    )
+    if re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", origin_operation_id
+    ) is None:
+        raise WriteSemanticError("origin_operation_id is invalid")
+    origin_revision = _field(parameters, "expected_origin_revision")
+    if (
+        isinstance(origin_revision, bool)
+        or not isinstance(origin_revision, int)
+        or not 1 <= origin_revision <= 2147483647
+    ):
+        raise WriteSemanticError(
+            "expected_origin_revision must be a positive bounded integer"
+        )
+    receipt_digest = _sha256_digest(
+        _field(parameters, "expected_origin_final_receipt_body_digest"),
+        "expected_origin_final_receipt_body_digest",
+    )
+    plan_digest = _sha256_digest(
+        _field(parameters, "expected_recovery_plan_digest"),
+        "expected_recovery_plan_digest",
+    )
+    statement_id = _positive_id(
+        _field(parameters, "expected_statement_id"), "expected_statement_id"
+    )
+    journal_id = _positive_id(
+        _field(parameters, "expected_journal_id"), "expected_journal_id"
+    )
+    currency_id = _positive_id(
+        _field(parameters, "expected_currency_id"), "expected_currency_id"
+    )
+    source_digest = _sha256_digest(
+        _field(parameters, "expected_source_digest"),
+        "expected_source_digest",
+    )
+    compensation_date = _date(
+        _field(parameters, "compensation_date"), "compensation_date"
+    )
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    return {
+        "checks": (
+            "bank_statement_compensation_origin_operation_explicit",
+            "bank_statement_compensation_origin_revision_explicit",
+            "bank_statement_compensation_final_receipt_digest_explicit",
+            "bank_statement_compensation_recovery_plan_digest_explicit",
+            "bank_statement_compensation_business_bindings_explicit",
+            "bank_statement_compensation_requires_completed_verified_finalized_import_origin",
+            "bank_statement_compensation_requires_exact_retained_release_recovery_plan",
+            "bank_statement_compensation_preserves_origin_and_compensates_complete_batch",
+            "bank_statement_compensation_rejects_delete_partial_or_reconciled_origin_graph",
+        ),
+        "computed": {
+            "origin_operation_id": origin_operation_id,
+            "expected_origin_revision": origin_revision,
+            "expected_origin_final_receipt_body_digest": receipt_digest,
+            "expected_recovery_plan_digest": plan_digest,
+            "expected_statement_id": statement_id,
+            "expected_journal_id": journal_id,
+            "expected_currency_id": currency_id,
+            "expected_source_digest": source_digest,
+            "compensation_date": compensation_date.isoformat(),
+        },
+    }
+
+
 _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.invoice.customer_create.v1": lambda value: _validate_document(value, vendor=False),
     "acct.bill.vendor_create.v1": lambda value: _validate_document(value, vendor=True),
@@ -783,6 +853,7 @@ _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.move.draft_cancel.v2": _validate_draft_cancel_v2,
     "acct.recovery.execute.v1": _validate_recovery,
     "acct.reconciliation.undo.v1": _validate_reconciliation_undo,
+    "acct.bank.statement_compensate.v1": _validate_bank_statement_compensate,
 }
 
 

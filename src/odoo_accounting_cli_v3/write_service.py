@@ -121,6 +121,14 @@ _ALLOWED_MODELS = {
             "account.move.line",
         }
     ),
+    "acct.bank.statement_compensate.v1": frozenset(
+        {
+            "account.bank.statement",
+            "account.bank.statement.line",
+            "account.move",
+            "account.move.line",
+        }
+    ),
     "acct.reconciliation.apply.v1": frozenset(
         {
             "account.move",
@@ -653,6 +661,13 @@ class DurableWriteService:
                 request_id=request_id,
                 parameters=parameters,
             )
+        if capability_id == "acct.bank.statement_compensate.v1":
+            return self._prepare_bank_statement_compensation(
+                context,
+                operation_id=operation_id,
+                request_id=request_id,
+                parameters=parameters,
+            )
         return self._prepare_operation(
             context,
             operation_id=operation_id,
@@ -778,6 +793,74 @@ class DurableWriteService:
             binding,
         )
         return undo
+
+    def _prepare_bank_statement_compensation(
+        self,
+        context: RequestContext,
+        *,
+        operation_id: str,
+        request_id: str,
+        parameters: dict[str, Any],
+    ) -> Operation:
+        try:
+            normalized_parameters = json.loads(canonical_json(parameters))
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise WriteServiceError(
+                "write parameters are not canonical JSON"
+            ) from exc
+        capability = self._policy.validate_request(
+            context,
+            "acct.bank.statement_compensate.v1",
+            normalized_parameters,
+        )
+        if capability.data["access"] != "write":
+            raise WriteServiceError(
+                "bank statement compensation capability is not a write"
+            )
+        origin, origin_receipt, plan = (
+            self._validated_bank_statement_compensation_origin(
+                context,
+                normalized_parameters,
+            )
+        )
+        compensation = self._prepare_operation(
+            context,
+            operation_id=operation_id,
+            request_id=request_id,
+            capability_id="acct.bank.statement_compensate.v1",
+            parameters=normalized_parameters,
+            allow_receipt_derived_recovery=False,
+        )
+        try:
+            binding = (
+                self._store
+                .get_bank_statement_compensation_operation_binding(
+                    compensation.operation_id
+                )
+            )
+        except OperationNotFound:
+            binding = (
+                self._store.bind_bank_statement_compensation_operation(
+                    origin_operation_id=origin.operation_id,
+                    compensation_operation_id=(
+                        compensation.operation_id
+                    ),
+                    expected_origin_revision=origin.revision,
+                    expected_origin_final_receipt_body_digest=(
+                        origin_receipt.body_digest
+                    ),
+                    plan_digest=plan["plan_digest"],
+                    occurred_at=self._now(),
+                )
+            )
+        self._assert_bank_statement_compensation_binding(
+            compensation,
+            origin,
+            origin_receipt,
+            plan,
+            binding,
+        )
+        return compensation
 
     def preview(self, context: RequestContext, operation_id: str) -> dict[str, Any]:
         operation = self.status(context, operation_id)
@@ -2176,6 +2259,244 @@ class DurableWriteService:
                 "origin receipt"
             )
 
+    def _validated_bank_statement_compensation_origin(
+        self,
+        context: RequestContext,
+        parameters: dict[str, Any],
+    ) -> tuple[Operation, Any, dict[str, Any]]:
+        origin_operation_id = parameters.get("origin_operation_id")
+        if not isinstance(origin_operation_id, str):
+            raise WriteServiceError(
+                "bank statement compensation origin operation ID is invalid"
+            )
+        origin = self._store.get_operation(origin_operation_id)
+        self._assert_context_binding(context, origin)
+        origin.assert_integrity()
+        if (
+            origin.capability_id != "acct.bank.statement_import.v1"
+            or origin.state != State.COMPLETED
+            or origin.revision
+            != parameters.get("expected_origin_revision")
+        ):
+            raise WriteServiceError(
+                "bank statement compensation requires the exact completed "
+                "bank statement import origin revision"
+            )
+        output = self._result_for_operation(context, origin)
+        if (
+            output.get("operation_state") != State.COMPLETED.value
+            or output.get("verification", {}).get("passed") is not True
+            or not isinstance(output.get("database_finalization"), dict)
+            or not output["database_finalization"]
+        ):
+            raise WriteServiceError(
+                "bank statement compensation origin is not verified and "
+                "database-finalized"
+            )
+        receipts = [
+            receipt
+            for receipt in self._store.get_final_write_receipts(
+                origin.operation_id
+            )
+            if receipt.operation_revision == origin.revision
+            and receipt.terminal_state == State.COMPLETED.value
+        ]
+        if len(receipts) != 1:
+            raise WriteServiceError(
+                "bank statement compensation origin has no unique final "
+                "receipt"
+            )
+        receipt = receipts[0]
+        expected_receipt_digest = parameters.get(
+            "expected_origin_final_receipt_body_digest"
+        )
+        if (
+            not isinstance(expected_receipt_digest, str)
+            or not hmac.compare_digest(
+                receipt.body_digest, expected_receipt_digest
+            )
+        ):
+            raise WriteServiceError(
+                "bank statement compensation origin final receipt digest "
+                "changed"
+            )
+        details = receipt.body.get("receipt_details")
+        plan = (
+            details.get("recovery_plan")
+            if isinstance(details, dict)
+            else None
+        )
+        try:
+            validate_executable_recovery_plan(plan)
+            index_recovery_guard_graph(
+                plan, expected_company_id=origin.company_id
+            )
+            contract = select_recovery_action_contract(
+                origin.capability_id,
+                plan["method"],
+                plan["oracle_id"],
+            )
+        except (WriteReceiptError, RecoveryContractError) as exc:
+            raise WriteServiceError(
+                "bank statement compensation origin recovery plan is "
+                "invalid"
+            ) from exc
+        expected_plan_digest = parameters.get(
+            "expected_recovery_plan_digest"
+        )
+        actions = plan.get("action_targets")
+        if (
+            plan["plan_version"] != 2
+            or plan["origin_operation_id"] != origin.operation_id
+            or plan["recovery_capability_id"]
+            != "acct.recovery.execute.v1"
+            or plan["method"] != "post_compensating_bank_statement_v1"
+            or plan["oracle_id"]
+            != "post_compensating_bank_statement_exact_v1"
+            or contract.origin_capability_id != origin.capability_id
+            or plan["requires_approval"] is not True
+            or not isinstance(expected_plan_digest, str)
+            or not hmac.compare_digest(
+                plan["plan_digest"], expected_plan_digest
+            )
+            or canonical_json(output.get("recovery_plan"))
+            != canonical_json(plan)
+            or type(actions) is not list
+            or len(actions) != 1
+            or actions[0].get("model") != "account.bank.statement"
+            or actions[0].get("record_id")
+            != parameters.get("expected_statement_id")
+        ):
+            raise WriteServiceError(
+                "bank statement compensation origin recovery plan binding "
+                "changed"
+            )
+
+        difference = output.get("difference")
+        after = (
+            difference.get("after")
+            if isinstance(difference, dict)
+            else None
+        )
+        statements = (
+            [
+                snapshot
+                for snapshot in after
+                if isinstance(snapshot, dict)
+                and snapshot.get("model") == "account.bank.statement"
+            ]
+            if isinstance(after, list)
+            else []
+        )
+        try:
+            if len(statements) != 1:
+                raise WriteReceiptError(
+                    "origin must contain one bank statement snapshot"
+                )
+            statement = statements[0]
+            validate_record_snapshot(statement)
+            values = json.loads(statement["values_json"])
+        except (WriteReceiptError, TypeError, json.JSONDecodeError) as exc:
+            raise WriteServiceError(
+                "bank statement compensation origin statement evidence is "
+                "invalid"
+            ) from exc
+        if (
+            statement["record_id"]
+            != parameters.get("expected_statement_id")
+            or not isinstance(values, dict)
+            or values.get("company_id")
+            != parameters.get("company_id")
+            or values.get("journal_id")
+            != parameters.get("expected_journal_id")
+            or values.get("currency_id")
+            != parameters.get("expected_currency_id")
+            or values.get("odoo_cli_v3_source_digest")
+            != parameters.get("expected_source_digest")
+            or origin.parameters.get("journal_id")
+            != parameters.get("expected_journal_id")
+            or origin.parameters.get("currency_id")
+            != parameters.get("expected_currency_id")
+            or origin.parameters.get("source_digest")
+            != parameters.get("expected_source_digest")
+        ):
+            raise WriteServiceError(
+                "bank statement compensation origin statement binding "
+                "changed"
+            )
+        if any(
+            event.event_type == "recovery.binding.created"
+            and event.payload.get("origin_operation_id")
+            == origin.operation_id
+            for event in self._store.audit_events()
+        ):
+            raise WriteServiceError(
+                "bank statement compensation origin has an incompatible "
+                "incident recovery binding"
+            )
+        return origin, receipt, json.loads(canonical_json(plan))
+
+    @staticmethod
+    def _assert_bank_statement_compensation_binding(
+        compensation: Operation,
+        origin: Operation,
+        origin_receipt: Any,
+        plan: dict[str, Any],
+        binding: Any,
+    ) -> None:
+        parameters = compensation.parameters
+        if (
+            compensation.operation_id == origin.operation_id
+            or compensation.capability_id
+            != "acct.bank.statement_compensate.v1"
+            or origin.capability_id != "acct.bank.statement_import.v1"
+            or origin.state != State.COMPLETED
+            or binding.binding_version != 1
+            or binding.audit_event.event_type
+            != "bank.statement.compensation.binding.created"
+            or binding.audit_event.operation_id
+            != compensation.operation_id
+            or binding.origin_operation_id != origin.operation_id
+            or binding.origin_request_id != origin.request_id
+            or binding.origin_operation_digest != origin.digest
+            or binding.origin_operation_revision != origin.revision
+            or binding.origin_final_receipt_id
+            != origin_receipt.receipt_id
+            or binding.origin_final_receipt_body_digest
+            != origin_receipt.body_digest
+            or binding.compensation_operation_id
+            != compensation.operation_id
+            or binding.compensation_request_id
+            != compensation.request_id
+            or binding.compensation_operation_digest
+            != compensation.digest
+            or binding.compensation_operation_revision != 0
+            or binding.plan_digest != plan["plan_digest"]
+            or parameters.get("origin_operation_id")
+            != origin.operation_id
+            or parameters.get("expected_origin_revision")
+            != origin.revision
+            or parameters.get(
+                "expected_origin_final_receipt_body_digest"
+            )
+            != origin_receipt.body_digest
+            or parameters.get("expected_recovery_plan_digest")
+            != plan["plan_digest"]
+            or binding.principal != compensation.principal
+            or binding.user_id != compensation.user_id
+            or binding.company_id != compensation.company_id
+            or binding.odoo_instance_id != compensation.odoo_instance_id
+            or binding.database_name != compensation.database_name
+            or binding.database_uuid != compensation.database_uuid
+            or binding.environment != compensation.environment
+            or binding.registry_digest != compensation.registry_digest
+            or binding.release_digest != compensation.release_digest
+        ):
+            raise WriteServiceError(
+                "bank statement compensation binding differs from its "
+                "immutable origin receipt"
+            )
+
     def _validated_origin_recovery_plan(
         self,
         context: RequestContext,
@@ -2896,6 +3217,37 @@ class DurableWriteService:
                 binding,
             )
             return plan
+        if (
+            operation.capability_id
+            == "acct.bank.statement_compensate.v1"
+        ):
+            self._assert_context_binding(context, operation)
+            try:
+                binding = (
+                    self._store
+                    .get_bank_statement_compensation_operation_binding(
+                        operation.operation_id
+                    )
+                )
+            except OperationNotFound as exc:
+                raise WriteServiceError(
+                    "bank statement compensation operation has no durable "
+                    "origin binding"
+                ) from exc
+            origin, origin_receipt, plan = (
+                self._validated_bank_statement_compensation_origin(
+                    context,
+                    operation.parameters,
+                )
+            )
+            self._assert_bank_statement_compensation_binding(
+                operation,
+                origin,
+                origin_receipt,
+                plan,
+                binding,
+            )
+            return plan
         if operation.capability_id != "acct.recovery.execute.v1":
             return None
         self._assert_context_binding(context, operation)
@@ -2929,12 +3281,15 @@ class DurableWriteService:
     ) -> None:
         """Keep ordinary receipt-bound undo fail-closed inside the service."""
 
-        if operation.capability_id != "acct.reconciliation.undo.v1":
+        if operation.capability_id not in {
+            "acct.reconciliation.undo.v1",
+            "acct.bank.statement_compensate.v1",
+        }:
             return
         plan = self.trusted_recovery_plan(context, operation)
         if plan is None:  # pragma: no cover - guarded by the capability check
             raise WriteServiceError(
-                "reconciliation undo has no trusted origin plan"
+                "receipt-bound operation has no trusted origin plan"
             )
 
     def _assert_live_precheck(

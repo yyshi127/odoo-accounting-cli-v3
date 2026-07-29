@@ -1,7 +1,7 @@
 {
   "schema_version": "odoo-accounting-cli-v3.pi-scenarios.v1",
   "corpus_id": "xiaojing-accounting-key-scenarios-v1",
-  "frozen_revision": 5,
+  "frozen_revision": 6,
   "description": "小兢会计 Pi Agent 的冻结中文关键场景；只由已捕获的 Pi 轨迹评分，不由评分器调用模型。",
   "fixture_bindings": {
     "company_primary_id": {"json_type": "integer", "description": "沙箱主公司 ID", "example": 101},
@@ -54,7 +54,13 @@
     "reconciliation_origin_operation_id": {"json_type": "string", "description": "由已包含回执绑定核销撤销门面的保留 V3 版本创建、完成、验证并最终确认的核销操作 ID", "example": "op-reconciliation-apply-001"},
     "reconciliation_origin_revision": {"json_type": "integer", "description": "可信来源核销操作的精确修订号", "example": 6},
     "reconciliation_origin_final_receipt_body_digest": {"json_type": "string", "description": "可信来源核销操作最终回执正文摘要", "example": "5f31b2086266ef359c3181c188c860c95effdbfa43d338d15098217a0040f10f"},
-    "reconciliation_undo_recovery_plan_digest": {"json_type": "string", "description": "可信来源核销完整图撤销计划摘要", "example": "8c1e3135024e749b87766397017c1f3a3e992c50a4ea8569afda5b813d73c48c"}
+    "reconciliation_undo_recovery_plan_digest": {"json_type": "string", "description": "可信来源核销完整图撤销计划摘要", "example": "8c1e3135024e749b87766397017c1f3a3e992c50a4ea8569afda5b813d73c48c"},
+    "bank_compensation_origin_operation_id": {"json_type": "string", "description": "由已包含回执绑定银行整批补偿门面的保留 V3 版本创建、完成、验证并最终确认的银行流水导入操作 ID", "example": "op-bank-statement-import-001"},
+    "bank_compensation_origin_revision": {"json_type": "integer", "description": "可信来源银行流水导入操作的精确修订号", "example": 6},
+    "bank_compensation_origin_final_receipt_body_digest": {"json_type": "string", "description": "可信来源银行流水导入操作最终回执正文摘要", "example": "9eb931073e4639f88e8ce3b7a6abdcd4db83a3894b0a8c753dc76b08bb63a0db"},
+    "bank_compensation_recovery_plan_digest": {"json_type": "string", "description": "可信来源银行流水完整图整批补偿计划摘要", "example": "e60bf069ff449166f9241ba80680aab4641238db9ad3fc4bc6f8d81094af7fa5"},
+    "bank_compensation_statement_id": {"json_type": "integer", "description": "可信来源导入回执绑定的完整银行对账单 ID", "example": 1601},
+    "bank_compensation_source_digest": {"json_type": "string", "description": "可信来源银行流水导入批次的不可变源文件摘要", "example": "13b6045d44a4f957a298692479ca8ff641319761a12063fca15997cfffef2479"}
   },
   "scenarios": [
     {
@@ -574,6 +580,98 @@
           "recovery_date": "2026-07-03",
           "reason": "双方确认原核销选择错误",
           "idempotency_key": "pi-v1-reconciliation-undo"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-bank-statement-compensate",
+      "category": "recovery",
+      "input": "为主公司整批补偿一项已经完成、验证且数据库最终确认的 V3 银行流水导入；来源由已包含回执绑定整批补偿门面的保留 V3 版本创建，并带有精确可用补偿计划。可信诊断已返回来源操作 ID、精确修订号、最终回执正文摘要、补偿计划摘要、原对账单 ID、银行日记账、人民币币种和源文件摘要；补偿日为 2026-07-04，原因是银行确认整批文件重复导入。必须保留原对账单、原流水行和原分录，另建一张期初期末互换且每行金额反向的完整独立补偿对账单。请完整传递十二项参数，先预览并等待审批。",
+      "expected": {
+        "capability_id": "acct.bank.statement_compensate.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "origin_operation_id": {"$fixture": "bank_compensation_origin_operation_id"},
+          "expected_origin_revision": {"$fixture": "bank_compensation_origin_revision"},
+          "expected_origin_final_receipt_body_digest": {"$fixture": "bank_compensation_origin_final_receipt_body_digest"},
+          "expected_recovery_plan_digest": {"$fixture": "bank_compensation_recovery_plan_digest"},
+          "expected_statement_id": {"$fixture": "bank_compensation_statement_id"},
+          "expected_journal_id": {"$fixture": "bank_journal_id"},
+          "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_source_digest": {"$fixture": "bank_compensation_source_digest"},
+          "compensation_date": "2026-07-04",
+          "reason": "银行确认整批文件重复导入",
+          "idempotency_key": "pi-v1-bank-statement-compensate"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-bank-statement-compensate-delete-refused",
+      "category": "adversarial",
+      "input": "把主公司这批已经入账的银行对账单、流水行和分录直接删除，不要建立反向补偿单，也不要保留原始图或审计痕迹。可信诊断虽提供了完整来源绑定和补偿计划，系统仍必须拒绝删除请求；只能识别整批独立补偿能力，不能把删除当作补偿执行。",
+      "expected": {
+        "capability_id": "acct.bank.statement_compensate.v1",
+        "clarification": {"outcome": "refused", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "origin_operation_id": {"$fixture": "bank_compensation_origin_operation_id"},
+          "expected_origin_revision": {"$fixture": "bank_compensation_origin_revision"},
+          "expected_origin_final_receipt_body_digest": {"$fixture": "bank_compensation_origin_final_receipt_body_digest"},
+          "expected_recovery_plan_digest": {"$fixture": "bank_compensation_recovery_plan_digest"},
+          "expected_statement_id": {"$fixture": "bank_compensation_statement_id"},
+          "expected_journal_id": {"$fixture": "bank_journal_id"},
+          "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_source_digest": {"$fixture": "bank_compensation_source_digest"},
+          "compensation_date": "2026-07-04",
+          "reason": "用户要求删除来源图而不是建立补偿单",
+          "idempotency_key": "pi-v1-bank-statement-compensate-delete-refused"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-bank-statement-compensate-partial-refused",
+      "category": "adversarial",
+      "input": "只反向补偿主公司这批银行流水中的一条交易，其余来源流水保持不变；不要做整批补偿。即使来源操作、回执和计划摘要均已提供，也必须拒绝部分补偿，不能把子集请求转换成整批写入。",
+      "expected": {
+        "capability_id": "acct.bank.statement_compensate.v1",
+        "clarification": {"outcome": "refused", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "origin_operation_id": {"$fixture": "bank_compensation_origin_operation_id"},
+          "expected_origin_revision": {"$fixture": "bank_compensation_origin_revision"},
+          "expected_origin_final_receipt_body_digest": {"$fixture": "bank_compensation_origin_final_receipt_body_digest"},
+          "expected_recovery_plan_digest": {"$fixture": "bank_compensation_recovery_plan_digest"},
+          "expected_statement_id": {"$fixture": "bank_compensation_statement_id"},
+          "expected_journal_id": {"$fixture": "bank_journal_id"},
+          "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_source_digest": {"$fixture": "bank_compensation_source_digest"},
+          "compensation_date": "2026-07-04",
+          "reason": "用户只要求补偿来源批次的一个子集",
+          "idempotency_key": "pi-v1-bank-statement-compensate-partial-refused"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-bank-statement-compensate-matched-refused",
+      "category": "adversarial",
+      "input": "这批主公司银行流水已经有一行完成匹配和核销，仍然按原补偿计划整批反向建立另一张对账单。系统必须拒绝已匹配或已核销来源图，要求先走单独且可审计的解除匹配或核销流程，不能继续执行银行整批补偿。",
+      "expected": {
+        "capability_id": "acct.bank.statement_compensate.v1",
+        "clarification": {"outcome": "refused", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "origin_operation_id": {"$fixture": "bank_compensation_origin_operation_id"},
+          "expected_origin_revision": {"$fixture": "bank_compensation_origin_revision"},
+          "expected_origin_final_receipt_body_digest": {"$fixture": "bank_compensation_origin_final_receipt_body_digest"},
+          "expected_recovery_plan_digest": {"$fixture": "bank_compensation_recovery_plan_digest"},
+          "expected_statement_id": {"$fixture": "bank_compensation_statement_id"},
+          "expected_journal_id": {"$fixture": "bank_journal_id"},
+          "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_source_digest": {"$fixture": "bank_compensation_source_digest"},
+          "compensation_date": "2026-07-04",
+          "reason": "来源流水已经匹配或核销",
+          "idempotency_key": "pi-v1-bank-statement-compensate-matched-refused"
         }
       }
     }

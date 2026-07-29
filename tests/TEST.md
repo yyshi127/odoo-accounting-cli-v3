@@ -33,11 +33,12 @@ where practical, then record actual execution evidence separately.
   PostgreSQL read-only transaction. Both remain `contract_tested` and
   `test`-staged only; neither is production-enabled.
 - No capability is enabled and no write capability is staged.
-- The current registry contains 19 write capabilities: the original 14-capability
+- The current registry contains 20 write capabilities: the original 14-capability
   baseline plus `acct.journal.entry_create.v1`, `acct.move.post.v1`, and
   `acct.move.draft_cancel.v2`, plus the narrowly scoped
   `acct.payment.cancel.v1` and the receipt-bound
-  `acct.reconciliation.undo.v1`. All five additions remain
+  `acct.reconciliation.undo.v1` and
+  `acct.bank.statement_compensate.v1`. All six additions remain
   `declared`, have no retained evidence receipts, and are neither staged nor
   enabled. `tests/test_phaseb_move_write_capability_closure.py` is an offline
   schema, semantics, idempotency, signed-failure, tamper, and dispatch test; it
@@ -52,6 +53,28 @@ where practical, then record actual execution evidence separately.
   suite with only platform-gated skips; Pi Bridge passed 140 tests with two
   Linux-only skips. This is development evidence only: no real Odoo sandbox
   write was performed, and the capability remains unstaged and disabled.
+- Dev257 declares `acct.bank.statement_compensate.v1` as a separate ordinary
+  critical write bound to one completed, verified, database-finalized
+  `acct.bank.statement_import.v1` receipt and its exact retained available
+  recovery plan. Its only business effect is a new independent whole-batch
+  compensation statement: the original statement, lines, and moves survive
+  unchanged, every source line is inverted, and opening/closing balances are
+  swapped. Delete, subset/partial, reconciled, bank-matched, externally changed,
+  or binding-mismatched origins fail closed. Current production-routed imports
+  do not contain the required facade/available-plan provenance, so they are
+  ineligible. The `19.0.0.7.0` control add-on and V3 executor share one
+  company-and-journal sequence lock for supported statement, line, linked
+  move/journal-item, and reconciliation ORM mutations. Generic recovery obtains
+  its graph and sequence locks in one sorted set before row locks. Execution
+  refreshes the source boundary under that lock and rejects unexpected
+  source-to-compensation activity before commit. Post-commit verification locks
+  again and revalidates the receipt-bound exact graphs without treating a
+  business-date/internal-index range as proof of transaction order. This is
+  declared/offline development work only. The 2026-07-29 Windows gate passed
+  5,291 pytest tests plus 775 subtests, with 286 skipped external/platform
+  cases; Pi Bridge passed 141 tests with two Linux-only skips. No real
+  two-connection Odoo concurrency test or sandbox write was performed, and the
+  capability remains unstaged and disabled.
 - The three Phase B handlers currently scope `tracking_disable` to their Odoo
   create/write/post call so uncontrolled mail-thread records cannot escape the
   exact accounting graph. The signed V3 operation anchor and receipts are the
@@ -334,8 +357,8 @@ requests across all enabled domains.
 
 ### Frozen F01-F03/F05 scoring contract
 
-`tests/fixtures/pi_scenarios.v1.json` is the revision-5 frozen Chinese key
-scenario corpus. Its 34 scenarios cover every one of the 29 registered
+`tests/fixtures/pi_scenarios.v1.json` is the revision-6 frozen Chinese key
+scenario corpus. Its 38 scenarios cover every one of the 30 registered
 capabilities and the
 ordinary, ambiguous, adversarial, multi-company, multi-currency, and recovery
 classes. Environment-specific Odoo record IDs are named fixture bindings, so a
@@ -369,6 +392,15 @@ contained this receipt-bound facade. Legacy, unfinalized, changed-revision, or
 digest-mismatched origins are ineligible. The scenario distinguishes this
 business undo from payment cancellation, refunds, and failed-operation
 recovery; it is not real Odoo evidence and does not stage or enable the
+capability.
+
+The `acct.bank.statement_compensate.v1` corpus slice is declared/offline only.
+One positive scenario preserves all 12 strict source, receipt, plan, statement,
+journal, currency, source-file, date, reason, and idempotency bindings through
+the Pi material-parameter contract. Three adversarial scenarios require refusal
+for deletion, subset/partial compensation, and already matched/reconciled
+source graphs. These expectations do not prove that a live Pi model selected
+correctly, do not prove Odoo execution, and do not stage or enable the
 capability.
 
 Payment cancellation v1 is limited to the bound company's own currency and a

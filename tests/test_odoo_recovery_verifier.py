@@ -548,13 +548,42 @@ def test_payment_recovery_freshly_proves_cancel_unreconcile_and_restoration():
     assert records["payment_move"].id in case.adapter.balance_reads
 
 
-def make_bank_case() -> tuple[Case, dict[str, Record]]:
+def make_bank_case(
+    *,
+    foreign_journal_currency: bool = False,
+    transaction_currency_is_company: bool = False,
+    unmarked_source_amount_currency: str = "0",
+) -> tuple[Case, dict[str, Record]]:
+    if transaction_currency_is_company and not foreign_journal_currency:
+        raise ValueError(
+            "company transaction currency requires a foreign journal currency"
+        )
     case = Case("post_compensating_bank_statement_v1")
+    company_currency = Ref(70)
+    company_currency.rounding = "0.01"
+    case.company.currency_id = company_currency
+    journal_currency = (
+        Ref(71) if foreign_journal_currency else company_currency
+    )
+    journal_currency.rounding = "0.01"
+    journal_currency_rate = (
+        Decimal("0.2") if foreign_journal_currency else Decimal("1")
+    )
+    transaction_currency = (
+        company_currency if transaction_currency_is_company else Ref(90)
+    )
+    transaction_currency.rounding = "0.01"
     original_moves = [
         make_move(case, 20),
         make_move(case, 30),
     ]
     journal = Ref(80)
+    journal.company_id = case.company
+    journal.currency_id = (
+        journal_currency if foreign_journal_currency else False
+    )
+    journal.default_account_id = Ref(91)
+    journal.suspense_account_id = Ref(92)
     partners = (Ref(81), Ref(82))
     original_lines = [
         case.add(
@@ -567,7 +596,11 @@ def make_bank_case() -> tuple[Case, dict[str, Record]]:
             ref="A",
             journal_id=journal,
             partner_id=partners[0],
-            foreign_currency_id=Ref(90),
+            foreign_currency_id=transaction_currency,
+            currency_id=journal_currency,
+            company_id=case.company,
+            is_reconciled=False,
+            payment_ids=[],
             move_id=original_moves[0],
             statement_id=False,
         ),
@@ -576,12 +609,16 @@ def make_bank_case() -> tuple[Case, dict[str, Record]]:
             102,
             date="2026-07-20",
             amount="30",
-            amount_currency="30",
+            amount_currency=unmarked_source_amount_currency,
             payment_ref="Original B",
             ref="B",
             journal_id=journal,
             partner_id=partners[1],
             foreign_currency_id=False,
+            currency_id=journal_currency,
+            company_id=case.company,
+            is_reconciled=False,
+            payment_ids=[],
             move_id=original_moves[1],
             statement_id=False,
         ),
@@ -596,10 +633,120 @@ def make_bank_case() -> tuple[Case, dict[str, Record]]:
         balance_end_real="150",
         is_complete=True,
         is_valid=True,
+        company_id=case.company,
+        journal_id=journal,
+        currency_id=journal_currency,
         line_ids=original_lines,
     )
     for line in original_lines:
         line.statement_id = original
+
+    def configure_move(move, bank_line, statement):
+        amount = _amount(bank_line.amount)
+        foreign_currency_id = (
+            bank_line.foreign_currency_id.id
+            if bank_line.foreign_currency_id
+            else None
+        )
+        foreign_amount = (
+            _amount(bank_line.amount_currency)
+            if foreign_currency_id is not None
+            else amount
+        )
+        if journal_currency is company_currency:
+            company_amount = amount
+        elif foreign_currency_id == company_currency.id:
+            company_amount = foreign_amount
+        else:
+            company_amount = amount / journal_currency_rate
+        move.company_id = case.company
+        move.journal_id = journal
+        move.currency_id = (
+            bank_line.foreign_currency_id
+            if foreign_currency_id is not None
+            else journal_currency
+        )
+        move.partner_id = bank_line.partner_id
+        move.date = bank_line.date
+        move.statement_line_id = bank_line
+        move.statement_line_ids = [bank_line]
+        for field in (
+            "payment_ids",
+            "matched_payment_ids",
+            "reconciled_payment_ids",
+            "tax_cash_basis_created_move_ids",
+            "exchange_diff_partial_ids",
+            "asset_ids",
+            "transaction_ids",
+            "authorized_transaction_ids",
+        ):
+            setattr(move, field, [])
+        for field in (
+            "origin_payment_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "asset_id",
+        ):
+            setattr(move, field, False)
+        move.deferred_move_ids = []
+        move.deferred_original_move_ids = []
+        specifications = (
+            (
+                journal.default_account_id,
+                journal_currency,
+                max(company_amount, Decimal()),
+                max(-company_amount, Decimal()),
+                company_amount,
+                amount,
+                journal_currency_rate,
+            ),
+            (
+                journal.suspense_account_id,
+                bank_line.foreign_currency_id or journal_currency,
+                max(-company_amount, Decimal()),
+                max(company_amount, Decimal()),
+                -company_amount,
+                -foreign_amount,
+                (
+                    Decimal("0.14")
+                    if foreign_currency_id is not None
+                    else journal_currency_rate
+                ),
+            ),
+        )
+        for move_line, specification in zip(move.line_ids, specifications):
+            (
+                account,
+                line_currency,
+                debit,
+                credit,
+                balance,
+                amount_currency,
+                currency_rate,
+            ) = specification
+            move_line.company_id = case.company
+            move_line.account_id = account
+            move_line.currency_id = line_currency
+            move_line.partner_id = bank_line.partner_id
+            move_line.debit = str(debit)
+            move_line.credit = str(credit)
+            move_line.balance = str(balance)
+            move_line.amount_currency = str(amount_currency)
+            move_line.currency_rate = str(currency_rate)
+            move_line.payment_id = False
+            move_line.statement_line_id = bank_line
+            move_line.statement_id = statement
+            move_line.tax_ids = []
+            move_line.tax_line_id = False
+            move_line.tax_tag_ids = []
+            move_line.analytic_distribution = False
+            move_line.analytic_line_ids = []
+            move_line.asset_ids = []
+            move_line.deferred_start_date = False
+            move_line.deferred_end_date = False
+
+    for move, line in zip(original_moves, original_lines):
+        configure_move(move, line, original)
     guards: list[tuple[Record, str]] = [
         *((line, "survive_exact") for line in original_lines),
         *((move, "survive_exact") for move in original_moves),
@@ -625,7 +772,11 @@ def make_bank_case() -> tuple[Case, dict[str, Record]]:
             ref="Recovery of bank line 101",
             journal_id=journal,
             partner_id=partners[0],
-            foreign_currency_id=Ref(90),
+            foreign_currency_id=transaction_currency,
+            currency_id=journal_currency,
+            company_id=case.company,
+            is_reconciled=False,
+            payment_ids=[],
             move_id=inverse_moves[0],
             statement_id=False,
         ),
@@ -634,12 +785,16 @@ def make_bank_case() -> tuple[Case, dict[str, Record]]:
             202,
             date=RECOVERY_DATE,
             amount="-30",
-            amount_currency="-30",
+            amount_currency="0",
             payment_ref=REASON,
             ref="Recovery of bank line 102",
             journal_id=journal,
             partner_id=partners[1],
             foreign_currency_id=False,
+            currency_id=journal_currency,
+            company_id=case.company,
+            is_reconciled=False,
+            payment_ids=[],
             move_id=inverse_moves[1],
             statement_id=False,
         ),
@@ -654,10 +809,15 @@ def make_bank_case() -> tuple[Case, dict[str, Record]]:
         balance_end_real="50",
         is_complete=True,
         is_valid=True,
+        company_id=case.company,
+        journal_id=journal,
+        currency_id=journal_currency,
         line_ids=inverse_lines,
     )
     for line in inverse_lines:
         line.statement_id = compensating
+    for move, line in zip(inverse_moves, inverse_lines):
+        configure_move(move, line, compensating)
     return case, {
         "original": original,
         "original_line": original_lines[0],
@@ -674,6 +834,108 @@ def test_bank_recovery_freshly_proves_independent_inverse_statement():
     assert "bank_line_amounts_fresh_inverse" in checks
     assert records["compensating"].id != records["original"].id
     assert set(case.adapter.balance_reads) >= {220, 230}
+
+
+def test_bank_company_currency_amounts_use_one_to_one_company_balance():
+    case, records = make_bank_case()
+    liquidity_line, suspense_line = records["inverse_line"].move_id.line_ids
+
+    case.verify()
+
+    assert liquidity_line.amount_currency == "-70"
+    assert liquidity_line.balance == "-70"
+    assert suspense_line.balance == "70"
+
+
+def test_bank_company_currency_rejects_balanced_wrong_company_amount():
+    case, records = make_bank_case()
+    liquidity_line, suspense_line = records["inverse_line"].move_id.line_ids
+    liquidity_line.credit = "69"
+    liquidity_line.balance = "-69"
+    suspense_line.debit = "69"
+    suspense_line.balance = "69"
+
+    with pytest.raises(
+        RecoveryVerificationError, match="journal currency conversion differs"
+    ):
+        case.verify()
+
+
+def test_bank_foreign_journal_uses_fresh_company_currency_conversion():
+    case, records = make_bank_case(foreign_journal_currency=True)
+    liquidity_line, suspense_line = records["inverse_line"].move_id.line_ids
+
+    case.verify()
+
+    assert liquidity_line.amount_currency == "-70"
+    assert liquidity_line.balance == "-3.5E+2"
+    assert suspense_line.amount_currency == "77"
+    assert suspense_line.balance == "3.5E+2"
+
+
+def test_bank_foreign_journal_rejects_balanced_one_to_one_valuation():
+    case, records = make_bank_case(foreign_journal_currency=True)
+    liquidity_line, suspense_line = records["inverse_line"].move_id.line_ids
+    liquidity_line.credit = "70"
+    liquidity_line.balance = "-70"
+    suspense_line.debit = "70"
+    suspense_line.balance = "70"
+
+    with pytest.raises(
+        RecoveryVerificationError, match="journal currency conversion differs"
+    ):
+        case.verify()
+
+
+def test_bank_company_transaction_currency_uses_transaction_amount():
+    case, records = make_bank_case(
+        foreign_journal_currency=True,
+        transaction_currency_is_company=True,
+    )
+    liquidity_line, suspense_line = records["inverse_line"].move_id.line_ids
+
+    case.verify()
+
+    assert liquidity_line.amount_currency == "-70"
+    assert liquidity_line.balance == "-77"
+    assert suspense_line.amount_currency == "77"
+    assert suspense_line.balance == "77"
+
+
+def test_bank_company_transaction_currency_rejects_journal_rate_valuation():
+    case, records = make_bank_case(
+        foreign_journal_currency=True,
+        transaction_currency_is_company=True,
+    )
+    liquidity_line, suspense_line = records["inverse_line"].move_id.line_ids
+    liquidity_line.credit = "350"
+    liquidity_line.balance = "-350"
+    suspense_line.debit = "350"
+    suspense_line.balance = "350"
+
+    with pytest.raises(
+        RecoveryVerificationError, match="journal currency conversion differs"
+    ):
+        case.verify()
+
+
+def test_bank_without_foreign_currency_requires_zero_compensating_amount_currency():
+    case, records = make_bank_case()
+    records["compensating"].line_ids[1].amount_currency = "1"
+
+    with pytest.raises(
+        RecoveryVerificationError, match="unmarked foreign amount differs"
+    ):
+        case.verify()
+
+
+def test_bank_without_foreign_currency_requires_zero_source_amount_currency():
+    case, _records = make_bank_case(unmarked_source_amount_currency="1")
+
+    with pytest.raises(
+        RecoveryVerificationError, match="unmarked foreign amount differs"
+    ):
+        case.verify()
 
 
 def make_reconciliation_case(
@@ -1165,6 +1427,68 @@ def test_bank_original_graph_must_remain_snapshot_exact():
 
     with pytest.raises(
         RecoveryVerificationError, match="survive_exact guard changed"
+    ):
+        case.verify()
+
+
+def test_bank_compensating_move_must_use_exact_journal_accounts():
+    case, records = make_bank_case()
+    records["inverse_line"].move_id.line_ids[0].account_id = Ref(999)
+
+    with pytest.raises(
+        RecoveryVerificationError,
+        match="does not use liquidity and suspense accounts",
+    ):
+        case.verify()
+
+
+def test_bank_compensating_move_must_preserve_linewise_amounts():
+    case, records = make_bank_case()
+    records["inverse_line"].move_id.line_ids[0].balance = "-69"
+
+    with pytest.raises(
+        RecoveryVerificationError, match="journal item amount differs"
+    ):
+        case.verify()
+
+
+def test_bank_compensating_move_rejects_external_payment_effects():
+    case, records = make_bank_case()
+    records["inverse_line"].move_id.payment_ids = [Ref(999)]
+
+    with pytest.raises(
+        RecoveryVerificationError, match="external side effect"
+    ):
+        case.verify()
+
+
+def test_bank_optional_asset_and_deferred_fields_may_be_absent():
+    case, records = make_bank_case()
+    for bank_line in records["compensating"].line_ids:
+        for move_line in bank_line.move_id.line_ids:
+            del move_line.asset_ids
+            del move_line.deferred_start_date
+            del move_line.deferred_end_date
+
+    case.verify()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("asset_ids", [Ref(999)]),
+        ("deferred_start_date", "2026-07-29"),
+        ("deferred_end_date", "2026-08-29"),
+    ],
+)
+def test_bank_present_optional_asset_or_deferred_effect_is_rejected(
+    field: str, value: Any
+):
+    case, records = make_bank_case()
+    setattr(records["inverse_line"].move_id.line_ids[0], field, value)
+
+    with pytest.raises(
+        RecoveryVerificationError, match="asset, deferred, or external effect"
     ):
         case.verify()
 

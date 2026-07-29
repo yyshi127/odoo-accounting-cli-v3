@@ -46,6 +46,8 @@ class DirectVerifyHarness(OdooWriteHandlers):
         self.context = SimpleNamespace(trusted_recovery_plan=plan)
         self.module_graph_bindings: list[tuple[dict[str, Any], Any]] = []
         self.specialized_delta_calls: list[tuple[Any, ...]] = []
+        self.bank_records: list[tuple[str, Record]] = []
+        self.bank_lock_calls: list[int] = []
 
     def _assert_draft_recovery_module_graph_binding(
         self,
@@ -56,6 +58,46 @@ class DirectVerifyHarness(OdooWriteHandlers):
 
     def _assert_recovery_exact_delta(self, *args: Any, **kwargs: Any) -> None:
         self.specialized_delta_calls.append((*args, kwargs))
+
+    def _recovery_records_by_role(self, plan, _company):
+        keyed = {
+            (model_name, record.id): record
+            for model_name, record in self.bank_records
+        }
+        actions = [
+            (
+                item["model"],
+                keyed[(item["model"], item["record_id"])],
+            )
+            for item in plan["action_targets"]
+        ]
+        guards = [
+            (
+                item["model"],
+                keyed[(item["model"], item["record_id"])],
+            )
+            for item in plan["guard_records"]
+        ]
+        return actions, guards, self.bank_records
+
+    def _locked_fresh_bank_recovery_graph(
+        self,
+        plan,
+        company,
+        actions,
+        guards,
+        *,
+        expected_journal_id=None,
+    ):
+        del plan, company
+        self.bank_lock_calls.append(expected_journal_id)
+        return actions, guards, self.bank_records, (actions[0][1], [])
+
+    def _fresh_bank_recovery_result_records(self, records, _company):
+        return records
+
+    def _assert_bank_compensation_verification_range(self, *_args):
+        return None
 
 
 def _plan_and_graph(
@@ -94,6 +136,9 @@ def _plan_and_graph(
         (action_model, action.id): {"company_id": 7},
         (guard_model, guard.id): {"company_id": 7},
     }
+    if method == "post_compensating_bank_statement_v1":
+        before[(action_model, action.id)]["company_id"] = [7, "Company"]
+        before[(action_model, action.id)]["journal_id"] = [2, "Bank"]
     return plan, records, before
 
 
@@ -109,6 +154,7 @@ def test_all_sixteen_methods_forward_the_complete_fresh_verifier_binding(
         "reason": f"Approved recovery for {method}",
     }
     handler = DirectVerifyHarness(plan)
+    handler.bank_records = records
     expected_tombstones = handler._expected_recovery_tombstones(plan)
     captured: dict[str, Any] = {}
 
@@ -167,6 +213,7 @@ def test_all_sixteen_verifier_errors_fail_closed_at_the_handler_boundary(
 ) -> None:
     plan, records, before = _plan_and_graph(method)
     handler = DirectVerifyHarness(plan)
+    handler.bank_records = records
 
     def reject(*_args: Any, **_kwargs: Any) -> tuple[str, ...]:
         raise RecoveryVerificationError("fresh oracle mismatch")

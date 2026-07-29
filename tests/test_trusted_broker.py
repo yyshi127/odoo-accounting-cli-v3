@@ -157,7 +157,10 @@ class FakeHistoricalExecutor:
                     existing.registry_digest,
                     existing.operation_id,
                 )
-            if request["capability_id"] == "acct.reconciliation.undo.v1":
+            if request["capability_id"] in {
+                "acct.reconciliation.undo.v1",
+                "acct.bank.statement_compensate.v1",
+            }:
                 origin = self.operations[
                     request["parameters"]["origin_operation_id"]
                 ]

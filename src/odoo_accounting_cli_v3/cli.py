@@ -561,16 +561,105 @@ def _pi_scenario_acceptance_report_status(
     }
 
 
+def _retained_write_capability_entries(
+    data: dict[str, Any],
+    *,
+    label: str,
+    expected_ids: tuple[str, ...],
+    blockers: list[str],
+) -> list[dict[str, Any]] | None:
+    evidence_root = data.get("evidence_root")
+    normalized_root = (
+        os.path.normpath(evidence_root)
+        if isinstance(evidence_root, str) and evidence_root
+        else None
+    )
+    evidence_root_path = (
+        Path(normalized_root)
+        if normalized_root is not None
+        and os.path.isabs(evidence_root)
+        and normalized_root == evidence_root
+        else None
+    )
+    if evidence_root_path is None:
+        blockers.append(f"{label} evidence_root must be a canonical absolute path")
+
+    capabilities = data.get("capabilities")
+    if type(capabilities) is not list:
+        blockers.append(f"{label} capabilities must be a list")
+        return None
+    if len(capabilities) != len(expected_ids):
+        blockers.append(f"{label} capability count does not match current registry")
+    capability_ids: list[str] = []
+    for item in capabilities:
+        if type(item) is not dict or not isinstance(item.get("capability_id"), str):
+            blockers.append(f"{label} capability entry is invalid")
+            return None
+        capability_ids.append(item["capability_id"])
+    if len(capability_ids) != len(set(capability_ids)):
+        blockers.append(f"{label} capability IDs must be unique")
+    if capability_ids != list(expected_ids):
+        blockers.append(f"{label} capability IDs/order do not match current registry")
+        return None
+
+    for capability_id, item in zip(expected_ids, capabilities, strict=True):
+        if item.get("status") != "verified":
+            blockers.append(f"{label} {capability_id} status is not verified")
+        if item.get("pipeline_ready") is not True:
+            blockers.append(f"{label} {capability_id} is not pipeline-ready")
+        if item.get("rejection") is not None:
+            blockers.append(f"{label} {capability_id} has a rejection")
+        metadata_path = item.get("metadata_path")
+        if evidence_root_path is not None and (
+            not isinstance(metadata_path, str)
+            or metadata_path != os.path.normpath(metadata_path)
+            or not os.path.isabs(metadata_path)
+            or metadata_path
+            != str(evidence_root_path / capability_id / "metadata.json")
+        ):
+            blockers.append(f"{label} {capability_id} metadata_path is invalid")
+    return capabilities
+
+
+def _retained_write_summary(
+    data: dict[str, Any],
+    *,
+    label: str,
+    expected_count: int,
+    blockers: list[str],
+) -> dict[str, Any]:
+    summary = {
+        "evidence_root": data.get("evidence_root"),
+        "missing_count": data.get("missing_count"),
+        "rejected_count": data.get("rejected_count"),
+        "sandbox_pipeline_ready": data.get("sandbox_pipeline_ready"),
+        "total_write_capabilities": data.get("total_write_capabilities"),
+        "verified_count": data.get("verified_count"),
+    }
+    for field, expected in (
+        ("total_write_capabilities", expected_count),
+        ("verified_count", expected_count),
+        ("missing_count", 0),
+        ("rejected_count", 0),
+    ):
+        value = summary.get(field)
+        if type(value) is not int or value != expected:
+            blockers.append(f"{label} {field} does not match current registry")
+    return summary
+
+
 def _write_pipeline_report_status(
     write_pipeline_report: Path | None,
     *,
     command: str,
     expected_release_identity: dict[str, Any],
+    expected_write_capability_ids: tuple[str, ...],
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if write_pipeline_report is None:
         blockers.append("sandbox write pipeline readiness report was not supplied")
         return {
+            "_capability_summaries": None,
             "blockers": blockers,
             "report_path": None,
             "report_sha256": None,
@@ -596,27 +685,86 @@ def _write_pipeline_report_status(
         blockers.append("sandbox write pipeline report has the wrong command")
     if not isinstance(data, dict):
         blockers.append("sandbox write pipeline report data is invalid")
+        capability_summaries = None
         summary = None
     else:
         release = data.get("release_identity")
         if data.get("sandbox_pipeline_ready") is not True:
             blockers.append("sandbox write pipeline is not ready")
-        for field, expected in expected_release_identity.items():
-            if (
-                expected is not None
-                and isinstance(release, dict)
-                and release.get(field) != expected
+        if not isinstance(release, dict):
+            blockers.append("sandbox write pipeline release identity is invalid")
+        else:
+            for field, expected in expected_release_identity.items():
+                if expected is not None and release.get(field) != expected:
+                    blockers.append(f"sandbox write pipeline release {field} mismatch")
+        capabilities = _retained_write_capability_entries(
+            data,
+            label="sandbox write pipeline",
+            expected_ids=expected_write_capability_ids,
+            blockers=blockers,
+        )
+        capability_summaries: dict[str, dict[str, Any]] | None = (
+            {} if capabilities is not None else None
+        )
+        if capabilities is not None:
+            for capability_id, item in zip(
+                expected_write_capability_ids, capabilities, strict=True
             ):
-                blockers.append(f"sandbox write pipeline release {field} mismatch")
-        summary = {
-            "evidence_root": data.get("evidence_root"),
-            "missing_count": data.get("missing_count"),
-            "rejected_count": data.get("rejected_count"),
-            "sandbox_pipeline_ready": data.get("sandbox_pipeline_ready"),
-            "total_write_capabilities": data.get("total_write_capabilities"),
-            "verified_count": data.get("verified_count"),
-        }
+                pipeline = item.get("pipeline")
+                pipeline_sha256 = None
+                if type(pipeline) is not dict:
+                    blockers.append(
+                        f"sandbox write pipeline {capability_id} pipeline is invalid"
+                    )
+                else:
+                    if pipeline.get("capability_id") != capability_id:
+                        blockers.append(
+                            f"sandbox write pipeline {capability_id} pipeline capability mismatch"
+                        )
+                    if (
+                        pipeline.get("schema_version") != 1
+                        or pipeline.get("scope")
+                        != "odoo-accounting-cli-v3.sandbox-write-evidence-pipeline.v1"
+                    ):
+                        blockers.append(
+                            f"sandbox write pipeline {capability_id} pipeline schema is invalid"
+                        )
+                    if (
+                        pipeline.get("release_sha256")
+                        != expected_release_identity.get("manifest_sha256")
+                    ):
+                        blockers.append(
+                            f"sandbox write pipeline {capability_id} pipeline release mismatch"
+                        )
+                    if (
+                        pipeline.get("registry_digest")
+                        != expected_release_identity.get("registry_digest")
+                    ):
+                        blockers.append(
+                            f"sandbox write pipeline {capability_id} pipeline registry mismatch"
+                        )
+                    if pipeline.get("verified") is not True:
+                        blockers.append(
+                            f"sandbox write pipeline {capability_id} pipeline is not verified"
+                        )
+                    pipeline_sha256 = _sha256_json(pipeline)
+                capability_summaries[capability_id] = {
+                    "capability_id": capability_id,
+                    "metadata_path": item.get("metadata_path"),
+                    "pipeline_ready": item.get("pipeline_ready"),
+                    "pipeline_sha256": pipeline_sha256,
+                    "rejection": item.get("rejection"),
+                    "required_evidence": item.get("required_evidence"),
+                    "status": item.get("status"),
+                }
+        summary = _retained_write_summary(
+            data,
+            label="sandbox write pipeline",
+            expected_count=len(expected_write_capability_ids),
+            blockers=blockers,
+        )
     return {
+        "_capability_summaries": capability_summaries if not blockers else None,
         "blockers": sorted(set(blockers)),
         "report_path": str(write_pipeline_report),
         "report_sha256": _sha256_bytes(raw),
@@ -630,6 +778,8 @@ def _write_evidence_index_status(
     *,
     command: str,
     expected_release_identity: dict[str, Any],
+    expected_write_capability_ids: tuple[str, ...],
+    pipeline_capability_summaries: dict[str, dict[str, Any]] | None,
     pipeline_summary: dict[str, Any] | None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
@@ -668,21 +818,71 @@ def _write_evidence_index_status(
             blockers.append("sandbox write evidence index has the wrong kind")
         if data.get("sandbox_pipeline_ready") is not True:
             blockers.append("sandbox write evidence index is not ready")
-        for field, expected in expected_release_identity.items():
-            if (
-                expected is not None
-                and isinstance(release, dict)
-                and release.get(field) != expected
+        if not isinstance(release, dict):
+            blockers.append("sandbox write evidence index release identity is invalid")
+        else:
+            for field, expected in expected_release_identity.items():
+                if expected is not None and release.get(field) != expected:
+                    blockers.append(
+                        f"sandbox write evidence index release {field} mismatch"
+                    )
+        capabilities = _retained_write_capability_entries(
+            data,
+            label="sandbox write evidence index",
+            expected_ids=expected_write_capability_ids,
+            blockers=blockers,
+        )
+        if capabilities is not None:
+            for capability_id, item in zip(
+                expected_write_capability_ids, capabilities, strict=True
             ):
-                blockers.append(f"sandbox write evidence index release {field} mismatch")
-        summary = {
-            "evidence_root": data.get("evidence_root"),
-            "missing_count": data.get("missing_count"),
-            "rejected_count": data.get("rejected_count"),
-            "sandbox_pipeline_ready": data.get("sandbox_pipeline_ready"),
-            "total_write_capabilities": data.get("total_write_capabilities"),
-            "verified_count": data.get("verified_count"),
-        }
+                if set(item) != {
+                    "capability_id",
+                    "metadata_path",
+                    "pipeline_ready",
+                    "pipeline_sha256",
+                    "rejection",
+                    "required_evidence",
+                    "status",
+                }:
+                    blockers.append(
+                        f"sandbox write evidence index {capability_id} fields are invalid"
+                    )
+                pipeline_sha256 = item.get("pipeline_sha256")
+                if (
+                    not isinstance(pipeline_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", pipeline_sha256) is None
+                ):
+                    blockers.append(
+                        f"sandbox write evidence index {capability_id} pipeline_sha256 is invalid"
+                    )
+                item_summary = {
+                    "capability_id": capability_id,
+                    "metadata_path": item.get("metadata_path"),
+                    "pipeline_ready": item.get("pipeline_ready"),
+                    "pipeline_sha256": pipeline_sha256,
+                    "rejection": item.get("rejection"),
+                    "required_evidence": item.get("required_evidence"),
+                    "status": item.get("status"),
+                }
+                expected_item_summary = (
+                    pipeline_capability_summaries.get(capability_id)
+                    if pipeline_capability_summaries is not None
+                    else None
+                )
+                if (
+                    expected_item_summary is None
+                    or item_summary != expected_item_summary
+                ):
+                    blockers.append(
+                        f"sandbox write evidence index {capability_id} summary does not match pipeline report"
+                    )
+        summary = _retained_write_summary(
+            data,
+            label="sandbox write evidence index",
+            expected_count=len(expected_write_capability_ids),
+            blockers=blockers,
+        )
         if pipeline_summary is not None:
             for field in (
                 "evidence_root",
@@ -5359,6 +5559,7 @@ def evidence_goal_readiness(
         )
         for capability in write_capabilities
     ]
+    write_capability_ids = tuple(capability.id for capability in write_capabilities)
     static_write_admissible_count = sum(
         1 for report in static_write_reports if report["sandbox_drill_admissible"] is True
     )
@@ -5411,11 +5612,16 @@ def evidence_goal_readiness(
         write_pipeline_report,
         command=command,
         expected_release_identity=expected_release_identity,
+        expected_write_capability_ids=write_capability_ids,
     )
     write_index_report = _write_evidence_index_status(
         write_evidence_index,
         command=command,
         expected_release_identity=expected_release_identity,
+        expected_write_capability_ids=write_capability_ids,
+        pipeline_capability_summaries=pipeline_report.pop(
+            "_capability_summaries"
+        ),
         pipeline_summary=pipeline_report["summary"],
     )
     retained_candidate_report = _sandbox_database_candidates_report_status(

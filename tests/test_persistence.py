@@ -1561,6 +1561,85 @@ class SQLitePersistenceTest(unittest.TestCase):
                 ).fetchone()
             )
 
+    def test_v1_bank_compensation_binding_namespace_is_not_migrated(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "bank-statement-compensation-binding:" + "a" * 64,
+                "legacy.custom",
+            ),
+            (
+                "legacy-bank-compensation",
+                "bank.statement.compensation.binding.created",
+            ),
+        )
+        for index, (event_id, event_type) in enumerate(cases):
+            with self.subTest(event_id=event_id, event_type=event_type):
+                legacy_path = (
+                    Path(self.directory.name)
+                    / f"bank-compensation-namespace-v1-{index}.sqlite3"
+                )
+                create_v1_schema(legacy_path)
+                occurred_at = (
+                    NOW.isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z")
+                )
+                payload_json = canonical_json(
+                    {"forged": True}
+                ).decode("utf-8")
+                event_hash = _audit_hash(
+                    sequence=1,
+                    event_id=event_id,
+                    event_type=event_type,
+                    operation_id=None,
+                    occurred_at=occurred_at,
+                    payload_json=payload_json,
+                    previous_hash=GENESIS_HASH,
+                )
+                with closing(
+                    sqlite3.connect(legacy_path)
+                ) as connection, connection:
+                    connection.execute(
+                        """
+                        INSERT INTO audit_events(
+                            sequence, event_id, event_type, operation_id,
+                            occurred_at, payload_json, previous_hash,
+                            event_hash
+                        ) VALUES(1, ?, ?, NULL, ?, ?, ?, ?)
+                        """,
+                        (
+                            event_id,
+                            event_type,
+                            occurred_at,
+                            payload_json,
+                            GENESIS_HASH,
+                            event_hash,
+                        ),
+                    )
+
+                with self.assertRaisesRegex(
+                    PersistenceIntegrityError, "reserved audit"
+                ):
+                    SQLitePersistence(legacy_path)
+
+                with closing(
+                    sqlite3.connect(legacy_path)
+                ) as connection:
+                    self.assertEqual(
+                        connection.execute(
+                            "PRAGMA user_version"
+                        ).fetchone()[0],
+                        1,
+                    )
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT value FROM schema_meta "
+                            "WHERE key = 'schema_version'"
+                        ).fetchone()[0],
+                        "1",
+                    )
+
     def test_v1_mismatched_idempotency_binding_is_not_migrated(self) -> None:
         legacy_path = Path(self.directory.name) / "idempotency-mismatch-v1.sqlite3"
         create_v1_schema(legacy_path)

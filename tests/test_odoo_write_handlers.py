@@ -573,7 +573,7 @@ def test_source_has_no_privilege_or_transaction_escape_and_no_private_orm_calls(
     assert ".remove_move_reconcile(" not in source
 
 
-def test_all_nineteen_registered_write_capabilities_have_three_real_dispatch_phases():
+def test_all_twenty_registered_write_capabilities_have_three_real_dispatch_phases():
     baseline_identifiers = {
         "acct.invoice.customer_create.v1",
         "acct.bill.vendor_create.v1",
@@ -601,6 +601,9 @@ def test_all_nineteen_registered_write_capabilities_have_three_real_dispatch_pha
     reconciliation_undo_identifiers = {
         "acct.reconciliation.undo.v1",
     }
+    bank_compensation_identifiers = {
+        "acct.bank.statement_compensate.v1",
+    }
     identifiers = {
         capability.id
         for capability in load_registry(ROOT / "registry" / "capabilities.json")
@@ -610,11 +613,13 @@ def test_all_nineteen_registered_write_capabilities_have_three_real_dispatch_pha
     assert len(phase_b_identifiers) == 3
     assert len(payment_close_identifiers) == 1
     assert len(reconciliation_undo_identifiers) == 1
+    assert len(bank_compensation_identifiers) == 1
     assert identifiers == (
         baseline_identifiers
         | phase_b_identifiers
         | payment_close_identifiers
         | reconciliation_undo_identifiers
+        | bank_compensation_identifiers
     )
     for identifier in sorted(identifiers):
         for phase in ("precheck", "execute", "verify"):

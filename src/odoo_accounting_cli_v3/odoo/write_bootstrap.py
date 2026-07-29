@@ -172,14 +172,23 @@ EXCLUSIVE_BEFORE_LOCK_CAPABILITIES = frozenset(
         "acct.payment.cancel.v1",
         "acct.recovery.execute.v1",
         "acct.reconciliation.undo.v1",
+        "acct.bank.statement_compensate.v1",
     }
 )
 TRUSTED_PLAN_CAPABILITIES = frozenset(
-    {"acct.recovery.execute.v1", "acct.reconciliation.undo.v1"}
+    {
+        "acct.recovery.execute.v1",
+        "acct.reconciliation.undo.v1",
+        "acct.bank.statement_compensate.v1",
+    }
 )
 RECONCILIATION_UNDO_METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
 RECONCILIATION_UNDO_ORACLE = (
     "undo_reconciliation_and_reverse_writeoff_exact_v1"
+)
+BANK_STATEMENT_COMPENSATE_METHOD = "post_compensating_bank_statement_v1"
+BANK_STATEMENT_COMPENSATE_ORACLE = (
+    "post_compensating_bank_statement_exact_v1"
 )
 ANCHOR_RESULT_FIELDS = frozenset(
     {
@@ -218,6 +227,8 @@ def _resource_lock_digests(
     company_id: int,
     parameters: Mapping[str, Any],
     trusted_recovery_plan: Mapping[str, Any] | None,
+    *,
+    bank_statement_journal_id: int | None = None,
 ) -> list[str]:
     """Return ordered transaction-lock identities for shared accounting resources."""
 
@@ -268,6 +279,11 @@ def _resource_lock_digests(
     elif capability_id == "acct.reconciliation.apply.v1":
         for record_id in parameters.get("line_ids", []):
             add("account.move.line", record_id)
+    elif capability_id == "acct.bank.statement_compensate.v1":
+        add(
+            "account.journal.bank_statement_sequence",
+            parameters.get("expected_journal_id"),
+        )
     elif capability_id == "acct.asset.create.v1":
         add("account.move.line", parameters.get("source_move_line_id"))
     elif capability_id == "acct.depreciation.post.v1":
@@ -298,6 +314,23 @@ def _resource_lock_digests(
             [parameters.get("journal_id"), parameters.get("vendor_reference")],
         )
 
+    if bank_statement_journal_id is not None:
+        if (
+            isinstance(bank_statement_journal_id, bool)
+            or not isinstance(bank_statement_journal_id, int)
+            or bank_statement_journal_id <= 0
+            or not isinstance(trusted_recovery_plan, Mapping)
+            or trusted_recovery_plan.get("method")
+            != BANK_STATEMENT_COMPENSATE_METHOD
+        ):
+            raise OdooWriteBootstrapError(
+                "bank statement sequence lock identity is invalid"
+            )
+        add(
+            "account.journal.bank_statement_sequence",
+            bank_statement_journal_id,
+        )
+
     if capability_id in TRUSTED_PLAN_CAPABILITIES and trusted_recovery_plan:
         try:
             graph = index_recovery_guard_graph(
@@ -315,6 +348,20 @@ def _resource_lock_digests(
     return sorted(resources)
 
 
+def _defer_bank_recovery_resource_locks(
+    capability_id: str,
+    trusted_recovery_plan: Mapping[str, Any] | None,
+) -> bool:
+    """Delay generic bank graph locks until its journal is live-prechecked."""
+
+    return (
+        capability_id == "acct.recovery.execute.v1"
+        and isinstance(trusted_recovery_plan, Mapping)
+        and trusted_recovery_plan.get("method")
+        == BANK_STATEMENT_COMPENSATE_METHOD
+    )
+
+
 def _precheck_lock_targets(
     evidence: Mapping[str, Any], *, company_id: int, exclusive_before: bool = False
 ) -> list[tuple[str, list[int], bool]]:
@@ -324,7 +371,7 @@ def _precheck_lock_targets(
     if not isinstance(details, Mapping):
         raise OdooWriteBootstrapError("live precheck handler details are invalid")
     targets: dict[tuple[str, int], tuple[str, bool]] = {}
-    for field in ("before", "dependencies"):
+    for field in ("before", "dependencies", "strict_dependencies"):
         snapshots = details.get(field, [])
         if not isinstance(snapshots, list):
             raise OdooWriteBootstrapError(
@@ -364,7 +411,10 @@ def _precheck_lock_targets(
                     f"live precheck {field} snapshot binding is invalid"
                 )
             key = (model_name, record_id)
-            strict_lock = exclusive_before and field == "before"
+            strict_lock = exclusive_before and field in {
+                "before",
+                "strict_dependencies",
+            }
             prior = targets.get(key)
             if prior is None:
                 targets[key] = (values_digest, strict_lock)
@@ -387,6 +437,66 @@ def _precheck_lock_targets(
         (model_name, record_ids, allow_referencing)
         for (model_name, allow_referencing), record_ids in sorted(grouped.items())
     ]
+
+
+def _bank_recovery_journal_from_precheck(
+    evidence: Mapping[str, Any],
+    *,
+    company_id: int,
+    trusted_recovery_plan: Mapping[str, Any],
+) -> int:
+    """Bind the deferred sequence lock to the approved source statement."""
+
+    _precheck_lock_targets(
+        evidence, company_id=company_id, exclusive_before=True
+    )
+    if (
+        trusted_recovery_plan.get("method")
+        != BANK_STATEMENT_COMPENSATE_METHOD
+    ):
+        raise OdooWriteBootstrapError(
+            "deferred bank recovery method is invalid"
+        )
+    actions = trusted_recovery_plan.get("action_targets")
+    if (
+        not isinstance(actions, list)
+        or len(actions) != 1
+        or actions[0].get("model") != "account.bank.statement"
+    ):
+        raise OdooWriteBootstrapError(
+            "bank recovery source statement is invalid"
+        )
+    details = evidence["handler_details"]
+    before = details.get("before")
+    strict = details.get("strict_dependencies")
+    statement = [
+        item
+        for item in before
+        if item.get("model") == "account.bank.statement"
+        and item.get("record_id") == actions[0].get("record_id")
+    ]
+    journals = [
+        item
+        for item in strict
+        if item.get("model") == "account.journal"
+    ]
+    if len(statement) != 1 or len(strict) != 1 or len(journals) != 1:
+        raise OdooWriteBootstrapError(
+            "bank recovery journal dependency is not exact"
+        )
+    journal_id = classic_read_many2one_id(
+        statement[0]["values"].get("journal_id")
+    )
+    if (
+        journal_id is None
+        or journals[0]["record_id"] != journal_id
+        or statement[0]["company_id"] != company_id
+        or journals[0]["company_id"] != company_id
+    ):
+        raise OdooWriteBootstrapError(
+            "bank recovery journal dependency differs from its statement"
+        )
+    return journal_id
 
 
 def _lock_live_precheck_records(
@@ -542,6 +652,27 @@ def _trusted_recovery_plan(
         raise OdooWriteBootstrapError(
             "trusted recovery plan is not an exact reconciliation undo plan"
         )
+    if operation.capability_id == "acct.bank.statement_compensate.v1":
+        actions = plan["action_targets"]
+        guards = plan["guard_records"]
+        if (
+            plan["plan_version"] != 2
+            or plan["method"] != BANK_STATEMENT_COMPENSATE_METHOD
+            or plan["oracle_id"] != BANK_STATEMENT_COMPENSATE_ORACLE
+            or len(actions) != 1
+            or actions[0]["model"] != "account.bank.statement"
+            or actions[0]["record_id"]
+            != parameters["expected_statement_id"]
+            or not guards
+            or any(
+                guard["expected_outcome"] != "survive_exact"
+                for guard in guards
+            )
+        ):
+            raise OdooWriteBootstrapError(
+                "trusted recovery plan is not an exact bank statement "
+                "compensation plan"
+            )
     try:
         index_recovery_guard_graph(
             plan, expected_company_id=operation.company_id
@@ -2166,7 +2297,13 @@ def execute_write_from_odoo_shell(
         )
         anchor = control_store._claim(**anchor_binding)
 
-    if anchor.state == "claimed":
+    deferred_bank_resource_locks = (
+        anchor.state == "claimed"
+        and _defer_bank_recovery_resource_locks(
+            operation.capability_id, trusted_recovery_plan
+        )
+    )
+    if anchor.state == "claimed" and not deferred_bank_resource_locks:
         resource_locks = _resource_lock_digests(
             operation.capability_id,
             operation.company_id,
@@ -2302,6 +2439,39 @@ def execute_write_from_odoo_shell(
                 key_id=execution_key_id,
                 secret=execution_secret,
             ))
+        if deferred_bank_resource_locks:
+            try:
+                bank_statement_journal_id = (
+                    _bank_recovery_journal_from_precheck(
+                        live_precheck,
+                        company_id=operation.company_id,
+                        trusted_recovery_plan=trusted_recovery_plan,
+                    )
+                )
+                resource_locks = _resource_lock_digests(
+                    operation.capability_id,
+                    operation.company_id,
+                    operation.parameters,
+                    trusted_recovery_plan,
+                    bank_statement_journal_id=(
+                        bank_statement_journal_id
+                    ),
+                )
+                anchor._acquire_resource_locks(resource_locks)
+            except Exception as exc:
+                return approved_response(_record_no_effect_failure(
+                    root_env,
+                    anchor,
+                    operation,
+                    check=(
+                        "precheck_resource_lock_exception:"
+                        f"{type(exc).__name__}"
+                    ),
+                    now=phase_time(),
+                    issuer=execution_issuer,
+                    key_id=execution_key_id,
+                    secret=execution_secret,
+                ))
         try:
             locked_precheck_records = _lock_live_precheck_records(
                 bound_env,

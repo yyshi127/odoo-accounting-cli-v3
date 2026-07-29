@@ -80,11 +80,19 @@ HANDLER_FORBIDDEN_FIELDS = frozenset(
     {"passed", "handler_details", "runtime_binding", "registry_digest", "release_digest"}
 )
 TRUSTED_PLAN_CAPABILITIES = frozenset(
-    {"acct.recovery.execute.v1", "acct.reconciliation.undo.v1"}
+    {
+        "acct.recovery.execute.v1",
+        "acct.reconciliation.undo.v1",
+        "acct.bank.statement_compensate.v1",
+    }
 )
 RECONCILIATION_UNDO_METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
 RECONCILIATION_UNDO_ORACLE = (
     "undo_reconciliation_and_reverse_writeoff_exact_v1"
+)
+BANK_STATEMENT_COMPENSATE_METHOD = "post_compensating_bank_statement_v1"
+BANK_STATEMENT_COMPENSATE_ORACLE = (
+    "post_compensating_bank_statement_exact_v1"
 )
 
 
@@ -165,6 +173,26 @@ def _trusted_recovery_plan(
         raise OdooWritePrecheckError(
             "trusted recovery plan is not an exact reconciliation undo plan"
         )
+    if capability_id == "acct.bank.statement_compensate.v1":
+        actions = plan["action_targets"]
+        guards = plan["guard_records"]
+        if (
+            plan["plan_version"] != 2
+            or plan["method"] != BANK_STATEMENT_COMPENSATE_METHOD
+            or plan["oracle_id"] != BANK_STATEMENT_COMPENSATE_ORACLE
+            or len(actions) != 1
+            or actions[0]["model"] != "account.bank.statement"
+            or actions[0]["record_id"] != parameters["expected_statement_id"]
+            or not guards
+            or any(
+                guard["expected_outcome"] != "survive_exact"
+                for guard in guards
+            )
+        ):
+            raise OdooWritePrecheckError(
+                "trusted recovery plan is not an exact bank statement "
+                "compensation plan"
+            )
     try:
         index_recovery_guard_graph(plan, expected_company_id=company_id)
     except ValueError as exc:

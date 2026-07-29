@@ -23,6 +23,7 @@ from odoo_accounting_cli_v3.historical_router import (
 from odoo_accounting_cli_v3.operations import Operation, State, canonical_json
 from odoo_accounting_cli_v3.persistence import OperationNotFound
 from odoo_accounting_cli_v3.write_receipts import (
+    create_record_snapshot,
     create_recovery_plan,
     create_recovery_plan_v2,
 )
@@ -181,6 +182,7 @@ class FakeStore:
         self.operations: dict[str, FakeOperation] = {}
         self.bindings: dict[str, Any] = {}
         self.undo_bindings: dict[str, Any] = {}
+        self.bank_compensation_bindings: dict[str, Any] = {}
         self.final_receipts: dict[str, tuple[Any, ...]] = {}
 
     def get_operation(self, operation_id: str) -> FakeOperation:
@@ -205,8 +207,52 @@ class FakeStore:
                 "reconciliation undo binding does not exist"
             ) from exc
 
+    def get_bank_statement_compensation_operation_binding(
+        self, compensation_operation_id: str
+    ) -> Any:
+        try:
+            return self.bank_compensation_bindings[
+                compensation_operation_id
+            ]
+        except KeyError as exc:
+            raise OperationNotFound(
+                "bank statement compensation binding does not exist"
+            ) from exc
+
     def recovery_plan(self, operation_id: str) -> dict[str, Any]:
         operation = self.operations[operation_id]
+        if operation.capability_id == "acct.bank.statement_import.v1":
+            return create_recovery_plan_v2(
+                origin_operation_id=operation_id,
+                recovery_capability_id="acct.recovery.execute.v1",
+                status="available",
+                method="post_compensating_bank_statement_v1",
+                requires_approval=True,
+                action_targets=[
+                    {
+                        "company_id": operation.company_id,
+                        "model": "account.bank.statement",
+                        "record_fingerprint": "7" * 64,
+                        "record_id": 701,
+                        "record_state": "complete",
+                    }
+                ],
+                guard_records=[
+                    {
+                        "company_id": operation.company_id,
+                        "expected_outcome": "survive_exact",
+                        "model": "account.bank.statement.line",
+                        "record_fingerprint": "8" * 64,
+                        "record_id": 702,
+                        "record_state": "posted",
+                    }
+                ],
+                oracle_id="post_compensating_bank_statement_exact_v1",
+                parameters={
+                    "company_id": operation.company_id,
+                    "statement_id": 701,
+                },
+            )
         if operation.capability_id == "acct.reconciliation.apply.v1":
             return create_recovery_plan_v2(
                 origin_operation_id=operation_id,
@@ -272,6 +318,33 @@ class FakeStore:
 
     def receipt(self, operation_id: str, plan: dict[str, Any]) -> Any:
         operation = self.operations[operation_id]
+        difference = None
+        if operation.capability_id == "acct.bank.statement_import.v1":
+            difference = {
+                "after": [
+                    create_record_snapshot(
+                        model="account.bank.statement",
+                        record_id=701,
+                        exists=True,
+                        record_state="complete",
+                        values={
+                            "company_id": operation.company_id,
+                            "journal_id": operation.parameters["journal_id"],
+                            "currency_id": operation.parameters["currency_id"],
+                            "odoo_cli_v3_source_digest": (
+                                operation.parameters["source_digest"]
+                            ),
+                        },
+                    )
+                ],
+                "before": [],
+                "changed_fields": [
+                    "company_id",
+                    "currency_id",
+                    "journal_id",
+                    "odoo_cli_v3_source_digest",
+                ],
+            }
         body = {
                 "capability_id": operation.capability_id,
                 "company_id": operation.company_id,
@@ -287,6 +360,11 @@ class FakeStore:
                     "database_finalization": {
                         "operation_id": operation.operation_id,
                     },
+                    **(
+                        {"difference": difference}
+                        if difference is not None
+                        else {}
+                    ),
                     "recovery_plan": plan,
                     "verification": {"passed": True},
                 },
@@ -529,6 +607,99 @@ def _reconciliation_undo_binding(
         environment=undo.environment,
         registry_digest=undo.registry_digest,
         release_digest=undo.release_digest,
+    )
+
+
+def _bank_statement_origin(
+    *,
+    operation_id: str = "op-bank-statement-origin",
+    release_digest: str = OLD_RELEASE,
+    registry_digest: str = OLD_REGISTRY,
+) -> FakeOperation:
+    origin = FakeOperation(
+        operation_id,
+        release_digest,
+        registry_digest,
+        capability_id="acct.bank.statement_import.v1",
+    )
+    origin.parameters = {
+        "company_id": 7,
+        "journal_id": 9,
+        "currency_id": 12,
+        "source_digest": "5" * 64,
+        "idempotency_key": f"key-{operation_id}",
+    }
+    return origin
+
+
+def _bank_statement_compensation_request(
+    store: FakeStore,
+    origin: FakeOperation,
+    *,
+    operation_id: str = "op-bank-statement-compensation",
+) -> dict[str, Any]:
+    receipt = store.receipt(
+        origin.operation_id, store.recovery_plan(origin.operation_id)
+    )
+    return {
+        "context": _context(),
+        "operation_id": operation_id,
+        "request_id": f"request-{operation_id}",
+        "capability_id": "acct.bank.statement_compensate.v1",
+        "parameters": {
+            "company_id": origin.company_id,
+            "origin_operation_id": origin.operation_id,
+            "expected_origin_revision": origin.revision,
+            "expected_origin_final_receipt_body_digest": (
+                receipt.body_digest
+            ),
+            "expected_recovery_plan_digest": (
+                receipt.body["receipt_details"]["recovery_plan"][
+                    "plan_digest"
+                ]
+            ),
+            "expected_statement_id": 701,
+            "expected_journal_id": 9,
+            "expected_currency_id": 12,
+            "expected_source_digest": "5" * 64,
+            "compensation_date": "2026-07-16",
+            "reason": "Compensate the complete verified import",
+            "idempotency_key": f"key-{operation_id}",
+        },
+    }
+
+
+def _bank_statement_compensation_binding(
+    origin: FakeOperation,
+    compensation: Operation,
+    receipt: Any,
+) -> Any:
+    details = receipt.body["receipt_details"]
+    return SimpleNamespace(
+        binding_version=1,
+        origin_operation_id=origin.operation_id,
+        origin_request_id=origin.request_id,
+        origin_operation_digest=origin.digest,
+        origin_operation_revision=origin.revision,
+        origin_final_receipt_id=receipt.receipt_id,
+        origin_final_receipt_body_digest=receipt.body_digest,
+        origin_database_finalization_digest=hashlib.sha256(
+            canonical_json(details["database_finalization"])
+        ).hexdigest(),
+        compensation_operation_id=compensation.operation_id,
+        compensation_request_id=compensation.request_id,
+        compensation_operation_digest=compensation.digest,
+        compensation_operation_revision=compensation.revision,
+        plan_digest=details["recovery_plan"]["plan_digest"],
+        principal=compensation.principal,
+        user_id=compensation.user_id,
+        company_id=compensation.company_id,
+        odoo_instance_id=compensation.odoo_instance_id,
+        database_name=compensation.database_name,
+        database_uuid=compensation.database_uuid,
+        environment=compensation.environment,
+        registry_digest=compensation.registry_digest,
+        release_digest=compensation.release_digest,
     )
 
 
@@ -1796,6 +1967,9 @@ def test_reconciliation_undo_prepare_is_pinned_to_origin_retained_release(
 
     assert response["data"]["operation_id"] == request["operation_id"]
     assert calls == [[old["executable_path"], "operation", "prepare"]]
+    durable = store.operations[request["operation_id"]]
+    assert durable.release_digest == OLD_RELEASE
+    assert durable.registry_digest == OLD_REGISTRY
 
 
 def test_reconciliation_undo_has_no_current_release_fallback(
@@ -1968,6 +2142,294 @@ def test_reconciliation_undo_prepare_requires_binding_after_child_dispatch(
         HistoricalRouterError, match="did not persist.*undo binding"
     ):
         router.dispatch("operation.prepare", request)
+
+
+def test_bank_statement_compensation_prepare_is_pinned_and_lossless(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, old = router_files
+    store = FakeStore()
+    origin = _bank_statement_origin()
+    store.operations[origin.operation_id] = origin
+    request = _bank_statement_compensation_request(store, origin)
+    expected_parameters = json.loads(
+        canonical_json(request["parameters"])
+    )
+    calls: list[list[str]] = []
+
+    def run(argv, *, stdin, **_kwargs):
+        calls.append(argv)
+        child_request = json.loads(stdin)
+        assert child_request["parameters"] == expected_parameters
+        compensation = _durable_operation(
+            operation_id=child_request["operation_id"],
+            request_id=child_request["request_id"],
+            capability_id=child_request["capability_id"],
+            parameters=child_request["parameters"],
+            release_digest=OLD_RELEASE,
+            registry_digest=OLD_REGISTRY,
+        )
+        store.operations[compensation.operation_id] = compensation
+        receipt = store.receipt(
+            origin.operation_id, store.recovery_plan(origin.operation_id)
+        )
+        store.bank_compensation_bindings[compensation.operation_id] = (
+            _bank_statement_compensation_binding(
+                origin, compensation, receipt
+            )
+        )
+        return _completed(
+            argv,
+            _response(
+                "operation.prepare",
+                operation_id=compensation.operation_id,
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    response = router.dispatch("operation.prepare", request)
+
+    assert response["data"]["operation_id"] == request["operation_id"]
+    assert calls == [[old["executable_path"], "operation", "prepare"]]
+
+
+def test_bank_statement_compensation_has_no_current_release_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = _bank_statement_origin(
+        operation_id="op-unretained-bank-origin",
+        release_digest="e" * 64,
+        registry_digest="f" * 64,
+    )
+    store.operations[origin.operation_id] = origin
+    request = _bank_statement_compensation_request(store, origin)
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError, match="no retained historical route"
+    ):
+        router.dispatch("operation.prepare", request)
+    assert called is False
+
+
+def test_existing_bank_statement_compensation_with_different_origin_release_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = _bank_statement_origin()
+    store.operations[origin.operation_id] = origin
+    request = _bank_statement_compensation_request(store, origin)
+    compensation = _durable_operation(
+        operation_id=request["operation_id"],
+        request_id=request["request_id"],
+        capability_id=request["capability_id"],
+        parameters=request["parameters"],
+        release_digest=CURRENT_RELEASE,
+        registry_digest=CURRENT_REGISTRY,
+    )
+    store.operations[compensation.operation_id] = compensation
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError, match="route differs from its origin"
+    ):
+        router.dispatch("operation.prepare", request)
+    assert called is False
+
+
+def test_bank_statement_compensation_preview_requires_durable_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = _bank_statement_origin()
+    store.operations[origin.operation_id] = origin
+    prepare = _bank_statement_compensation_request(store, origin)
+    compensation = _durable_operation(
+        operation_id=prepare["operation_id"],
+        request_id=prepare["request_id"],
+        capability_id=prepare["capability_id"],
+        parameters=prepare["parameters"],
+        release_digest=OLD_RELEASE,
+        registry_digest=OLD_REGISTRY,
+    )
+    store.operations[compensation.operation_id] = compensation
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError, match="no durable origin binding"
+    ):
+        router.dispatch(
+            "operation.preview",
+            _request(
+                "operation.preview",
+                operation_id=compensation.operation_id,
+            ),
+        )
+    assert called is False
+
+
+def test_bank_statement_compensation_prepare_requires_binding_after_child_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = _bank_statement_origin()
+    store.operations[origin.operation_id] = origin
+    request = _bank_statement_compensation_request(store, origin)
+
+    def run(argv, *, stdin, **_kwargs):
+        child_request = json.loads(stdin)
+        compensation = _durable_operation(
+            operation_id=child_request["operation_id"],
+            request_id=child_request["request_id"],
+            capability_id=child_request["capability_id"],
+            parameters=child_request["parameters"],
+            release_digest=OLD_RELEASE,
+            registry_digest=OLD_REGISTRY,
+        )
+        store.operations[compensation.operation_id] = compensation
+        return _completed(
+            argv,
+            _response(
+                "operation.prepare",
+                operation_id=compensation.operation_id,
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError,
+        match="did not persist.*bank statement.*compensation binding",
+    ):
+        router.dispatch("operation.prepare", request)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ("receipt_body", "expected_source", "binding_plan"),
+)
+def test_bank_statement_compensation_rejects_receipt_business_or_binding_tamper(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    tamper: str,
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = _bank_statement_origin(
+        operation_id=f"op-bank-tamper-{tamper}"
+    )
+    store.operations[origin.operation_id] = origin
+    prepare = _bank_statement_compensation_request(store, origin)
+    called = False
+
+    if tamper == "receipt_body":
+        receipt = store.receipt(
+            origin.operation_id, store.recovery_plan(origin.operation_id)
+        )
+        receipt.body["receipt_details"]["verification"]["passed"] = False
+        store.final_receipts[origin.operation_id] = (receipt,)
+        action = "operation.prepare"
+        request = prepare
+    elif tamper == "expected_source":
+        prepare["parameters"]["expected_source_digest"] = "9" * 64
+        action = "operation.prepare"
+        request = prepare
+    else:
+        compensation = _durable_operation(
+            operation_id=prepare["operation_id"],
+            request_id=prepare["request_id"],
+            capability_id=prepare["capability_id"],
+            parameters=prepare["parameters"],
+            release_digest=OLD_RELEASE,
+            registry_digest=OLD_REGISTRY,
+        )
+        store.operations[compensation.operation_id] = compensation
+        receipt = store.receipt(
+            origin.operation_id, store.recovery_plan(origin.operation_id)
+        )
+        binding = _bank_statement_compensation_binding(
+            origin, compensation, receipt
+        )
+        binding.plan_digest = "9" * 64
+        store.bank_compensation_bindings[compensation.operation_id] = binding
+        action = "operation.preview"
+        request = _request(
+            "operation.preview",
+            operation_id=compensation.operation_id,
+        )
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(HistoricalRouterError):
+        router.dispatch(action, request)
+    assert called is False
 
 
 def test_recover_rejects_orphan_or_mismatched_recovery_before_dispatch(

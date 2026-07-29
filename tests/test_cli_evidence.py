@@ -79,6 +79,28 @@ READ_GOAL_EVIDENCE_KINDS = [
     "release_identity",
     "security_negative",
 ]
+WRITE_CAPABILITY_IDS = [
+    "acct.accrual.create.v1",
+    "acct.asset.create.v1",
+    "acct.bank.statement_compensate.v1",
+    "acct.bank.statement_import.v1",
+    "acct.bill.vendor_create.v1",
+    "acct.deferred.create.v1",
+    "acct.depreciation.post.v1",
+    "acct.invoice.customer_create.v1",
+    "acct.journal.entry_create.v1",
+    "acct.move.draft_cancel.v1",
+    "acct.move.draft_cancel.v2",
+    "acct.move.post.v1",
+    "acct.move.reverse.v1",
+    "acct.payment.cancel.v1",
+    "acct.payment.register.v1",
+    "acct.period.adjustment_create.v1",
+    "acct.reconciliation.apply.v1",
+    "acct.reconciliation.undo.v1",
+    "acct.recovery.execute.v1",
+    "acct.refund.create.v1",
+]
 
 
 def _ready_read_capabilities_report() -> dict:
@@ -230,8 +252,8 @@ def _ready_pi_scenario_report(
         "run_id": "pi-run-1",
         "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v1",
         "trace_coverage": {
-            "captured": 34,
-            "expected": 34,
+            "captured": 38,
+            "expected": 38,
             "missing_scenario_ids": [],
             "passed": True,
         },
@@ -241,20 +263,54 @@ def _ready_pi_scenario_report(
     return path
 
 
-def _ready_write_pipeline_report(tmp_path: Path, release_identity: dict) -> Path:
+def _ready_write_pipeline_report(
+    tmp_path: Path,
+    release_identity: dict,
+    *,
+    capability_ids: list[str] | None = None,
+    evidence_root: str | None = None,
+    total_write_capabilities: int = 20,
+    verified_count: int = 20,
+    missing_count: int = 0,
+    rejected_count: int = 0,
+) -> Path:
+    root = evidence_root or str(tmp_path / "pipelines")
+    capabilities = []
+    for capability_id in capability_ids or WRITE_CAPABILITY_IDS:
+        pipeline = {
+            "capability_id": capability_id,
+            "registry_digest": release_identity["registry_digest"],
+            "release_sha256": release_identity["manifest_sha256"],
+            "schema_version": 1,
+            "scope": "odoo-accounting-cli-v3.sandbox-write-evidence-pipeline.v1",
+            "verified": True,
+        }
+        capabilities.append(
+            {
+                "capability_id": capability_id,
+                "metadata_path": str(Path(root) / capability_id / "metadata.json"),
+                "pipeline": pipeline,
+                "pipeline_ready": True,
+                "rejection": None,
+                "required_evidence": {"environment": "sandbox"},
+                "static_readiness": {"sandbox_drill_admissible": True},
+                "status": "verified",
+            }
+        )
     report = {
         "business_succeeded": False,
         "command": "evidence.write-pipeline-readiness",
         "data": {
-            "evidence_root": str(tmp_path / "pipelines"),
-            "missing_count": 0,
+            "capabilities": capabilities,
+            "evidence_root": root,
+            "missing_count": missing_count,
             "production_promotion_allowed": False,
             "real_odoo_write_performed": False,
-            "rejected_count": 0,
+            "rejected_count": rejected_count,
             "release_identity": release_identity,
             "sandbox_pipeline_ready": True,
-            "total_write_capabilities": 19,
-            "verified_count": 19,
+            "total_write_capabilities": total_write_capabilities,
+            "verified_count": verified_count,
         },
         "ok": True,
     }
@@ -267,23 +323,49 @@ def _ready_write_evidence_index(
     tmp_path: Path,
     release_identity: dict,
     *,
+    capability_ids: list[str] | None = None,
     evidence_root: str | None = None,
-    verified_count: int = 19,
+    total_write_capabilities: int = 20,
+    verified_count: int = 20,
+    missing_count: int = 0,
+    rejected_count: int = 0,
 ) -> Path:
+    root = evidence_root or str(tmp_path / "pipelines")
+    capabilities = []
+    for capability_id in capability_ids or WRITE_CAPABILITY_IDS:
+        pipeline = {
+            "capability_id": capability_id,
+            "registry_digest": release_identity["registry_digest"],
+            "release_sha256": release_identity["manifest_sha256"],
+            "schema_version": 1,
+            "scope": "odoo-accounting-cli-v3.sandbox-write-evidence-pipeline.v1",
+            "verified": True,
+        }
+        capabilities.append(
+            {
+                "capability_id": capability_id,
+                "metadata_path": str(Path(root) / capability_id / "metadata.json"),
+                "pipeline_ready": True,
+                "pipeline_sha256": cli_module._sha256_json(pipeline),
+                "rejection": None,
+                "required_evidence": {"environment": "sandbox"},
+                "status": "verified",
+            }
+        )
     index = {
         "business_succeeded": False,
         "command": "evidence.write-evidence-index",
         "data": {
-            "capabilities": [],
-            "evidence_root": evidence_root or str(tmp_path / "pipelines"),
+            "capabilities": capabilities,
+            "evidence_root": root,
             "index_kind": "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1",
-            "missing_count": 0,
+            "missing_count": missing_count,
             "production_promotion_allowed": False,
             "real_odoo_write_performed": False,
-            "rejected_count": 0,
+            "rejected_count": rejected_count,
             "release_identity": release_identity,
             "sandbox_pipeline_ready": True,
-            "total_write_capabilities": 19,
+            "total_write_capabilities": total_write_capabilities,
             "verified_count": verified_count,
         },
         "ok": True,
@@ -1961,10 +2043,10 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
     assert payload["data"]["evidence_root"]["ready"] is True
     assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
-    assert len(payload["data"]["capabilities"]) == 19
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 19
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 19
-    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 19
+    assert len(payload["data"]["capabilities"]) == 20
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 20
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 20
+    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 20
     assert payload["data"]["capability_summary"][
         "sandbox_staging_promotion_ready_count"
     ] == 0
@@ -1972,8 +2054,8 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
         "registry evidence level is not sandbox_verified",
         "registry has no retained sandbox write evidence receipts",
     ]
-    assert payload["data"]["total_write_capabilities"] == 19
-    assert payload["data"]["sandbox_drill_admissible_count"] == 19
+    assert payload["data"]["total_write_capabilities"] == 20
+    assert payload["data"]["sandbox_drill_admissible_count"] == 20
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
@@ -2023,9 +2105,9 @@ def test_evidence_sandbox_write_environment_audit_summary_omits_capability_detai
     assert "capabilities" not in payload["data"]
     assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 19
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 19
-    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 19
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 20
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 20
+    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 20
     assert payload["data"]["capability_summary"][
         "sandbox_staging_promotion_ready_count"
     ] == 0
@@ -2081,8 +2163,8 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
     assert payload["data"]["onboarding"]["blockers"] == [
         "sandbox onboarding readiness receipt was not supplied"
     ]
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 19
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 19
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 20
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 20
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
@@ -3849,8 +3931,8 @@ def test_evidence_write_capabilities_readiness_reports_all_registered_writes():
         item["sandbox_staging_promotion_ready"] is False
         for item in payload["data"]["capabilities"]
     )
-    assert payload["data"]["total_write_capabilities"] == 19
-    assert payload["data"]["admissible_count"] == 19
+    assert payload["data"]["total_write_capabilities"] == 20
+    assert payload["data"]["admissible_count"] == 20
     reported = [item["capability"]["id"] for item in payload["data"]["capabilities"]]
     assert reported == sorted(reported)
     assert "acct.invoice.customer_create.v1" in reported
@@ -3896,9 +3978,9 @@ def test_evidence_write_pipeline_readiness_reports_verified_and_missing(
     assert payload["command"] == "evidence.write-pipeline-readiness"
     assert payload["business_succeeded"] is False
     data = payload["data"]
-    assert data["total_write_capabilities"] == 19
+    assert data["total_write_capabilities"] == 20
     assert data["verified_count"] == 1
-    assert data["missing_count"] == 18
+    assert data["missing_count"] == 19
     assert data["rejected_count"] == 0
     assert data["sandbox_pipeline_ready"] is False
     invoice = next(
@@ -3989,7 +4071,7 @@ def test_evidence_write_pipeline_readiness_reports_rejected_release_mismatch(
     assert result.exit_code == 0, result.output
     data = __import__("json").loads(result.output)["data"]
     assert data["verified_count"] == 0
-    assert data["missing_count"] == 18
+    assert data["missing_count"] == 19
     assert data["rejected_count"] == 1
     invoice = next(
         item
@@ -4038,9 +4120,9 @@ def test_evidence_write_evidence_index_reports_compact_handoff(tmp_path: Path):
     assert payload["business_succeeded"] is False
     data = payload["data"]
     assert data["index_kind"] == "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1"
-    assert data["total_write_capabilities"] == 19
+    assert data["total_write_capabilities"] == 20
     assert data["verified_count"] == 1
-    assert data["missing_count"] == 18
+    assert data["missing_count"] == 19
     assert data["rejected_count"] == 0
     invoice = next(
         item
@@ -4678,6 +4760,15 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     assert data["sandbox_database"]["sandbox_database_ready"] is True
     assert data["write_pipeline"]["write_pipeline_ready"] is True
     assert data["write_evidence_index"]["index_ready"] is True
+    assert data["write_pipeline"]["summary"] == {
+        "evidence_root": str(tmp_path / "pipelines"),
+        "missing_count": 0,
+        "rejected_count": 0,
+        "sandbox_pipeline_ready": True,
+        "total_write_capabilities": 20,
+        "verified_count": 20,
+    }
+    assert data["write_evidence_index"]["summary"] == data["write_pipeline"]["summary"]
     assert (
         data["read_capabilities_readiness"]["read_static_readiness_ready"]
         is True
@@ -4687,7 +4778,273 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         is True
     )
     assert data["read_capabilities_readiness"]["admissible_count"] == 10
-    assert data["write_static_readiness"]["admissible_count"] == 19
+    assert data["write_static_readiness"]["admissible_count"] == 20
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_blocker"),
+    [
+        (
+            "empty",
+            "sandbox write pipeline capability count does not match current registry",
+        ),
+        (
+            "missing",
+            "sandbox write pipeline capability count does not match current registry",
+        ),
+        (
+            "duplicate",
+            "sandbox write pipeline capability IDs must be unique",
+        ),
+        (
+            "unknown",
+            "sandbox write pipeline capability IDs/order do not match current registry",
+        ),
+        (
+            "out_of_order",
+            "sandbox write pipeline capability IDs/order do not match current registry",
+        ),
+        (
+            "unverified",
+            f"sandbox write pipeline {WRITE_CAPABILITY_IDS[0]} status is not verified",
+        ),
+        (
+            "path_traversal",
+            f"sandbox write pipeline {WRITE_CAPABILITY_IDS[0]} metadata_path is invalid",
+        ),
+        (
+            "wrong_pipeline_binding",
+            f"sandbox write pipeline {WRITE_CAPABILITY_IDS[0]} pipeline capability mismatch",
+        ),
+    ],
+)
+def test_write_pipeline_report_status_rejects_forged_capability_membership(
+    tmp_path: Path,
+    case: str,
+    expected_blocker: str,
+):
+    identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+    }
+    report_path = _ready_write_pipeline_report(tmp_path, identity)
+    json_module = __import__("json")
+    report = json_module.loads(report_path.read_text(encoding="utf-8"))
+    capabilities = report["data"]["capabilities"]
+    if case == "empty":
+        capabilities.clear()
+    elif case == "missing":
+        capabilities.pop()
+    elif case == "duplicate":
+        capabilities[1] = deepcopy(capabilities[0])
+    elif case == "unknown":
+        capabilities[0]["capability_id"] = "acct.unknown.write.v1"
+    elif case == "out_of_order":
+        capabilities[0], capabilities[1] = capabilities[1], capabilities[0]
+    elif case == "unverified":
+        capabilities[0]["status"] = "missing"
+    elif case == "path_traversal":
+        capabilities[0]["metadata_path"] = str(
+            tmp_path
+            / "pipelines"
+            / WRITE_CAPABILITY_IDS[0]
+            / ".."
+            / "metadata.json"
+        )
+    elif case == "wrong_pipeline_binding":
+        capabilities[0]["pipeline"]["capability_id"] = WRITE_CAPABILITY_IDS[1]
+    report_path.write_text(json_module.dumps(report, sort_keys=True), encoding="utf-8")
+
+    status = cli_module._write_pipeline_report_status(
+        report_path,
+        command="evidence.goal-readiness",
+        expected_release_identity=identity,
+        expected_write_capability_ids=tuple(WRITE_CAPABILITY_IDS),
+    )
+
+    assert status["write_pipeline_ready"] is False
+    assert expected_blocker in status["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_blocker"),
+    [
+        (
+            "empty",
+            "sandbox write evidence index capability count does not match current registry",
+        ),
+        (
+            "missing",
+            "sandbox write evidence index capability count does not match current registry",
+        ),
+        (
+            "duplicate",
+            "sandbox write evidence index capability IDs must be unique",
+        ),
+        (
+            "unknown",
+            "sandbox write evidence index capability IDs/order do not match current registry",
+        ),
+        (
+            "unverified",
+            f"sandbox write evidence index {WRITE_CAPABILITY_IDS[0]} status is not verified",
+        ),
+        (
+            "path_traversal",
+            f"sandbox write evidence index {WRITE_CAPABILITY_IDS[0]} metadata_path is invalid",
+        ),
+        (
+            "invalid_pipeline_sha256",
+            f"sandbox write evidence index {WRITE_CAPABILITY_IDS[0]} pipeline_sha256 is invalid",
+        ),
+        (
+            "forged_pipeline_summary",
+            f"sandbox write evidence index {WRITE_CAPABILITY_IDS[0]} summary does not match pipeline report",
+        ),
+    ],
+)
+def test_write_evidence_index_status_rejects_forged_capability_summary(
+    tmp_path: Path,
+    case: str,
+    expected_blocker: str,
+):
+    identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+    }
+    pipeline_path = _ready_write_pipeline_report(tmp_path, identity)
+    pipeline_status = cli_module._write_pipeline_report_status(
+        pipeline_path,
+        command="evidence.goal-readiness",
+        expected_release_identity=identity,
+        expected_write_capability_ids=tuple(WRITE_CAPABILITY_IDS),
+    )
+    pipeline_capability_summaries = pipeline_status.pop("_capability_summaries")
+    assert pipeline_status["write_pipeline_ready"] is True
+
+    index_path = _ready_write_evidence_index(tmp_path, identity)
+    json_module = __import__("json")
+    index = json_module.loads(index_path.read_text(encoding="utf-8"))
+    capabilities = index["data"]["capabilities"]
+    if case == "empty":
+        capabilities.clear()
+    elif case == "missing":
+        capabilities.pop()
+    elif case == "duplicate":
+        capabilities[1] = deepcopy(capabilities[0])
+    elif case == "unknown":
+        capabilities[0]["capability_id"] = "acct.unknown.write.v1"
+    elif case == "unverified":
+        capabilities[0]["status"] = "missing"
+    elif case == "path_traversal":
+        capabilities[0]["metadata_path"] = str(
+            tmp_path
+            / "pipelines"
+            / WRITE_CAPABILITY_IDS[0]
+            / ".."
+            / "metadata.json"
+        )
+    elif case == "invalid_pipeline_sha256":
+        capabilities[0]["pipeline_sha256"] = "invalid"
+    elif case == "forged_pipeline_summary":
+        capabilities[0]["pipeline_sha256"] = "f" * 64
+    index_path.write_text(json_module.dumps(index, sort_keys=True), encoding="utf-8")
+
+    status = cli_module._write_evidence_index_status(
+        index_path,
+        command="evidence.goal-readiness",
+        expected_release_identity=identity,
+        expected_write_capability_ids=tuple(WRITE_CAPABILITY_IDS),
+        pipeline_capability_summaries=pipeline_capability_summaries,
+        pipeline_summary=pipeline_status["summary"],
+    )
+
+    assert status["index_ready"] is False
+    assert expected_blocker in status["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("summary_overrides", "mismatched_fields"),
+    [
+        (
+            {"total_write_capabilities": 19, "verified_count": 19},
+            ("total_write_capabilities", "verified_count"),
+        ),
+        ({"missing_count": 1}, ("missing_count",)),
+        ({"rejected_count": 1}, ("rejected_count",)),
+    ],
+)
+def test_evidence_goal_readiness_rejects_write_evidence_not_bound_to_current_registry(
+    tmp_path: Path,
+    summary_overrides: dict[str, int],
+    mismatched_fields: tuple[str, ...],
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev257",
+    }
+    pipeline_report = _ready_write_pipeline_report(
+        tmp_path,
+        expected_identity,
+        **summary_overrides,
+    )
+    write_evidence_index = _ready_write_evidence_index(
+        tmp_path,
+        expected_identity,
+        **summary_overrides,
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value={**READY_CURRENT_ROUTE, "current_route_ready": True, "blockers": []},
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--write-pipeline-report",
+                str(pipeline_report),
+                "--write-evidence-index",
+                str(write_evidence_index),
+                "--observed-database-name",
+                "odoo_v3_sandbox",
+                "--expected-sandbox-database-name",
+                "odoo_v3_sandbox",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["goal_readiness_ready"] is False
+    assert data["write_pipeline"]["write_pipeline_ready"] is False
+    assert data["write_evidence_index"]["index_ready"] is False
+    for field in mismatched_fields:
+        assert (
+            f"sandbox write pipeline {field} does not match current registry"
+            in data["blockers"]
+        )
+        assert (
+            f"sandbox write evidence index {field} does not match current registry"
+            in data["blockers"]
+        )
 
 
 def test_evidence_goal_readiness_rejects_mismatched_write_evidence_index(
@@ -4879,7 +5236,7 @@ def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
     assert payload["command"] == "evidence.pi-trace-capture-check"
     assert payload["business_succeeded"] is False
     assert payload["data"]["trace_capture_ready"] is True
-    assert payload["data"]["trace_count"] == 34
+    assert payload["data"]["trace_count"] == 38
     assert payload["data"]["real_odoo_write_performed"] is False
 
 

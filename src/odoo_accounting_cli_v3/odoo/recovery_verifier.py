@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import hmac
 from typing import Any, Mapping, Protocol, Sequence
@@ -1142,6 +1142,351 @@ def _verify_payment(graph: _Graph) -> tuple[str, ...]:
     )
 
 
+def _required_bank_value(record: Any, field: str, label: str) -> Any:
+    missing = object()
+    value = getattr(record, field, missing)
+    if value is missing:
+        raise _error(f"{label} lacks required field {field}")
+    return value
+
+
+def _round_bank_currency(
+    amount: Decimal, currency: Any, label: str
+) -> Decimal:
+    rounding = _decimal(
+        _required_bank_value(currency, "rounding", label),
+        f"{label} rounding",
+    )
+    if rounding <= 0:
+        raise _error(f"{label} rounding is invalid")
+    try:
+        units = (amount / rounding).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    except InvalidOperation as exc:
+        raise _error(f"{label} amount cannot be rounded") from exc
+    return units * rounding
+
+
+def _verify_bank_move(
+    graph: _Graph,
+    *,
+    statement: Any,
+    source_line: Any,
+    line: Any,
+    recovery_date: str,
+) -> Any:
+    move = graph.record(
+        "account.move", _record_id(_required_bank_value(
+            line, "move_id", "compensating bank line"
+        ))
+    )
+    journal = _required_bank_value(
+        source_line, "journal_id", "source bank line"
+    )
+    company = _required_bank_value(
+        line, "company_id", "compensating bank line"
+    )
+    company_currency = _required_bank_value(
+        company, "currency_id", "compensating bank company"
+    )
+    configured_journal_currency = _required_bank_value(
+        journal, "currency_id", "source bank journal"
+    )
+    journal_currency = (
+        configured_journal_currency
+        if _record_id(configured_journal_currency) is not None
+        else company_currency
+    )
+    liquidity_account_id = _record_id(
+        _required_bank_value(
+            journal, "default_account_id", "source bank journal"
+        )
+    )
+    suspense_account_id = _record_id(
+        _required_bank_value(
+            journal, "suspense_account_id", "source bank journal"
+        )
+    )
+    statement_currency = _required_bank_value(
+        statement, "currency_id", "compensating bank statement"
+    )
+    statement_currency_id = _record_id(statement_currency)
+    foreign_currency_id = _record_id(
+        _required_bank_value(
+            line, "foreign_currency_id", "compensating bank line"
+        )
+    )
+    if (
+        liquidity_account_id is None
+        or suspense_account_id is None
+        or liquidity_account_id == suspense_account_id
+        or statement_currency_id is None
+        or statement_currency_id != _record_id(journal_currency)
+        or _record_id(
+            _required_bank_value(
+                journal, "company_id", "source bank journal"
+            )
+        )
+        != _record_id(company)
+        or _record_id(
+            _required_bank_value(
+                source_line, "company_id", "source bank line"
+            )
+        )
+        != _record_id(company)
+        or _record_id(
+            _required_bank_value(
+                source_line, "currency_id", "source bank line"
+            )
+        )
+        != statement_currency_id
+        or _record_id(
+            _required_bank_value(
+                line, "currency_id", "compensating bank line"
+            )
+        )
+        != statement_currency_id
+        or _record_id(
+            _required_bank_value(
+                statement, "company_id", "compensating bank statement"
+            )
+        )
+        != _record_id(company)
+        or _record_id(
+            _required_bank_value(
+                statement, "journal_id", "compensating bank statement"
+            )
+        )
+        != _record_id(journal)
+        or foreign_currency_id == statement_currency_id
+        or _state(move) != "posted"
+        or _record_id(
+            _required_bank_value(move, "company_id", "compensating bank move")
+        )
+        != _record_id(
+            _required_bank_value(line, "company_id", "compensating bank line")
+        )
+        or _record_id(
+            _required_bank_value(move, "journal_id", "compensating bank move")
+        )
+        != _record_id(journal)
+        or _record_id(
+            _required_bank_value(move, "currency_id", "compensating bank move")
+        )
+        != (foreign_currency_id or statement_currency_id)
+        or str(
+            _required_bank_value(move, "date", "compensating bank move")
+        )
+        != recovery_date
+        or _record_id(
+            _required_bank_value(
+                move, "statement_line_id", "compensating bank move"
+            )
+        )
+        != _record_id(line)
+        or _record_id(
+            _required_bank_value(move, "partner_id", "compensating bank move")
+        )
+        != _record_id(
+            _required_bank_value(line, "partner_id", "compensating bank line")
+        )
+        or (
+            hasattr(move, "statement_line_ids")
+            and _relation_ids(getattr(move, "statement_line_ids", None))
+            != (_record_id(line),)
+        )
+    ):
+        raise _error("compensating bank move identity differs")
+    move_line_ids = _relation_ids(
+        _required_bank_value(
+            move, "line_ids", "compensating bank move"
+        )
+    )
+    if len(move_line_ids) != 2:
+        raise _error("compensating bank move is not an exact two-line move")
+    move_lines = [
+        graph.record("account.move.line", item) for item in move_line_ids
+    ]
+    by_account: dict[int, Any] = {}
+    for move_line in move_lines:
+        required = {
+            field: _required_bank_value(
+                move_line, field, "compensating bank journal item"
+            )
+            for field in (
+                "move_id",
+                "company_id",
+                "account_id",
+                "currency_id",
+                "partner_id",
+                "debit",
+                "credit",
+                "balance",
+                "amount_currency",
+                "reconciled",
+                "full_reconcile_id",
+                "matched_debit_ids",
+                "matched_credit_ids",
+                "payment_id",
+                "statement_line_id",
+                "statement_id",
+                "tax_ids",
+                "tax_line_id",
+                "tax_tag_ids",
+                "analytic_distribution",
+                "analytic_line_ids",
+            )
+        }
+        account_id = _record_id(required["account_id"])
+        if account_id in by_account:
+            raise _error("compensating bank move repeats an account")
+        if (
+            _record_id(required["move_id"]) != _record_id(move)
+            or _record_id(required["company_id"])
+            != _record_id(getattr(line, "company_id", None))
+            or _record_id(required["partner_id"])
+            not in {None, _record_id(getattr(line, "partner_id", None))}
+            or bool(required["reconciled"])
+            or _record_id(required["full_reconcile_id"]) is not None
+            or _relation_ids(required["matched_debit_ids"])
+            or _relation_ids(required["matched_credit_ids"])
+            or _record_id(required["payment_id"]) is not None
+            or _record_id(required["statement_line_id"])
+            not in {None, _record_id(line)}
+            or _record_id(required["statement_id"])
+            not in {None, _record_id(statement)}
+            or _relation_ids(required["tax_ids"])
+            or _record_id(required["tax_line_id"]) is not None
+            or _relation_ids(required["tax_tag_ids"])
+            or required["analytic_distribution"] not in (False, None, {})
+            or _relation_ids(required["analytic_line_ids"])
+            or _relation_ids(getattr(move_line, "asset_ids", None))
+            or getattr(move_line, "deferred_start_date", None)
+            not in (False, None)
+            or getattr(move_line, "deferred_end_date", None)
+            not in (False, None)
+        ):
+            raise _error(
+                "compensating bank journal item has a tax, analytic, payment, "
+                "reconciliation, asset, deferred, or external effect"
+            )
+        by_account[account_id] = move_line
+    if set(by_account) != {liquidity_account_id, suspense_account_id}:
+        raise _error(
+            "compensating bank move does not use liquidity and suspense accounts"
+        )
+    amount = _decimal(
+        _required_bank_value(line, "amount", "compensating bank line"),
+        "compensating bank amount",
+    )
+    foreign_amount = (
+        _decimal(
+            _required_bank_value(
+                line, "amount_currency", "compensating bank line"
+            ),
+            "compensating bank foreign amount",
+        )
+        if foreign_currency_id is not None
+        else amount
+    )
+    liquidity_line = by_account[liquidity_account_id]
+    conversion_error = (
+        "compensating bank journal item amount differs: "
+        "journal currency conversion differs"
+    )
+    company_currency_id = _record_id(company_currency)
+    if statement_currency_id == company_currency_id:
+        company_amount = amount
+    elif foreign_currency_id == company_currency_id:
+        company_amount = foreign_amount
+    else:
+        liquidity_rate = _decimal(
+            _required_bank_value(
+                liquidity_line,
+                "currency_rate",
+                "compensating bank liquidity journal item",
+            ),
+            "compensating bank liquidity currency rate",
+        )
+        if liquidity_rate <= 0:
+            raise _error(conversion_error)
+        company_amount = _round_bank_currency(
+            amount / liquidity_rate,
+            company_currency,
+            "compensating bank company currency",
+        )
+    if (
+        _decimal(
+            _required_bank_value(
+                liquidity_line,
+                "balance",
+                "compensating bank liquidity journal item",
+            ),
+            "compensating bank liquidity balance",
+        )
+        != company_amount
+    ):
+        raise _error(conversion_error)
+    expectations = {
+        liquidity_account_id: {
+            "currency_id": statement_currency_id,
+            "debit": max(company_amount, Decimal("0")),
+            "credit": max(-company_amount, Decimal("0")),
+            "balance": company_amount,
+            "amount_currency": amount,
+        },
+        suspense_account_id: {
+            "currency_id": foreign_currency_id or statement_currency_id,
+            "debit": max(-company_amount, Decimal("0")),
+            "credit": max(company_amount, Decimal("0")),
+            "balance": -company_amount,
+            "amount_currency": -foreign_amount,
+        },
+    }
+    for account_id, expected in expectations.items():
+        move_line = by_account[account_id]
+        if _record_id(getattr(move_line, "currency_id", None)) != expected[
+            "currency_id"
+        ]:
+            raise _error("compensating bank journal item currency differs")
+        for field in ("debit", "credit", "balance", "amount_currency"):
+            if _decimal(
+                getattr(move_line, field, None),
+                f"compensating bank {field}",
+            ) != expected[field]:
+                raise _error(
+                    "compensating bank journal item amount differs"
+                )
+    if any(
+        _record_id(getattr(move, field, None)) is not None
+        for field in (
+            "origin_payment_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "reversed_entry_id",
+            "asset_id",
+        )
+    ) or any(
+        _relation_ids(getattr(move, field, None))
+        for field in (
+            "payment_ids",
+            "matched_payment_ids",
+            "reconciled_payment_ids",
+            "tax_cash_basis_created_move_ids",
+            "exchange_diff_partial_ids",
+            "asset_ids",
+            "deferred_move_ids",
+            "deferred_original_move_ids",
+            "transaction_ids",
+            "authorized_transaction_ids",
+        )
+    ):
+        raise _error("compensating bank move has an external side effect")
+    graph.assert_balanced(move)
+    return move
+
+
 def _verify_bank(
     graph: _Graph, recovery_date: str, reason: str
 ) -> tuple[str, ...]:
@@ -1225,23 +1570,37 @@ def _verify_bank(
         foreign_currency_id = _record_id(
             getattr(source, "foreign_currency_id", None)
         )
-        if (
-            foreign_currency_id is not None
-            and _decimal(
+        if foreign_currency_id is not None:
+            if _decimal(
                 getattr(line, "amount_currency", None),
                 "compensating foreign amount",
-            )
-            != -_decimal(
+            ) != -_decimal(
                 getattr(source, "amount_currency", None),
                 "source foreign amount",
+            ):
+                raise _error("fresh compensating bank foreign amount differs")
+        elif (
+            _decimal(
+                getattr(line, "amount_currency", 0) or 0,
+                "compensating unmarked foreign amount",
             )
+            != 0
+            or _decimal(
+                getattr(source, "amount_currency", 0) or 0,
+                "source unmarked foreign amount",
+            )
+            != 0
         ):
-            raise _error("fresh compensating bank foreign amount differs")
-        move_id = _record_id(getattr(line, "move_id", None))
-        move = graph.record("account.move", move_id)
-        if _state(move) != "posted":
-            raise _error("compensating bank line move is not posted")
-        graph.assert_balanced(move)
+            raise _error(
+                "fresh compensating bank unmarked foreign amount differs"
+            )
+        move = _verify_bank_move(
+            graph,
+            statement=compensating,
+            source_line=source,
+            line=line,
+            recovery_date=recovery_date,
+        )
         paired[source_id] = line
     if set(paired) != set(original_lines):
         raise _error("fresh compensating bank line set differs")
@@ -1269,6 +1628,9 @@ def _verify_bank(
         "bank_compensating_statement_fresh",
         "bank_line_amounts_fresh_inverse",
         "bank_balances_fresh_inverse",
+        "bank_move_identity_and_two_line_graph_fresh_exact",
+        "bank_liquidity_and_suspense_amounts_fresh_exact",
+        "bank_move_tax_analytic_payment_and_reconciliation_graph_empty",
         "bank_compensation_graph_complete",
     )
 

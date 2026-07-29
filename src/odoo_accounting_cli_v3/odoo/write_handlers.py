@@ -93,16 +93,25 @@ _CAPABILITIES = frozenset(
         "acct.move.draft_cancel.v2",
         "acct.recovery.execute.v1",
         "acct.reconciliation.undo.v1",
+        "acct.bank.statement_compensate.v1",
     }
 )
 _TRUSTED_PLAN_CAPABILITIES = frozenset(
-    {"acct.recovery.execute.v1", "acct.reconciliation.undo.v1"}
+    {
+        "acct.recovery.execute.v1",
+        "acct.reconciliation.undo.v1",
+        "acct.bank.statement_compensate.v1",
+    }
 )
 _RECONCILIATION_UNDO_METHOD = (
     "undo_reconciliation_and_reverse_writeoff_v1"
 )
 _RECONCILIATION_UNDO_ORACLE = (
     "undo_reconciliation_and_reverse_writeoff_exact_v1"
+)
+_BANK_STATEMENT_COMPENSATE_METHOD = "post_compensating_bank_statement_v1"
+_BANK_STATEMENT_COMPENSATE_ORACLE = (
+    "post_compensating_bank_statement_exact_v1"
 )
 
 # This dormant implementation is reachable only through a receipt-derived V2
@@ -492,6 +501,30 @@ def _canonical(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _bank_statement_sequence_lock_digest(
+    company_id: int, journal_id: int
+) -> str:
+    if (
+        isinstance(company_id, bool)
+        or not isinstance(company_id, int)
+        or company_id <= 0
+        or isinstance(journal_id, bool)
+        or not isinstance(journal_id, int)
+        or journal_id <= 0
+    ):
+        raise OdooWriteHandlerError(
+            "bank statement sequence lock identity is invalid"
+        )
+    return _digest(
+        {
+            "purpose": "odoo_write_resource_lock_v1",
+            "company_id": company_id,
+            "model": "account.journal.bank_statement_sequence",
+            "identity": journal_id,
+        }
+    )
 
 
 def _recovery(
@@ -1317,6 +1350,7 @@ class OdooWriteHandlers:
             "acct.move.draft_cancel.v2",
             "acct.recovery.execute.v1",
             "acct.reconciliation.undo.v1",
+            "acct.bank.statement_compensate.v1",
         }:
             verification_result = method(
                 parameters,
@@ -1458,6 +1492,7 @@ class OdooWriteHandlers:
             "acct.move.draft_cancel.v2": "draft_cancel_v2",
             "acct.recovery.execute.v1": "recovery",
             "acct.reconciliation.undo.v1": "reconciliation_undo",
+            "acct.bank.statement_compensate.v1": "bank_statement_compensate",
         }[capability_id]
         return f"{phase}_{key}"
 
@@ -9023,6 +9058,1477 @@ class OdooWriteHandlers:
                 f"recovery plan execution guard rejected the plan: {exc}"
             ) from exc
 
+    @staticmethod
+    def _bank_statement_compensation_parameters(
+        p: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Map the approved public date without mutating its signed parameters."""
+
+        internal = dict(p)
+        compensation_date = internal.pop("compensation_date", None)
+        if not isinstance(compensation_date, str) or not compensation_date:
+            raise OdooWriteHandlerError("compensation_date is required")
+        if "recovery_date" in internal:
+            raise OdooWriteHandlerError(
+                "recovery_date is not a public bank compensation parameter"
+            )
+        internal["recovery_date"] = compensation_date
+        return internal
+
+    @staticmethod
+    def _required_bank_field(record: Any, field: str, label: str) -> Any:
+        missing = object()
+        value = getattr(record, field, missing)
+        if value is missing:
+            raise OdooWriteHandlerError(
+                f"{label} lacks required auditable field {field}"
+            )
+        return value
+
+    def _bank_statement_compensate_plan(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+    ) -> Mapping[str, Any]:
+        plan = self.context.trusted_recovery_plan
+        try:
+            validate_executable_recovery_plan(plan)
+            index_recovery_guard_graph(
+                plan, expected_company_id=_record_id(company)
+            )
+        except WriteReceiptError as exc:
+            raise OdooWriteHandlerError(
+                "trusted bank statement compensation plan is invalid"
+            ) from exc
+        if not isinstance(plan, Mapping):
+            raise OdooWriteHandlerError(
+                "trusted bank statement compensation plan is invalid"
+            )
+        actions = plan["action_targets"]
+        guards = plan["guard_records"]
+        if (
+            plan.get("plan_version") != 2
+            or plan.get("method") != _BANK_STATEMENT_COMPENSATE_METHOD
+            or plan.get("oracle_id") != _BANK_STATEMENT_COMPENSATE_ORACLE
+            or plan.get("origin_operation_id") != p.get("origin_operation_id")
+            or plan.get("plan_digest")
+            != p.get("expected_recovery_plan_digest")
+            or p.get("company_id") != _record_id(company)
+            or len(actions) != 1
+            or actions[0]["model"] != "account.bank.statement"
+            or actions[0]["record_id"] != p.get("expected_statement_id")
+            or not guards
+            or any(
+                guard["expected_outcome"] != "survive_exact"
+                for guard in guards
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "trusted recovery plan is not bound to this bank statement "
+                "compensation"
+            )
+        return plan
+
+    @staticmethod
+    def _bank_move_has_external_effects(move: Any) -> bool:
+        singular = (
+            "origin_payment_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "reversed_entry_id",
+            "asset_id",
+            "closing_return_id",
+            "transfer_model_id",
+            "purchase_id",
+            "debit_origin_id",
+            "invoice_pdf_report_id",
+            "invoice_vendor_bill_id",
+            "purchase_vendor_bill_id",
+            "ubl_cii_xml_id",
+            "l10n_es_edi_facturae_xml_id",
+            "message_main_attachment_id",
+        )
+        plural = (
+            "payment_ids",
+            "matched_payment_ids",
+            "reconciled_payment_ids",
+            "tax_cash_basis_created_move_ids",
+            "reversal_move_ids",
+            "adjusting_entry_origin_move_ids",
+            "adjusting_entries_move_ids",
+            "exchange_diff_partial_ids",
+            "transaction_ids",
+            "authorized_transaction_ids",
+            "asset_ids",
+            "deferred_move_ids",
+            "deferred_original_move_ids",
+            "edi_document_ids",
+            "expense_ids",
+            "pos_order_ids",
+            "stock_move_ids",
+            "landed_costs_ids",
+            "attachment_ids",
+        )
+        binary = (
+            "invoice_pdf_report_file",
+            "ubl_cii_xml_file",
+            "l10n_es_edi_facturae_xml_file",
+            "signature",
+        )
+        return (
+            any(
+                _record_id(getattr(move, field, None)) is not None
+                for field in singular
+            )
+            or any(_ids(getattr(move, field, [])) for field in plural)
+            or any(_is_present(getattr(move, field, False)) for field in binary)
+        )
+
+    def _assert_pristine_bank_move_line(
+        self,
+        line: Any,
+        *,
+        company: Any,
+        move: Any,
+        bank_line: Any,
+        statement: Any,
+        currency: Any,
+    ) -> None:
+        required = {
+            field: self._required_bank_field(
+                line, field, "bank journal item"
+            )
+            for field in (
+                "move_id",
+                "company_id",
+                "account_id",
+                "currency_id",
+                "parent_state",
+                "debit",
+                "credit",
+                "balance",
+                "amount_currency",
+                "reconciled",
+                "full_reconcile_id",
+                "matched_debit_ids",
+                "matched_credit_ids",
+                "payment_id",
+                "statement_line_id",
+                "statement_id",
+                "tax_ids",
+                "tax_line_id",
+                "tax_tag_ids",
+                "tax_repartition_line_id",
+                "analytic_distribution",
+                "analytic_line_ids",
+            )
+        }
+        partner_id = _record_id(getattr(bank_line, "partner_id", None))
+        if (
+            _record_id(required["move_id"]) != _record_id(move)
+            or _record_id(required["company_id"]) != _record_id(company)
+            or _record_id(required["currency_id"]) != _record_id(currency)
+            or str(required["parent_state"]) != "posted"
+            or _record_id(getattr(line, "partner_id", None))
+            not in {None, partner_id}
+            or bool(required["reconciled"])
+            or _record_id(required["full_reconcile_id"]) is not None
+            or _ids(required["matched_debit_ids"])
+            or _ids(required["matched_credit_ids"])
+            or _record_id(required["payment_id"]) is not None
+            or _record_id(required["statement_line_id"])
+            not in {None, _record_id(bank_line)}
+            or _record_id(required["statement_id"])
+            not in {None, _record_id(statement)}
+            or _ids(required["tax_ids"])
+            or _record_id(required["tax_line_id"]) is not None
+            or _ids(required["tax_tag_ids"])
+            or _record_id(required["tax_repartition_line_id"]) is not None
+            or required["analytic_distribution"] not in (False, None, {})
+            or _ids(required["analytic_line_ids"])
+            or _ids(getattr(line, "asset_ids", []))
+            or getattr(line, "deferred_start_date", False) not in (False, None)
+            or getattr(line, "deferred_end_date", False) not in (False, None)
+            or _ids(getattr(line, "reconciled_lines_ids", []))
+            or _ids(
+                getattr(
+                    line,
+                    "reconciled_lines_excluding_exchange_diff_ids",
+                    [],
+                )
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "bank journal item has reconciliation, FX, tax, analytic, "
+                "payment, asset, deferred, or external effects"
+            )
+        debit = _decimal(required["debit"], "bank journal item debit")
+        credit = _decimal(required["credit"], "bank journal item credit")
+        balance = _decimal(required["balance"], "bank journal item balance")
+        amount_currency = _decimal(
+            required["amount_currency"], "bank journal item amount_currency"
+        )
+        if (debit > 0) == (credit > 0):
+            raise OdooWriteHandlerError(
+                "bank journal item has a malformed debit or credit"
+            )
+        self.assert_amount(
+            balance, debit - credit, currency, "bank journal item balance"
+        )
+        self.assert_amount(
+            amount_currency,
+            balance,
+            currency,
+            "bank journal item amount_currency",
+        )
+
+    def _bank_statement_boundary_records(
+        self,
+        actions: list[tuple[str, Any]],
+        guards: list[tuple[str, Any]],
+    ) -> tuple[Any, list[Any]]:
+        statements = [
+            record
+            for model_name, record in actions
+            if model_name == "account.bank.statement"
+        ]
+        if len(actions) != 1 or len(statements) != 1:
+            raise OdooWriteHandlerError(
+                "bank compensation boundary requires one source statement"
+            )
+        statement = statements[0]
+        keyed_guards = {
+            (model_name, _record_id(record)): record
+            for model_name, record in guards
+        }
+        if len(keyed_guards) != len(guards):
+            raise OdooWriteHandlerError(
+                "bank compensation boundary guard graph contains a duplicate"
+            )
+        line_ids = _ids(
+            self._required_bank_field(
+                statement, "line_ids", "source bank statement"
+            )
+        )
+        lines = [
+            keyed_guards.get(("account.bank.statement.line", line_id))
+            for line_id in line_ids
+        ]
+        if not line_ids or any(line is None for line in lines):
+            raise OdooWriteHandlerError(
+                "bank compensation boundary line graph is incomplete"
+            )
+        return statement, lines
+
+    def _acquire_bank_statement_sequence_lock(
+        self,
+        company: Any,
+        journal_id: int,
+    ) -> str:
+        digest = _bank_statement_sequence_lock_digest(
+            _record_id(company), journal_id
+        )
+        try:
+            model = self.context.env["odoo.accounting.cli.operation"]
+            acquire = getattr(model, "_acquire_scope_lock", None)
+            if not callable(acquire):
+                raise TypeError("scope lock method is unavailable")
+            acquire(digest)
+        except Exception as exc:
+            raise OdooWriteHandlerError(
+                "bank statement sequence lock failed closed"
+            ) from exc
+        return digest
+
+    def _locked_fresh_bank_recovery_graph(
+        self,
+        plan: Mapping[str, Any],
+        company: Any,
+        actions: list[tuple[str, Any]],
+        guards: list[tuple[str, Any]],
+        *,
+        expected_journal_id: int | None = None,
+    ) -> tuple[
+        list[tuple[str, Any]],
+        list[tuple[str, Any]],
+        list[tuple[str, Any]],
+        tuple[Any, list[Any]],
+    ]:
+        statement, _lines = self._bank_statement_boundary_records(
+            actions, guards
+        )
+        observed_journal_id = _record_id(
+            self._required_bank_field(
+                statement, "journal_id", "source bank statement"
+            )
+        )
+        journal_id = (
+            expected_journal_id
+            if expected_journal_id is not None
+            else observed_journal_id
+        )
+        if (
+            observed_journal_id is None
+            or isinstance(journal_id, bool)
+            or not isinstance(journal_id, int)
+            or journal_id <= 0
+        ):
+            raise OdooWriteHandlerError(
+                "source bank statement journal binding is unavailable"
+            )
+        self._acquire_bank_statement_sequence_lock(company, journal_id)
+        invalidate_all = getattr(self.context.env, "invalidate_all", None)
+        if not callable(invalidate_all):
+            raise OdooWriteHandlerError(
+                "bank statement sequence cache invalidation is unavailable"
+            )
+        try:
+            invalidate_all()
+            fresh_actions, fresh_guards, fresh_records = (
+                self._recovery_records_by_role(plan, company)
+            )
+        except Exception as exc:
+            raise OdooWriteHandlerError(
+                "bank statement sequence refresh failed closed"
+            ) from exc
+        fresh_boundary = self._bank_statement_boundary_records(
+            fresh_actions, fresh_guards
+        )
+        fresh_journal_id = _record_id(
+            self._required_bank_field(
+                fresh_boundary[0],
+                "journal_id",
+                "source bank statement",
+            )
+        )
+        if fresh_journal_id != journal_id:
+            raise OdooWriteHandlerError(
+                "source bank statement journal changed while locking"
+            )
+        return (
+            fresh_actions,
+            fresh_guards,
+            fresh_records,
+            fresh_boundary,
+        )
+
+    def _bank_recovery_journal_from_before(
+        self,
+        plan: Mapping[str, Any],
+        before: Mapping[tuple[str, int], dict[str, Any]],
+        company: Any,
+    ) -> int:
+        actions = plan.get("action_targets")
+        if (
+            not isinstance(actions, list)
+            or len(actions) != 1
+            or actions[0].get("model") != "account.bank.statement"
+        ):
+            raise OdooWriteHandlerError(
+                "bank recovery before statement binding is invalid"
+            )
+        statement_key = (
+            "account.bank.statement",
+            actions[0].get("record_id"),
+        )
+        values = before.get(statement_key)
+        journal_id = (
+            classic_read_many2one_id(values.get("journal_id"))
+            if isinstance(values, Mapping)
+            else None
+        )
+        company_id = (
+            classic_read_many2one_id(values.get("company_id"))
+            if isinstance(values, Mapping)
+            else None
+        )
+        if (
+            journal_id is None
+            or company_id != _record_id(company)
+        ):
+            raise OdooWriteHandlerError(
+                "bank recovery before journal binding is unavailable"
+            )
+        return journal_id
+
+    def _fresh_bank_recovery_result_records(
+        self,
+        records: list[tuple[str, Any]],
+        company: Any,
+    ) -> list[tuple[str, Any]]:
+        keys = [
+            (model_name, _record_id(record))
+            for model_name, record in records
+        ]
+        if (
+            len(keys) != len(set(keys))
+            or any(
+                not isinstance(model_name, str)
+                or not model_name.startswith("account.")
+                or record_id is None
+                for model_name, record_id in keys
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "bank recovery result graph identity is invalid"
+            )
+        return [
+            (
+                model_name,
+                self.record(model_name, record_id, company),
+            )
+            for model_name, record_id in keys
+        ]
+
+    def _assert_bank_compensation_verification_range(
+        self,
+        plan: Mapping[str, Any],
+        company: Any,
+        source_statement: Any,
+        source_lines: list[Any],
+        records: list[tuple[str, Any]],
+    ) -> None:
+        """Reject inserted activity only inside the source-to-compensation range."""
+
+        source_statement_id = _record_id(source_statement)
+        source_line_ids = {_record_id(line) for line in source_lines}
+        journal_id = _record_id(
+            self._required_bank_field(
+                source_statement,
+                "journal_id",
+                "source bank statement",
+            )
+        )
+        source_indices = [
+            self._required_bank_field(
+                line, "internal_index", "source bank statement line"
+            )
+            for line in source_lines
+        ]
+        if (
+            source_statement_id is None
+            or journal_id is None
+            or None in source_line_ids
+            or not source_indices
+            or any(
+                not isinstance(value, str) or not value
+                for value in source_indices
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "source bank statement verification range is invalid"
+            )
+        planned = {
+            (item["model"], item["record_id"])
+            for item in [
+                *plan["action_targets"],
+                *plan["guard_records"],
+            ]
+        }
+        keyed = {
+            (model_name, _record_id(record)): record
+            for model_name, record in records
+        }
+        if len(keyed) != len(records) or not planned.issubset(keyed):
+            raise OdooWriteHandlerError(
+                "bank recovery verification graph is incomplete"
+            )
+        new_statement_keys = [
+            key
+            for key in set(keyed) - planned
+            if key[0] == "account.bank.statement"
+        ]
+        if len(new_statement_keys) != 1:
+            raise OdooWriteHandlerError(
+                "bank recovery verification has no unique compensation"
+            )
+        compensation = keyed[new_statement_keys[0]]
+        compensation_statement_id = _record_id(compensation)
+        compensation_line_ids = _ids(
+            self._required_bank_field(
+                compensation,
+                "line_ids",
+                "compensating bank statement",
+            )
+        )
+        compensation_lines = [
+            keyed.get(("account.bank.statement.line", line_id))
+            for line_id in compensation_line_ids
+        ]
+        if not compensation_line_ids or any(
+            line is None for line in compensation_lines
+        ):
+            raise OdooWriteHandlerError(
+                "compensating bank statement line graph is incomplete"
+            )
+        compensation_indices: list[str] = []
+        for line in compensation_lines:
+            internal_index = self._required_bank_field(
+                line, "internal_index", "compensating bank statement line"
+            )
+            if (
+                not isinstance(internal_index, str)
+                or not internal_index
+                or _record_id(
+                    self._required_bank_field(
+                        line,
+                        "journal_id",
+                        "compensating bank statement line",
+                    )
+                )
+                != journal_id
+                or _record_id(
+                    self._required_bank_field(
+                        line,
+                        "statement_id",
+                        "compensating bank statement line",
+                    )
+                )
+                != compensation_statement_id
+                or str(
+                    self._required_bank_field(
+                        line,
+                        "state",
+                        "compensating bank statement line",
+                    )
+                )
+                != "posted"
+            ):
+                raise OdooWriteHandlerError(
+                    "compensating bank statement ordering identity differs"
+                )
+            compensation_indices.append(internal_index)
+        first_line_index = self._required_bank_field(
+            compensation,
+            "first_line_index",
+            "compensating bank statement",
+        )
+        source_last = max(source_indices)
+        compensation_last = max(compensation_indices)
+        if (
+            _record_id(
+                self._required_bank_field(
+                    compensation,
+                    "journal_id",
+                    "compensating bank statement",
+                )
+            )
+            != journal_id
+            or first_line_index != min(compensation_indices)
+            or len(compensation_indices) != len(set(compensation_indices))
+            or min(compensation_indices) <= source_last
+        ):
+            raise OdooWriteHandlerError(
+                "compensating bank statement ordering range differs"
+            )
+        permitted_statement_ids = sorted(
+            {source_statement_id, compensation_statement_id}
+        )
+        permitted_line_ids = sorted(
+            {*source_line_ids, *compensation_line_ids}
+        )
+        inserted_statements = self.search_records(
+            "account.bank.statement",
+            [
+                ("journal_id", "=", journal_id),
+                ("id", "not in", permitted_statement_ids),
+                ("first_line_index", ">", source_last),
+                ("first_line_index", "<=", compensation_last),
+                ("line_ids.state", "=", "posted"),
+            ],
+            company,
+            limit=1,
+        )
+        inserted_lines = self.search_records(
+            "account.bank.statement.line",
+            [
+                ("journal_id", "=", journal_id),
+                ("id", "not in", permitted_line_ids),
+                ("state", "=", "posted"),
+                ("internal_index", ">", source_last),
+                ("internal_index", "<=", compensation_last),
+            ],
+            company,
+            limit=1,
+        )
+        if inserted_statements or inserted_lines:
+            raise OdooWriteHandlerError(
+                "unexpected posted bank activity exists between source and "
+                "compensation"
+            )
+
+    def _assert_bank_statement_checkpoint_boundary(
+        self,
+        statement: Any,
+        lines: list[Any],
+        company: Any,
+        *,
+        allowed_statement_ids: Any = (),
+        allowed_line_ids: Any = (),
+    ) -> None:
+        """Reject only posted activity after the source's Odoo ordering boundary."""
+
+        statement_id = _record_id(statement)
+        journal_id = _record_id(
+            self._required_bank_field(
+                statement, "journal_id", "source bank statement"
+            )
+        )
+        first_line_index = self._required_bank_field(
+            statement, "first_line_index", "source bank statement"
+        )
+        if (
+            statement_id is None
+            or journal_id is None
+            or not isinstance(first_line_index, str)
+            or not first_line_index
+        ):
+            raise OdooWriteHandlerError(
+                "source bank statement ordering boundary is unavailable"
+            )
+        source_line_ids: list[int] = []
+        internal_indices: list[str] = []
+        for line in lines:
+            line_id = _record_id(line)
+            internal_index = self._required_bank_field(
+                line, "internal_index", "source bank statement line"
+            )
+            if (
+                line_id is None
+                or _record_id(
+                    self._required_bank_field(
+                        line, "journal_id", "source bank statement line"
+                    )
+                )
+                != journal_id
+                or _record_id(
+                    self._required_bank_field(
+                        line, "statement_id", "source bank statement line"
+                    )
+                )
+                != statement_id
+                or str(
+                    self._required_bank_field(
+                        line, "state", "source bank statement line"
+                    )
+                )
+                != "posted"
+                or not isinstance(internal_index, str)
+                or not internal_index
+            ):
+                raise OdooWriteHandlerError(
+                    "source bank statement line ordering boundary differs"
+                )
+            source_line_ids.append(line_id)
+            internal_indices.append(internal_index)
+        if (
+            len(source_line_ids) != len(set(source_line_ids))
+            or len(internal_indices) != len(set(internal_indices))
+            or first_line_index != min(internal_indices)
+        ):
+            raise OdooWriteHandlerError(
+                "source bank statement first-line boundary differs"
+            )
+        try:
+            permitted_statement_ids = {
+                statement_id,
+                *(int(item) for item in allowed_statement_ids),
+            }
+            permitted_line_ids = {
+                *source_line_ids,
+                *(int(item) for item in allowed_line_ids),
+            }
+        except (TypeError, ValueError) as exc:
+            raise OdooWriteHandlerError(
+                "bank compensation boundary exclusions are invalid"
+            ) from exc
+        if any(item <= 0 for item in permitted_statement_ids | permitted_line_ids):
+            raise OdooWriteHandlerError(
+                "bank compensation boundary exclusions are invalid"
+            )
+        last_line_index = max(internal_indices)
+        later_statements = self.search_records(
+            "account.bank.statement",
+            [
+                ("journal_id", "=", journal_id),
+                ("id", "not in", sorted(permitted_statement_ids)),
+                ("first_line_index", ">", first_line_index),
+                ("line_ids.state", "=", "posted"),
+            ],
+            company,
+            limit=1,
+        )
+        later_lines = self.search_records(
+            "account.bank.statement.line",
+            [
+                ("journal_id", "=", journal_id),
+                ("id", "not in", sorted(permitted_line_ids)),
+                ("state", "=", "posted"),
+                ("internal_index", ">", last_line_index),
+            ],
+            company,
+            limit=1,
+        )
+        if later_statements or later_lines:
+            raise OdooWriteHandlerError(
+                "a later posted bank statement checkpoint or line exists"
+            )
+
+    def _bank_statement_compensation_source(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+    ) -> tuple[
+        Any,
+        list[Any],
+        list[Any],
+        list[tuple[str, Any]],
+        list[tuple[str, Any]],
+    ]:
+        plan = self._bank_statement_compensate_plan(p, company)
+        actions, guards, records = self._recovery_records_by_role(
+            plan, company
+        )
+        if (
+            len(actions) != 1
+            or actions[0][0] != "account.bank.statement"
+        ):
+            raise OdooWriteHandlerError(
+                "bank compensation requires one source statement"
+            )
+        statement = actions[0][1]
+        keyed_guards = {
+            (model_name, _record_id(record)): record
+            for model_name, record in guards
+        }
+        if len(keyed_guards) != len(guards):
+            raise OdooWriteHandlerError(
+                "bank compensation guard graph contains a duplicate"
+            )
+        statement_line_ids = _ids(
+            self._required_bank_field(
+                statement, "line_ids", "source bank statement"
+            )
+        )
+        if not statement_line_ids:
+            raise OdooWriteHandlerError(
+                "source bank statement contains no lines"
+            )
+        lines: list[Any] = []
+        moves: list[Any] = []
+        expected_keys = {
+            ("account.bank.statement", _record_id(statement))
+        }
+        move_ids: set[int] = set()
+        for line_id in statement_line_ids:
+            line = keyed_guards.get(
+                ("account.bank.statement.line", line_id)
+            )
+            if line is None:
+                raise OdooWriteHandlerError(
+                    "bank statement line guard graph is incomplete"
+                )
+            move_id = _record_id(
+                self._required_bank_field(
+                    line, "move_id", "source bank statement line"
+                )
+            )
+            if move_id is None or move_id in move_ids:
+                raise OdooWriteHandlerError(
+                    "bank statement move ownership is missing or ambiguous"
+                )
+            move = keyed_guards.get(("account.move", move_id))
+            if move is None:
+                raise OdooWriteHandlerError(
+                    "bank statement move guard graph is incomplete"
+                )
+            move_line_ids = _ids(
+                self._required_bank_field(
+                    move, "line_ids", "source bank statement move"
+                )
+            )
+            if len(move_line_ids) != 2 or any(
+                ("account.move.line", item) not in keyed_guards
+                for item in move_line_ids
+            ):
+                raise OdooWriteHandlerError(
+                    "bank statement journal-item guard graph is incomplete"
+                )
+            move_ids.add(move_id)
+            lines.append(line)
+            moves.append(move)
+            expected_keys.update(
+                {
+                    ("account.bank.statement.line", line_id),
+                    ("account.move", move_id),
+                    *(
+                        ("account.move.line", item)
+                        for item in move_line_ids
+                    ),
+                }
+            )
+        actual_keys = {
+            (model_name, _record_id(record))
+            for model_name, record in records
+        }
+        if actual_keys != expected_keys:
+            raise OdooWriteHandlerError(
+                "bank statement compensation plan does not cover the exact "
+                "statement-line-move graph"
+            )
+
+        if (
+            _record_id(statement) != p["expected_statement_id"]
+            or _record_id(
+                self._required_bank_field(
+                    statement, "company_id", "source bank statement"
+                )
+            )
+            != _record_id(company)
+            or _record_id(
+                self._required_bank_field(
+                    statement, "journal_id", "source bank statement"
+                )
+            )
+            != p["expected_journal_id"]
+            or _record_id(
+                self._required_bank_field(
+                    statement, "currency_id", "source bank statement"
+                )
+            )
+            != p["expected_currency_id"]
+            or str(
+                self._required_bank_field(
+                    statement,
+                    "odoo_cli_v3_source_digest",
+                    "source bank statement",
+                )
+                or ""
+            )
+            != p["expected_source_digest"]
+            or self._required_bank_field(
+                statement, "is_complete", "source bank statement"
+            )
+            is not True
+            or self._required_bank_field(
+                statement, "is_valid", "source bank statement"
+            )
+            is not True
+        ):
+            raise OdooWriteHandlerError(
+                "source bank statement business binding differs from the "
+                "approved input"
+            )
+        journal = self.record(
+            "account.journal", p["expected_journal_id"], company
+        )
+        company_currency_id = _record_id(
+            self._required_bank_field(
+                company, "currency_id", "bound company"
+            )
+        )
+        liquidity_account_id = _record_id(
+            self._required_bank_field(
+                journal, "default_account_id", "source bank journal"
+            )
+        )
+        suspense_account_id = _record_id(
+            self._required_bank_field(
+                journal, "suspense_account_id", "source bank journal"
+            )
+        )
+        if (
+            str(
+                self._required_bank_field(
+                    journal, "type", "source bank journal"
+                )
+            )
+            != "bank"
+            or self._required_bank_field(
+                journal, "active", "source bank journal"
+            )
+            is not True
+            or _record_id(
+                self._required_bank_field(
+                    journal, "company_id", "source bank journal"
+                )
+            )
+            != _record_id(company)
+            or company_currency_id != p["expected_currency_id"]
+            or _record_id(
+                self._required_bank_field(
+                    journal, "currency_id", "source bank journal"
+                )
+            )
+            not in {None, company_currency_id}
+            or liquidity_account_id is None
+            or suspense_account_id is None
+            or liquidity_account_id == suspense_account_id
+        ):
+            raise OdooWriteHandlerError(
+                "bank compensation requires one active company-currency "
+                "journal with distinct liquidity and suspense accounts"
+            )
+        currency = self.assert_currency(
+            p["expected_currency_id"], company, journal
+        )
+        liquidity_account = self.check_account(
+            liquidity_account_id, company
+        )
+        suspense_account = self.check_account(
+            suspense_account_id, company
+        )
+
+        total = Decimal("0")
+        line_dates: list[date] = []
+        all_move_line_ids: list[int] = []
+        for line, move in zip(lines, moves):
+            line_date = _as_date(
+                self._required_bank_field(
+                    line, "date", "source bank statement line"
+                ),
+                "bank statement line date",
+            )
+            line_dates.append(line_date)
+            amount = _decimal(
+                self._required_bank_field(
+                    line, "amount", "source bank statement line"
+                ),
+                "bank statement line amount",
+            )
+            total += amount
+            if (
+                _record_id(
+                    self._required_bank_field(
+                        line, "company_id", "source bank statement line"
+                    )
+                )
+                != _record_id(company)
+                or _record_id(
+                    self._required_bank_field(
+                        line, "journal_id", "source bank statement line"
+                    )
+                )
+                != journal.id
+                or _record_id(
+                    self._required_bank_field(
+                        line, "currency_id", "source bank statement line"
+                    )
+                )
+                != currency.id
+                or _record_id(
+                    self._required_bank_field(
+                        line, "statement_id", "source bank statement line"
+                    )
+                )
+                != statement.id
+                or self._required_bank_field(
+                    line, "is_reconciled", "source bank statement line"
+                )
+                is not False
+                or _ids(
+                    self._required_bank_field(
+                        line, "payment_ids", "source bank statement line"
+                    )
+                )
+                or _record_id(
+                    self._required_bank_field(
+                        line,
+                        "foreign_currency_id",
+                        "source bank statement line",
+                    )
+                )
+                is not None
+                or _decimal(
+                    self._required_bank_field(
+                        line,
+                        "amount_currency",
+                        "source bank statement line",
+                    )
+                    or 0,
+                    "bank statement line foreign amount",
+                )
+                != 0
+            ):
+                raise OdooWriteHandlerError(
+                    "source bank statement line is reconciled, matched, paid, "
+                    "foreign-currency, or outside the approved graph"
+                )
+            if (
+                str(
+                    self._required_bank_field(
+                        move, "state", "source bank statement move"
+                    )
+                )
+                != "posted"
+                or str(
+                    self._required_bank_field(
+                        move, "move_type", "source bank statement move"
+                    )
+                )
+                != "entry"
+                or _record_id(
+                    self._required_bank_field(
+                        move, "company_id", "source bank statement move"
+                    )
+                )
+                != company.id
+                or _record_id(
+                    self._required_bank_field(
+                        move, "journal_id", "source bank statement move"
+                    )
+                )
+                != journal.id
+                or _record_id(
+                    self._required_bank_field(
+                        move, "currency_id", "source bank statement move"
+                    )
+                )
+                != currency.id
+                or _as_date(
+                    self._required_bank_field(
+                        move, "date", "source bank statement move"
+                    ),
+                    "bank statement move date",
+                )
+                != line_date
+                or _record_id(
+                    self._required_bank_field(
+                        move,
+                        "statement_line_id",
+                        "source bank statement move",
+                    )
+                )
+                != line.id
+                or self._bank_move_has_external_effects(move)
+            ):
+                raise OdooWriteHandlerError(
+                    "source bank statement move has unsupported state, "
+                    "identity, FX, CABA, payment, asset, deferred, or external "
+                    "effects"
+                )
+            move_lines = [
+                keyed_guards[("account.move.line", item)]
+                for item in _ids(move.line_ids)
+            ]
+            by_account: dict[int, Any] = {}
+            for move_line in move_lines:
+                self._assert_pristine_bank_move_line(
+                    move_line,
+                    company=company,
+                    move=move,
+                    bank_line=line,
+                    statement=statement,
+                    currency=currency,
+                )
+                account_id = _record_id(move_line.account_id)
+                if account_id in by_account:
+                    raise OdooWriteHandlerError(
+                        "bank move account graph contains a duplicate"
+                    )
+                by_account[account_id] = move_line
+                all_move_line_ids.append(move_line.id)
+            if set(by_account) != {
+                liquidity_account_id,
+                suspense_account_id,
+            }:
+                raise OdooWriteHandlerError(
+                    "bank move does not use the exact liquidity and suspense "
+                    "account pair"
+                )
+            for actual, expected, label in (
+                (
+                    by_account[liquidity_account_id].balance,
+                    amount,
+                    "bank liquidity balance",
+                ),
+                (
+                    by_account[liquidity_account_id].debit,
+                    max(amount, Decimal("0")),
+                    "bank liquidity debit",
+                ),
+                (
+                    by_account[liquidity_account_id].credit,
+                    max(-amount, Decimal("0")),
+                    "bank liquidity credit",
+                ),
+                (
+                    by_account[suspense_account_id].balance,
+                    -amount,
+                    "bank suspense balance",
+                ),
+                (
+                    by_account[suspense_account_id].debit,
+                    max(-amount, Decimal("0")),
+                    "bank suspense debit",
+                ),
+                (
+                    by_account[suspense_account_id].credit,
+                    max(amount, Decimal("0")),
+                    "bank suspense credit",
+                ),
+            ):
+                self.assert_amount(actual, expected, currency, label)
+            self.assert_move_balanced(move, company)
+        if self.search_records(
+            "account.partial.reconcile",
+            [("debit_move_id", "in", all_move_line_ids)],
+            company,
+            limit=1,
+        ) or self.search_records(
+            "account.partial.reconcile",
+            [("credit_move_id", "in", all_move_line_ids)],
+            company,
+            limit=1,
+        ):
+            raise OdooWriteHandlerError(
+                "source bank statement contains a hidden reconciliation"
+            )
+        maximum_line_date = max(line_dates)
+        if _as_date(
+            self._required_bank_field(
+                statement, "date", "source bank statement"
+            ),
+            "source bank statement date",
+        ) != maximum_line_date:
+            raise OdooWriteHandlerError(
+                "source bank statement date differs from its maximum line date"
+            )
+        compensation_date = self.assert_open_date(
+            company,
+            p["compensation_date"],
+            "compensation_date",
+            journal=journal,
+        )
+        self.assert_effective_open_date(
+            company,
+            p["compensation_date"],
+            "compensation_date",
+            journal=journal,
+            taxes=False,
+        )
+        if compensation_date < maximum_line_date:
+            raise OdooWriteHandlerError(
+                "compensation_date precedes the source bank statement"
+            )
+        self._assert_bank_statement_checkpoint_boundary(
+            statement, lines, company
+        )
+        opening = _decimal(
+            self._required_bank_field(
+                statement, "balance_start", "source bank statement"
+            ),
+            "source bank statement opening balance",
+        )
+        closing = _decimal(
+            self._required_bank_field(
+                statement, "balance_end_real", "source bank statement"
+            ),
+            "source bank statement closing balance",
+        )
+        self.assert_amount(
+            opening + total,
+            closing,
+            currency,
+            "source bank statement balance equation",
+        )
+        self.assert_amount(
+            self._required_bank_field(
+                statement, "balance_end", "source bank statement"
+            ),
+            closing,
+            currency,
+            "source bank statement computed closing balance",
+        )
+        dependencies = self.unique_records(
+            [
+                ("res.company", company),
+                ("res.currency", currency),
+                ("account.journal", journal),
+                ("account.account", liquidity_account),
+                ("account.account", suspense_account),
+            ]
+        )
+        return statement, lines, moves, records, dependencies
+
+    def precheck_bank_statement_compensate(
+        self, p: dict[str, Any], company: Any
+    ) -> dict[str, Any]:
+        internal = self._bank_statement_compensation_parameters(p)
+        detail = self.precheck_recovery(internal, company)
+        _statement, _lines, _moves, _records, dependencies = (
+            self._bank_statement_compensation_source(p, company)
+        )
+        return {
+            **detail,
+            "checks": [
+                *detail["checks"],
+                "receipt_bound_exact_bank_statement_graph",
+                "source_statement_business_binding_matches",
+                "company_currency_bank_journal_and_accounts_match",
+                "source_statement_lines_are_pristine_and_unreconciled",
+                "source_moves_are_posted_exact_two_line_graphs",
+                "tax_fx_caba_analytic_payment_asset_deferred_graph_empty",
+                "compensation_date_open_and_not_before_source",
+                "no_later_bank_statement_checkpoint",
+            ],
+            "dependencies": self.snapshots(dependencies, company),
+        }
+
+    def execute_bank_statement_compensate(self, p, company, checked):
+        self._bank_statement_compensate_plan(p, company)
+        internal = self._bank_statement_compensation_parameters(p)
+        result = self.execute_recovery(internal, company, checked)
+        if not isinstance(result, tuple) or len(result) != 3:
+            raise OdooWriteHandlerError(
+                "bank statement compensation did not return its exact graph"
+            )
+        records, _recovery_result, tombstone_keys = result
+        if tombstone_keys:
+            raise OdooWriteHandlerError(
+                "bank statement compensation unexpectedly deleted a record"
+            )
+        before = self.trusted_before_values(
+            {"before": checked.get("before")}, company
+        )
+        verification_result = self.verify_recovery(
+            internal, company, list(records), before
+        )
+        if (
+            not isinstance(verification_result, list)
+            or not verification_result
+        ):
+            raise OdooWriteHandlerError(
+                "bank statement compensation exact oracle returned no proof"
+            )
+        self._assert_bank_statement_compensation_result(
+            p, company, list(records)
+        )
+        return result
+
+    def _assert_bank_statement_compensation_result(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+        records: list[tuple[str, Any]],
+    ) -> None:
+        plan = self._bank_statement_compensate_plan(p, company)
+        planned = {
+            (item["model"], item["record_id"])
+            for item in [
+                *plan["action_targets"],
+                *plan["guard_records"],
+            ]
+        }
+        keyed = {
+            (model_name, _record_id(record)): record
+            for model_name, record in records
+        }
+        if len(keyed) != len(records) or not planned.issubset(keyed):
+            raise OdooWriteHandlerError(
+                "bank statement compensation result graph is incomplete"
+            )
+        new_keys = set(keyed) - planned
+        new_statements = [
+            record
+            for (model_name, _record_id_value), record in keyed.items()
+            if model_name == "account.bank.statement"
+            and (model_name, _record_id(record)) in new_keys
+        ]
+        if len(new_statements) != 1:
+            raise OdooWriteHandlerError(
+                "bank statement compensation has no unique new statement"
+            )
+        new_statement = new_statements[0]
+        journal = self.record(
+            "account.journal", p["expected_journal_id"], company
+        )
+        liquidity_account_id = _record_id(
+            getattr(journal, "default_account_id", None)
+        )
+        suspense_account_id = _record_id(
+            getattr(journal, "suspense_account_id", None)
+        )
+        if (
+            liquidity_account_id is None
+            or suspense_account_id is None
+            or liquidity_account_id == suspense_account_id
+        ):
+            raise OdooWriteHandlerError(
+                "compensating bank journal account pair is ambiguous"
+            )
+        currency = self.assert_currency(
+            p["expected_currency_id"], company, journal
+        )
+        if (
+            _record_id(getattr(new_statement, "company_id", None))
+            != company.id
+            or _record_id(getattr(new_statement, "journal_id", None))
+            != p["expected_journal_id"]
+            or _record_id(getattr(new_statement, "currency_id", None))
+            != p["expected_currency_id"]
+            or str(getattr(new_statement, "date", ""))
+            != p["compensation_date"]
+            or str(getattr(new_statement, "reference", "")) != p["reason"]
+            or getattr(new_statement, "is_complete", None) is not True
+            or getattr(new_statement, "is_valid", None) is not True
+        ):
+            raise OdooWriteHandlerError(
+                "new compensating bank statement identity differs"
+            )
+        for line_id in _ids(getattr(new_statement, "line_ids", [])):
+            line = keyed.get(("account.bank.statement.line", line_id))
+            move = keyed.get(
+                (
+                    "account.move",
+                    _record_id(getattr(line, "move_id", None))
+                    if line is not None
+                    else None,
+                )
+            )
+            if (
+                line is None
+                or move is None
+                or _record_id(getattr(line, "statement_id", None))
+                != new_statement.id
+                or _record_id(getattr(line, "company_id", None))
+                != company.id
+                or _record_id(getattr(line, "journal_id", None))
+                != p["expected_journal_id"]
+                or _record_id(getattr(line, "currency_id", None))
+                != p["expected_currency_id"]
+                or _record_id(getattr(line, "foreign_currency_id", None))
+                is not None
+                or _decimal(
+                    getattr(line, "amount_currency", 0) or 0,
+                    "compensating bank line foreign amount",
+                )
+                != 0
+                or bool(getattr(line, "is_reconciled", False))
+                or _ids(getattr(line, "payment_ids", []))
+                or str(getattr(line, "date", ""))
+                != p["compensation_date"]
+                or str(getattr(line, "payment_ref", "")) != p["reason"]
+                or _record_id(getattr(move, "statement_line_id", None))
+                != line.id
+                or _record_id(getattr(move, "company_id", None))
+                != company.id
+                or _record_id(getattr(move, "journal_id", None))
+                != p["expected_journal_id"]
+                or _record_id(getattr(move, "currency_id", None))
+                != p["expected_currency_id"]
+                or _record_id(getattr(move, "partner_id", None))
+                != _record_id(getattr(line, "partner_id", None))
+                or (
+                    hasattr(move, "statement_line_ids")
+                    and _ids(getattr(move, "statement_line_ids", []))
+                    != [line.id]
+                )
+                or str(getattr(move, "date", ""))
+                != p["compensation_date"]
+                or str(getattr(move, "state", "")) != "posted"
+                or self._bank_move_has_external_effects(move)
+            ):
+                raise OdooWriteHandlerError(
+                    "new compensating bank line or move has unsupported "
+                    "identity, reconciliation, FX, or external effects"
+                )
+            move_lines = [
+                keyed.get(("account.move.line", item))
+                for item in _ids(getattr(move, "line_ids", []))
+            ]
+            if len(move_lines) != 2 or any(
+                item is None for item in move_lines
+            ):
+                raise OdooWriteHandlerError(
+                    "new compensating bank move does not have exactly two "
+                    "journal items"
+                )
+            by_account: dict[int, Any] = {}
+            for move_line in move_lines:
+                self._assert_pristine_bank_move_line(
+                    move_line,
+                    company=company,
+                    move=move,
+                    bank_line=line,
+                    statement=new_statement,
+                    currency=currency,
+                )
+                account_id = _record_id(move_line.account_id)
+                if account_id in by_account:
+                    raise OdooWriteHandlerError(
+                        "new compensating bank move repeats an account"
+                    )
+                by_account[account_id] = move_line
+            if set(by_account) != {
+                liquidity_account_id,
+                suspense_account_id,
+            }:
+                raise OdooWriteHandlerError(
+                    "new compensating bank move does not use the exact "
+                    "liquidity and suspense account pair"
+                )
+            amount = _decimal(
+                getattr(line, "amount", None),
+                "compensating bank line amount",
+            )
+            for actual, expected, label in (
+                (
+                    by_account[liquidity_account_id].balance,
+                    amount,
+                    "compensating liquidity balance",
+                ),
+                (
+                    by_account[liquidity_account_id].debit,
+                    max(amount, Decimal("0")),
+                    "compensating liquidity debit",
+                ),
+                (
+                    by_account[liquidity_account_id].credit,
+                    max(-amount, Decimal("0")),
+                    "compensating liquidity credit",
+                ),
+                (
+                    by_account[suspense_account_id].balance,
+                    -amount,
+                    "compensating suspense balance",
+                ),
+                (
+                    by_account[suspense_account_id].debit,
+                    max(-amount, Decimal("0")),
+                    "compensating suspense debit",
+                ),
+                (
+                    by_account[suspense_account_id].credit,
+                    max(amount, Decimal("0")),
+                    "compensating suspense credit",
+                ),
+            ):
+                self.assert_amount(actual, expected, currency, label)
+            self.assert_move_balanced(move, company)
+
+    def verify_bank_statement_compensate(
+        self, p, company, records, before
+    ):
+        self._bank_statement_compensate_plan(p, company)
+        internal = self._bank_statement_compensation_parameters(p)
+        checks = self.verify_recovery(
+            internal, company, records, before
+        )
+        if not isinstance(checks, list) or not checks:
+            raise OdooWriteHandlerError(
+                "bank statement compensation exact oracle returned no proof"
+            )
+        self._assert_bank_statement_compensation_result(
+            p, company, records
+        )
+        return [
+            *checks,
+            "bank_compensation_business_binding_fresh",
+            "bank_compensation_two_line_move_graphs_fresh",
+            "bank_compensation_external_effect_graph_empty_fresh",
+        ]
+
     def _reconciliation_undo_plan(
         self,
         p: Mapping[str, Any],
@@ -9121,6 +10627,7 @@ class OdooWriteHandlers:
             company,
             self._approved_recovery_record_references(plan),
         )
+        strict_dependencies: list[dict[str, Any]] = []
         if plan["method"] in {
             DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
             DRAFT_VENDOR_BILL_RECOVERY_METHOD,
@@ -9160,6 +10667,31 @@ class OdooWriteHandlers:
             _actions, _guards, records = self._recovery_records_by_role(
                 plan, company
             )
+            if plan["method"] == _BANK_STATEMENT_COMPENSATE_METHOD:
+                statement, boundary_lines = (
+                    self._bank_statement_boundary_records(_actions, _guards)
+                )
+                self._assert_bank_statement_checkpoint_boundary(
+                    statement, boundary_lines, company
+                )
+                journal_id = _record_id(
+                    self._required_bank_field(
+                        statement, "journal_id", "source bank statement"
+                    )
+                )
+                if journal_id is None:
+                    raise OdooWriteHandlerError(
+                        "source bank statement journal binding is unavailable"
+                    )
+                strict_dependencies = self.snapshots(
+                    [
+                        (
+                            "account.journal",
+                            self.record("account.journal", journal_id, company),
+                        )
+                    ],
+                    company,
+                )
             current_references = self._current_recovery_record_references(
                 plan, company, known_records=records
             )
@@ -9178,11 +10710,14 @@ class OdooWriteHandlers:
                 "public_orm_recovery_action_registered",
             ]
             dependencies = []
-        return {
+        detail = {
             "checks": checks,
             "before": self.snapshots(records, company),
             "dependencies": dependencies,
         }
+        if strict_dependencies:
+            detail["strict_dependencies"] = strict_dependencies
+        return detail
 
     def execute_recovery(self, p, company, checked):
         plan = self.context.trusted_recovery_plan
@@ -9211,6 +10746,19 @@ class OdooWriteHandlers:
         actions, guards, planned_records = self._recovery_records_by_role(
             plan, company
         )
+        bank_boundary: tuple[Any, list[Any]] | None = None
+        if plan["method"] == _BANK_STATEMENT_COMPENSATE_METHOD:
+            (
+                actions,
+                guards,
+                planned_records,
+                bank_boundary,
+            ) = self._locked_fresh_bank_recovery_graph(
+                plan, company, actions, guards
+            )
+            self._assert_bank_statement_checkpoint_boundary(
+                bank_boundary[0], bank_boundary[1], company
+            )
         current_references = self._current_recovery_record_references(
             plan, company, known_records=planned_records
         )
@@ -9271,6 +10819,35 @@ class OdooWriteHandlers:
         ):
             raise OdooWriteHandlerError(
                 "recovery ORM result graph differs from its exact contract"
+            )
+        if bank_boundary is not None:
+            result_key_set = set(result_keys)
+            new_statement_ids = [
+                record_id
+                for model_name, record_id in result_key_set - planned_keys
+                if model_name == "account.bank.statement"
+            ]
+            new_line_ids = [
+                record_id
+                for model_name, record_id in result_key_set - planned_keys
+                if model_name == "account.bank.statement.line"
+            ]
+            self._assert_bank_statement_checkpoint_boundary(
+                bank_boundary[0],
+                bank_boundary[1],
+                company,
+                allowed_statement_ids=new_statement_ids,
+                allowed_line_ids=new_line_ids,
+            )
+            # Ordering can prove interleaving only before this execution
+            # transaction commits.  A later verification may be a restart
+            # after legitimate backdated bank activity.
+            self._assert_bank_compensation_verification_range(
+                plan,
+                company,
+                bank_boundary[0],
+                bank_boundary[1],
+                result_records,
             )
         return (
             result_records,
@@ -9379,6 +10956,30 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError("trusted recovery plan is unavailable")
         self._assert_draft_recovery_module_graph_binding(plan, company)
         expected_tombstones = self._expected_recovery_tombstones(plan)
+        if plan["method"] == _BANK_STATEMENT_COMPENSATE_METHOD:
+            expected_journal_id = self._bank_recovery_journal_from_before(
+                plan, before, company
+            )
+            actions, guards, _planned_records = (
+                self._recovery_records_by_role(plan, company)
+            )
+            (
+                _fresh_actions,
+                _fresh_guards,
+                _fresh_planned_records,
+                _source_boundary,
+            ) = self._locked_fresh_bank_recovery_graph(
+                plan,
+                company,
+                actions,
+                guards,
+                expected_journal_id=expected_journal_id,
+            )
+            records = self._fresh_bank_recovery_result_records(
+                records, company
+            )
+            # Do not rescan the ordering range here: post-commit verification
+            # relies on the receipt-bound source and compensation graph below.
         try:
             fresh_checks = list(
                 verify_recovery_action(

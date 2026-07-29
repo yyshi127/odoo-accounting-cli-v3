@@ -32,6 +32,8 @@ PRISTINE_DRAFT_METHODS = frozenset(
         "cancel_pristine_v3_draft_vendor_bill_v1",
     }
 )
+BANK_STATEMENT_COMPENSATE_METHOD = "post_compensating_bank_statement_v1"
+BANK_LINE_INDEX = "2026072000000000000000000201"
 
 
 def _reference(
@@ -39,12 +41,13 @@ def _reference(
     record_id: int,
     *,
     company_id: int = COMPANY_ID,
+    record_state: str = "draft",
 ) -> dict:
     return {
         "model": model,
         "record_id": record_id,
         "company_id": company_id,
-        "record_state": "draft",
+        "record_state": record_state,
         "record_fingerprint": f"{record_id % 16:x}" * 64,
     }
 
@@ -88,25 +91,46 @@ def _plan(
 ) -> dict:
     contract = RECOVERY_ACTION_CONTRACTS[method]
     oracle_id = oracle_id or contract.oracle_id
-    action_targets = [
-        _reference(
-            sorted(contract.action_models)[0],
-            101,
-            company_id=reference_company_id,
-        )
-    ]
-    guard_records = [
-        {
-            **_reference(
-                sorted(contract.guard_models)[0],
-                201,
+    if method == BANK_STATEMENT_COMPENSATE_METHOD:
+        action_targets = [
+            _reference(
+                "account.bank.statement",
+                101,
                 company_id=reference_company_id,
-            ),
-            "expected_outcome": sorted(
-                contract.allowed_guard_outcomes
-            )[0],
-        }
-    ]
+                record_state="posted",
+            )
+        ]
+        guard_records = [
+            {
+                **_reference(
+                    "account.bank.statement.line",
+                    201,
+                    company_id=reference_company_id,
+                    record_state="posted",
+                ),
+                "expected_outcome": "survive_exact",
+            }
+        ]
+    else:
+        action_targets = [
+            _reference(
+                sorted(contract.action_models)[0],
+                101,
+                company_id=reference_company_id,
+            )
+        ]
+        guard_records = [
+            {
+                **_reference(
+                    sorted(contract.guard_models)[0],
+                    201,
+                    company_id=reference_company_id,
+                ),
+                "expected_outcome": sorted(
+                    contract.allowed_guard_outcomes
+                )[0],
+            }
+        ]
     return create_recovery_plan_v2(
         origin_operation_id=ORIGIN_OPERATION_ID,
         recovery_capability_id="acct.recovery.execute.v1",
@@ -163,6 +187,15 @@ class _GuardHarness(OdooWriteHandlers):
             (item["model"], item["record_id"]): _Record(item)
             for item in [*plan["action_targets"], *plan["guard_records"]]
         }
+        self.journal = _Record(_reference("account.journal", 901))
+        if plan["method"] == BANK_STATEMENT_COMPENSATE_METHOD:
+            statement = self.records[("account.bank.statement", 101)]
+            line = self.records[("account.bank.statement.line", 201)]
+            statement.line_ids = [line]
+            statement.first_line_index = BANK_LINE_INDEX
+            line.statement_id = statement
+            line.internal_index = BANK_LINE_INDEX
+            line.state = "posted"
 
     def record(
         self,
@@ -173,6 +206,8 @@ class _GuardHarness(OdooWriteHandlers):
         write=False,
         shared=False,
     ):
+        if model_name == "account.journal" and record_id == self.journal.id:
+            return self.journal
         try:
             return self.records[(model_name, record_id)]
         except KeyError as exc:
@@ -192,6 +227,9 @@ class _GuardHarness(OdooWriteHandlers):
 
     def create_model(self, model_name, company, *, context=None):
         return SimpleNamespace(model_name=model_name, context=context)
+
+    def search_records(self, model_name, domain, company, *, limit=None):
+        return []
 
     def _draft_document_recovery_graph(self, plan, company):
         action = plan["action_targets"][0]

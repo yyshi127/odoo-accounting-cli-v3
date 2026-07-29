@@ -355,6 +355,23 @@ def reconciliation_undo_parameters() -> dict:
     }
 
 
+def bank_statement_compensate_parameters() -> dict:
+    return {
+        "company_id": 7,
+        "origin_operation_id": "op-bank-statement-import-1001",
+        "expected_origin_revision": 6,
+        "expected_origin_final_receipt_body_digest": "1" * 64,
+        "expected_recovery_plan_digest": "2" * 64,
+        "expected_statement_id": 701,
+        "expected_journal_id": 7,
+        "expected_currency_id": 12,
+        "expected_source_digest": "3" * 64,
+        "compensation_date": "2026-07-16",
+        "reason": "Compensate the complete verified import batch",
+        "idempotency_key": "compensate-bank-import-op-1001",
+    }
+
+
 VALID_CASES = {
     "acct.invoice.customer_create.v1": invoice_parameters,
     "acct.bill.vendor_create.v1": bill_parameters,
@@ -375,6 +392,7 @@ VALID_CASES = {
     "acct.move.draft_cancel.v2": draft_cancel_v2_parameters,
     "acct.recovery.execute.v1": recovery_parameters,
     "acct.reconciliation.undo.v1": reconciliation_undo_parameters,
+    "acct.bank.statement_compensate.v1": bank_statement_compensate_parameters,
 }
 
 
@@ -569,6 +587,66 @@ def test_reconciliation_undo_semantics_preserve_all_origin_bindings():
         "reconciliation_undo_requires_completed_verified_finalized_apply_origin",
         "reconciliation_undo_requires_retained_release_with_facade",
         "reconciliation_undo_requires_complete_origin_graph",
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("origin_operation_id", "", "origin_operation_id"),
+        ("origin_operation_id", "invalid origin", "origin_operation_id"),
+        ("expected_origin_revision", 0, "expected_origin_revision"),
+        ("expected_origin_revision", True, "expected_origin_revision"),
+        (
+            "expected_origin_final_receipt_body_digest",
+            "A" * 64,
+            "expected_origin_final_receipt_body_digest",
+        ),
+        (
+            "expected_recovery_plan_digest",
+            "2" * 63,
+            "expected_recovery_plan_digest",
+        ),
+        ("expected_statement_id", 0, "expected_statement_id"),
+        ("expected_journal_id", False, "expected_journal_id"),
+        ("expected_currency_id", -1, "expected_currency_id"),
+        ("expected_source_digest", "3" * 65, "expected_source_digest"),
+        ("compensation_date", "2026-02-30", "compensation_date"),
+        ("reason", " ", "reason"),
+    ),
+)
+def test_bank_statement_compensation_semantics_are_exact_and_fail_closed(
+    field, value, error
+):
+    parameters = bank_statement_compensate_parameters()
+    parameters[field] = value
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.bank.statement_compensate.v1", parameters)
+
+
+def test_bank_statement_compensation_preserves_all_origin_and_business_bindings():
+    result = validate_write_semantics(
+        "acct.bank.statement_compensate.v1",
+        bank_statement_compensate_parameters(),
+    )
+
+    assert result["computed"] == {
+        "origin_operation_id": "op-bank-statement-import-1001",
+        "expected_origin_revision": 6,
+        "expected_origin_final_receipt_body_digest": "1" * 64,
+        "expected_recovery_plan_digest": "2" * 64,
+        "expected_statement_id": 701,
+        "expected_journal_id": 7,
+        "expected_currency_id": 12,
+        "expected_source_digest": "3" * 64,
+        "compensation_date": "2026-07-16",
+    }
+    assert set(result["checks"]) >= {
+        "bank_statement_compensation_requires_completed_verified_finalized_import_origin",
+        "bank_statement_compensation_requires_exact_retained_release_recovery_plan",
+        "bank_statement_compensation_preserves_origin_and_compensates_complete_batch",
+        "bank_statement_compensation_rejects_delete_partial_or_reconciled_origin_graph",
     }
 
 
