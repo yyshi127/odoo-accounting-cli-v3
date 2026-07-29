@@ -1,6 +1,6 @@
 import json
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,6 +9,13 @@ from odoo_accounting_cli_v3.domain.ar_open_items import (
     CurrencyInfo as ArCurrencyInfo,
     OpenItemPartial,
     OpenItemSource,
+)
+from odoo_accounting_cli_v3.domain.report_read import (
+    CurrencyInfo as ReportCurrencyInfo,
+    NativeReportFilters,
+    NativeReportPeriod,
+    NativeReportSnapshot,
+    canonical_period_key,
 )
 from odoo_accounting_cli_v3.domain.trial_balance import AccountInfo, Aggregate, CurrencyInfo
 from odoo_accounting_cli_v3.gateway import GatewayError
@@ -278,6 +285,99 @@ class ApBackend(ArBackend):
         return {702: OpenItemPartial()}
 
 
+class RecordingReportBackend:
+    currency_info = ReportCurrencyInfo(12, "CNY", "CNY", Decimal("0.01"))
+
+    def __init__(self):
+        self.calls = []
+
+    def assert_read_access(self, *, company_id):
+        if company_id != 7:
+            raise AssertionError("unexpected company")
+
+    def company_currency(self, *, company_id):
+        if company_id != 7:
+            raise AssertionError("unexpected company")
+        return self.currency_info
+
+    def fetch_native_report(self, **kwargs):
+        self.calls.append(kwargs)
+        comparison_periods = ()
+        if kwargs["comparison_mode"] is not None:
+            if kwargs["comparison_mode"] == "same_last_year":
+                comparison_from = kwargs["date_from"].replace(
+                    year=kwargs["date_from"].year - 1
+                )
+                comparison_to = kwargs["date_to"].replace(
+                    year=kwargs["date_to"].year - 1
+                )
+            else:
+                comparison_to = kwargs["date_from"] - timedelta(days=1)
+                comparison_from = comparison_to - (
+                    kwargs["date_to"] - kwargs["date_from"]
+                )
+            comparison_periods = (
+                NativeReportPeriod(
+                    key=canonical_period_key(
+                        "range", comparison_from, comparison_to
+                    ),
+                    label="Comparison period",
+                    mode="range",
+                    date_from=comparison_from,
+                    date_to=comparison_to,
+                ),
+            )
+        report_ids = {
+            "generic_tax": 1,
+            "balance_sheet": 22,
+            "cash_flow": 23,
+            "profit_and_loss": 25,
+        }
+        report_names = {
+            "generic_tax": "Tax Report",
+            "balance_sheet": "Balance Sheet",
+            "cash_flow": "Cash Flow Statement",
+            "profit_and_loss": "Profit and Loss",
+        }
+        report_kind = kwargs["report_kind"]
+        report_id = report_ids[report_kind]
+        report_name = report_names[report_kind]
+        return NativeReportSnapshot(
+            company_id=kwargs["company_id"],
+            requested_report_id=report_id,
+            requested_report_name=report_name,
+            resolved_report_id=report_id,
+            resolved_report_name=report_name,
+            report_family=kwargs["report_family"],
+            report_kind=report_kind,
+            currency_id=kwargs["currency_id"],
+            period_key=canonical_period_key(
+                "range", kwargs["date_from"], kwargs["date_to"]
+            ),
+            date_mode="range",
+            date_from=kwargs["date_from"],
+            date_to=kwargs["date_to"],
+            comparison_mode=kwargs["comparison_mode"],
+            comparison_periods=kwargs["comparison_periods"],
+            resolved_comparison_periods=comparison_periods,
+            effective_filters=NativeReportFilters(
+                move_state=kwargs["move_state"],
+                journal_scope=kwargs["journal_scope"],
+                journal_ids=(15,),
+                tax_unit_id=kwargs["tax_unit_id"],
+                unreconciled_only=kwargs["unreconciled_only"],
+                hide_zero_lines=kwargs["hide_zero_lines"],
+                line_expansion_request=kwargs["line_expansion_request"],
+                custom_aml_filter_count=0,
+                analytic_groupby=False,
+                consolidation=False,
+                multi_currency_display=False,
+            ),
+            warnings=(),
+            lines=(),
+        )
+
+
 def staged_capabilities():
     document = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
     return validate_registry(document)
@@ -341,7 +441,14 @@ def request_document(
 
 
 class OdooBootstrapTest(unittest.TestCase):
-    def execute(self, request=None, *, user=None, consume_auth_token=None):
+    def execute(
+        self,
+        request=None,
+        *,
+        user=None,
+        consume_auth_token=None,
+        report_backend=None,
+    ):
         factory_contexts = []
         root_env = RootEnvironment()
         bound = BoundEnvironment(user or User(), root_env.cr)
@@ -362,6 +469,11 @@ class OdooBootstrapTest(unittest.TestCase):
                 trial_balance_backend_factory=lambda _env, _uid, _companies: Backend(),
                 ar_open_items_backend_factory=lambda _env, _uid, _companies: ArBackend(),
                 ap_open_items_backend_factory=lambda _env, _uid, _companies: ApBackend(),
+                report_read_backend_factory=(
+                    (lambda _env, _uid, _companies: report_backend)
+                    if report_backend is not None
+                    else None
+                ),
             )
 
         result = execute_read_from_odoo_shell(
@@ -460,11 +572,138 @@ class OdooBootstrapTest(unittest.TestCase):
                 "acct.gl.trial_balance.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
+                "acct.report.financial_read.v1",
+                "acct.tax.report_read.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 5, "total_count": 5})
+        self.assertEqual(result["page"], {"count": 7, "total_count": 7})
         self.assertEqual(result["receipt"]["capability_id"], "acct.registry.list.v1")
-        self.assertEqual(result["receipt"]["record_count"], 5)
+        self.assertEqual(result["receipt"]["record_count"], 7)
+
+    def test_report_handlers_keep_all_parameters_through_bootstrap(self):
+        base_parameters = {
+            "company_id": 7,
+            "date_from": "2026-01-01",
+            "date_to": "2026-06-30",
+            "move_state": "posted",
+            "journal_scope": "all_report_eligible",
+            "tax_unit_id": None,
+            "unreconciled_only": False,
+            "hide_zero_lines": False,
+            "line_expansion_request": "none",
+            "currency_id": 12,
+            "limit": 17,
+            "offset": 3,
+        }
+        cases = (
+            (
+                "tax",
+                "acct.tax.report_read.v1",
+                None,
+                "tax",
+                "generic_tax",
+                None,
+                None,
+            ),
+            (
+                "balance_sheet",
+                "acct.report.financial_read.v1",
+                {
+                    "kind": "balance_sheet",
+                    "comparison": {"mode": "previous_period", "periods": 1},
+                },
+                "financial",
+                "balance_sheet",
+                "previous_period",
+                1,
+            ),
+            (
+                "profit_and_loss",
+                "acct.report.financial_read.v1",
+                {
+                    "kind": "profit_and_loss",
+                    "comparison": {"mode": "previous_year", "periods": 1},
+                },
+                "financial",
+                "profit_and_loss",
+                "same_last_year",
+                1,
+            ),
+            (
+                "cash_flow",
+                "acct.report.financial_read.v1",
+                {"kind": "cash_flow", "comparison": None},
+                "financial",
+                "cash_flow",
+                None,
+                None,
+            ),
+        )
+        for (
+            label,
+            capability_id,
+            report_request,
+            expected_family,
+            expected_kind,
+            expected_comparison_mode,
+            expected_comparison_periods,
+        ) in cases:
+            with self.subTest(report=label):
+                requested = dict(base_parameters)
+                if report_request is not None:
+                    requested["report_request"] = report_request
+                backend = RecordingReportBackend()
+                request = request_document(
+                    capability_id=capability_id,
+                    request_parameters=requested,
+                )
+
+                result, _factory_contexts = self.execute(
+                    request, report_backend=backend
+                )
+
+                self.assertEqual(
+                    backend.calls,
+                    [
+                        {
+                            "company_id": 7,
+                            "report_family": expected_family,
+                            "report_kind": expected_kind,
+                            "date_from": date(2026, 1, 1),
+                            "date_to": date(2026, 6, 30),
+                            "comparison_mode": expected_comparison_mode,
+                            "comparison_periods": expected_comparison_periods,
+                            "currency_id": 12,
+                            "move_state": "posted",
+                            "journal_scope": "all_report_eligible",
+                            "tax_unit_id": None,
+                            "unreconciled_only": False,
+                            "hide_zero_lines": False,
+                            "line_expansion_request": "none",
+                        }
+                    ],
+                )
+                self.assertEqual(result["report"]["family"], expected_family)
+                self.assertEqual(result["report"]["kind"], expected_kind)
+                self.assertEqual(
+                    result["period"]["requested"],
+                    {
+                        "mode": "range",
+                        "date_from": "2026-01-01",
+                        "date_to": "2026-06-30",
+                    },
+                )
+                self.assertEqual(
+                    result["page"],
+                    {
+                        "limit": 17,
+                        "offset": 3,
+                        "count": 0,
+                        "total_count": 0,
+                    },
+                )
+                self.assertEqual(result["receipt"]["capability_id"], capability_id)
+                self.assertEqual(result["receipt"]["record_count"], 0)
 
     def test_ar_open_items_request_keeps_all_filters_and_returns_bound_receipt(self):
         requested = {

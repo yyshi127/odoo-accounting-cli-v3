@@ -278,6 +278,8 @@ class GatewayTest(unittest.TestCase):
                 "acct.move.draft_cancel_eligibility.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
+                "acct.report.financial_read.v1",
+                "acct.tax.report_read.v1",
             ],
         )
         with self.assertRaisesRegex(GatewayError, "not enabled"):

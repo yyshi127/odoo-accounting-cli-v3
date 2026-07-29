@@ -19,8 +19,18 @@ where practical, then record actual execution evidence separately.
   until its purpose, owner, reset method, and allowed companies are confirmed.
 - `acct.registry.list.v1`, `acct.gl.trial_balance.v1`,
   `acct.ar.open_items.v1`, `acct.ap.open_items.v1`, and
-  `acct.multicurrency.balance_read.v1` are staged for the isolated `test`
-  environment; no capability is enabled and no write capability is staged.
+  `acct.multicurrency.balance_read.v1`,
+  `acct.move.draft_cancel_eligibility.v1`,
+  `acct.report.financial_read.v1`, and `acct.tax.report_read.v1` are the eight
+  trusted, statically admissible read-handler targets staged for the isolated
+  `test` environment. Multi-company consolidation and operation diagnostics
+  remain the two declared but unimplemented read gaps.
+- The financial and tax report reads are fixed to posted entries,
+  `all_report_eligible` journals, no requested line expansion, and the bound
+  company currency. They must execute against real Odoo inside the attested
+  PostgreSQL read-only transaction. Both remain `contract_tested` and
+  `test`-staged only; neither is production-enabled.
+- No capability is enabled and no write capability is staged.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -563,12 +573,12 @@ At the current local development checkpoint:
   Odoo write/recovery run, and Pi end-to-end evidence do not exist; no sandbox
   or production write is authorized;
 - dev250 adds a non-authorizing readiness gate for the exact ten registered
-  read capabilities. It locks the six reviewed Odoo dispatch handlers to their
+  read capabilities. It locks the reviewed Odoo dispatch handlers to their
   real executor mapping, requires top-level `page` and `receipt`, the complete
   `read_receipt_v2` JSON Schema, strict input/output contracts, test routing,
-  and the versioned required-read inventory. The current result is six
-  statically admissible reads and four declared-only gaps: tax report,
-  financial report, multi-company consolidation, and operation diagnostics.
+  and the versioned required-read inventory. The dev250 result is six
+  statically admissible reads and four declared-only gaps: tax reporting,
+  financial reporting, multi-company consolidation, and operation diagnostics.
   Registry-embedded evidence receipt claims cannot satisfy final Goal evidence:
   current-release receipt hashes would self-reference both the registry digest
   and release manifest, and their metadata alone does not independently verify
@@ -581,6 +591,18 @@ At the current local development checkpoint:
   the checker itself to execute from the release resolved by `current`, so a
   retained pre-dev250 checker cannot validate a dev250 handoff. These checks
   perform no real Odoo or PostgreSQL write and do not authorize production.
+- dev251 adds contract-tested, test-staged native Odoo tax and financial-report
+  handlers. Their trusted roots are resolved inside the adapter from fixed
+  XML-IDs; Pi cannot supply database report IDs. The result is eight statically
+  admissible reads and two declared-only gaps: multi-company consolidation and
+  operation diagnostics. These two new handlers remain disabled and are not
+  production-ready until exact-release target receipts, a pinned report
+  definition digest, and independent tax/accounting standard-answer evidence
+  pass their external gates.
+  The release-contained Dev251 collector and independent verifier can retain
+  exact-release staged-test receipts plus rollback-boundary and unchanged
+  PostgreSQL witness evidence, but their output explicitly leaves accounting
+  correctness and production promotion false.
 
 The 2026-07-22 Dev29 pre-release worktree validation executed 4,289 tests:
 4,017 passed, 272 platform/external-environment cases skipped, and none failed

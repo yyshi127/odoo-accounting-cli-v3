@@ -13,11 +13,15 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-Five reads are staged execution candidates for the dedicated test environment:
-the ACL-filtered capability registry, trial balance, historical AR and AP open
-items, and multicurrency balance. Staging is separate from enablement: no
-capability is yet marked enabled or routed through Pi. No write capability is
-staged or enabled;
+Eight read handlers are the current trusted, statically admissible target for
+the dedicated test environment: the ACL-filtered capability registry, trial
+balance, historical AR and AP open items, multicurrency balance, pristine-draft
+cancellation eligibility, native financial reports, and the native tax report.
+The two report reads are still only `contract_tested` and staged for `test`;
+they are not enabled in production. Multi-company consolidation and operation
+diagnostics remain the two declared but unimplemented read gaps. Staging is
+separate from enablement: no capability is yet marked enabled or routed through
+Pi. No write capability is staged or enabled;
 sandbox and production remain closed until their approval, idempotency,
 verification, recovery, and evidence gates pass.
 

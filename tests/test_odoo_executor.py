@@ -18,6 +18,15 @@ from odoo_accounting_cli_v3.domain.multicurrency_balance import (
     EffectiveRate,
     TechnicalRateSource,
 )
+from odoo_accounting_cli_v3.domain.report_read import (
+    CurrencyInfo as ReportCurrencyInfo,
+    NativeReportColumn,
+    NativeReportFilters,
+    NativeReportLine,
+    NativeReportPeriod,
+    NativeReportSnapshot,
+    canonical_period_key,
+)
 from odoo_accounting_cli_v3.domain.trial_balance import AccountInfo, Aggregate, CurrencyInfo
 from odoo_accounting_cli_v3.gateway import RequestContext
 from odoo_accounting_cli_v3.odoo.executor import OdooExecutionError, OdooReadExecutor
@@ -348,6 +357,130 @@ class MulticurrencyBackend:
         )
 
 
+class ReportBackend:
+    currency_info = ReportCurrencyInfo(12, "CNY", "CNY", Decimal("0.01"))
+
+    def assert_read_access(self, *, company_id):
+        if company_id != 7:
+            raise AssertionError("unexpected company")
+
+    def company_currency(self, *, company_id):
+        return self.currency_info
+
+    def fetch_native_report(self, **kwargs):
+        family = kwargs["report_family"]
+        report_kind = kwargs["report_kind"]
+        report_id = {
+            ("financial", "balance_sheet"): 22,
+            ("financial", "cash_flow"): 23,
+            ("financial", "profit_and_loss"): 25,
+            ("tax", "generic_tax"): 1,
+        }[(family, report_kind)]
+        expression_label = "net" if family == "tax" else "balance"
+        report_name = "Tax Report" if family == "tax" else "Balance Sheet"
+        main_period_key = canonical_period_key(
+            "range", kwargs["date_from"], kwargs["date_to"]
+        )
+        columns = [
+            NativeReportColumn(
+                label="Net" if family == "tax" else "Balance",
+                expression_label=expression_label,
+                value=Decimal("100.00"),
+                figure_type="monetary",
+                period_key=main_period_key,
+                period_label="Current period",
+                period_mode="range",
+                period_date_from=kwargs["date_from"],
+                period_date_to=kwargs["date_to"],
+                currency_id=12,
+                is_blank=False,
+                auditable=True,
+            )
+        ]
+        resolved_comparison_periods = ()
+        if kwargs["comparison_mode"] is not None:
+            comparison_to = kwargs["date_from"] - timedelta(days=1)
+            comparison_from = comparison_to - (
+                kwargs["date_to"] - kwargs["date_from"]
+            )
+            comparison_key = canonical_period_key(
+                "range", comparison_from, comparison_to
+            )
+            resolved_comparison_periods = (
+                NativeReportPeriod(
+                    key=comparison_key,
+                    label="Previous period",
+                    mode="range",
+                    date_from=comparison_from,
+                    date_to=comparison_to,
+                ),
+            )
+            columns.append(
+                NativeReportColumn(
+                    label="Balance",
+                    expression_label=expression_label,
+                    value=Decimal("90.00"),
+                    figure_type="monetary",
+                    period_key=comparison_key,
+                    period_label="Previous period",
+                    period_mode="range",
+                    period_date_from=comparison_from,
+                    period_date_to=comparison_to,
+                    currency_id=12,
+                    is_blank=False,
+                    auditable=True,
+                )
+            )
+        line = NativeReportLine(
+            raw_id=f"~account.report~{report_id}|line",
+            code=None,
+            name="Net Sales" if family == "tax" else "Assets",
+            level=0,
+            columns=tuple(columns),
+            unfoldable=False,
+            unfolded=False,
+            source_move_line_count=None,
+            source_move_line_count_proven=False,
+        )
+        warnings = (
+            ("odoo:tax_source_move_line_count_unavailable",)
+            if family == "tax"
+            else ()
+        )
+        return NativeReportSnapshot(
+            company_id=kwargs["company_id"],
+            requested_report_id=report_id,
+            requested_report_name=report_name,
+            resolved_report_id=report_id,
+            resolved_report_name=report_name,
+            report_family=family,
+            report_kind=report_kind,
+            currency_id=kwargs["currency_id"],
+            period_key=main_period_key,
+            date_mode="range",
+            date_from=kwargs["date_from"],
+            date_to=kwargs["date_to"],
+            comparison_mode=kwargs["comparison_mode"],
+            comparison_periods=kwargs["comparison_periods"],
+            resolved_comparison_periods=resolved_comparison_periods,
+            effective_filters=NativeReportFilters(
+                move_state=kwargs["move_state"],
+                journal_scope=kwargs["journal_scope"],
+                journal_ids=(15,),
+                tax_unit_id=kwargs["tax_unit_id"],
+                unreconciled_only=kwargs["unreconciled_only"],
+                hide_zero_lines=kwargs["hide_zero_lines"],
+                line_expansion_request=kwargs["line_expansion_request"],
+                custom_aml_filter_count=0,
+                analytic_groupby=False,
+                consolidation=False,
+                multi_currency_display=False,
+            ),
+            warnings=warnings,
+            lines=(line,),
+        )
+
+
 def context(**changes):
     values = {
         "audience": "odoo-accounting-cli-v3",
@@ -420,6 +553,9 @@ class OdooReadExecutorTest(unittest.TestCase):
             multicurrency_balance_backend_factory=(
                 lambda _env, _user, _companies: MulticurrencyBackend()
             ),
+            report_read_backend_factory=(
+                lambda _env, _user, _companies: ReportBackend()
+            ),
         )
 
     def test_executes_handler_and_verifies_receipt(self) -> None:
@@ -466,6 +602,8 @@ class OdooReadExecutorTest(unittest.TestCase):
                 "acct.ap.open_items.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.move.draft_cancel_eligibility.v1",
+                "acct.report.financial_read.v1",
+                "acct.tax.report_read.v1",
             }
         )
         executor = self.executor()
@@ -539,6 +677,51 @@ class OdooReadExecutorTest(unittest.TestCase):
                 multicurrency_parameters,
                 MulticurrencyBackend(),
             ),
+            (
+                "_report_read_backend_factory",
+                "acct.report.financial_read.v1",
+                {
+                    "company_id": 7,
+                    "report_request": {
+                        "kind": "balance_sheet",
+                        "comparison": {
+                            "mode": "previous_period",
+                            "periods": 1,
+                        },
+                    },
+                    "date_from": "2026-01-01",
+                    "date_to": "2026-06-30",
+                    "move_state": "posted",
+                    "journal_scope": "all_report_eligible",
+                    "tax_unit_id": None,
+                    "unreconciled_only": False,
+                    "hide_zero_lines": False,
+                    "line_expansion_request": "none",
+                    "currency_id": 12,
+                    "limit": 100,
+                    "offset": 0,
+                },
+                ReportBackend(),
+            ),
+            (
+                "_report_read_backend_factory",
+                "acct.tax.report_read.v1",
+                {
+                    "company_id": 7,
+                    "date_from": "2026-01-01",
+                    "date_to": "2026-06-30",
+                    "move_state": "posted",
+                    "journal_scope": "all_report_eligible",
+                    "tax_unit_id": None,
+                    "unreconciled_only": False,
+                    "hide_zero_lines": False,
+                    "line_expansion_request": "none",
+                    "currency_id": 12,
+                    "limit": 100,
+                    "offset": 0,
+                },
+                ReportBackend(),
+            ),
         )
         for factory_attribute, capability_id, requested, backend in cases:
             with self.subTest(capability_id=capability_id):
@@ -577,10 +760,12 @@ class OdooReadExecutorTest(unittest.TestCase):
                 "acct.gl.trial_balance.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
+                "acct.report.financial_read.v1",
+                "acct.tax.report_read.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 5, "total_count": 5})
-        self.assertEqual(result["receipt"]["record_count"], 5)
+        self.assertEqual(result["page"], {"count": 7, "total_count": 7})
+        self.assertEqual(result["receipt"]["record_count"], 7)
         self.assertEqual(env.company.access_checks, [("rights", "read"), ("rule", "read")])
         for descriptor in result["capabilities"]:
             source = capability(descriptor["id"]).data
@@ -818,6 +1003,80 @@ class OdooReadExecutorTest(unittest.TestCase):
         )
         executor.verify(
             context(), multicurrency_capability, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_financial_report_executes_native_handler_and_verifies_receipt(self) -> None:
+        executor = self.executor()
+        requested = {
+            "company_id": 7,
+            "report_request": {
+                "kind": "balance_sheet",
+                "comparison": {
+                    "mode": "previous_period",
+                    "periods": 1,
+                },
+            },
+            "date_from": "2026-01-01",
+            "date_to": "2026-06-30",
+            "move_state": "posted",
+            "journal_scope": "all_report_eligible",
+            "tax_unit_id": None,
+            "unreconciled_only": False,
+            "hide_zero_lines": False,
+            "line_expansion_request": "none",
+            "currency_id": 12,
+            "limit": 100,
+            "offset": 0,
+        }
+        report_capability = capability("acct.report.financial_read.v1")
+
+        result = executor(
+            context(), report_capability, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertEqual(result["report"]["family"], "financial")
+        self.assertEqual(
+            result["lines"][0]["columns"][0]["cell"]["value"],
+            "100",
+        )
+        self.assertEqual(result["receipt"]["record_count"], 1)
+        executor.verify(
+            context(), report_capability, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_tax_report_keeps_unproven_source_count_unavailable(self) -> None:
+        executor = self.executor()
+        requested = {
+            "company_id": 7,
+            "date_from": "2026-01-01",
+            "date_to": "2026-06-30",
+            "move_state": "posted",
+            "journal_scope": "all_report_eligible",
+            "tax_unit_id": None,
+            "unreconciled_only": False,
+            "hide_zero_lines": False,
+            "line_expansion_request": "none",
+            "currency_id": 12,
+            "limit": 100,
+            "offset": 0,
+        }
+        report_capability = capability("acct.tax.report_read.v1")
+
+        result = executor(
+            context(), report_capability, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertEqual(result["report"]["family"], "tax")
+        self.assertEqual(
+            result["lines"][0]["source_move_line_count"],
+            {"available": False, "count": None},
+        )
+        self.assertEqual(
+            result["warnings"],
+            ["odoo:tax_source_move_line_count_unavailable"],
+        )
+        executor.verify(
+            context(), report_capability, requested, result, "c" * 64, "d" * 64
         )
 
 

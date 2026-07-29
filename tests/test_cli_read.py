@@ -284,6 +284,142 @@ def multicurrency_result_body() -> dict:
     return body
 
 
+def report_request_document(
+    capability_id: str,
+    *,
+    kind: str | None = None,
+    comparison: dict | None = None,
+) -> dict:
+    request = request_document()
+    parameters = {
+        "company_id": 7,
+        "date_from": "2026-04-01",
+        "date_to": "2026-06-30",
+        "move_state": "posted",
+        "journal_scope": "all_report_eligible",
+        "tax_unit_id": None,
+        "unreconciled_only": False,
+        "hide_zero_lines": False,
+        "line_expansion_request": "none",
+        "currency_id": 12,
+        "limit": 100,
+        "offset": 0,
+    }
+    if capability_id == "acct.report.financial_read.v1":
+        parameters["report_request"] = {
+            "kind": kind,
+            "comparison": comparison,
+        }
+    request["capability_id"] = capability_id
+    request["parameters"] = parameters
+    request["context"]["auth_token_id"] = (
+        f"token-cli-report-{kind or 'generic-tax'}"
+    )
+    request["context"]["auth_request_digest"] = authentication_request_digest(
+        capability_id, parameters
+    )
+    return request
+
+
+def report_result_body(
+    capability_id: str,
+    *,
+    kind: str,
+    comparison: dict | None,
+) -> dict:
+    identifiers = {
+        "generic_tax": (1, "Tax Report"),
+        "balance_sheet": (22, "Balance Sheet"),
+        "cash_flow": (23, "Cash Flow Statement"),
+        "profit_and_loss": (25, "Profit and Loss"),
+    }
+    report_id, report_name = identifiers[kind]
+    comparison_result = None
+    if comparison is not None:
+        requested_mode = comparison["mode"]
+        resolved_mode = (
+            "same_last_year"
+            if requested_mode == "previous_year"
+            else "previous_period"
+        )
+        comparison_date_from, comparison_date_to = (
+            ("2025-04-01", "2025-06-30")
+            if requested_mode == "previous_year"
+            else ("2026-01-01", "2026-03-31")
+        )
+        comparison_result = {
+            "requested_mode": requested_mode,
+            "resolved_mode": resolved_mode,
+            "periods": 1,
+            "resolved_periods": [
+                {
+                    "key": "period-" + "b" * 64,
+                    "label": "Comparison period",
+                    "mode": "range",
+                    "date_from": comparison_date_from,
+                    "date_to": comparison_date_to,
+                }
+            ],
+        }
+    family = (
+        "tax" if capability_id == "acct.tax.report_read.v1" else "financial"
+    )
+    warnings = (
+        ["odoo:tax_source_move_line_count_unavailable"]
+        if family == "tax"
+        else []
+    )
+    return {
+        "report": {
+            "family": family,
+            "kind": kind,
+            "requested": {"id": report_id, "name": report_name},
+            "resolved": {"id": report_id, "name": report_name},
+        },
+        "period": {
+            "requested": {
+                "mode": "range",
+                "date_from": "2026-04-01",
+                "date_to": "2026-06-30",
+            },
+            "resolved": {
+                "key": "period-" + "a" * 64,
+                "mode": "range",
+                "date_from": "2026-04-01",
+                "date_to": "2026-06-30",
+            },
+            "comparison": comparison_result,
+        },
+        "effective_filters": {
+            "move_state": "posted",
+            "journal_scope": "all_report_eligible",
+            "journal_ids": [15],
+            "tax_unit_id": None,
+            "unreconciled_only": False,
+            "hide_zero_lines": False,
+            "line_expansion_request": "none",
+            "custom_aml_filter_count": 0,
+            "analytic_groupby": False,
+            "consolidation": False,
+            "multi_currency_display": False,
+        },
+        "currency": {
+            "id": 12,
+            "name": "CNY",
+            "symbol": "CNY",
+            "rounding": "0.01",
+        },
+        "warnings": warnings,
+        "lines": [],
+        "page": {
+            "limit": 100,
+            "offset": 0,
+            "count": 0,
+            "total_count": 0,
+        },
+    }
+
+
 def identity() -> dict:
     return {
         "commit": "a" * 40,
@@ -508,6 +644,89 @@ class CliReadTest(unittest.TestCase):
         self.assertEqual(
             transmitted["capability_id"], "acct.multicurrency.balance_read.v1"
         )
+
+    @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
+    @patch("odoo_accounting_cli_v3.cli._load_release_identity")
+    @patch("odoo_accounting_cli_v3.cli.load_runtime_config")
+    @patch(
+        "odoo_accounting_cli_v3.cli.load_runtime_secrets",
+        return_value=(AUTH_SECRET, RECEIPT_SECRET),
+    )
+    def test_report_reads_transmit_stable_kind_and_complete_accounting_context(
+        self, _load_secrets, load_config, load_identity, run_shell
+    ) -> None:
+        load_config.return_value = self.config
+        load_identity.return_value = identity()
+        cases = (
+            (
+                "acct.tax.report_read.v1",
+                "generic_tax",
+                None,
+            ),
+            (
+                "acct.report.financial_read.v1",
+                "balance_sheet",
+                {"mode": "previous_period", "periods": 1},
+            ),
+            (
+                "acct.report.financial_read.v1",
+                "profit_and_loss",
+                {"mode": "previous_year", "periods": 1},
+            ),
+            (
+                "acct.report.financial_read.v1",
+                "cash_flow",
+                None,
+            ),
+        )
+        for capability_id, kind, comparison in cases:
+            with self.subTest(capability_id=capability_id, kind=kind):
+                request = report_request_document(
+                    capability_id,
+                    kind=kind,
+                    comparison=comparison,
+                )
+                body = report_result_body(
+                    capability_id,
+                    kind=kind,
+                    comparison=comparison,
+                )
+                verified = self.verified_result(request, body)
+                run_shell.reset_mock()
+                run_shell.return_value = verified
+
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "read",
+                        "--runtime-config",
+                        str(self.runtime_path),
+                        "--request-json",
+                        json.dumps(request),
+                    ],
+                )
+
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(
+                    json.loads(result.stdout)["data"]["result"],
+                    verified,
+                )
+                transmitted = run_shell.call_args.args[1]
+                self.assertEqual(
+                    transmitted["parameters"],
+                    request["parameters"],
+                )
+                self.assertEqual(
+                    transmitted["capability_id"],
+                    capability_id,
+                )
+                self.assertNotIn(
+                    "report_id",
+                    json.dumps(
+                        transmitted["parameters"],
+                        sort_keys=True,
+                    ),
+                )
 
     @patch("odoo_accounting_cli_v3.cli.run_odoo_shell")
     @patch("odoo_accounting_cli_v3.cli._load_release_identity", return_value=identity())

@@ -3955,6 +3955,17 @@ def _read_capability_readiness_report(
         if isinstance(receipt_schema, dict)
         else []
     )
+    receipt_capability_schema = receipt_properties.get("capability_id")
+    receipt_properties_without_capability = {
+        key: value
+        for key, value in receipt_properties.items()
+        if key != "capability_id"
+    }
+    expected_receipt_properties_without_capability = {
+        key: value
+        for key, value in _READ_RECEIPT_PROPERTY_SCHEMAS.items()
+        if key != "capability_id"
+    }
     evidence = data["evidence"]
     evidence_level = evidence.get("level")
     evidence_receipts = evidence.get("receipts", [])
@@ -4001,7 +4012,13 @@ def _read_capability_readiness_report(
             and receipt_schema.get("additionalProperties") is False
             and isinstance(output_required, list)
             and "receipt" in output_required
-            and receipt_properties == _READ_RECEIPT_PROPERTY_SCHEMAS
+            and receipt_properties_without_capability
+            == expected_receipt_properties_without_capability
+            and receipt_capability_schema
+            in (
+                _READ_RECEIPT_PROPERTY_SCHEMAS["capability_id"],
+                {"type": "string", "enum": [capability.id]},
+            )
             and set(receipt_required) == _READ_RECEIPT_FIELDS
         ),
         "strict_input_schema": _is_strict_object_schema(data["input_schema"]),

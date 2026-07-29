@@ -54,6 +54,7 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
         "deployment/dev29/runtime_setup.py",
         "deployment/dev29/systemd/odoo-accounting-cli-v3-dev29-tmpfiles.conf",
         "deployment/dev29/verify_read_evidence.py",
+        "deployment/dev251/README.md",
         "deployment/dev9/README.md",
         "deployment/dev9/render-systemd-service.py",
         "deployment/dev9/run-private-mount-gate.sh",
@@ -248,6 +249,16 @@ DEV29_READ_EVIDENCE_RELEASE_MEMBERS = frozenset(
         "tests/TEST.md",
     }
 )
+DEV251_REPORT_READ_EVIDENCE_RELEASE_MEMBERS = frozenset(
+    {
+        "deployment/dev251/README.md",
+        "deployment/dev251/collect_report_read_evidence.py",
+        "deployment/dev251/report_read_plan.json",
+        "deployment/dev251/verify_report_read_evidence.py",
+        "docs/DEPLOYMENT.md",
+        "tests/test_dev251_report_read_evidence.py",
+    }
+)
 EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3-effect-finalizer",
@@ -289,6 +300,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/domain/ap_open_items.py",
         "src/odoo_accounting_cli_v3/domain/ar_open_items.py",
         "src/odoo_accounting_cli_v3/domain/multicurrency_balance.py",
+        "src/odoo_accounting_cli_v3/domain/report_read.py",
         "src/odoo_accounting_cli_v3/domain/trial_balance.py",
         "src/odoo_accounting_cli_v3/domain/write_semantics.py",
         "src/odoo_accounting_cli_v3/gateway.py",
@@ -302,6 +314,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/odoo/multicurrency_balance.py",
         "src/odoo_accounting_cli_v3/odoo/read_boundary_evidence.py",
         "src/odoo_accounting_cli_v3/odoo/read_transaction.py",
+        "src/odoo_accounting_cli_v3/odoo/report_read.py",
         "src/odoo_accounting_cli_v3/odoo/runner.py",
         "src/odoo_accounting_cli_v3/odoo/trial_balance.py",
         "src/odoo_accounting_cli_v3/odoo/write_bootstrap.py",
@@ -333,11 +346,13 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "tests/test_odoo_read_boundary_evidence_runner.py",
         "tests/test_read_boundary_evidence.py",
         "tests/test_read_handler_static_safety.py",
+        "tests/test_report_read.py",
         "tests/test_odoo_control_addon.py",
         "tests/test_odoo_multicurrency_balance_backend.py",
         "tests/test_odoo_module_graph.py",
         "tests/test_odoo_module_guard.py",
         "tests/test_odoo_module_guard_addon.py",
+        "tests/test_odoo_report_read.py",
         "tests/test_dev22_module_guard_postgres.py",
         "tests/test_dev22_module_guard_security_contract.py",
         "tests/test_odoo_release_binding.py",
@@ -394,6 +409,7 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
     | DEV18_SANDBOX_CAPACITY_RELEASE_MEMBERS
     | DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS
     | DEV29_READ_EVIDENCE_RELEASE_MEMBERS
+    | DEV251_REPORT_READ_EVIDENCE_RELEASE_MEMBERS
     | EFFECT_FINALIZER_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
@@ -649,6 +665,25 @@ class ReleaseArchiveTest(unittest.TestCase):
         self.assertEqual(discovered, expected)
         self.assertTrue(
             DEV29_READ_EVIDENCE_RELEASE_MEMBERS.issubset(
+                REQUIRED_WRITE_RELEASE_MEMBERS
+            )
+        )
+
+    def test_dev251_report_read_evidence_is_an_exact_release_member_set(self) -> None:
+        directory = PROJECT_ROOT / "deployment" / "dev251"
+        discovered = {
+            path.relative_to(PROJECT_ROOT).as_posix()
+            for path in directory.rglob("*")
+            if path.is_file() and not path.name.endswith((".pyc", ".pyo"))
+        }
+        expected = {
+            name
+            for name in DEV251_REPORT_READ_EVIDENCE_RELEASE_MEMBERS
+            if name.startswith("deployment/dev251/")
+        }
+        self.assertEqual(discovered, expected)
+        self.assertTrue(
+            DEV251_REPORT_READ_EVIDENCE_RELEASE_MEMBERS.issubset(
                 REQUIRED_WRITE_RELEASE_MEMBERS
             )
         )

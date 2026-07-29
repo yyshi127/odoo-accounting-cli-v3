@@ -207,10 +207,10 @@ def _ready_pi_scenario_report(
 ) -> Path:
     gates = {
         gate_id: {
-            "denominator": 25,
+            "denominator": 28,
             "failures": {},
             "minimum_percent": "95.00" if gate_id == "F01" else "100.00",
-            "numerator": 25,
+            "numerator": 28,
             "passed": True,
             "percent": "100.00",
         }
@@ -230,8 +230,8 @@ def _ready_pi_scenario_report(
         "run_id": "pi-run-1",
         "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v1",
         "trace_coverage": {
-            "captured": 25,
-            "expected": 25,
+            "captured": 28,
+            "expected": 28,
             "missing_scenario_ids": [],
             "passed": True,
         },
@@ -3517,7 +3517,7 @@ def test_evidence_write_runtime_config_plan_reports_base_runtime_scope_blocker(
     ]
 
 
-def test_evidence_read_capabilities_readiness_exposes_declared_handler_gaps():
+def test_evidence_read_capabilities_readiness_exposes_remaining_handler_gaps():
     expected_identity = {
         "commit": "1" * 40,
         "manifest_sha256": "d" * 64,
@@ -3546,13 +3546,11 @@ def test_evidence_read_capabilities_readiness_exposes_declared_handler_gaps():
     assert payload["command"] == "evidence.read-capabilities-readiness"
     assert payload["business_succeeded"] is False
     assert data["read_static_readiness_ready"] is False
-    assert data["admissible_count"] == 6
+    assert data["admissible_count"] == 8
     assert data["total_read_capabilities"] == 10
     assert data["unready_capability_ids"] == [
         "acct.diagnostics.operation_read.v1",
         "acct.multicompany.consolidated_read.v1",
-        "acct.report.financial_read.v1",
-        "acct.tax.report_read.v1",
     ]
     assert data["blockers"] == [
         "not every registered read capability is statically admissible for trusted execution",
@@ -3569,11 +3567,11 @@ def test_evidence_read_capabilities_readiness_exposes_declared_handler_gaps():
         for item in data["capabilities"]
         if item["capability"]["id"] == "acct.tax.report_read.v1"
     )
-    assert tax_report["trusted_handler_kind"] is None
-    assert tax_report["checks"]["contract_evidence_present"] is False
-    assert tax_report["checks"]["trusted_handler_supported"] is False
-    assert tax_report["checks"]["read_receipt_v2_contract"] is False
-    assert tax_report["checks"]["test_execution_routed"] is False
+    assert tax_report["trusted_handler_kind"] == "odoo"
+    assert tax_report["checks"]["contract_evidence_present"] is True
+    assert tax_report["checks"]["trusted_handler_supported"] is True
+    assert tax_report["checks"]["read_receipt_v2_contract"] is True
+    assert tax_report["checks"]["test_execution_routed"] is True
     assert tax_report["goal_evidence_ready"] is False
     assert tax_report["missing_goal_evidence_kinds"] == READ_GOAL_EVIDENCE_KINDS
 
@@ -4060,7 +4058,7 @@ def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
         data["read_capabilities_readiness"]["read_static_readiness_ready"]
         is False
     )
-    assert data["read_capabilities_readiness"]["admissible_count"] == 6
+    assert data["read_capabilities_readiness"]["admissible_count"] == 8
     assert (
         data["read_capabilities_readiness"]["read_goal_readiness_ready"]
         is False
@@ -4848,7 +4846,7 @@ def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
     assert payload["command"] == "evidence.pi-trace-capture-check"
     assert payload["business_succeeded"] is False
     assert payload["data"]["trace_capture_ready"] is True
-    assert payload["data"]["trace_count"] == 25
+    assert payload["data"]["trace_count"] == 28
     assert payload["data"]["real_odoo_write_performed"] is False
 
 

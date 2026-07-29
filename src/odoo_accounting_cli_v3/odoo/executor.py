@@ -15,6 +15,11 @@ from ..domain.multicurrency_balance import (
     MulticurrencyBalanceBackend,
     read_multicurrency_balance,
 )
+from ..domain.report_read import (
+    ReportReadBackend,
+    read_financial_report,
+    read_tax_report,
+)
 from ..domain.trial_balance import TrialBalanceBackend, read_trial_balance
 from ..gateway import RequestContext
 from ..receipts import (
@@ -26,10 +31,19 @@ from ..registry import Capability
 from .ap_open_items import OdooApOpenItemsBackend
 from .ar_open_items import OdooArOpenItemsBackend
 from .multicurrency_balance import OdooMulticurrencyBalanceBackend
+from .report_read import OdooReportReadBackend
 from .trial_balance import OdooTrialBalanceBackend
 
 
 SHA256_HEX = frozenset("0123456789abcdef")
+_FINANCIAL_REPORT_ROOT_XMLIDS = frozenset(
+    {
+        "account_reports.balance_sheet",
+        "account_reports.cash_flow_report",
+        "account_reports.profit_and_loss",
+    }
+)
+_TAX_REPORT_ROOT_XMLIDS = frozenset({"account.generic_tax_report"})
 _CAPABILITIES = frozenset(
     {
         "acct.registry.list.v1",
@@ -38,6 +52,8 @@ _CAPABILITIES = frozenset(
         "acct.ap.open_items.v1",
         "acct.multicurrency.balance_read.v1",
         "acct.move.draft_cancel_eligibility.v1",
+        "acct.report.financial_read.v1",
+        "acct.tax.report_read.v1",
     }
 )
 
@@ -201,6 +217,10 @@ class OdooReadExecutor:
             [Any, int, frozenset[int]], MulticurrencyBalanceBackend
         ]
         | None = None,
+        report_read_backend_factory: Callable[
+            [Any, int, frozenset[int]], ReportReadBackend
+        ]
+        | None = None,
     ) -> None:
         capability_list = tuple(capabilities)
         capability_map = {item.id: item for item in capability_list}
@@ -254,6 +274,17 @@ class OdooReadExecutor:
                     user_id=user_id,
                     allowed_company_ids=allowed,
                 )
+            )
+        )
+        self._report_read_backend_factory = report_read_backend_factory or (
+            lambda bound_env, user_id, allowed: OdooReportReadBackend(
+                bound_env,
+                user_id=user_id,
+                allowed_company_ids=allowed,
+                allowed_root_xmlids_by_family={
+                    "financial": _FINANCIAL_REPORT_ROOT_XMLIDS,
+                    "tax": _TAX_REPORT_ROOT_XMLIDS,
+                },
             )
         )
 
@@ -368,6 +399,22 @@ class OdooReadExecutor:
             self._env, context.user_id, context.allowed_company_ids
         )
         return read_multicurrency_balance(backend, parameters)
+
+    def _read_financial_report(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._report_read_backend_factory(
+            self._env, context.user_id, context.allowed_company_ids
+        )
+        return read_financial_report(backend, parameters)
+
+    def _read_tax_report(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._report_read_backend_factory(
+            self._env, context.user_id, context.allowed_company_ids
+        )
+        return read_tax_report(backend, parameters)
 
     def _read_draft_cancel_eligibility(
         self, context: RequestContext, parameters: dict[str, Any]
@@ -569,6 +616,8 @@ class OdooReadExecutor:
             "acct.ap.open_items.v1": self._read_ap_open_items,
             "acct.multicurrency.balance_read.v1": self._read_multicurrency_balance,
             "acct.move.draft_cancel_eligibility.v1": self._read_draft_cancel_eligibility,
+            "acct.report.financial_read.v1": self._read_financial_report,
+            "acct.tax.report_read.v1": self._read_tax_report,
         }
 
     def __call__(

@@ -195,7 +195,7 @@ class PiScenarioGateTest(unittest.TestCase):
             for scenario in self.corpus["scenarios"]
         }
         self.assertEqual(covered, registered)
-        self.assertEqual(len(self.corpus["scenarios"]), 25)
+        self.assertEqual(len(self.corpus["scenarios"]), 28)
         self.assertEqual(
             {scenario["category"] for scenario in self.corpus["scenarios"]},
             {
@@ -250,6 +250,49 @@ class PiScenarioGateTest(unittest.TestCase):
                     "idempotency_key",
                 },
             )
+
+        tax_report_scenario = next(
+            scenario
+            for scenario in self.corpus["scenarios"]
+            if scenario["id"] == "pi-v1-tax-report"
+        )
+        self.assertNotIn(
+            "report_id",
+            tax_report_scenario["expected"]["material_parameters"],
+        )
+        financial_report_scenarios = [
+            scenario
+            for scenario in self.corpus["scenarios"]
+            if scenario["expected"]["capability_id"]
+            == "acct.report.financial_read.v1"
+        ]
+        self.assertEqual(
+            [scenario["id"] for scenario in financial_report_scenarios],
+            [
+                "pi-v1-financial-report-balance-sheet",
+                "pi-v1-financial-report-profit-and-loss",
+                "pi-v1-financial-report-cash-flow",
+                "pi-v1-financial-report-ambiguous-kind",
+            ],
+        )
+        self.assertEqual(
+            [
+                scenario["expected"]["material_parameters"]["report_request"][
+                    "kind"
+                ]
+                for scenario in financial_report_scenarios[:3]
+            ],
+            ["balance_sheet", "profit_and_loss", "cash_flow"],
+        )
+        for scenario in financial_report_scenarios:
+            self.assertNotIn(
+                "report_id",
+                scenario["expected"]["material_parameters"]["report_request"],
+            )
+        self.assertEqual(
+            financial_report_scenarios[-1]["expected"]["clarification"],
+            {"outcome": "clarified", "fields": ["report_request"]},
+        )
 
         trace_document = self._perfect_trace_document()
         traces = {
@@ -370,15 +413,15 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertEqual(
             report["trace_coverage"],
             {
-                "captured": 25,
-                "expected": 25,
+                "captured": 28,
+                "expected": 28,
                 "passed": True,
                 "missing_scenario_ids": [],
             },
         )
         for gate_id in ("F01", "F02", "F03", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 25)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 25)
+            self.assertEqual(report["gates"][gate_id]["numerator"], 28)
+            self.assertEqual(report["gates"][gate_id]["denominator"], 28)
             self.assertEqual(report["gates"][gate_id]["percent"], "100.00")
             self.assertTrue(report["gates"][gate_id]["passed"])
 
@@ -395,9 +438,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 23)
-        self.assertEqual(report["gates"]["F01"]["denominator"], 25)
-        self.assertEqual(report["gates"]["F01"]["percent"], "92.00")
+        self.assertEqual(report["gates"]["F01"]["numerator"], 26)
+        self.assertEqual(report["gates"]["F01"]["denominator"], 28)
+        self.assertEqual(report["gates"]["F01"]["percent"], "92.86")
         self.assertEqual(report["gates"]["F01"]["minimum_percent"], "95.00")
         self.assertFalse(report["gates"]["F01"]["passed"])
         self.assertFalse(report["acceptance_passed"])
@@ -415,8 +458,8 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 24)
-        self.assertEqual(report["gates"]["F01"]["percent"], "96.00")
+        self.assertEqual(report["gates"]["F01"]["numerator"], 27)
+        self.assertEqual(report["gates"]["F01"]["percent"], "96.43")
         self.assertTrue(report["gates"]["F01"]["passed"])
 
     def test_clarification_and_parameter_loss_are_scored_independently(self) -> None:
@@ -437,9 +480,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 25)
-        self.assertEqual(report["gates"]["F02"]["numerator"], 24)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 24)
+        self.assertEqual(report["gates"]["F01"]["numerator"], 28)
+        self.assertEqual(report["gates"]["F02"]["numerator"], 27)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 27)
         self.assertEqual(len(report["gates"]["F02"]["failures"]), 1)
         self.assertEqual(len(report["gates"]["F03"]["failures"]), 1)
 
@@ -465,7 +508,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 24)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 27)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -492,7 +535,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 24)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 27)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -523,7 +566,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F05"]["numerator"], 24)
+        self.assertEqual(report["gates"]["F05"]["numerator"], 27)
         self.assertFalse(report["gates"]["F05"]["passed"])
         self.assertFalse(report["acceptance_passed"])
         failure = report["gates"]["F05"]["failures"][
@@ -548,8 +591,8 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F02"]["numerator"], 24)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 25)
+        self.assertEqual(report["gates"]["F02"]["numerator"], 27)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 28)
         self.assertIn(
             "company_id",
             report["gates"]["F02"]["failures"]["pi-v1-registry-list"][
@@ -571,8 +614,8 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertFalse(report["trace_coverage"]["passed"])
         self.assertEqual(report["trace_coverage"]["missing_scenario_ids"], [missing_id])
         for gate_id in ("F01", "F02", "F03", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 24)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 25)
+            self.assertEqual(report["gates"][gate_id]["numerator"], 27)
+            self.assertEqual(report["gates"][gate_id]["denominator"], 28)
             self.assertIn(missing_id, report["gates"][gate_id]["failures"])
 
     def test_trace_is_bound_to_corpus_input_and_rejects_unknown_event_fields(self) -> None:

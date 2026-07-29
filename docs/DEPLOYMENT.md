@@ -361,9 +361,11 @@ sizes, archive SHA-256, trusted-artifact SHA-256, manifest SHA-256, registry
 digest, version, commit, builder, and UTC time. Transfer both files to temporary
 server paths and recompute both SHA-256 values on the server before extracting
 the archive or installing the anchor. All new uploads and generated temporary
-release inputs must use
-`/opt/odoo-accounting-cli-v3/upload-sources/incoming/`; do not create new
-release inputs below `/root`. Historical files migrated from
+release inputs must use a dedicated immutable release directory below
+`/opt/odoo-accounting-cli-v3/upload-sources/incoming/<version>-<commit12>/`;
+do not create new release inputs below `/root` or directly in the shared
+`incoming/` parent. Installer scratch data belongs in
+`/opt/odoo-accounting-cli-v3/tmp/`. Historical files migrated from
 `/root/odoo-v3-upload`, `/root/odoo-accounting-cli-v3-*.tar.gz`, or
 `install-release-dev*.py` belong only in
 `/opt/odoo-accounting-cli-v3/upload-sources/legacy-root-20260728/` and must not
@@ -374,8 +376,8 @@ installers, 7 packages, and 13 upload directories; 125,584,659 bytes) without
 deleting them. The before/after manifests in that directory match byte-for-byte;
 `migration-after.tsv` has SHA-256
 `46fefbf03259e09dc5038f047393f0e878e6eefaac80bc91dcc258d00b3b74e4`.
-The two durable release trust-key files remain outside this temporary-artifact
-archive until a separately reviewed trust-store migration is available.
+The two durable release verification files are root-owned under
+`/opt/odoo-accounting-cli-v3/trust/`; they are not temporary release inputs.
 
 ## Side-by-side installation
 
@@ -391,15 +393,15 @@ installed:
 
 ```bash
 sudo install -d -o root -g root -m 0700 \
-  /opt/odoo-accounting-cli-v3/upload-sources/incoming
+  /opt/odoo-accounting-cli-v3/upload-sources/incoming/<version>-<commit12>
 sudo install -o root -g root -m 0444 \
   <exact-target-commit-checkout>/deployment/install-release.py \
-  /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py
-test "$(sudo /usr/bin/sha256sum /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py)" = \
-  "<expected-installer-sha256>  /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py"
+  /opt/odoo-accounting-cli-v3/upload-sources/incoming/<version>-<commit12>/install-release.py
+test "$(sudo /usr/bin/sha256sum /opt/odoo-accounting-cli-v3/upload-sources/incoming/<version>-<commit12>/install-release.py)" = \
+  "<expected-installer-sha256>  /opt/odoo-accounting-cli-v3/upload-sources/incoming/<version>-<commit12>/install-release.py"
 sudo /usr/bin/python3 \
-  /opt/odoo-accounting-cli-v3/upload-sources/incoming/install-release.py \
-  --archive /opt/odoo-accounting-cli-v3/upload-sources/incoming/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz \
+  /opt/odoo-accounting-cli-v3/upload-sources/incoming/<version>-<commit12>/install-release.py \
+  --archive /opt/odoo-accounting-cli-v3/upload-sources/incoming/<version>-<commit12>/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz \
   --expected-package-sha256 <64-lowercase-hex> \
   --expected-manifest-sha256 <64-lowercase-hex> \
   --expected-version <version> \
@@ -843,6 +845,29 @@ and `deployment/dev29/read_oracles.py`, documented in
 `deployment/dev29/README-oracles.md`. Generic command failure is not acceptable
 negative evidence: the same execution must return the plan's exact staged-test
 rejection code, while production keeps the generic failure envelope.
+
+Dev251 adds a supplemental exact-release gate for the native tax, balance
+sheet, profit and loss, and cash-flow report reads. Follow
+`deployment/dev251/README.md` and execute only the installed release copies of
+`collect_report_read_evidence.py` and `verify_report_read_evidence.py`. The
+collector uses `/run/odoo-accounting-cli-v3-dev251` for transient state and
+publishes verified, frozen bundles only below
+`/var/lib/odoo-accounting-cli-v3/evidence`; it never uses `/root`. The verifier
+independently binds four fixed signed requests and receipts to the exact
+release, runtime, registry, company, user, database, periods, filters,
+pagination, rollback boundary, and unchanged PostgreSQL witness. This
+supplemental bundle deliberately records that no independent accounting oracle
+is available and that production promotion is forbidden. It cannot replace the
+Dev29 sealed dependency closure, an approved report-definition baseline, or
+independent tax and accounting standard-answer evidence.
+
+Exit code `3` from the Dev251 collector means the no-replace rename completed
+but parent-directory durability could not be confirmed. The frozen final
+directory is retained with `status=publication_outcome_unknown`,
+`reconcile_required=true`, and `safe_to_rerun=false`. Do not repeat the Odoo
+reads. Run the same release collector with `--reconcile` and the same identity
+arguments; that path independently verifies the existing bundle and retries
+only the directory `fsync`.
 
 The read-only target findings in
 `docs/TARGET_HOST_DEV29_CLOSURE_BASELINE_2026-07-20.md` record the original

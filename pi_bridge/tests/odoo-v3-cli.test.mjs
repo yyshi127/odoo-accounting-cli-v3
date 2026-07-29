@@ -529,6 +529,19 @@ function writeParameterFixtures() {
 }
 
 function assertSchemaValue(value, schema, location = "parameters") {
+	if (schema.oneOf) {
+		let matchCount = 0;
+		for (const branch of schema.oneOf) {
+			try {
+				assertSchemaValue(value, branch, location);
+				matchCount += 1;
+			} catch {
+				// A oneOf value must match exactly one branch.
+			}
+		}
+		assert.equal(matchCount, 1, `${location} must match exactly one oneOf branch`);
+		return;
+	}
 	const allowedTypes = Array.isArray(schema.type) ? schema.type : [schema.type];
 	if (value === null) {
 		assert.ok(allowedTypes.includes("null"), `${location} does not allow null`);
@@ -766,6 +779,131 @@ test("multicurrency read retains the complete company, cutoff, currency set, pol
 	assert.equal(result.data.result._test_raw_stdin, JSON.stringify(before));
 	assert.deepEqual(result.data.result._test_parsed_request, before);
 	assert.deepEqual(request, before);
+});
+
+test("tax and financial report reads retain every report request, period, filter, currency, and page parameter", async (t) => {
+	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
+	const registry = JSON.parse(await readFile(registryPath, "utf8"));
+	const reportSchemas = new Map(
+		registry.capabilities
+			.filter((item) => ["acct.tax.report_read.v1", "acct.report.financial_read.v1"].includes(item.id))
+			.map((item) => [item.id, item.input_schema]),
+	);
+	const runtimeConfigPath = path.join(fixtureDir, "runtime.json");
+	const run = createBoundRunner({
+		cliPath: process.execPath,
+		prefixArgs: [trustedFixture],
+		runtimeConfigPath,
+		timeoutMs: 5000,
+	});
+	const cases = [
+		{
+			case_name: "tax",
+			capability_id: "acct.tax.report_read.v1",
+			parameters: {
+				company_id: 7,
+				date_from: "2026-04-01",
+				date_to: "2026-06-30",
+				move_state: "posted",
+				journal_scope: "all_report_eligible",
+				tax_unit_id: null,
+				unreconciled_only: false,
+				hide_zero_lines: false,
+				line_expansion_request: "none",
+				currency_id: 12,
+				limit: 100,
+				offset: 0,
+			},
+		},
+		{
+			case_name: "balance-sheet-previous-period",
+			capability_id: "acct.report.financial_read.v1",
+			parameters: {
+				company_id: 7,
+				report_request: {
+					kind: "balance_sheet",
+					comparison: {
+						mode: "previous_period",
+						periods: 1,
+					},
+				},
+				date_from: "2026-04-01",
+				date_to: "2026-06-30",
+				move_state: "posted",
+				journal_scope: "all_report_eligible",
+				tax_unit_id: null,
+				unreconciled_only: false,
+				hide_zero_lines: false,
+				line_expansion_request: "none",
+				currency_id: 12,
+				limit: 100,
+				offset: 0,
+			},
+		},
+		{
+			case_name: "profit-and-loss-previous-year",
+			capability_id: "acct.report.financial_read.v1",
+			parameters: {
+				company_id: 7,
+				report_request: {
+					kind: "profit_and_loss",
+					comparison: {
+						mode: "previous_year",
+						periods: 1,
+					},
+				},
+				date_from: "2026-04-01",
+				date_to: "2026-06-30",
+				move_state: "posted",
+				journal_scope: "all_report_eligible",
+				tax_unit_id: null,
+				unreconciled_only: false,
+				hide_zero_lines: false,
+				line_expansion_request: "none",
+				currency_id: 12,
+				limit: 100,
+				offset: 0,
+			},
+		},
+		{
+			case_name: "cash-flow-without-comparison",
+			capability_id: "acct.report.financial_read.v1",
+			parameters: {
+				company_id: 7,
+				report_request: {
+					kind: "cash_flow",
+					comparison: null,
+				},
+				date_from: "2026-04-01",
+				date_to: "2026-06-30",
+				move_state: "posted",
+				journal_scope: "all_report_eligible",
+				tax_unit_id: null,
+				unreconciled_only: false,
+				hide_zero_lines: false,
+				line_expansion_request: "none",
+				currency_id: 12,
+				limit: 100,
+				offset: 0,
+			},
+		},
+	];
+
+	for (const testCase of cases) {
+		const { case_name: caseName, ...request } = testCase;
+		await t.test(caseName, async () => {
+			const inputSchema = reportSchemas.get(request.capability_id);
+			assert.ok(inputSchema, `${request.capability_id} must exist in the current registry`);
+			assertSchemaValue(request.parameters, inputSchema, `${caseName}.parameters`);
+			const before = structuredClone(request);
+			const result = await run("read", request);
+
+			assert.equal(result.ok, true);
+			assert.equal(result.data.result._test_raw_stdin, JSON.stringify(before));
+			assert.deepEqual(result.data.result._test_parsed_request, before);
+			assert.deepEqual(request, before);
+		});
+	}
 });
 
 test("approve-execute and result reject evidence-free fake CLI success", async () => {

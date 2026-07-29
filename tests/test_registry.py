@@ -3,6 +3,7 @@ import json
 import unittest
 from pathlib import Path
 
+from odoo_accounting_cli_v3.contracts import ContractError, validate_value
 from odoo_accounting_cli_v3.registry import RegistryError, load_registry, registry_digest, validate_registry
 
 
@@ -69,6 +70,8 @@ class RegistryTest(unittest.TestCase):
                 "acct.gl.trial_balance.v1",
                 "acct.ar.open_items.v1",
                 "acct.ap.open_items.v1",
+                "acct.tax.report_read.v1",
+                "acct.report.financial_read.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.move.draft_cancel_eligibility.v1",
             ],
@@ -212,6 +215,312 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(item["evidence"]["level"], "contract_tested")
         self.assertEqual(item["staged_environments"], ["test"])
         self.assertEqual(item["enabled_environments"], [])
+
+    def test_native_report_contracts_are_strict_staged_and_audit_honest(self) -> None:
+        by_id = {item["id"]: item for item in self.document["capabilities"]}
+        tax = by_id["acct.tax.report_read.v1"]
+        financial = by_id["acct.report.financial_read.v1"]
+
+        self.assertEqual(
+            tax["input_schema"]["required"],
+            [
+                "company_id",
+                "date_from",
+                "date_to",
+                "move_state",
+                "journal_scope",
+                "tax_unit_id",
+                "unreconciled_only",
+                "hide_zero_lines",
+                "line_expansion_request",
+                "currency_id",
+                "limit",
+                "offset",
+            ],
+        )
+        self.assertNotIn("comparison", tax["input_schema"]["properties"])
+        self.assertNotIn("report_request", tax["input_schema"]["properties"])
+        self.assertEqual(
+            financial["input_schema"]["required"],
+            [
+                "company_id",
+                "report_request",
+                "date_from",
+                "date_to",
+                "move_state",
+                "journal_scope",
+                "tax_unit_id",
+                "unreconciled_only",
+                "hide_zero_lines",
+                "line_expansion_request",
+                "currency_id",
+                "limit",
+                "offset",
+            ],
+        )
+
+        report_request = financial["input_schema"]["properties"]["report_request"]
+        self.assertEqual(len(report_request["oneOf"]), 2)
+        comparative, cash_flow = report_request["oneOf"]
+        self.assertEqual(
+            comparative["properties"]["kind"]["enum"],
+            ["balance_sheet", "profit_and_loss"],
+        )
+        self.assertEqual(cash_flow["properties"]["kind"]["enum"], ["cash_flow"])
+        self.assertEqual(cash_flow["properties"]["comparison"], {"type": "null"})
+        comparison_input = comparative["properties"]["comparison"]
+        self.assertEqual(
+            [
+                branch.get("properties", {}).get("mode", {}).get("enum")
+                for branch in comparison_input["oneOf"]
+            ],
+            [None, ["previous_period"], ["previous_year"]],
+        )
+        self.assertTrue(
+            all(
+                branch["properties"]["periods"]["enum"] == [1]
+                for branch in comparison_input["oneOf"][1:]
+            )
+        )
+        for valid in (
+            {
+                "kind": "balance_sheet",
+                "comparison": None,
+            },
+            {
+                "kind": "balance_sheet",
+                "comparison": {"mode": "previous_period", "periods": 1},
+            },
+            {
+                "kind": "profit_and_loss",
+                "comparison": {"mode": "previous_year", "periods": 1},
+            },
+            {
+                "kind": "cash_flow",
+                "comparison": None,
+            },
+        ):
+            validate_value(valid, report_request)
+        for invalid in (
+            {
+                "kind": "cash_flow",
+                "comparison": {"mode": "previous_period", "periods": 1},
+            },
+            {
+                "kind": "balance_sheet",
+                "comparison": {"mode": "previous_period", "periods": 2},
+            },
+            {
+                "kind": "general_ledger",
+                "comparison": None,
+            },
+            {
+                "kind": "balance_sheet",
+                "report_id": 22,
+                "comparison": None,
+            },
+        ):
+            with self.assertRaises(ContractError):
+                validate_value(invalid, report_request)
+
+        for item, family, kinds, journal_minimum in (
+            (tax, "tax", ["generic_tax"], 1),
+            (
+                financial,
+                "financial",
+                ["balance_sheet", "profit_and_loss", "cash_flow"],
+                1,
+            ),
+        ):
+            self.assertEqual(
+                item["output_schema"]["required"],
+                [
+                    "report",
+                    "period",
+                    "effective_filters",
+                    "currency",
+                    "warnings",
+                    "lines",
+                    "page",
+                    "receipt",
+                ],
+            )
+            output = item["output_schema"]["properties"]
+            self.assertEqual(
+                output["report"]["properties"]["family"]["enum"], [family]
+            )
+            self.assertEqual(
+                output["report"]["properties"]["kind"]["enum"],
+                kinds,
+            )
+            self.assertIn("kind", output["report"]["required"])
+            self.assertEqual(
+                output["period"]["properties"]["resolved"]["properties"]["mode"]["enum"],
+                ["range", "single"],
+            )
+            resolved_period = output["period"]["properties"]["resolved"]
+            self.assertIn("key", resolved_period["required"])
+            self.assertEqual(
+                resolved_period["properties"]["key"]["pattern"],
+                "^period-[0-9a-f]{64}$",
+            )
+            line = output["lines"]["items"]
+            self.assertIs(line["additionalProperties"], False)
+            self.assertIn("unfoldable", line["required"])
+            self.assertIn("unfolded", line["required"])
+            self.assertIn("parent", line["required"])
+            self.assertNotIn("parent_line_id", line["properties"])
+            self.assertNotIn("parent_relation_source", line["properties"])
+            parent_branches = line["properties"]["parent"]["oneOf"]
+            self.assertEqual(
+                [
+                    branch["properties"]["line_id"]["type"]
+                    for branch in parent_branches
+                ],
+                ["null", "string"],
+            )
+            self.assertEqual(
+                [
+                    branch["properties"]["relation_source"]["enum"]
+                    for branch in parent_branches
+                ],
+                [["none"], ["explicit"]],
+            )
+            column = line["properties"]["columns"]["items"]
+            self.assertEqual(
+                column["required"],
+                [
+                    "label",
+                    "expression_label",
+                    "period",
+                    "cell",
+                    "measure",
+                    "auditable",
+                ],
+            )
+            cell_branches = column["properties"]["cell"]["oneOf"]
+            self.assertEqual(
+                [
+                    branch["properties"]["is_blank"]["enum"]
+                    for branch in cell_branches
+                ],
+                [[True], [False]],
+            )
+            measure_branches = column["properties"]["measure"]["oneOf"]
+            self.assertEqual(
+                measure_branches[0]["properties"]["figure_type"]["enum"],
+                ["monetary"],
+            )
+            self.assertEqual(
+                measure_branches[1]["properties"]["currency_id"]["type"],
+                "null",
+            )
+            self.assertIn("auditable", column["required"])
+            self.assertEqual(
+                column["properties"]["period"]["properties"]["key"]["pattern"],
+                "^period-[0-9a-f]{64}$",
+            )
+            self.assertEqual(
+                output["receipt"]["properties"]["signature_purpose"]["enum"],
+                ["read_receipt_v2"],
+            )
+            self.assertEqual(
+                output["receipt"]["properties"]["capability_id"]["enum"],
+                [item["id"]],
+            )
+            effective = output["effective_filters"]
+            self.assertEqual(
+                effective["properties"]["move_state"]["enum"],
+                ["posted"],
+            )
+            self.assertEqual(
+                effective["properties"]["journal_scope"]["enum"],
+                ["all_report_eligible"],
+            )
+            self.assertEqual(
+                effective["properties"]["line_expansion_request"]["enum"],
+                ["none"],
+            )
+            self.assertEqual(
+                effective["properties"]["journal_ids"]["minItems"],
+                journal_minimum,
+            )
+            self.assertEqual(
+                effective["properties"]["journal_ids"]["maxItems"],
+                10000,
+            )
+            self.assertIs(
+                effective["properties"]["journal_ids"]["uniqueItems"],
+                True,
+            )
+            serialized = json.dumps(item, sort_keys=True)
+            self.assertNotIn("all_accessible", serialized)
+            self.assertNotIn("detail_scope", serialized)
+            self.assertEqual(item["evidence"]["level"], "contract_tested")
+            self.assertEqual(item["staged_environments"], ["test"])
+            self.assertEqual(item["enabled_environments"], [])
+
+        self.assertEqual(
+            tax["output_schema"]["properties"]["period"]["properties"]["comparison"],
+            {"type": "null"},
+        )
+        financial_comparison = (
+            financial["output_schema"]["properties"]["period"]["properties"]["comparison"]
+        )
+        self.assertEqual(
+            [
+                branch.get("properties", {}).get("resolved_mode", {}).get("enum")
+                for branch in financial_comparison["oneOf"]
+            ],
+            [None, ["previous_period"], ["same_last_year"]],
+        )
+        self.assertTrue(
+            all(
+                "resolved_periods" in branch.get("required", [])
+                for branch in financial_comparison["oneOf"][1:]
+            )
+        )
+        for branch in financial_comparison["oneOf"][1:]:
+            self.assertEqual(branch["properties"]["periods"]["enum"], [1])
+            self.assertEqual(
+                branch["properties"]["resolved_periods"]["minItems"],
+                1,
+            )
+            self.assertEqual(
+                branch["properties"]["resolved_periods"]["maxItems"],
+                1,
+            )
+        self.assertEqual(
+            tax["output_schema"]["properties"]["warnings"]["items"]["enum"],
+            [
+                "odoo:date_range_normalized",
+                "odoo:draft_entries_excluded",
+                "odoo:report_variant_resolved",
+                "odoo:tax_source_move_line_count_unavailable",
+            ],
+        )
+        self.assertEqual(
+            financial["output_schema"]["properties"]["warnings"]["items"]["enum"],
+            [
+                "odoo:date_range_normalized",
+                "odoo:draft_entries_excluded",
+                "odoo:report_variant_resolved",
+            ],
+        )
+        tax_line = tax["output_schema"]["properties"]["lines"]["items"]
+        self.assertIn("source_move_line_count", tax_line["required"])
+        self.assertEqual(
+            [
+                branch["properties"]["available"]["enum"]
+                for branch in tax_line["properties"]["source_move_line_count"][
+                    "oneOf"
+                ]
+            ],
+            [[False], [True]],
+        )
+        financial_line = financial["output_schema"]["properties"]["lines"]["items"]
+        self.assertNotIn("source_move_line_count", financial_line["properties"])
+        self.assertNotIn("source_drilldown", tax["verification"]["method"])
 
     def test_multicurrency_contract_is_strict_but_not_claimed_as_verified(self) -> None:
         item = next(
