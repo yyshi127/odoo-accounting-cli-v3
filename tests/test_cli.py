@@ -64,10 +64,17 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert payload["command"] == "registry.audit"
     assert data["registry_audit_ready"] is True
     assert data["blockers"] == []
-    assert data["total_count"] == 30
-    assert data["access_counts"] == {"read": 10, "write": 20}
-    assert data["read_count"] == 10
-    assert data["write_count"] == 20
+    assert data["total_count"] == 35
+    assert data["access_counts"] == {"read": 12, "write": 23}
+    assert data["read_count"] == 12
+    assert data["write_count"] == 23
+    assert data["evidence_level_counts"] == {
+        "contract_tested": 12,
+        "declared": 23,
+        "odoo_verified": 0,
+        "production_verified": 0,
+        "sandbox_verified": 0,
+    }
     assert data["strict_schema"]["input_strict_count"] == data["total_count"]
     assert data["strict_schema"]["output_strict_count"] == data["total_count"]
     assert data["policy_counts"]["write_approval_required"] == data["write_count"]
@@ -76,7 +83,7 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert data["staged_environment_counts"] == {
         "production": 0,
         "sandbox": 0,
-        "test": 10,
+        "test": 12,
     }
     assert data["production_promotion_allowed"] is False
     assert data["real_odoo_write_performed"] is False

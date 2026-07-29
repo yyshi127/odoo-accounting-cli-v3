@@ -126,7 +126,13 @@ REVIEWED_READ_DISPATCH = {
     "acct.ap.open_items.v1": "_read_ap_open_items",
     "acct.multicompany.consolidated_read.v1": "_read_multicompany_consolidated",
     "acct.multicurrency.balance_read.v1": "_read_multicurrency_balance",
+    "acct.move.document_post_eligibility.v1": (
+        "_read_document_post_eligibility"
+    ),
     "acct.move.draft_cancel_eligibility.v1": "_read_draft_cancel_eligibility",
+    "acct.refund.draft_cancel_eligibility.v1": (
+        "_read_refund_draft_cancel_eligibility"
+    ),
     "acct.report.financial_read.v1": "_read_financial_report",
     "acct.tax.report_read.v1": "_read_tax_report",
 }
@@ -143,7 +149,7 @@ READ_BOOTSTRAP_SOURCE_SHA256 = (
     "e089b7c0d7607d65ee49cf40c527dbc2ae28b5f025e9b36fe716c0f4b4909ec7"
 )
 READ_EXECUTOR_SOURCE_SHA256 = (
-    "d383ed0650e55aa8704c6c7dfafa87435ea06084755b2c3ada44a75d2714e4ed"
+    "3bfd34896321523726e50148d1c28e9b18a2237f19052da7b57dd137e8f490f3"
 )
 REVIEWED_INITIALIZER_ATTRIBUTES = {
     ("odoo_accounting_cli_v3.gateway", "CapabilityGateway"): frozenset(

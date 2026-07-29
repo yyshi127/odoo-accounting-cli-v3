@@ -494,7 +494,7 @@ passing composite Odoo receipt. The current target capacity and service-
 continuity gates have not passed, so production promotion remains blocked.
 
 Runtime configuration never enables a capability by itself. The registry must
-contain the same environment in the selected channel. All 20 currently
+contain the same environment in the selected channel. All 23 currently
 registered write capabilities remain closed by default. They may move to staged
 only in a dedicated sandbox after their local contract gate passes, and may
 advance again only from retained capability-specific real Odoo lifecycle
@@ -514,12 +514,63 @@ pristine-draft eligibility. The contract is registered for test staging only and
 has strict output-schema, ACL, cross-company, and Pi parameter-transit coverage;
 it still lacks retained real-sandbox Odoo receipt evidence, so the write remains
 disabled.
-Staging also requires a reviewed target-module graph and a database automation
-inventory proving that `account.move.write` has no active override, server
+The installed-module graph proves only that the module name/version set is
+stable; it is not a semantic override allowlist. Staging also requires an
+explicit review of target-module overrides and a database automation inventory
+proving that `action_post`/`account.move.write` has no active override, server
 action, base automation, webhook, mail, or queue side effect outside the
 approved move/line graph. The local exact-delta verifier cannot observe an
 external call or an unrelated record created by an override, so fake-ORM tests
-do not satisfy this gate.
+do not satisfy this gate and a real Odoo 19 sandbox run remains mandatory.
+
+The Dev259 customer-invoice/vendor-bill posting and refund-draft-cancellation
+slices are also closed. The intended Pi workflow obtains their exact parameters
+from the matching eligibility read:
+
+- `acct.move.document_post_eligibility.v1` for
+  `acct.invoice.customer_post.v1` and `acct.bill.vendor_post.v1`; and
+- `acct.refund.draft_cancel_eligibility.v1` for
+  `acct.refund.draft_cancel.v1`.
+
+Both reads are only `contract_tested`, staged for `test`, and have no retained
+real-Odoo receipt. The three writes remain `declared`, with no staged or enabled
+environment and no real-Odoo write evidence. Runtime configuration must not
+default, invent, or copy any document/business binding from an untrusted
+message. The current write schemas do not include an eligibility receipt or
+receipt digest and therefore do not cryptographically chain the read to the
+write. Each write precheck instead independently reconstructs and validates the
+bound Odoo graph. Pi/evidence receipt correlation remains a separate
+orchestration and retained-evidence requirement, not an implemented write-input
+safety property.
+
+The current customer-invoice/vendor-bill posting slice handles the observed
+Odoo 19 partner-rank postcommit delta only when the target partner's relevant
+`customer_rank`/`supplier_rank` is exactly `0` before `action_post` and exactly
+`1` afterward. It is not a general production posting implementation for
+partners with an existing rank or for unreviewed module extensions.
+
+The Dev259 eligibility oracle is also restricted to complete productless,
+taxless, undiscounted graphs with one receivable/payable maturity line. A
+taxed, product, discounted, or complex payment-term document must return
+ineligible even if the lower-level write handler could otherwise inspect it.
+Do not treat this fail-closed slice as general invoice/bill/refund support.
+
+The eligibility boundary rebuilds a normalized Odoo graph and requires both
+the document and business SHA-256 bindings to match. For a refund's posted
+origin, exactly one binding-shape candidate must match both hashes: creation
+recorded `posting_mode:"post"`, or creation recorded `posting_mode:"draft"` and
+the current document is now posted. The latter proves only the binding stored
+at creation; it does not record the later caller or entry point for
+`action_post` and cannot prove that a controlled posting capability performed
+the transition.
+
+The current create-to-eligibility reconstruction can reject an economically
+equivalent document because Odoo loses source decimal spelling such as `100`
+versus `100.00`, the runtime normalizes tax-ID order, and it stably orders
+invoice lines by `line_reference`. The original create-v1 paths did not enforce
+one matching canonical representation for all three cases. Do not weaken the
+check; admit affected records only after a future versioned canonical
+binding/provenance migration has proved them.
 
 The current `acct.recovery.execute.v1` contract is also disabled and is limited
 to an incident whose origin is durably `failed` after one successful execution
@@ -534,13 +585,15 @@ readable for frozen-route audit but are rejected by the current executor.
 
 The local implementation registers 16 state-dependent recovery contracts for
 the 12 original non-terminal source-write capabilities. This recovery-catalog
-count is independent of the current registry's 20 write capabilities. The
+count is independent of the current registry's 23 write capabilities. The
 original `acct.move.draft_cancel.v1` and `acct.recovery.execute.v1` do not add
-follow-on contracts. The six later writes also do not expand that catalog:
+follow-on contracts. The nine later writes also do not expand that catalog:
 manual-entry creation and posting require separately approved draft-cancel or
 reversal operations; `acct.move.draft_cancel.v2` is terminal; and payment
 cancellation, reconciliation undo, and bank-statement compensation retain
-explicit manual-escalation recovery policies. Every executable contract is
+explicit manual-escalation recovery policies. Customer-invoice and vendor-bill
+posting require a separately approved credit note or reversal after posting;
+refund draft cancellation is terminal. Every executable contract is
 restricted to `test` and `sandbox`, has a public-ORM action and an independent
 fresh-read oracle, and rejects production execution. Payment and reconciliation
 results that already contain a prior partial or full reconciliation graph are

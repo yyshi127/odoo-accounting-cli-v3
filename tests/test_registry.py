@@ -76,6 +76,8 @@ class RegistryTest(unittest.TestCase):
                 "acct.multicurrency.balance_read.v1",
                 "acct.move.draft_cancel_eligibility.v1",
                 "acct.diagnostics.operation_read.v1",
+                "acct.move.document_post_eligibility.v1",
+                "acct.refund.draft_cancel_eligibility.v1",
             ],
         )
         for item in staged:

@@ -166,6 +166,9 @@ EXECUTOR_GROUP = "odoo_accounting_cli_v3_control.group_executor"
 APPROVER_GROUP = "odoo_accounting_cli_v3_control.group_approver"
 EXCLUSIVE_BEFORE_LOCK_CAPABILITIES = frozenset(
     {
+        "acct.invoice.customer_post.v1",
+        "acct.bill.vendor_post.v1",
+        "acct.refund.draft_cancel.v1",
         "acct.move.draft_cancel.v1",
         "acct.move.draft_cancel.v2",
         "acct.move.post.v1",
@@ -248,6 +251,9 @@ def _resource_lock_digests(
 
     if capability_id == "acct.refund.create.v1":
         add("account.move", parameters.get("origin_move_id"))
+    elif capability_id == "acct.refund.draft_cancel.v1":
+        add("account.move", parameters.get("move_id"))
+        add("account.move", parameters.get("expected_origin_move_id"))
     elif capability_id == "acct.payment.cancel.v1":
         add("account.payment", parameters.get("payment_id"))
         add("account.move", parameters.get("move_id"))
@@ -291,6 +297,12 @@ def _resource_lock_digests(
         add("account.move", parameters.get("depreciation_move_id"))
     elif capability_id == "acct.deferred.create.v1":
         add("account.move.line", parameters.get("source_move_line_id"))
+    elif capability_id in {
+        "acct.invoice.customer_post.v1",
+        "acct.bill.vendor_post.v1",
+    }:
+        add("account.move", parameters.get("move_id"))
+        add("res.partner", parameters.get("expected_partner_id"))
     elif capability_id in {
         "acct.move.draft_cancel.v2",
         "acct.move.post.v1",

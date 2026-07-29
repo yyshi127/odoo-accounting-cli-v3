@@ -40,6 +40,81 @@ exact routed release and retain that output. The current development registry
 has subsequently grown, but a dirty checkout is not a release or target-host
 receipt.
 
+## Current development inventory
+
+The current development registry contains 35 capabilities: 12 reads and 23
+writes. All 35 have strict input/output schemas. The 12 reads are
+`contract_tested` and staged only for `test`; the 23 writes remain `declared`,
+with empty staged and enabled environment lists. No capability is enabled in
+any environment.
+
+Dev259 adds these contracts to the preceding 30-capability inventory:
+
+- `acct.move.document_post_eligibility.v1` (read);
+- `acct.refund.draft_cancel_eligibility.v1` (read);
+- `acct.invoice.customer_post.v1` (write);
+- `acct.bill.vendor_post.v1` (write); and
+- `acct.refund.draft_cancel.v1` (write).
+
+The two reads only prove local contract and test-channel integration. They have
+zero retained real-Odoo read receipts. The three writes have source handlers
+and control-plane contracts, but no retained real-Odoo write lifecycle
+receipts. Across the complete development inventory, source/contract
+implementation is 23/23 writes while real-Odoo write evidence remains 0/23.
+These facts must not be restated as sandbox verification, production
+readiness, or Goal completion.
+
+The current posting implementation also has a deliberately narrow partner-rank
+boundary. It accepts a customer-invoice/vendor-bill target only when the
+relevant `customer_rank`/`supplier_rank` is exactly `0` before `action_post` and
+requires an exact value of `1` afterward. That closes the observed Odoo 19
+postcommit delta for this development slice; it is not general production
+coverage for existing-ranked partners or unreviewed module extensions.
+
+The eligibility oracle additionally admits only a complete productless,
+taxless, undiscounted financial graph with one receivable/payable maturity
+line. It deliberately rejects taxed, product, discounted, and complex
+payment-term documents until their exact Odoo 19 preview and post-action
+semantics are proved. This is a safe development boundary, not full accounting
+document coverage.
+
+Within that boundary, a full refund must reproduce an exact linewise reversal,
+including immutable line references. A partial refund must stay within the
+origin total and map every business line by one unique reference to an origin
+line with the same account, partner, currency, product and tax identity; its
+quantity, subtotal and total may not exceed the origin line.
+
+The posting eligibility read reconstructs one normalized canonical document
+graph and requires both its document and business SHA-256 bindings to match.
+The refund-cancellation eligibility read applies the same double-binding rule
+to the refund and its origin. For the already-posted origin, exactly one of two
+binding-shape candidates must match: creation recorded `posting_mode:"post"`,
+or creation recorded `posting_mode:"draft"` and the current document is now
+posted. The second candidate proves only the creation-time binding. It does not
+identify the later caller or entry point for `action_post`, so it is not proof
+that the separately controlled posting capability performed the transition.
+
+This create-to-eligibility reconstruction deliberately fails closed. Odoo does
+not preserve source-level decimal spelling such as `100` versus `100.00`, tax
+ID order is normalized, and invoice lines are stably reordered by
+`line_reference`. The original create-v1 paths did not enforce one matching
+canonical representation for all three cases. A noncanonical V3 binding can
+therefore be rejected even when the business document is economically
+equivalent. This is a safety false negative, not proof of tampering. Such
+records remain ineligible until a future, versioned canonical
+binding/provenance migration can prove their source representation; the
+runtime must never guess a compatible legacy binding.
+
+An installed-module graph proves module name/version-set stability only. It
+does not semantically enumerate or approve overrides of `action_post`,
+`account.move.write`, or postcommit behavior. No Dev259 write may be enabled
+without a real Odoo 19 sandbox lifecycle and an explicit target-module override
+review; retained graph equality alone is insufficient.
+
+These are development-tree observations, not an exact-release audit. Replace
+them with retained `registry audit` and Odoo receipts from the packaged release
+before making any routed-release claim.
+
 ## Machine audit command
 
 Run the exact release member, not a developer checkout:

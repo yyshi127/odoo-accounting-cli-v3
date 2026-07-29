@@ -69,9 +69,11 @@ READ_CAPABILITY_IDS = [
     "acct.ar.open_items.v1",
     "acct.diagnostics.operation_read.v1",
     "acct.gl.trial_balance.v1",
+    "acct.move.document_post_eligibility.v1",
     "acct.move.draft_cancel_eligibility.v1",
     "acct.multicompany.consolidated_read.v1",
     "acct.multicurrency.balance_read.v1",
+    "acct.refund.draft_cancel_eligibility.v1",
     "acct.registry.list.v1",
     "acct.report.financial_read.v1",
     "acct.tax.report_read.v1",
@@ -89,9 +91,11 @@ WRITE_CAPABILITY_IDS = [
     "acct.bank.statement_compensate.v1",
     "acct.bank.statement_import.v1",
     "acct.bill.vendor_create.v1",
+    "acct.bill.vendor_post.v1",
     "acct.deferred.create.v1",
     "acct.depreciation.post.v1",
     "acct.invoice.customer_create.v1",
+    "acct.invoice.customer_post.v1",
     "acct.journal.entry_create.v1",
     "acct.move.draft_cancel.v1",
     "acct.move.draft_cancel.v2",
@@ -104,7 +108,17 @@ WRITE_CAPABILITY_IDS = [
     "acct.reconciliation.undo.v1",
     "acct.recovery.execute.v1",
     "acct.refund.create.v1",
+    "acct.refund.draft_cancel.v1",
 ]
+EXPECTED_READ_CAPABILITY_COUNT = 12
+EXPECTED_WRITE_CAPABILITY_COUNT = 23
+
+
+def test_cli_readiness_fixtures_are_the_exact_current_capability_inventory():
+    assert len(READ_CAPABILITY_IDS) == EXPECTED_READ_CAPABILITY_COUNT
+    assert len(WRITE_CAPABILITY_IDS) == EXPECTED_WRITE_CAPABILITY_COUNT
+    assert READ_CAPABILITY_IDS == sorted(set(READ_CAPABILITY_IDS))
+    assert WRITE_CAPABILITY_IDS == sorted(set(WRITE_CAPABILITY_IDS))
 
 
 @pytest.fixture(autouse=True)
@@ -254,11 +268,11 @@ def _ready_pi_scenario_report(
     registry_digest_value: str = "4" * 64,
 ) -> Path:
     gate_denominators = {
-        "F01": 38,
-        "F02": 38,
-        "F03": 31,
-        "F04": 18,
-        "F05": 38,
+        "F01": 43,
+        "F02": 43,
+        "F03": 36,
+        "F04": 21,
+        "F05": 43,
     }
     gates = {
         gate_id: {
@@ -309,18 +323,18 @@ def _ready_pi_scenario_report(
         "run_id": "pi-run-1",
         "runtime_evidence": {
             "acl_independently_rechecked": False,
-            "expected_trace_count": 31,
-            "read_exchange_count": 13,
+            "expected_trace_count": 36,
+            "read_exchange_count": 15,
             "verified": True,
-            "verified_trace_count": 31,
-            "write_authority_signature_verified_count": 18,
-            "write_exchange_count": 18,
+            "verified_trace_count": 36,
+            "write_authority_signature_verified_count": 21,
+            "write_exchange_count": 21,
         },
         "runtime_evidence_verified": True,
         "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v3",
         "trace_coverage": {
-            "captured": 38,
-            "expected": 38,
+            "captured": 43,
+            "expected": 43,
             "missing_scenario_ids": [],
             "passed": True,
         },
@@ -426,8 +440,8 @@ def _ready_write_pipeline_report(
     *,
     capability_ids: list[str] | None = None,
     evidence_root: str | None = None,
-    total_write_capabilities: int = 20,
-    verified_count: int = 20,
+    total_write_capabilities: int = EXPECTED_WRITE_CAPABILITY_COUNT,
+    verified_count: int = EXPECTED_WRITE_CAPABILITY_COUNT,
     missing_count: int = 0,
     rejected_count: int = 0,
 ) -> Path:
@@ -482,8 +496,8 @@ def _ready_write_evidence_index(
     *,
     capability_ids: list[str] | None = None,
     evidence_root: str | None = None,
-    total_write_capabilities: int = 20,
-    verified_count: int = 20,
+    total_write_capabilities: int = EXPECTED_WRITE_CAPABILITY_COUNT,
+    verified_count: int = EXPECTED_WRITE_CAPABILITY_COUNT,
     missing_count: int = 0,
     rejected_count: int = 0,
 ) -> Path:
@@ -2322,10 +2336,22 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
     assert payload["data"]["evidence_root"]["ready"] is True
     assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
-    assert len(payload["data"]["capabilities"]) == 20
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 20
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 20
-    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 20
+    assert (
+        len(payload["data"]["capabilities"])
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["capability_summary"]["total_write_capabilities"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["capability_summary"]["not_staging_ready_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["capability_summary"]["sandbox_drill_admissible_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
     assert payload["data"]["capability_summary"][
         "sandbox_staging_promotion_ready_count"
     ] == 0
@@ -2333,8 +2359,14 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
         "registry evidence level is not sandbox_verified",
         "registry has no retained sandbox write evidence receipts",
     ]
-    assert payload["data"]["total_write_capabilities"] == 20
-    assert payload["data"]["sandbox_drill_admissible_count"] == 20
+    assert (
+        payload["data"]["total_write_capabilities"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["sandbox_drill_admissible_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
@@ -2384,9 +2416,18 @@ def test_evidence_sandbox_write_environment_audit_summary_omits_capability_detai
     assert "capabilities" not in payload["data"]
     assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 20
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 20
-    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 20
+    assert (
+        payload["data"]["capability_summary"]["total_write_capabilities"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["capability_summary"]["not_staging_ready_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["capability_summary"]["sandbox_drill_admissible_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
     assert payload["data"]["capability_summary"][
         "sandbox_staging_promotion_ready_count"
     ] == 0
@@ -2442,8 +2483,14 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
     assert payload["data"]["onboarding"]["blockers"] == [
         "sandbox onboarding readiness receipt was not supplied"
     ]
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 20
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 20
+    assert (
+        payload["data"]["capability_summary"]["total_write_capabilities"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["capability_summary"]["not_staging_ready_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
@@ -3907,8 +3954,8 @@ def test_evidence_read_capabilities_readiness_keeps_external_evidence_gate_close
     assert payload["command"] == "evidence.read-capabilities-readiness"
     assert payload["business_succeeded"] is False
     assert data["read_static_readiness_ready"] is True
-    assert data["admissible_count"] == 10
-    assert data["total_read_capabilities"] == 10
+    assert data["admissible_count"] == EXPECTED_READ_CAPABILITY_COUNT
+    assert data["total_read_capabilities"] == EXPECTED_READ_CAPABILITY_COUNT
     assert data["unready_capability_ids"] == []
     assert data["blockers"] == [
         "trusted external read evidence is not independently verified for every registered read capability",
@@ -4046,6 +4093,72 @@ def test_read_capability_readiness_rejects_mutated_receipt_property_contract():
     data["output_schema"]["properties"]["receipt"]["properties"][
         "capability_id"
     ] = {"type": "string"}
+    capability = Capability.from_dict(data)
+
+    report = _read_capability_readiness_report(
+        capability,
+        trusted_read_handlers={capability.id: "odoo"},
+    )
+
+    assert report["checks"]["read_receipt_v2_contract"] is False
+    assert report["trusted_read_admissible"] is False
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    [
+        "acct.move.document_post_eligibility.v1",
+        "acct.refund.draft_cancel_eligibility.v1",
+    ],
+)
+def test_read_capability_readiness_accepts_stricter_odoo_receipt_constraints(
+    capability_id: str,
+):
+    capability = next(
+        item for item in _load_capabilities() if item.id == capability_id
+    )
+
+    report = _read_capability_readiness_report(
+        capability,
+        trusted_read_handlers={capability.id: "odoo"},
+    )
+
+    assert report["checks"]["read_receipt_v2_contract"] is True
+    assert report["trusted_read_admissible"] is True
+
+
+def test_read_capability_readiness_rejects_wrong_strict_capability_enum():
+    source = next(
+        capability
+        for capability in _load_capabilities()
+        if capability.id == "acct.move.document_post_eligibility.v1"
+    )
+    data = deepcopy(source.data)
+    data["output_schema"]["properties"]["receipt"]["properties"][
+        "capability_id"
+    ]["enum"] = ["acct.refund.draft_cancel_eligibility.v1"]
+    capability = Capability.from_dict(data)
+
+    report = _read_capability_readiness_report(
+        capability,
+        trusted_read_handlers={capability.id: "odoo"},
+    )
+
+    assert report["checks"]["read_receipt_v2_contract"] is False
+    assert report["trusted_read_admissible"] is False
+
+
+def test_read_capability_readiness_rejects_weakened_strict_capability_schema():
+    source = next(
+        capability
+        for capability in _load_capabilities()
+        if capability.id == "acct.move.document_post_eligibility.v1"
+    )
+    data = deepcopy(source.data)
+    capability_schema = data["output_schema"]["properties"]["receipt"][
+        "properties"
+    ]["capability_id"]
+    capability_schema.pop("minLength")
     capability = Capability.from_dict(data)
 
     report = _read_capability_readiness_report(
@@ -4210,8 +4323,14 @@ def test_evidence_write_capabilities_readiness_reports_all_registered_writes():
         item["sandbox_staging_promotion_ready"] is False
         for item in payload["data"]["capabilities"]
     )
-    assert payload["data"]["total_write_capabilities"] == 20
-    assert payload["data"]["admissible_count"] == 20
+    assert (
+        payload["data"]["total_write_capabilities"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
+    assert (
+        payload["data"]["admissible_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
     reported = [item["capability"]["id"] for item in payload["data"]["capabilities"]]
     assert reported == sorted(reported)
     assert "acct.invoice.customer_create.v1" in reported
@@ -4257,9 +4376,9 @@ def test_evidence_write_pipeline_readiness_reports_verified_and_missing(
     assert payload["command"] == "evidence.write-pipeline-readiness"
     assert payload["business_succeeded"] is False
     data = payload["data"]
-    assert data["total_write_capabilities"] == 20
+    assert data["total_write_capabilities"] == EXPECTED_WRITE_CAPABILITY_COUNT
     assert data["verified_count"] == 1
-    assert data["missing_count"] == 19
+    assert data["missing_count"] == EXPECTED_WRITE_CAPABILITY_COUNT - 1
     assert data["rejected_count"] == 0
     assert data["sandbox_pipeline_ready"] is False
     invoice = next(
@@ -4350,7 +4469,7 @@ def test_evidence_write_pipeline_readiness_reports_rejected_release_mismatch(
     assert result.exit_code == 0, result.output
     data = __import__("json").loads(result.output)["data"]
     assert data["verified_count"] == 0
-    assert data["missing_count"] == 19
+    assert data["missing_count"] == EXPECTED_WRITE_CAPABILITY_COUNT - 1
     assert data["rejected_count"] == 1
     invoice = next(
         item
@@ -4399,9 +4518,9 @@ def test_evidence_write_evidence_index_reports_compact_handoff(tmp_path: Path):
     assert payload["business_succeeded"] is False
     data = payload["data"]
     assert data["index_kind"] == "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1"
-    assert data["total_write_capabilities"] == 20
+    assert data["total_write_capabilities"] == EXPECTED_WRITE_CAPABILITY_COUNT
     assert data["verified_count"] == 1
-    assert data["missing_count"] == 19
+    assert data["missing_count"] == EXPECTED_WRITE_CAPABILITY_COUNT - 1
     assert data["rejected_count"] == 0
     invoice = next(
         item
@@ -4452,7 +4571,10 @@ def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
         data["read_capabilities_readiness"]["read_static_readiness_ready"]
         is True
     )
-    assert data["read_capabilities_readiness"]["admissible_count"] == 10
+    assert (
+        data["read_capabilities_readiness"]["admissible_count"]
+        == EXPECTED_READ_CAPABILITY_COUNT
+    )
     assert (
         data["read_capabilities_readiness"]["read_goal_readiness_ready"]
         is False
@@ -5074,8 +5196,8 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         "missing_count": 0,
         "rejected_count": 0,
         "sandbox_pipeline_ready": True,
-        "total_write_capabilities": 20,
-        "verified_count": 20,
+        "total_write_capabilities": EXPECTED_WRITE_CAPABILITY_COUNT,
+        "verified_count": EXPECTED_WRITE_CAPABILITY_COUNT,
     }
     assert data["write_evidence_index"]["summary"] == data["write_pipeline"]["summary"]
     assert (
@@ -5086,8 +5208,14 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         data["read_capabilities_readiness"]["read_goal_readiness_ready"]
         is True
     )
-    assert data["read_capabilities_readiness"]["admissible_count"] == 10
-    assert data["write_static_readiness"]["admissible_count"] == 20
+    assert (
+        data["read_capabilities_readiness"]["admissible_count"]
+        == EXPECTED_READ_CAPABILITY_COUNT
+    )
+    assert (
+        data["write_static_readiness"]["admissible_count"]
+        == EXPECTED_WRITE_CAPABILITY_COUNT
+    )
 
 
 @pytest.mark.parametrize(
@@ -5282,7 +5410,10 @@ def test_write_evidence_index_status_rejects_forged_capability_summary(
     ("summary_overrides", "mismatched_fields"),
     [
         (
-            {"total_write_capabilities": 19, "verified_count": 19},
+            {
+                "total_write_capabilities": EXPECTED_WRITE_CAPABILITY_COUNT - 1,
+                "verified_count": EXPECTED_WRITE_CAPABILITY_COUNT - 1,
+            },
             ("total_write_capabilities", "verified_count"),
         ),
         ({"missing_count": 1}, ("missing_count",)),
@@ -5890,7 +6021,7 @@ def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
     assert payload["command"] == "evidence.pi-trace-capture-check"
     assert payload["business_succeeded"] is False
     assert payload["data"]["trace_capture_ready"] is True
-    assert payload["data"]["trace_count"] == 38
+    assert payload["data"]["trace_count"] == 43
     assert payload["data"]["real_odoo_write_performed"] is False
 
 

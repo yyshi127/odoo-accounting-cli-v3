@@ -1,7 +1,7 @@
 {
   "schema_version": "odoo-accounting-cli-v3.pi-scenarios.v1",
   "corpus_id": "xiaojing-accounting-key-scenarios-v1",
-  "frozen_revision": 6,
+  "frozen_revision": 7,
   "description": "小兢会计 Pi Agent 的冻结中文关键场景；只由已捕获的 Pi 轨迹评分，不由评分器调用模型。",
   "fixture_bindings": {
     "company_primary_id": {"json_type": "integer", "description": "沙箱主公司 ID", "example": 101},
@@ -46,6 +46,22 @@
     "draft_manual_entry_cancel_document_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 手工分录单据绑定", "example": "9bef9ff60ca971676105c4def52b6d5de1e71f97ba88db2e6fd44f120bbcdf8b"},
     "draft_manual_entry_cancel_business_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 手工分录业务绑定", "example": "67819435e13b74e033805f70ecf1aee39a3afeb56ff04bf2d4a7fc95c06b1c5d"},
     "draft_manual_entry_cancel_line_ids": {"json_type": "array", "description": "可信候选读取返回的待取消 V3 手工分录完整行 ID", "example": [1406, 1407]},
+    "post_customer_invoice_id": {"json_type": "integer", "description": "可信候选读取返回的待过账 V3 客户发票草稿 ID", "example": 1701},
+    "post_customer_document_binding": {"json_type": "string", "description": "可信候选读取返回的待过账 V3 客户发票单据绑定", "example": "9f06242fd95b9b9370c6e0ddb7cb9ab8da9f26f89b09dd807fd990067f0f9bc4"},
+    "post_customer_business_binding": {"json_type": "string", "description": "可信候选读取返回的待过账 V3 客户发票业务绑定", "example": "f8ee1a6a51089041ccab4461b459d3f38e1a581fc96f90a3f1784ed511e2946a"},
+    "post_customer_line_ids": {"json_type": "array", "description": "可信候选读取返回的待过账 V3 客户发票完整行 ID", "example": [1702, 1703]},
+    "post_vendor_bill_id": {"json_type": "integer", "description": "可信候选读取返回的待过账 V3 供应商账单草稿 ID", "example": 1711},
+    "post_vendor_document_binding": {"json_type": "string", "description": "可信候选读取返回的待过账 V3 供应商账单单据绑定", "example": "69efe284256fdc2fafc065de5bff6de63d99412a7acaeb534633ca3cd053e441"},
+    "post_vendor_business_binding": {"json_type": "string", "description": "可信候选读取返回的待过账 V3 供应商账单业务绑定", "example": "c7c56a414691e6375b936f5a48c7204401c8323432bfea94c2432bec76c8aa51"},
+    "post_vendor_line_ids": {"json_type": "array", "description": "可信候选读取返回的待过账 V3 供应商账单完整行 ID", "example": [1712, 1713]},
+    "refund_draft_id": {"json_type": "integer", "description": "可信候选读取返回的待取消 V3 客户退款草稿 ID", "example": 1721},
+    "refund_draft_document_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 客户退款单据绑定", "example": "358a0e5ce038e7bb74c813d04404102b341e656688396480714715fd88041255"},
+    "refund_draft_business_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 客户退款业务绑定", "example": "e7b22d7ffe2753ed355ed4e8575467baf4681b6bc08736ae7c7e842d6c38c5aa"},
+    "refund_draft_line_ids": {"json_type": "array", "description": "可信候选读取返回的待取消 V3 客户退款完整行 ID", "example": [1722, 1723]},
+    "refund_origin_invoice_id": {"json_type": "integer", "description": "待取消 V3 客户退款绑定且必须保留的来源客户发票 ID", "example": 1731},
+    "refund_origin_document_binding": {"json_type": "string", "description": "待取消 V3 客户退款来源发票单据绑定", "example": "055ed4b0362d4b47de3718149d0e80128e87418a644b167337835bdecc09e687"},
+    "refund_origin_business_binding": {"json_type": "string", "description": "待取消 V3 客户退款来源发票业务绑定", "example": "1bccc8786b942ed137d6b75facd63c1075f5d72b988b40722c08b4d4833229d3"},
+    "refund_origin_line_ids": {"json_type": "array", "description": "待取消 V3 客户退款来源发票完整行 ID", "example": [1732, 1733]},
     "payment_cancel_payment_id": {"json_type": "integer", "description": "可信候选读取返回的待取消未核销处理中付款 ID", "example": 1501},
     "payment_cancel_move_id": {"json_type": "integer", "description": "可信候选读取返回的待取消付款已过账分录 ID", "example": 1502},
     "payment_cancel_line_ids": {"json_type": "array", "description": "可信候选读取返回的待取消付款完整两条分录行 ID", "example": [1503, 1504]},
@@ -439,6 +455,122 @@
         "material_parameters": {
           "company_id": {"$fixture": "company_primary_id"}, "move_id": {"$fixture": "draft_customer_invoice_id"},
           "expected_move_type": "out_invoice"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-document-post-eligibility-read",
+      "category": "ordinary",
+      "input": "先不要过账，也不要创建新发票。请只读取主公司这张现有 V3 客户发票草稿是否符合专用客户发票过账条件；核对公司、草稿 ID 和 out_invoice 类型，返回完整候选参数与可审计读取回执。",
+      "expected": {
+        "capability_id": "acct.move.document_post_eligibility.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "move_id": {"$fixture": "post_customer_invoice_id"},
+          "expected_move_type": "out_invoice"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-refund-draft-cancel-eligibility-read",
+      "category": "ordinary",
+      "input": "先不要取消退款，也不要改动来源发票。请只读取主公司这张从未过账的 V3 客户退款草稿是否符合专用退款取消条件；核对公司、退款草稿 ID 和 out_refund 类型，返回退款与来源发票的完整绑定候选和可审计读取回执。",
+      "expected": {
+        "capability_id": "acct.refund.draft_cancel_eligibility.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "move_id": {"$fixture": "refund_draft_id"},
+          "expected_move_type": "out_refund"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-customer-invoice-post",
+      "category": "ordinary",
+      "input": "过账主公司现有的 V3 客户发票草稿，不要新建发票，也不要走手工分录过账。可信候选读取已核对：草稿 ID、out_invoice、单据绑定、业务绑定、客户、销售日记账、人民币，发票日 2026-06-20、会计日 2026-06-22、到期日 2026-07-20、参考号 PI-CUST-POST-20260620，未税 300.00、税额 39.00、价税合计和未清余额均为 339.00，完整行 ID 也已返回。原因是客户发票复核完成。请完整传递十九项参数，先预览并等待审批。",
+      "expected": {
+        "capability_id": "acct.invoice.customer_post.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "move_id": {"$fixture": "post_customer_invoice_id"},
+          "expected_move_type": "out_invoice",
+          "expected_document_binding": {"$fixture": "post_customer_document_binding"},
+          "expected_business_binding": {"$fixture": "post_customer_business_binding"},
+          "expected_partner_id": {"$fixture": "customer_id"},
+          "expected_journal_id": {"$fixture": "sales_journal_id"},
+          "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_invoice_date": "2026-06-20",
+          "expected_accounting_date": "2026-06-22",
+          "expected_due_date": "2026-07-20",
+          "expected_reference": "PI-CUST-POST-20260620",
+          "expected_amount_untaxed": "300.00",
+          "expected_amount_tax": "39.00",
+          "expected_amount_total": "339.00",
+          "expected_amount_residual": "339.00",
+          "expected_line_ids": {"$fixture": "post_customer_line_ids"},
+          "reason": "客户发票复核完成",
+          "idempotency_key": "pi-v1-customer-invoice-post"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-vendor-bill-post",
+      "category": "ordinary",
+      "input": "过账主公司现有的 V3 供应商账单草稿，不要新建账单，也不要误选客户发票或手工分录过账。可信候选读取已核对：草稿 ID、in_invoice、单据绑定、业务绑定、供应商、采购日记账、人民币，发票日 2026-06-21、会计日 2026-06-23、到期日 2026-07-21、供应商参考号 PI-VEND-POST-20260621，未税 880.00、税额 52.80、价税合计和未清余额均为 932.80，完整行 ID 也已返回。原因是供应商账单复核完成。请完整传递十九项参数，先预览并等待审批。",
+      "expected": {
+        "capability_id": "acct.bill.vendor_post.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "move_id": {"$fixture": "post_vendor_bill_id"},
+          "expected_move_type": "in_invoice",
+          "expected_document_binding": {"$fixture": "post_vendor_document_binding"},
+          "expected_business_binding": {"$fixture": "post_vendor_business_binding"},
+          "expected_partner_id": {"$fixture": "vendor_id"},
+          "expected_journal_id": {"$fixture": "purchase_journal_id"},
+          "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_invoice_date": "2026-06-21",
+          "expected_accounting_date": "2026-06-23",
+          "expected_due_date": "2026-07-21",
+          "expected_reference": "PI-VEND-POST-20260621",
+          "expected_amount_untaxed": "880.00",
+          "expected_amount_tax": "52.80",
+          "expected_amount_total": "932.80",
+          "expected_amount_residual": "932.80",
+          "expected_line_ids": {"$fixture": "post_vendor_line_ids"},
+          "reason": "供应商账单复核完成",
+          "idempotency_key": "pi-v1-vendor-bill-post"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-refund-draft-cancel",
+      "category": "ordinary",
+      "input": "取消主公司这张由 V3 创建且从未过账的客户退款草稿，不要取消客户发票或手工分录，也不得删除或修改来源发票。可信候选读取已核对：退款 ID、out_refund、来源发票 ID、退款单据与业务绑定、来源单据与业务绑定、客户、销售日记账、人民币、退款日 2026-06-24、退款总额 128.50，以及退款和来源发票各自完整且不同的行 ID。原因是退款草稿重复录入。请完整传递十七项参数，先预览并等待审批。",
+      "expected": {
+        "capability_id": "acct.refund.draft_cancel.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"},
+          "move_id": {"$fixture": "refund_draft_id"},
+          "expected_move_type": "out_refund",
+          "expected_origin_move_id": {"$fixture": "refund_origin_invoice_id"},
+          "expected_document_binding": {"$fixture": "refund_draft_document_binding"},
+          "expected_business_binding": {"$fixture": "refund_draft_business_binding"},
+          "expected_origin_document_binding": {"$fixture": "refund_origin_document_binding"},
+          "expected_origin_business_binding": {"$fixture": "refund_origin_business_binding"},
+          "expected_partner_id": {"$fixture": "customer_id"},
+          "expected_journal_id": {"$fixture": "sales_journal_id"},
+          "expected_currency_id": {"$fixture": "currency_cny_id"},
+          "expected_refund_date": "2026-06-24",
+          "expected_total_amount": "128.50",
+          "expected_line_ids": {"$fixture": "refund_draft_line_ids"},
+          "expected_origin_line_ids": {"$fixture": "refund_origin_line_ids"},
+          "reason": "退款草稿重复录入",
+          "idempotency_key": "pi-v1-refund-draft-cancel"
         }
       }
     },

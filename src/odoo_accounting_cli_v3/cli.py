@@ -4876,9 +4876,11 @@ _REQUIRED_READ_CAPABILITY_IDS = frozenset(
         "acct.ar.open_items.v1",
         "acct.diagnostics.operation_read.v1",
         "acct.gl.trial_balance.v1",
+        "acct.move.document_post_eligibility.v1",
         "acct.move.draft_cancel_eligibility.v1",
         "acct.multicompany.consolidated_read.v1",
         "acct.multicurrency.balance_read.v1",
+        "acct.refund.draft_cancel_eligibility.v1",
         "acct.registry.list.v1",
         "acct.report.financial_read.v1",
         "acct.tax.report_read.v1",
@@ -4995,12 +4997,7 @@ def _read_capability_readiness_report(
         if key != "capability_id"
     }
     trusted_handler_kind = trusted_read_handlers.get(capability.id)
-    if trusted_handler_kind == "odoo":
-        read_receipt_properties_match = (
-            receipt_properties_without_capability
-            == expected_receipt_properties_without_capability
-        )
-    elif trusted_handler_kind == "trusted_local_persistence":
+    if trusted_handler_kind in _TRUSTED_READ_HANDLER_KINDS:
         read_receipt_properties_match = (
             set(receipt_properties_without_capability)
             == set(expected_receipt_properties_without_capability)
@@ -5015,6 +5012,20 @@ def _read_capability_readiness_report(
         )
     else:
         read_receipt_properties_match = False
+    receipt_capability_schema_matches = (
+        receipt_capability_schema
+        == _READ_RECEIPT_PROPERTY_SCHEMAS["capability_id"]
+        or receipt_capability_schema
+        == {"type": "string", "enum": [capability.id]}
+        or (
+            isinstance(receipt_capability_schema, dict)
+            and _schema_has_at_least_constraints(
+                receipt_capability_schema,
+                _READ_RECEIPT_PROPERTY_SCHEMAS["capability_id"],
+            )
+            and receipt_capability_schema.get("enum") == [capability.id]
+        )
+    )
     evidence = data["evidence"]
     evidence_level = evidence.get("level")
     evidence_receipts = evidence.get("receipts", [])
@@ -5062,11 +5073,7 @@ def _read_capability_readiness_report(
             and isinstance(output_required, list)
             and "receipt" in output_required
             and read_receipt_properties_match
-            and receipt_capability_schema
-            in (
-                _READ_RECEIPT_PROPERTY_SCHEMAS["capability_id"],
-                {"type": "string", "enum": [capability.id]},
-            )
+            and receipt_capability_schema_matches
             and set(receipt_required) == _READ_RECEIPT_FIELDS
         ),
         "strict_input_schema": _is_strict_object_schema(data["input_schema"]),

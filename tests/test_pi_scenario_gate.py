@@ -648,8 +648,8 @@ class PiScenarioGateTest(unittest.TestCase):
             for scenario in self.corpus["scenarios"]
         }
         self.assertEqual(covered, registered)
-        self.assertEqual(self.corpus["frozen_revision"], 6)
-        self.assertEqual(len(self.corpus["scenarios"]), 38)
+        self.assertEqual(self.corpus["frozen_revision"], 7)
+        self.assertEqual(len(self.corpus["scenarios"]), 43)
         self.assertEqual(
             {scenario["category"] for scenario in self.corpus["scenarios"]},
             {
@@ -801,6 +801,165 @@ class PiScenarioGateTest(unittest.TestCase):
         )
         self.assertTrue(
             all("手工分录" in scenario["input"] for scenario in move_post_scenarios)
+        )
+
+        document_lifecycle_scenarios = {
+            scenario["id"]: scenario
+            for scenario in self.corpus["scenarios"]
+            if scenario["expected"]["capability_id"]
+            in {
+                "acct.move.document_post_eligibility.v1",
+                "acct.refund.draft_cancel_eligibility.v1",
+                "acct.invoice.customer_post.v1",
+                "acct.bill.vendor_post.v1",
+                "acct.refund.draft_cancel.v1",
+            }
+        }
+        self.assertEqual(
+            {
+                scenario_id: scenario["expected"]["capability_id"]
+                for scenario_id, scenario in document_lifecycle_scenarios.items()
+            },
+            {
+                "pi-v1-document-post-eligibility-read": (
+                    "acct.move.document_post_eligibility.v1"
+                ),
+                "pi-v1-refund-draft-cancel-eligibility-read": (
+                    "acct.refund.draft_cancel_eligibility.v1"
+                ),
+                "pi-v1-customer-invoice-post": "acct.invoice.customer_post.v1",
+                "pi-v1-vendor-bill-post": "acct.bill.vendor_post.v1",
+                "pi-v1-refund-draft-cancel": "acct.refund.draft_cancel.v1",
+            },
+        )
+        for scenario_id in (
+            "pi-v1-document-post-eligibility-read",
+            "pi-v1-refund-draft-cancel-eligibility-read",
+        ):
+            self.assertEqual(
+                set(
+                    document_lifecycle_scenarios[scenario_id]["expected"][
+                        "material_parameters"
+                    ]
+                ),
+                {"company_id", "move_id", "expected_move_type"},
+            )
+        post_fields = {
+            "company_id",
+            "move_id",
+            "expected_move_type",
+            "expected_document_binding",
+            "expected_business_binding",
+            "expected_partner_id",
+            "expected_journal_id",
+            "expected_currency_id",
+            "expected_invoice_date",
+            "expected_accounting_date",
+            "expected_due_date",
+            "expected_reference",
+            "expected_amount_untaxed",
+            "expected_amount_tax",
+            "expected_amount_total",
+            "expected_amount_residual",
+            "expected_line_ids",
+            "reason",
+            "idempotency_key",
+        }
+        for scenario_id in (
+            "pi-v1-customer-invoice-post",
+            "pi-v1-vendor-bill-post",
+        ):
+            self.assertEqual(
+                set(
+                    document_lifecycle_scenarios[scenario_id]["expected"][
+                        "material_parameters"
+                    ]
+                ),
+                post_fields,
+            )
+        self.assertEqual(
+            set(
+                document_lifecycle_scenarios[
+                    "pi-v1-refund-draft-cancel"
+                ]["expected"]["material_parameters"]
+            ),
+            {
+                "company_id",
+                "move_id",
+                "expected_move_type",
+                "expected_origin_move_id",
+                "expected_document_binding",
+                "expected_business_binding",
+                "expected_origin_document_binding",
+                "expected_origin_business_binding",
+                "expected_partner_id",
+                "expected_journal_id",
+                "expected_currency_id",
+                "expected_refund_date",
+                "expected_total_amount",
+                "expected_line_ids",
+                "expected_origin_line_ids",
+                "reason",
+                "idempotency_key",
+            },
+        )
+        resolved_document_lifecycle = {
+            scenario_id: resolve_fixture_bindings(
+                scenario["expected"]["material_parameters"], self._bindings()
+            )
+            for scenario_id, scenario in document_lifecycle_scenarios.items()
+        }
+        customer_post = resolved_document_lifecycle[
+            "pi-v1-customer-invoice-post"
+        ]
+        vendor_post = resolved_document_lifecycle["pi-v1-vendor-bill-post"]
+        refund_cancel = resolved_document_lifecycle[
+            "pi-v1-refund-draft-cancel"
+        ]
+        self.assertEqual(
+            {
+                customer_post["move_id"],
+                vendor_post["move_id"],
+                refund_cancel["move_id"],
+                refund_cancel["expected_origin_move_id"],
+            },
+            {1701, 1711, 1721, 1731},
+        )
+        binding_values = {
+            customer_post["expected_document_binding"],
+            customer_post["expected_business_binding"],
+            vendor_post["expected_document_binding"],
+            vendor_post["expected_business_binding"],
+            refund_cancel["expected_document_binding"],
+            refund_cancel["expected_business_binding"],
+            refund_cancel["expected_origin_document_binding"],
+            refund_cancel["expected_origin_business_binding"],
+        }
+        self.assertEqual(len(binding_values), 8)
+        self.assertTrue(all(len(value) == 64 for value in binding_values))
+        line_id_groups = (
+            customer_post["expected_line_ids"],
+            vendor_post["expected_line_ids"],
+            refund_cancel["expected_line_ids"],
+            refund_cancel["expected_origin_line_ids"],
+        )
+        self.assertTrue(
+            all(group == sorted(set(group)) for group in line_id_groups)
+        )
+        self.assertEqual(
+            len(set().union(*(set(group) for group in line_id_groups))),
+            sum(len(group) for group in line_id_groups),
+        )
+        self.assertEqual(customer_post["expected_invoice_date"], "2026-06-20")
+        self.assertEqual(vendor_post["expected_invoice_date"], "2026-06-21")
+        self.assertEqual(refund_cancel["expected_refund_date"], "2026-06-24")
+        self.assertEqual(
+            {
+                customer_post["expected_currency_id"],
+                vendor_post["expected_currency_id"],
+                refund_cancel["expected_currency_id"],
+            },
+            {self._bindings()["currency_cny_id"]},
         )
 
         payment_cancel_scenarios = [
@@ -1082,6 +1241,15 @@ class PiScenarioGateTest(unittest.TestCase):
                 scenario["expected"]["material_parameters"], self._bindings()
             )
             self._assert_write_parameter_binding(trace, resolved)
+        for scenario_id in (
+            "pi-v1-customer-invoice-post",
+            "pi-v1-vendor-bill-post",
+            "pi-v1-refund-draft-cancel",
+        ):
+            self._assert_write_parameter_binding(
+                traces[scenario_id],
+                resolved_document_lifecycle[scenario_id],
+            )
         payment_cancel_trace = traces[payment_cancel_scenario["id"]]
         resolved_payment_cancel = resolve_fixture_bindings(
             payment_cancel_scenario["expected"]["material_parameters"],
@@ -1206,8 +1374,8 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertEqual(
             report["trace_coverage"],
             {
-                "captured": 38,
-                "expected": 38,
+                "captured": 43,
+                "expected": 43,
                 "passed": True,
                 "missing_scenario_ids": [],
             },
@@ -1221,25 +1389,25 @@ class PiScenarioGateTest(unittest.TestCase):
             report["runtime_evidence"],
             {
                 "verified": True,
-                "verified_trace_count": 31,
-                "expected_trace_count": 31,
-                "read_exchange_count": 13,
-                "write_exchange_count": 18,
-                "write_authority_signature_verified_count": 18,
+                "verified_trace_count": 36,
+                "expected_trace_count": 36,
+                "read_exchange_count": 15,
+                "write_exchange_count": 21,
+                "write_authority_signature_verified_count": 21,
                 "acl_independently_rechecked": False,
             },
         )
         for gate_id in ("F01", "F02", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 38)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 38)
+            self.assertEqual(report["gates"][gate_id]["numerator"], 43)
+            self.assertEqual(report["gates"][gate_id]["denominator"], 43)
             self.assertEqual(report["gates"][gate_id]["percent"], "100.00")
             self.assertTrue(report["gates"][gate_id]["passed"])
-        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
-        self.assertEqual(report["gates"]["F03"]["denominator"], 31)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 36)
+        self.assertEqual(report["gates"]["F03"]["denominator"], 36)
         self.assertEqual(report["gates"]["F03"]["percent"], "100.00")
         self.assertTrue(report["gates"]["F03"]["passed"])
-        self.assertEqual(report["gates"]["F04"]["numerator"], 18)
-        self.assertEqual(report["gates"]["F04"]["denominator"], 18)
+        self.assertEqual(report["gates"]["F04"]["numerator"], 21)
+        self.assertEqual(report["gates"]["F04"]["denominator"], 21)
         self.assertEqual(report["gates"]["F04"]["percent"], "100.00")
         self.assertTrue(report["gates"]["F04"]["passed"])
 
@@ -2028,7 +2196,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F05"]["numerator"], 37)
+        self.assertEqual(report["gates"]["F05"]["numerator"], 42)
         self.assertFalse(report["gates"]["F05"]["passed"])
         failure = report["gates"]["F05"]["failures"]["pi-v1-refund"]
         self.assertIn("assistant_final.status", failure["issues"])
@@ -2141,7 +2309,7 @@ class PiScenarioGateTest(unittest.TestCase):
                     TEST_ATTESTATION_KEYS,
                     expected_release_sha256=TEST_RELEASE_SHA256,
                 )
-                self.assertEqual(report["gates"]["F05"]["numerator"], 37)
+                self.assertEqual(report["gates"]["F05"]["numerator"], 42)
                 self.assertFalse(report["gates"]["F05"]["passed"])
                 failure = report["gates"]["F05"]["failures"]["pi-v1-refund"]
                 self.assertIn(f"execution_refused.{field}", failure["issues"])
@@ -2245,7 +2413,7 @@ class PiScenarioGateTest(unittest.TestCase):
                         expected_release_sha256=TEST_RELEASE_SHA256,
                     )
                     self.assertEqual(
-                        report["gates"]["F05"]["numerator"], 37
+                        report["gates"]["F05"]["numerator"], 42
                     )
                     self.assertFalse(report["gates"]["F05"]["passed"])
                     failure = report["gates"]["F05"]["failures"][
@@ -2381,8 +2549,8 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_selection_gate_fails_below_95_percent(self) -> None:
         trace_document = self._perfect_trace_document()
-        wrong_id = self.corpus["scenarios"][2]["expected"]["capability_id"]
-        for trace in trace_document["traces"][:2]:
+        wrong_id = "acct.refund.draft_cancel.v1"
+        for trace in trace_document["traces"][:3]:
             trace["events"][1]["data"]["capability_id"] = wrong_id
         self._resign(trace_document)
         report = score_documents(
@@ -2392,9 +2560,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 36)
-        self.assertEqual(report["gates"]["F01"]["denominator"], 38)
-        self.assertEqual(report["gates"]["F01"]["percent"], "94.74")
+        self.assertEqual(report["gates"]["F01"]["numerator"], 40)
+        self.assertEqual(report["gates"]["F01"]["denominator"], 43)
+        self.assertEqual(report["gates"]["F01"]["percent"], "93.02")
         self.assertEqual(report["gates"]["F01"]["minimum_percent"], "95.00")
         self.assertFalse(report["gates"]["F01"]["passed"])
         self.assertFalse(report["acceptance_passed"])
@@ -2412,8 +2580,8 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 37)
-        self.assertEqual(report["gates"]["F01"]["percent"], "97.37")
+        self.assertEqual(report["gates"]["F01"]["numerator"], 42)
+        self.assertEqual(report["gates"]["F01"]["percent"], "97.67")
         self.assertTrue(report["gates"]["F01"]["passed"])
 
     def test_clarification_and_parameter_loss_are_scored_independently(self) -> None:
@@ -2431,8 +2599,8 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 38)
-        self.assertEqual(report["gates"]["F02"]["numerator"], 37)
+        self.assertEqual(report["gates"]["F01"]["numerator"], 43)
+        self.assertEqual(report["gates"]["F02"]["numerator"], 42)
         self.assertEqual(len(report["gates"]["F02"]["failures"]), 1)
 
         parameter_document = self._perfect_trace_document()
@@ -2468,7 +2636,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 30)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 35)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -2492,7 +2660,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 30)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 35)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -2535,8 +2703,8 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F02"]["numerator"], 37)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F02"]["numerator"], 42)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 36)
         self.assertIn(
             "company_id",
             report["gates"]["F02"]["failures"]["pi-v1-registry-list"][
@@ -2558,14 +2726,14 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertFalse(report["trace_coverage"]["passed"])
         self.assertEqual(report["trace_coverage"]["missing_scenario_ids"], [missing_id])
         for gate_id in ("F01", "F02", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 37)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 38)
+            self.assertEqual(report["gates"][gate_id]["numerator"], 42)
+            self.assertEqual(report["gates"][gate_id]["denominator"], 43)
             self.assertIn(missing_id, report["gates"][gate_id]["failures"])
-        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
-        self.assertEqual(report["gates"]["F03"]["denominator"], 31)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 36)
+        self.assertEqual(report["gates"]["F03"]["denominator"], 36)
         self.assertNotIn(missing_id, report["gates"]["F03"]["failures"])
-        self.assertEqual(report["gates"]["F04"]["numerator"], 18)
-        self.assertEqual(report["gates"]["F04"]["denominator"], 18)
+        self.assertEqual(report["gates"]["F04"]["numerator"], 21)
+        self.assertEqual(report["gates"]["F04"]["denominator"], 21)
 
     def test_trace_is_bound_to_corpus_input_and_rejects_unknown_event_fields(self) -> None:
         wrong_release = self._perfect_trace_document()

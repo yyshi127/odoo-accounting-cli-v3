@@ -219,9 +219,30 @@ def test_contracts_for_capability_is_complete_and_stably_sorted(
 
 @pytest.mark.parametrize(
     "capability_id",
-    ["acct.move.draft_cancel.v1", "acct.recovery.execute.v1"],
+    [
+        "acct.move.draft_cancel.v1",
+        "acct.refund.draft_cancel.v1",
+        "acct.recovery.execute.v1",
+    ],
 )
 def test_terminal_capabilities_have_no_follow_on_executable_recovery(
+    capability_id,
+):
+    assert contracts_for_capability(capability_id) == ()
+    assert all(
+        contract.origin_capability_id != capability_id
+        for contract in RECOVERY_ACTION_CONTRACTS.values()
+    )
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    [
+        "acct.invoice.customer_post.v1",
+        "acct.bill.vendor_post.v1",
+    ],
+)
+def test_document_post_requires_a_future_separate_credit_note_capability(
     capability_id,
 ):
     assert contracts_for_capability(capability_id) == ()
@@ -285,6 +306,11 @@ def test_selection_rejects_every_single_field_mismatch_with_one_stable_error(
         (
             "origin_capability_id",
             "acct.recovery.execute.v1",
+            "terminal capabilities",
+        ),
+        (
+            "origin_capability_id",
+            "acct.refund.draft_cancel.v1",
             "terminal capabilities",
         ),
         ("method", "", "recovery method is invalid"),

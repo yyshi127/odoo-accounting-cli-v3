@@ -4,7 +4,7 @@ Status: multi-turn persistence design baseline; not an implemented chat-thread
 store or production evidence. The separate FD4 terminal-answer admission
 control is implemented and contract-tested, but it is not the complete
 multi-turn design below and does not constitute the retained live Pi trace or
-95%-selection evidence for the frozen 38-scenario gate.
+95%-selection evidence for the frozen 43-scenario gate.
 
 This design keeps V2 intact and defines a separate V3 chat path. It authorizes
 no Odoo write.

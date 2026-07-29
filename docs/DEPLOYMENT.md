@@ -1161,7 +1161,7 @@ and negative-test results. A command exit code alone is not evidence.
 
 ## Dedicated write-sandbox candidate verification
 
-All 20 currently registered write capabilities are closed by default. Local
+All 23 currently registered write capabilities are closed by default. Local
 contracts, handlers, and tests do not authorize staging. After the complete
 local gate, create a new reviewed release that stages only the selected
 capabilities for a dedicated sandbox. The sandbox must have its own database
@@ -1175,7 +1175,8 @@ writes with 16 state-dependent contracts; draft versus posted invoice, bill,
 refund, and period-adjustment results intentionally select different actions.
 That catalog count is not the current write-capability count. The original
 draft-cancel and recovery-execute paths add no follow-on contracts, and the six
-later writes use their separately approved cancellation/reversal capability or
+later writes plus the three Dev259 document-lifecycle writes use their
+separately approved cancellation/reversal capability or
 their explicit terminal/manual-escalation policy. A local passing test must
 prove the exact action/guard graph, pre-action fingerprints,
 ACL/company binding, tombstone absence, action-specific financial oracle, and
@@ -1197,6 +1198,63 @@ Odoo receipt. The candidate-read contract is registered for test staging only;
 its strict-schema, ACL, cross-company, and parameter-transit tests are retained.
 No real-sandbox Odoo eligibility receipt or automation-safety receipt exists
 yet, so draft cancellation remains disabled.
+
+The Dev259 document-lifecycle contracts add two eligibility reads and three
+writes. These arrows describe the required Pi/deployment workflow, not a
+cryptographic receipt chain inside the current write input:
+
+- `acct.move.document_post_eligibility.v1` feeds only
+  `acct.invoice.customer_post.v1` or `acct.bill.vendor_post.v1`; and
+- `acct.refund.draft_cancel_eligibility.v1` feeds only
+  `acct.refund.draft_cancel.v1`.
+
+The reads are `contract_tested` and staged only for `test`; the writes are
+`declared`, unstaged, and disabled. None has a retained real-Odoo receipt.
+Before any selected write can enter sandbox planning, retain the exact signed
+eligibility response under the same release, registry, user, company, database,
+move IDs, line IDs, dates, amounts, and document/business bindings. Posting
+must verify the exact resulting posted graph. Refund cancellation must verify
+the cancelled refund plus an unchanged unique posted origin; it must never
+delete the refund. The write schemas do not currently carry an eligibility
+receipt/digest; each write precheck independently reconstructs the Odoo graph.
+The sandbox evidence must therefore correlate the read and write externally
+rather than claim an implemented receipt-chaining control.
+
+The current customer-invoice/vendor-bill posting slice admits only a target
+whose relevant `customer_rank`/`supplier_rank` is exactly `0` before
+`action_post`, then requires that rank to be exactly `1` in the verified
+postcommit graph. This bounded handling of the observed Odoo 19 side effect is
+not generally production-applicable to existing-ranked partners or unreviewed
+module extensions.
+
+The Dev259 eligibility oracle further returns `eligible:true` only for a
+complete productless, taxless, undiscounted financial graph with one
+receivable/payable maturity line. Taxed, product, discounted, and complex
+payment-term documents fail closed. Do not promote this bounded slice as full
+invoice, bill, or refund coverage.
+
+The eligibility check reconstructs a normalized graph and requires both hashes
+to match. For the refund origin, exactly one double-hash candidate must match:
+creation recorded `posting_mode:"post"`, or creation recorded
+`posting_mode:"draft"` while the current document is now posted. The draft
+candidate proves only the binding stored at creation. It does not record which
+later caller or entry point invoked `action_post`, and must not be cited as
+proof that the controlled posting capability performed the transition.
+
+The current create-to-eligibility reconstruction may also reject an
+economically equivalent document because Odoo does not retain lexical decimal
+spelling such as `100` versus `100.00`, tax-ID order is normalized, and invoice
+lines are stably reordered by `line_reference`. The original create-v1 paths
+did not enforce one matching canonical representation for all three cases.
+Treat these as safe false negatives. A future versioned canonical
+binding/provenance migration, not a compatibility guess, is required before
+admitting affected records.
+
+The installed-module graph proves only that the module name/version set stayed
+stable; it is not a semantic override allowlist. Before staging or enabling any
+of these writes, complete a real Odoo 19 sandbox lifecycle and explicitly
+review target-module overrides of `action_post`, `account.move.write`, and
+postcommit behavior. Graph equality alone cannot satisfy that gate.
 
 Before any provisioning action, run the exact immutable release member
 `deployment/dev18/sandbox_capacity_gate.py` as specified in

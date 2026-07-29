@@ -328,7 +328,11 @@ def test_environment_fail_closed_matrix(environment, message):
 
 @pytest.mark.parametrize(
     "origin_capability_id",
-    ["acct.move.draft_cancel.v1", "acct.recovery.execute.v1"],
+    [
+        "acct.move.draft_cancel.v1",
+        "acct.refund.draft_cancel.v1",
+        "acct.recovery.execute.v1",
+    ],
 )
 def test_terminal_capabilities_cannot_execute_follow_on_recovery(
     origin_capability_id,

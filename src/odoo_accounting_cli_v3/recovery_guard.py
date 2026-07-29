@@ -38,6 +38,7 @@ _TERMINAL_CAPABILITY_IDS = frozenset(
     {
         "acct.move.draft_cancel.v1",
         "acct.move.draft_cancel.v2",
+        "acct.refund.draft_cancel.v1",
         "acct.recovery.execute.v1",
     }
 )

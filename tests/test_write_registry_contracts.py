@@ -42,6 +42,11 @@ RECONCILIATION_UNDO_WRITE_IDS = (
 BANK_STATEMENT_COMPENSATE_WRITE_IDS = (
     "acct.bank.statement_compensate.v1",
 )
+DOCUMENT_LIFECYCLE_WRITE_IDS = (
+    "acct.invoice.customer_post.v1",
+    "acct.bill.vendor_post.v1",
+    "acct.refund.draft_cancel.v1",
+)
 WRITE_IDS = (
     *BASELINE_WRITE_IDS[:13],
     *PHASE_B_WRITE_IDS,
@@ -49,6 +54,7 @@ WRITE_IDS = (
     BASELINE_WRITE_IDS[13],
     *RECONCILIATION_UNDO_WRITE_IDS,
     *BANK_STATEMENT_COMPENSATE_WRITE_IDS,
+    *DOCUMENT_LIFECYCLE_WRITE_IDS,
 )
 
 EXPECTED_INPUT_FIELDS = {
@@ -159,6 +165,36 @@ EXPECTED_INPUT_FIELDS = {
     "acct.recovery.execute.v1": {
         "company_id", "origin_operation_id", "expected_recovery_plan_digest",
         "recovery_date", "reason", "idempotency_key",
+    },
+    "acct.invoice.customer_post.v1": {
+        "company_id", "move_id", "expected_move_type",
+        "expected_document_binding", "expected_business_binding",
+        "expected_partner_id", "expected_journal_id", "expected_currency_id",
+        "expected_invoice_date", "expected_accounting_date",
+        "expected_due_date", "expected_reference",
+        "expected_amount_untaxed", "expected_amount_tax",
+        "expected_amount_total", "expected_amount_residual",
+        "expected_line_ids", "reason", "idempotency_key",
+    },
+    "acct.bill.vendor_post.v1": {
+        "company_id", "move_id", "expected_move_type",
+        "expected_document_binding", "expected_business_binding",
+        "expected_partner_id", "expected_journal_id", "expected_currency_id",
+        "expected_invoice_date", "expected_accounting_date",
+        "expected_due_date", "expected_reference",
+        "expected_amount_untaxed", "expected_amount_tax",
+        "expected_amount_total", "expected_amount_residual",
+        "expected_line_ids", "reason", "idempotency_key",
+    },
+    "acct.refund.draft_cancel.v1": {
+        "company_id", "move_id", "expected_move_type",
+        "expected_origin_move_id", "expected_document_binding",
+        "expected_business_binding", "expected_origin_document_binding",
+        "expected_origin_business_binding", "expected_partner_id",
+        "expected_journal_id", "expected_currency_id",
+        "expected_refund_date", "expected_total_amount",
+        "expected_line_ids", "expected_origin_line_ids", "reason",
+        "idempotency_key",
     },
 }
 
@@ -457,6 +493,58 @@ VALID_INPUTS = {
         "reason": "Cancel duplicate pristine draft entry",
         "idempotency_key": "cancel-draft-entry-883",
     },
+    "acct.invoice.customer_post.v1": {
+        "company_id": 7, "move_id": 901,
+        "expected_move_type": "out_invoice",
+        "expected_document_binding": "1" * 64,
+        "expected_business_binding": "2" * 64,
+        "expected_partner_id": 101, "expected_journal_id": 5,
+        "expected_currency_id": 12, "expected_invoice_date": "2026-07-15",
+        "expected_accounting_date": "2026-07-15",
+        "expected_due_date": "2026-08-15",
+        "expected_reference": "INV-EXT-901",
+        "expected_amount_untaxed": "100.00",
+        "expected_amount_tax": "10.00",
+        "expected_amount_total": "110.00",
+        "expected_amount_residual": "110.00",
+        "expected_line_ids": [9011, 9012, 9013],
+        "reason": "Post the approved customer invoice",
+        "idempotency_key": "post-customer-invoice-901",
+    },
+    "acct.bill.vendor_post.v1": {
+        "company_id": 7, "move_id": 902,
+        "expected_move_type": "in_invoice",
+        "expected_document_binding": "3" * 64,
+        "expected_business_binding": "4" * 64,
+        "expected_partner_id": 102, "expected_journal_id": 6,
+        "expected_currency_id": 12, "expected_invoice_date": "2026-07-15",
+        "expected_accounting_date": "2026-07-15",
+        "expected_due_date": "2026-08-15",
+        "expected_reference": "BILL-EXT-902",
+        "expected_amount_untaxed": "100.00",
+        "expected_amount_tax": "10.00",
+        "expected_amount_total": "110.00",
+        "expected_amount_residual": "110.00",
+        "expected_line_ids": [9021, 9022, 9023],
+        "reason": "Post the approved vendor bill",
+        "idempotency_key": "post-vendor-bill-902",
+    },
+    "acct.refund.draft_cancel.v1": {
+        "company_id": 7, "move_id": 903,
+        "expected_move_type": "out_refund",
+        "expected_origin_move_id": 901,
+        "expected_document_binding": "5" * 64,
+        "expected_business_binding": "6" * 64,
+        "expected_origin_document_binding": "1" * 64,
+        "expected_origin_business_binding": "2" * 64,
+        "expected_partner_id": 101, "expected_journal_id": 5,
+        "expected_currency_id": 12, "expected_refund_date": "2026-07-16",
+        "expected_total_amount": "110.00",
+        "expected_line_ids": [9031, 9032, 9033],
+        "expected_origin_line_ids": [9011, 9012, 9013],
+        "reason": "Cancel the duplicate unposted credit note",
+        "idempotency_key": "cancel-draft-refund-903",
+    },
 }
 
 
@@ -566,6 +654,7 @@ def _valid_v2_output(capability_id):
 
 def test_exact_write_capability_set_and_safety_gates_remain_closed():
     writes = _writes()
+    assert len(WRITE_IDS) == 23
     assert tuple(writes) == WRITE_IDS
     assert len(BASELINE_WRITE_IDS) == 14
     assert tuple(
@@ -593,6 +682,11 @@ def test_exact_write_capability_set_and_safety_gates_remain_closed():
         for capability_id in WRITE_IDS
         if capability_id in BANK_STATEMENT_COMPENSATE_WRITE_IDS
     ) == BANK_STATEMENT_COMPENSATE_WRITE_IDS
+    assert tuple(
+        capability_id
+        for capability_id in WRITE_IDS
+        if capability_id in DOCUMENT_LIFECYCLE_WRITE_IDS
+    ) == DOCUMENT_LIFECYCLE_WRITE_IDS
     for item in writes.values():
         assert item["evidence"] == {"level": "declared", "receipts": []}
         assert item.get("staged_environments", []) == []
@@ -1508,4 +1602,17 @@ def test_registered_write_capabilities_are_bound_to_control_and_odoo_layers():
     assert ODOO_WRITE_CAPABILITIES == registered_write_ids
     for capability_id, models in _ALLOWED_MODELS.items():
         assert models, f"{capability_id} has no auditable Odoo model allowlist"
-        assert all(model.startswith("account.") for model in models)
+        allowed_non_account_models = (
+            {"res.partner"}
+            if capability_id
+            in {
+                "acct.invoice.customer_post.v1",
+                "acct.bill.vendor_post.v1",
+            }
+            else set()
+        )
+        assert {
+            model
+            for model in models
+            if not model.startswith("account.")
+        } == allowed_non_account_models

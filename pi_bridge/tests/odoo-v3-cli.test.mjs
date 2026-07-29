@@ -743,6 +743,48 @@ function writeParameterFixtures() {
 			reason: "Post the separately approved V3 manual entry",
 			idempotency_key: "manual-entry-post-6003",
 		},
+		"acct.invoice.customer_post.v1": {
+			company_id: 7,
+			move_id: 6201,
+			expected_move_type: "out_invoice",
+			expected_document_binding: "9f06242fd95b9b9370c6e0ddb7cb9ab8da9f26f89b09dd807fd990067f0f9bc4",
+			expected_business_binding: "f8ee1a6a51089041ccab4461b459d3f38e1a581fc96f90a3f1784ed511e2946a",
+			expected_partner_id: 901,
+			expected_journal_id: 31,
+			expected_currency_id: 12,
+			expected_invoice_date: "2026-07-20",
+			expected_accounting_date: "2026-07-22",
+			expected_due_date: "2026-08-20",
+			expected_reference: "PI-CUST-POST-20260720",
+			expected_amount_untaxed: "300.00",
+			expected_amount_tax: "39.00",
+			expected_amount_total: "339.00",
+			expected_amount_residual: "339.00",
+			expected_line_ids: [6202, 6203],
+			reason: "Post the exactly bound pristine V3 customer invoice draft",
+			idempotency_key: "customer-invoice-post-6201",
+		},
+		"acct.bill.vendor_post.v1": {
+			company_id: 7,
+			move_id: 6211,
+			expected_move_type: "in_invoice",
+			expected_document_binding: "69efe284256fdc2fafc065de5bff6de63d99412a7acaeb534633ca3cd053e441",
+			expected_business_binding: "c7c56a414691e6375b936f5a48c7204401c8323432bfea94c2432bec76c8aa51",
+			expected_partner_id: 902,
+			expected_journal_id: 32,
+			expected_currency_id: 12,
+			expected_invoice_date: "2026-07-21",
+			expected_accounting_date: "2026-07-23",
+			expected_due_date: "2026-08-21",
+			expected_reference: "PI-VEND-POST-20260721",
+			expected_amount_untaxed: "880.00",
+			expected_amount_tax: "52.80",
+			expected_amount_total: "932.80",
+			expected_amount_residual: "932.80",
+			expected_line_ids: [6212, 6213],
+			reason: "Post the exactly bound pristine V3 vendor bill draft",
+			idempotency_key: "vendor-bill-post-6211",
+		},
 		"acct.move.draft_cancel.v2": {
 			company_id: 7,
 			move_id: 6004,
@@ -772,6 +814,25 @@ function writeParameterFixtures() {
 			expected_business_binding: "e".repeat(64),
 			reason: "Cancel the explicitly bound pristine draft invoice",
 			idempotency_key: "draft-cancel-6002",
+		},
+		"acct.refund.draft_cancel.v1": {
+			company_id: 7,
+			move_id: 6221,
+			expected_move_type: "out_refund",
+			expected_origin_move_id: 6231,
+			expected_document_binding: "358a0e5ce038e7bb74c813d04404102b341e656688396480714715fd88041255",
+			expected_business_binding: "e7b22d7ffe2753ed355ed4e8575467baf4681b6bc08736ae7c7e842d6c38c5aa",
+			expected_origin_document_binding: "055ed4b0362d4b47de3718149d0e80128e87418a644b167337835bdecc09e687",
+			expected_origin_business_binding: "1bccc8786b942ed137d6b75facd63c1075f5d72b988b40722c08b4d4833229d3",
+			expected_partner_id: 901,
+			expected_journal_id: 31,
+			expected_currency_id: 12,
+			expected_refund_date: "2026-07-24",
+			expected_total_amount: "128.50",
+			expected_line_ids: [6222, 6223],
+			expected_origin_line_ids: [6232, 6233],
+			reason: "Cancel the never-posted V3 customer credit note while preserving its bound origin",
+			idempotency_key: "refund-draft-cancel-6221",
 		},
 		"acct.recovery.execute.v1": {
 			company_id: 7,
@@ -1704,12 +1765,12 @@ test("complex financial parameters are retained byte-for-byte through the test b
 	assert.deepEqual(result.data.argv, ["operation", "prepare"]);
 });
 
-test("all 20 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
+test("all 23 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
 	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
 	const registry = JSON.parse(await readFile(registryPath, "utf8"));
 	const writeCapabilities = registry.capabilities.filter((item) => item.access === "write");
 	const fixtures = writeParameterFixtures();
-	assert.equal(writeCapabilities.length, 20);
+	assert.equal(writeCapabilities.length, 23);
 	assert.deepEqual(Object.keys(fixtures).sort(), writeCapabilities.map((item) => item.id).sort());
 
 	const run = createBoundRunner({

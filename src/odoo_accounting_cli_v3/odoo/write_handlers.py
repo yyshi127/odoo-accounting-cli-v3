@@ -11,6 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
+import re
 from typing import Any, Mapping
 
 from .module_graph import (
@@ -88,9 +89,12 @@ _CAPABILITIES = frozenset(
         "acct.period.adjustment_create.v1",
         "acct.journal.entry_create.v1",
         "acct.move.post.v1",
+        "acct.invoice.customer_post.v1",
+        "acct.bill.vendor_post.v1",
         "acct.move.reverse.v1",
         "acct.move.draft_cancel.v1",
         "acct.move.draft_cancel.v2",
+        "acct.refund.draft_cancel.v1",
         "acct.recovery.execute.v1",
         "acct.reconciliation.undo.v1",
         "acct.bank.statement_compensate.v1",
@@ -156,7 +160,8 @@ _MANUAL_RECOVERY_METHODS = {
 _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "account.move": (
         "name", "state", "move_type", "company_id", "journal_id", "currency_id",
-        "partner_id", "date", "invoice_date", "invoice_date_due", "ref",
+        "partner_id", "commercial_partner_id", "date", "invoice_date",
+        "invoice_date_due", "ref",
         "invoice_payment_term_id",
         "amount_untaxed", "amount_tax", "amount_total", "amount_residual", "payment_state",
         "line_ids", "invoice_line_ids", "reversed_entry_id", "reversal_move_ids",
@@ -290,9 +295,11 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "res.partner": (
         "name", "active", "company_id", "company_ids", "commercial_partner_id",
+        "customer_rank", "supplier_rank",
         "property_account_position_id",
         "property_account_receivable_id", "property_account_payable_id",
         "property_payment_term_id", "property_supplier_payment_term_id",
+        "create_uid", "create_date", "write_uid", "write_date",
     ),
     "account.tax": (
         "name", "active", "company_id", "type_tax_use", "tax_scope",
@@ -370,7 +377,8 @@ _REQUIRED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
     "account.move": frozenset(
         {
             "state", "move_type", "company_id", "journal_id", "currency_id",
-            "partner_id", "date", "line_ids", "odoo_cli_v3_document_binding",
+            "partner_id", "commercial_partner_id", "date", "line_ids",
+            "odoo_cli_v3_document_binding",
             "odoo_cli_v3_business_binding",
         }
     ),
@@ -423,6 +431,8 @@ _REQUIRED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
     "res.partner": frozenset(
         {
             "name", "active", "commercial_partner_id",
+            "customer_rank", "supplier_rank",
+            "create_uid", "create_date", "write_uid", "write_date",
             "property_account_receivable_id", "property_account_payable_id",
         }
     ),
@@ -1334,7 +1344,17 @@ class OdooWriteHandlers:
         for reference in execution.get("records", []):
             model_name = str(reference["model"])
             record_id = int(reference["record_id"])
-            records.append((model_name, self.record(model_name, record_id, company)))
+            records.append(
+                (
+                    model_name,
+                    self.record(
+                        model_name,
+                        record_id,
+                        company,
+                        shared=model_name in _SHARED_SNAPSHOT_MODELS,
+                    ),
+                )
+            )
         method = getattr(self, self.dispatch_name(capability_id, "verify"))
         if capability_id in {
             "acct.refund.create.v1",
@@ -1345,9 +1365,12 @@ class OdooWriteHandlers:
             "acct.depreciation.post.v1",
             "acct.deferred.create.v1",
             "acct.move.post.v1",
+            "acct.invoice.customer_post.v1",
+            "acct.bill.vendor_post.v1",
             "acct.move.reverse.v1",
             "acct.move.draft_cancel.v1",
             "acct.move.draft_cancel.v2",
+            "acct.refund.draft_cancel.v1",
             "acct.recovery.execute.v1",
             "acct.reconciliation.undo.v1",
             "acct.bank.statement_compensate.v1",
@@ -1487,9 +1510,12 @@ class OdooWriteHandlers:
             "acct.period.adjustment_create.v1": "adjustment",
             "acct.journal.entry_create.v1": "journal_entry_create",
             "acct.move.post.v1": "move_post",
+            "acct.invoice.customer_post.v1": "customer_invoice_post",
+            "acct.bill.vendor_post.v1": "vendor_bill_post",
             "acct.move.reverse.v1": "reversal",
             "acct.move.draft_cancel.v1": "draft_cancel",
             "acct.move.draft_cancel.v2": "draft_cancel_v2",
+            "acct.refund.draft_cancel.v1": "refund_draft_cancel",
             "acct.recovery.execute.v1": "recovery",
             "acct.reconciliation.undo.v1": "reconciliation_undo",
             "acct.bank.statement_compensate.v1": "bank_statement_compensate",
@@ -1747,6 +1773,58 @@ class OdooWriteHandlers:
         if getattr(partner, "active", True) is False:
             raise OdooWriteHandlerError("partner is inactive")
         return partner
+
+    def document_posting_partners(
+        self, partner_id: int, company: Any, *, vendor: bool
+    ) -> list[tuple[str, Any]]:
+        """Bind every partner record that Odoo 19 mutates while posting."""
+
+        partner = self.record(
+            "res.partner",
+            partner_id,
+            company,
+            write=True,
+            shared=True,
+        )
+        if getattr(partner, "active", True) is False:
+            raise OdooWriteHandlerError("partner is inactive")
+        commercial_partner_id = _record_id(
+            getattr(partner, "commercial_partner_id", None)
+        )
+        if commercial_partner_id is None:
+            raise OdooWriteHandlerError(
+                "document partner has no auditable commercial partner"
+            )
+        if commercial_partner_id != partner_id:
+            raise OdooWriteHandlerError(
+                "document posting requires the selected partner to be its "
+                "commercial partner so the rank lock and audit graph are exact"
+            )
+        commercial_partner = self.record(
+            "res.partner",
+            commercial_partner_id,
+            company,
+            write=True,
+            shared=True,
+        )
+        if getattr(commercial_partner, "active", True) is False:
+            raise OdooWriteHandlerError("commercial partner is inactive")
+        rank_field = "supplier_rank" if vendor else "customer_rank"
+        records = self.unique_records(
+            [
+                ("res.partner", partner),
+                ("res.partner", commercial_partner),
+            ]
+        )
+        for _model_name, record in records:
+            rank = getattr(record, rank_field, None)
+            if isinstance(rank, bool) or not isinstance(rank, int) or rank != 0:
+                raise OdooWriteHandlerError(
+                    "document posting requires a zero "
+                    + rank_field
+                    + " so the Odoo rank side effect is synchronous and auditable"
+                )
+        return records
 
     def check_account(self, account_id: int, company: Any) -> Any:
         account = self.record("account.account", account_id, company)
@@ -2726,7 +2804,15 @@ class OdooWriteHandlers:
                     "refund origin changed after approval"
                 )
 
-    def verify_refund(self, p, company, records, trusted_before=None):
+    def verify_refund(
+        self,
+        p,
+        company,
+        records,
+        trusted_before=None,
+        *,
+        require_origin_approval=True,
+    ):
         origin_moves = [
             record
             for model_name, record in records
@@ -2966,21 +3052,25 @@ class OdooWriteHandlers:
         )
         if str(getattr(refund, "payment_state", "not_paid")) != "not_paid":
             raise OdooWriteHandlerError("new refund payment state differs")
-        self.assert_refund_origin_approval(
-            origin, refund, company, trusted_before
-        )
+        if require_origin_approval:
+            self.assert_refund_origin_approval(
+                origin, refund, company, trusted_before
+            )
         self.assert_move_balanced(origin, company)
         self.assert_move_balanced(refund, company)
         self.assert_exact_move_graph(records, [origin, refund], company)
-        return [
+        checks = [
             "refund_type_matches", "origin_link_matches", "date_matches",
             "journal_matches", "currency_matches", "reason_matches",
             "document_binding_matches", "business_binding_matches",
             "payment_term_matches",
             "total_matches", "state_matches", "partial_lines_match",
             "linewise_full_refund_exact", "unpaid_residual_matches",
-            "origin_approval_matches", "move_balanced", "record_graph_exact",
+            "move_balanced", "record_graph_exact",
         ]
+        if require_origin_approval:
+            checks.append("origin_approval_matches")
+        return checks
 
     @staticmethod
     def payment_target_line_before(line: Any, move_id: int) -> dict[str, Any]:
@@ -7834,6 +7924,923 @@ class OdooWriteHandlers:
             "record_graph_exact",
         ]
 
+    def _assert_graph_matches_approved_before(
+        self,
+        records: list[tuple[str, Any]],
+        company: Any,
+        before: Mapping[tuple[str, int], dict[str, Any]],
+        *,
+        label: str,
+    ) -> None:
+        keys = {
+            (model_name, _record_id(record))
+            for model_name, record in records
+        }
+        if None in {record_id for _model_name, record_id in keys} or set(
+            before
+        ) != keys:
+            raise OdooWriteHandlerError(
+                f"{label} approved complete record graph differs"
+            )
+        for model_name, record in records:
+            self.assert_approved_record_delta(
+                model_name,
+                record,
+                company,
+                before.get((model_name, record.id)),
+                allowed_changed_fields=frozenset(),
+                label=label,
+            )
+
+    def _create_document_lines_from_graph(
+        self,
+        lines: list[Any],
+        *,
+        include_product_in_binding: bool,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        binding_lines: list[dict[str, Any]] = []
+        dependency_lines: list[dict[str, Any]] = []
+        seen_references: set[str] = set()
+        for line in lines:
+            reference = str(
+                getattr(line, "odoo_cli_v3_line_reference", "") or ""
+            )
+            name = str(getattr(line, "name", "") or "")
+            account_id = _record_id(getattr(line, "account_id", None))
+            product_id = _record_id(getattr(line, "product_id", None))
+            quantity = _decimal(
+                getattr(line, "quantity", None), "line quantity"
+            )
+            price_unit = _decimal(
+                getattr(line, "price_unit", None), "line price_unit"
+            )
+            tax_ids = _ids(getattr(line, "tax_ids", []))
+            if (
+                not reference
+                or reference in seen_references
+                or re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", reference
+                )
+                is None
+                or not name.strip()
+                or len(name) > 256
+                or account_id is None
+                or quantity <= 0
+                or price_unit < 0
+                or len(tax_ids) != len(set(tax_ids))
+                or len(tax_ids) > 8
+            ):
+                raise OdooWriteHandlerError(
+                    "document graph cannot reproduce its immutable binding"
+                )
+            seen_references.add(reference)
+            normalized = {
+                "line_reference": reference,
+                "name": name,
+                "account_id": account_id,
+                "quantity": _canonical_decimal(quantity, "line quantity"),
+                "price_unit": _canonical_decimal(
+                    price_unit, "line price_unit"
+                ),
+                "tax_ids": tax_ids,
+            }
+            dependency_line = {**normalized, "product_id": product_id}
+            dependency_lines.append(dependency_line)
+            if include_product_in_binding:
+                normalized = {**normalized, "product_id": product_id}
+            binding_lines.append(normalized)
+        if not 1 <= len(binding_lines) <= 32:
+            raise OdooWriteHandlerError(
+                "document graph cannot reproduce its immutable binding"
+            )
+        binding_lines.sort(key=lambda item: item["line_reference"])
+        dependency_lines.sort(key=lambda item: item["line_reference"])
+        return binding_lines, dependency_lines
+
+    def _create_document_parameters_from_graph(
+        self,
+        move: Any,
+        all_lines: list[Any],
+        company: Any,
+        *,
+        vendor: bool,
+    ) -> tuple[dict[str, Any], list[tuple[str, Any]]]:
+        invoice_line_ids = _ids(getattr(move, "invoice_line_ids", []))
+        keyed = {line.id: line for line in all_lines}
+        if (
+            not invoice_line_ids
+            or len(keyed) != len(all_lines)
+            or any(line_id not in keyed for line_id in invoice_line_ids)
+        ):
+            raise OdooWriteHandlerError(
+                "document graph cannot reproduce its immutable binding"
+            )
+        invoice_lines = [keyed[line_id] for line_id in invoice_line_ids]
+        binding_lines, dependency_lines = (
+            self._create_document_lines_from_graph(
+                invoice_lines, include_product_in_binding=True
+            )
+        )
+        parameters: dict[str, Any] = {
+            "company_id": company.id,
+            "partner_id": _record_id(getattr(move, "partner_id", None)),
+            "invoice_date": _as_date(
+                getattr(move, "invoice_date", None), "invoice_date"
+            ).isoformat(),
+            "accounting_date": _as_date(
+                getattr(move, "date", None), "accounting_date"
+            ).isoformat(),
+            "due_date": _as_date(
+                getattr(move, "invoice_date_due", None), "due_date"
+            ).isoformat(),
+            "currency_id": _record_id(getattr(move, "currency_id", None)),
+            "journal_id": _record_id(getattr(move, "journal_id", None)),
+            "posting_mode": "draft",
+            (
+                "vendor_reference" if vendor else "reference"
+            ): str(getattr(move, "ref", "") or ""),
+            "lines": binding_lines,
+        }
+        if (
+            parameters["partner_id"] is None
+            or parameters["currency_id"] is None
+            or parameters["journal_id"] is None
+            or not parameters[
+                "vendor_reference" if vendor else "reference"
+            ]
+            or len(
+                parameters[
+                    "vendor_reference" if vendor else "reference"
+                ]
+            )
+            > 256
+        ):
+            raise OdooWriteHandlerError(
+                "document graph cannot reproduce its immutable binding"
+            )
+        dependencies = self.check_document_lines(
+            dependency_lines, company, vendor=vendor
+        )
+        for line in all_lines:
+            account_id = _record_id(getattr(line, "account_id", None))
+            if account_id is None:
+                raise OdooWriteHandlerError(
+                    "document graph has an unbound journal item account"
+                )
+            dependencies.append(
+                (
+                    "account.account",
+                    self.check_account(account_id, company),
+                )
+            )
+        return parameters, self.unique_records(dependencies)
+
+    def _assert_create_document_bindings_from_graph(
+        self,
+        move: Any,
+        lines: list[Any],
+        company: Any,
+        *,
+        vendor: bool,
+        expected_document_binding: str,
+        expected_business_binding: str,
+        allowed_posting_modes: tuple[str, ...] = ("draft",),
+    ) -> tuple[list[tuple[str, Any]], dict[str, Any]]:
+        parameters, line_dependencies = (
+            self._create_document_parameters_from_graph(
+                move, lines, company, vendor=vendor
+            )
+        )
+        kind = "vendor_bill" if vendor else "customer_invoice"
+        stored_document_binding = str(
+            getattr(move, "odoo_cli_v3_document_binding", "") or ""
+        )
+        stored_business_binding = str(
+            getattr(move, "odoo_cli_v3_business_binding", "") or ""
+        )
+        if (
+            stored_document_binding != expected_document_binding
+            or stored_business_binding != expected_business_binding
+        ):
+            raise OdooWriteHandlerError(
+                "document graph cannot reproduce its immutable binding"
+            )
+        if (
+            not allowed_posting_modes
+            or len(allowed_posting_modes) != len(set(allowed_posting_modes))
+            or any(
+                posting_mode not in {"draft", "post"}
+                for posting_mode in allowed_posting_modes
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "document graph posting provenance is invalid"
+            )
+        matches = []
+        for posting_mode in allowed_posting_modes:
+            candidate = {**parameters, "posting_mode": posting_mode}
+            if (
+                self.document_binding(kind, candidate)
+                == stored_document_binding
+                and self.business_binding(kind, candidate)
+                == stored_business_binding
+            ):
+                matches.append(candidate)
+        if len(matches) != 1:
+            raise OdooWriteHandlerError(
+                "document graph cannot reproduce a unique immutable binding"
+            )
+        return line_dependencies, matches[0]
+
+    def _assert_refund_bindings_from_graph(
+        self,
+        refund: Any,
+        lines: list[Any],
+        origin: Any,
+        company: Any,
+        *,
+        vendor: bool,
+        expected_document_binding: str,
+        expected_business_binding: str,
+    ) -> list[tuple[str, Any]]:
+        invoice_line_ids = _ids(getattr(refund, "invoice_line_ids", []))
+        keyed = {line.id: line for line in lines}
+        if (
+            not invoice_line_ids
+            or len(keyed) != len(lines)
+            or any(line_id not in keyed for line_id in invoice_line_ids)
+        ):
+            raise OdooWriteHandlerError(
+                "refund graph cannot reproduce its immutable binding"
+            )
+        invoice_lines = [keyed[line_id] for line_id in invoice_line_ids]
+        binding_lines, dependency_lines = (
+            self._create_document_lines_from_graph(
+                invoice_lines, include_product_in_binding=False
+            )
+        )
+        reason = str(
+            getattr(refund, "odoo_cli_v3_reason", "") or ""
+        )
+        refund_date = str(getattr(refund, "date", "") or "")
+        invoice_date = str(
+            getattr(refund, "invoice_date", "") or ""
+        )
+        if (
+            not reason
+            or len(reason) > 512
+            or not refund_date
+            or invoice_date != refund_date
+        ):
+            raise OdooWriteHandlerError(
+                "refund graph cannot reproduce its immutable binding"
+            )
+        base = {
+            "company_id": company.id,
+            "origin_move_id": origin.id,
+            "refund_type": (
+                "vendor_debit_note"
+                if vendor
+                else "customer_credit_note"
+            ),
+            "refund_date": refund_date,
+            "journal_id": _record_id(getattr(refund, "journal_id", None)),
+            "currency_id": _record_id(
+                getattr(refund, "currency_id", None)
+            ),
+            "expected_total_amount": _canonical_decimal(
+                abs(
+                    _decimal(
+                        getattr(refund, "amount_total", None),
+                        "refund amount_total",
+                    )
+                ),
+                "refund amount_total",
+            ),
+            "reason": reason,
+            "posting_mode": "draft",
+        }
+        if base["journal_id"] is None or base["currency_id"] is None:
+            raise OdooWriteHandlerError(
+                "refund graph cannot reproduce its immutable binding"
+            )
+        candidates = [
+            {**base, "refund_mode": "full", "lines": []},
+            {
+                **base,
+                "refund_mode": "partial",
+                "lines": binding_lines,
+            },
+        ]
+        stored_document_binding = str(
+            getattr(refund, "odoo_cli_v3_document_binding", "") or ""
+        )
+        stored_business_binding = str(
+            getattr(refund, "odoo_cli_v3_business_binding", "") or ""
+        )
+        if (
+            stored_document_binding != expected_document_binding
+            or stored_business_binding != expected_business_binding
+        ):
+            raise OdooWriteHandlerError(
+                "refund graph cannot reproduce its immutable binding"
+            )
+        matches = [
+            candidate
+            for candidate in candidates
+            if self.document_binding("refund", candidate)
+            == stored_document_binding
+            and self.business_binding("refund", candidate)
+            == stored_business_binding
+        ]
+        if len(matches) != 1:
+            raise OdooWriteHandlerError(
+                "refund graph cannot reproduce a unique immutable binding"
+            )
+        refund_graph = self.unique_records(
+            [
+                *self.move_records(origin, company),
+                *self.move_records(refund, company),
+            ]
+        )
+        self.verify_refund(
+            matches[0],
+            company,
+            refund_graph,
+            require_origin_approval=False,
+        )
+        dependencies = self.check_document_lines(
+            dependency_lines, company, vendor=vendor
+        )
+        for line in lines:
+            account_id = _record_id(getattr(line, "account_id", None))
+            if account_id is None:
+                raise OdooWriteHandlerError(
+                    "refund graph has an unbound journal item account"
+                )
+            dependencies.append(
+                (
+                    "account.account",
+                    self.check_account(account_id, company),
+                )
+            )
+        return self.unique_records(dependencies)
+
+    def _existing_document_post_graph(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+        *,
+        vendor: bool,
+    ) -> tuple[
+        Any,
+        list[Any],
+        list[tuple[str, Any]],
+        list[tuple[str, Any]],
+    ]:
+        if self.context.trusted_recovery_plan is not None:
+            raise OdooWriteHandlerError(
+                "trusted recovery plan must be null for document posting"
+            )
+        expected_move_type = "in_invoice" if vendor else "out_invoice"
+        if p["expected_move_type"] != expected_move_type:
+            raise OdooWriteHandlerError(
+                "document posting move type is not fixed to its capability"
+            )
+        move = self.record("account.move", p["move_id"], company, write=True)
+        line_ids = _ids(getattr(move, "line_ids", []))
+        if line_ids != p["expected_line_ids"]:
+            raise OdooWriteHandlerError(
+                "document posting complete line graph differs"
+            )
+        lines = [
+            self.record(
+                "account.move.line", line_id, company, write=True
+            )
+            for line_id in line_ids
+        ]
+        self._assert_pristine_draft_document(
+            move,
+            lines,
+            company,
+            expected_state="draft",
+            vendor=vendor,
+        )
+        line_dependencies, graph_parameters = (
+            self._assert_create_document_bindings_from_graph(
+                move,
+                lines,
+                company,
+                vendor=vendor,
+                expected_document_binding=p[
+                    "expected_document_binding"
+                ],
+                expected_business_binding=p[
+                    "expected_business_binding"
+                ],
+            )
+        )
+        partner_records = self.document_posting_partners(
+            p["expected_partner_id"], company, vendor=vendor
+        )
+        partner = next(
+            record
+            for _model_name, record in partner_records
+            if record.id == p["expected_partner_id"]
+        )
+        commercial_partner_id = _record_id(
+            getattr(partner, "commercial_partner_id", None)
+        )
+        journal = self.check_journal(
+            {"journal_id": p["expected_journal_id"]},
+            company,
+            {"purchase" if vendor else "sale"},
+        )
+        if (
+            _record_id(getattr(move, "partner_id", None))
+            != p["expected_partner_id"]
+            or _record_id(getattr(move, "commercial_partner_id", None))
+            != commercial_partner_id
+            or _record_id(getattr(move, "journal_id", None))
+            != p["expected_journal_id"]
+            or _record_id(getattr(move, "currency_id", None))
+            != p["expected_currency_id"]
+            or str(getattr(move, "invoice_date", ""))
+            != p["expected_invoice_date"]
+            or str(getattr(move, "date", ""))
+            != p["expected_accounting_date"]
+            or str(getattr(move, "invoice_date_due", ""))
+            != p["expected_due_date"]
+            or str(getattr(move, "ref", "") or "")
+            != p["expected_reference"]
+        ):
+            raise OdooWriteHandlerError(
+                "document posting approved identity differs"
+            )
+        if (
+            _decimal(
+                getattr(move, "amount_total", None), "amount_total"
+            )
+            <= 0
+            or _decimal(
+                getattr(move, "amount_residual", None), "amount_residual"
+            )
+            <= 0
+        ):
+            raise OdooWriteHandlerError(
+                "document posting total and residual must be positive"
+            )
+        invoice_line_ids = _ids(getattr(move, "invoice_line_ids", []))
+        if (
+            not invoice_line_ids
+            or not set(invoice_line_ids).issubset(line_ids)
+        ):
+            raise OdooWriteHandlerError(
+                "document posting invoice line graph is incomplete"
+            )
+        for line in lines:
+            display_type = str(getattr(line, "display_type", "") or "")
+            if (
+                display_type
+                not in {"line_section", "line_subsection", "line_note"}
+                and _record_id(getattr(line, "partner_id", None))
+                != commercial_partner_id
+            ):
+                raise OdooWriteHandlerError(
+                    "document posting line partner would be normalized by Odoo"
+                )
+            if getattr(line, "matching_number", False) not in {
+                False,
+                None,
+                "",
+            }:
+                raise OdooWriteHandlerError(
+                    "document posting temporary reconciliation marker is forbidden"
+                )
+            if _decimal(
+                getattr(line, "deductible_amount", None),
+                "deductible_amount",
+            ) != Decimal("100"):
+                raise OdooWriteHandlerError(
+                    "document posting requires fully deductible journal items"
+                )
+        if _record_id(getattr(move, "partner_bank_id", None)) is not None:
+            raise OdooWriteHandlerError(
+                "document posting partner bank side effects are not allowlisted"
+            )
+        invoice_line_set = set(invoice_line_ids)
+        tax_lines = [
+            line
+            for line in lines
+            if line.id not in invoice_line_set
+            and _record_id(getattr(line, "tax_line_id", None)) is not None
+        ]
+        term_lines = [
+            line
+            for line in lines
+            if line.id not in invoice_line_set and line not in tax_lines
+        ]
+        expected_term_type = (
+            "liability_payable" if vendor else "asset_receivable"
+        )
+        if (
+            len(term_lines) != 1
+            or str(getattr(term_lines[0], "display_type", ""))
+            != "payment_term"
+            or str(
+                getattr(
+                    getattr(term_lines[0], "account_id", None),
+                    "account_type",
+                    "",
+                )
+            )
+            != expected_term_type
+        ):
+            raise OdooWriteHandlerError(
+                "document posting payment term graph differs"
+            )
+        currency = self.assert_currency(
+            p["expected_currency_id"], company, journal
+        )
+        for field in (
+            "amount_untaxed",
+            "amount_tax",
+            "amount_total",
+            "amount_residual",
+        ):
+            self.assert_amount(
+                getattr(move, field, None),
+                p[f"expected_{field}"],
+                currency,
+                f"expected_{field}",
+            )
+        if str(getattr(move, "payment_state", "")) != "not_paid":
+            raise OdooWriteHandlerError(
+                "document posting target is not fully unpaid"
+            )
+        if self.search_records(
+            "account.partial.reconcile",
+            [("exchange_move_id", "=", move.id)],
+            company,
+            limit=1,
+        ) or self.search_records(
+            "account.move",
+            [("tax_cash_basis_origin_move_id", "=", move.id)],
+            company,
+            limit=1,
+        ):
+            raise OdooWriteHandlerError(
+                "document posting target has exchange or CABA external effects"
+            )
+        has_taxes = any(
+            _ids(getattr(line, "tax_ids", []))
+            or _record_id(getattr(line, "tax_line_id", None)) is not None
+            for line in lines
+        )
+        self.assert_effective_open_date(
+            company,
+            p["expected_accounting_date"],
+            "expected_accounting_date",
+            journal=move.journal_id,
+            taxes=has_taxes,
+            move=move,
+        )
+        move_records = [
+            ("account.move", move),
+            *(("account.move.line", line) for line in lines),
+        ]
+        self.verify_document(
+            graph_parameters, company, move_records, vendor=vendor
+        )
+        records = [*move_records, *partner_records]
+        dependencies = self.unique_records(
+            [
+                ("res.company", company),
+                ("account.journal", journal),
+                ("res.currency", currency),
+                *line_dependencies,
+            ]
+        )
+        return move, lines, records, dependencies
+
+    def _precheck_existing_document_post(
+        self, p: dict[str, Any], company: Any, *, vendor: bool
+    ) -> dict[str, Any]:
+        move, lines, records, dependencies = (
+            self._existing_document_post_graph(
+                p, company, vendor=vendor
+            )
+        )
+        return {
+            "checks": [
+                "single_pristine_v3_draft_document",
+                "document_type_fixed_to_capability",
+                "complete_approved_line_graph",
+                "document_identity_amounts_and_bindings_match",
+                "fully_unpaid_and_unreconciled",
+                "partner_and_commercial_partner_rank_zero_and_write_acl",
+                "line_partner_matching_and_deductibility_side_effects_absent",
+                "edi_ocr_purchase_stock_auto_post_and_external_effects_absent",
+                "posting_date_open",
+                "write_acl",
+            ],
+            "before": self.snapshots(records, company),
+            "dependencies": self.snapshots(dependencies, company),
+        }
+
+    def precheck_customer_invoice_post(self, p, company):
+        return self._precheck_existing_document_post(
+            p, company, vendor=False
+        )
+
+    def precheck_vendor_bill_post(self, p, company):
+        return self._precheck_existing_document_post(p, company, vendor=True)
+
+    def _execute_existing_document_post(
+        self,
+        p: dict[str, Any],
+        company: Any,
+        checked: Mapping[str, Any],
+        *,
+        vendor: bool,
+    ) -> tuple[list[tuple[str, Any]], dict[str, Any]]:
+        move, _lines, records, _dependencies = (
+            self._existing_document_post_graph(p, company, vendor=vendor)
+        )
+        before = self.trusted_before_values(checked, company)
+        self._assert_graph_matches_approved_before(
+            records,
+            company,
+            before,
+            label="document posting",
+        )
+        move.with_context(
+            tracking_disable=True,
+            mail_notrack=True,
+        ).action_post()
+        if str(getattr(move, "state", "")) != "posted":
+            raise OdooWriteHandlerError(
+                "document action_post did not reach posted state"
+            )
+        result_records = self.unique_records(
+            [
+                *self.move_records(move, company),
+                *(
+                    (model_name, record)
+                    for model_name, record in records
+                    if model_name == "res.partner"
+                ),
+            ]
+        )
+        self._verify_existing_document_post(
+            p,
+            company,
+            result_records,
+            before,
+            vendor=vendor,
+        )
+        return result_records, _recovery(
+            "manual_escalation",
+            (
+                "manual_review_vendor_bill_recovery"
+                if vendor
+                else "manual_review_customer_invoice_recovery"
+            ),
+            [{"model": "account.move", "record_id": move.id}],
+        )
+
+    def execute_customer_invoice_post(self, p, company, checked):
+        return self._execute_existing_document_post(
+            p, company, checked, vendor=False
+        )
+
+    def execute_vendor_bill_post(self, p, company, checked):
+        return self._execute_existing_document_post(
+            p, company, checked, vendor=True
+        )
+
+    def _verify_existing_document_post(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+        records: list[tuple[str, Any]],
+        before: Mapping[tuple[str, int], dict[str, Any]],
+        *,
+        vendor: bool,
+    ) -> list[str]:
+        keyed = {
+            (model_name, record.id): record
+            for model_name, record in records
+        }
+        expected_keys = {
+            ("account.move", p["move_id"]),
+            *(("account.move.line", line_id) for line_id in p["expected_line_ids"]),
+        }
+        move = keyed.get(("account.move", p["move_id"]))
+        partner = keyed.get(("res.partner", p["expected_partner_id"]))
+        commercial_partner_id = (
+            _record_id(getattr(partner, "commercial_partner_id", None))
+            if partner is not None
+            else None
+        )
+        partner_keys = (
+            {
+                ("res.partner", p["expected_partner_id"]),
+                ("res.partner", commercial_partner_id),
+            }
+            if commercial_partner_id is not None
+            else set()
+        )
+        expected_keys.update(partner_keys)
+        if (
+            move is None
+            or partner is None
+            or commercial_partner_id is None
+            or len(keyed) != len(records)
+            or set(keyed) != expected_keys
+            or set(before) != expected_keys
+            or _ids(getattr(move, "line_ids", []))
+            != p["expected_line_ids"]
+        ):
+            raise OdooWriteHandlerError(
+                "posted document read-back graph differs"
+            )
+        expected_move_type = "in_invoice" if vendor else "out_invoice"
+        if (
+            p["expected_move_type"] != expected_move_type
+            or str(getattr(move, "move_type", "")) != expected_move_type
+            or str(getattr(move, "state", "")) != "posted"
+            or str(getattr(move, "name", "") or "") in {"", "/"}
+            or getattr(move, "posted_before", None) is not True
+            or _record_id(getattr(move, "partner_id", None))
+            != p["expected_partner_id"]
+            or _record_id(getattr(move, "journal_id", None))
+            != p["expected_journal_id"]
+            or _record_id(getattr(move, "currency_id", None))
+            != p["expected_currency_id"]
+            or str(getattr(move, "invoice_date", ""))
+            != p["expected_invoice_date"]
+            or str(getattr(move, "date", ""))
+            != p["expected_accounting_date"]
+            or str(getattr(move, "invoice_date_due", ""))
+            != p["expected_due_date"]
+            or str(getattr(move, "ref", "") or "")
+            != p["expected_reference"]
+            or str(
+                getattr(move, "odoo_cli_v3_document_binding", "") or ""
+            )
+            != p["expected_document_binding"]
+            or str(
+                getattr(move, "odoo_cli_v3_business_binding", "") or ""
+            )
+            != p["expected_business_binding"]
+            or str(getattr(move, "payment_state", "")) != "not_paid"
+        ):
+            raise OdooWriteHandlerError(
+                "posted document identity or binding differs"
+            )
+        move_before = before.get(("account.move", move.id))
+        if (
+            not isinstance(move_before, Mapping)
+            or move_before.get("state") != "draft"
+            or move_before.get("posted_before") is not False
+        ):
+            raise OdooWriteHandlerError(
+                "document posting approval snapshot is invalid"
+            )
+        move_current = self.assert_approved_record_delta(
+            "account.move",
+            move,
+            company,
+            move_before,
+            allowed_changed_fields=frozenset(
+                {
+                    "state",
+                    "name",
+                    "posted_before",
+                    "sequence_prefix",
+                    "sequence_number",
+                    "secure_sequence_number",
+                    "inalterable_hash",
+                    "checked",
+                    "write_uid",
+                    "write_date",
+                }
+            ),
+            label="posted document",
+        )
+        transaction_write_date = self.assert_controlled_log_access_delta(
+            move_current, move_before, label="posted document"
+        )
+        for line_id in p["expected_line_ids"]:
+            line = keyed[("account.move.line", line_id)]
+            approved = before.get(("account.move.line", line_id))
+            if not isinstance(approved, Mapping):
+                raise OdooWriteHandlerError(
+                    "document posting line approval snapshot is missing"
+                )
+            current = self.snapshot(
+                "account.move.line", line, company
+            )["values"]
+            if (
+                set(current) != set(approved)
+                or classic_read_many2one_id(approved.get("move_id"))
+                != move.id
+                or classic_read_many2one_id(current.get("move_id"))
+                != move.id
+                or approved.get("parent_state") != "draft"
+                or current.get("parent_state") != "posted"
+                or any(
+                    current[field] != approved[field]
+                    for field in set(current)
+                    - {"move_id", "parent_state", "write_uid", "write_date"}
+                )
+            ):
+                raise OdooWriteHandlerError(
+                    "document line changed outside the posting allowlist"
+                )
+            if self.assert_controlled_log_access_delta(
+                current,
+                approved,
+                label="posted document line",
+            ) != transaction_write_date:
+                raise OdooWriteHandlerError(
+                    "document posting audit timestamps differ"
+                )
+        rank_field = "supplier_rank" if vendor else "customer_rank"
+        other_rank_field = "customer_rank" if vendor else "supplier_rank"
+        for partner_key in sorted(partner_keys):
+            posting_partner = keyed[partner_key]
+            approved = before.get(partner_key)
+            current = self.assert_approved_record_delta(
+                "res.partner",
+                posting_partner,
+                company,
+                approved,
+                allowed_changed_fields=frozenset(
+                    {
+                        rank_field,
+                        "write_uid",
+                        "write_date",
+                    }
+                ),
+                label="document posting partner",
+            )
+            if (
+                not isinstance(approved, Mapping)
+                or approved.get(rank_field) != 0
+                or current.get(rank_field) != 1
+                or current.get(other_rank_field)
+                != approved.get(other_rank_field)
+                or self.assert_controlled_log_access_delta(
+                    current,
+                    approved,
+                    label="document posting partner",
+                )
+                != transaction_write_date
+            ):
+                raise OdooWriteHandlerError(
+                    "document posting partner rank side effect differs"
+                )
+        currency = self.assert_currency(
+            p["expected_currency_id"], company, move.journal_id
+        )
+        for field in (
+            "amount_untaxed",
+            "amount_tax",
+            "amount_total",
+            "amount_residual",
+        ):
+            self.assert_amount(
+                getattr(move, field, None),
+                p[f"expected_{field}"],
+                currency,
+                f"expected_{field}",
+            )
+        self.assert_move_balanced(move, company)
+        return [
+            "existing_v3_document_posted_exactly",
+            "receipt_number_assigned",
+            "posted_before_set",
+            "identity_amounts_dates_and_bindings_preserved",
+            "business_and_tax_lines_unchanged",
+            "payment_term_graph_unchanged",
+            "posting_delta_allowlist_matches",
+            "partner_rank_side_effect_exact",
+            "payment_reconciliation_and_external_effects_absent",
+            "record_graph_exact",
+        ]
+
+    def verify_customer_invoice_post(self, p, company, records, before):
+        return self._verify_existing_document_post(
+            p, company, records, before, vendor=False
+        )
+
+    def verify_vendor_bill_post(self, p, company, records, before):
+        return self._verify_existing_document_post(
+            p, company, records, before, vendor=True
+        )
+
     def precheck_reversal(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
         if p.get("posting_mode") != "post":
             raise OdooWriteHandlerError("posting_mode must be post for move reversal")
@@ -8053,12 +9060,22 @@ class OdooWriteHandlers:
         *,
         expected_state: str,
         vendor: bool,
+        refund: bool = False,
+        expected_origin_move_id: int | None = None,
     ) -> None:
-        document_label = "vendor bill" if vendor else "customer invoice"
+        document_label = (
+            ("vendor" if vendor else "customer") + " refund"
+            if refund
+            else ("vendor bill" if vendor else "customer invoice")
+        )
+        expected_move_type = (
+            ("in_refund" if vendor else "out_refund")
+            if refund
+            else ("in_invoice" if vendor else "out_invoice")
+        )
         if (
             str(getattr(move, "state", "")) != expected_state
-            or str(getattr(move, "move_type", ""))
-            != ("in_invoice" if vendor else "out_invoice")
+            or str(getattr(move, "move_type", "")) != expected_move_type
             or getattr(move, "name", None) not in {False, "/"}
             or getattr(move, "posted_before", None) is not False
             or str(getattr(move, "auto_post", "")) != "no"
@@ -8117,6 +9134,15 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "recovery target has prior posting, EDI, or manual mutation evidence"
             )
+        if (
+            _record_id(getattr(move, "reversed_entry_id", None))
+            != expected_origin_move_id
+        ):
+            raise OdooWriteHandlerError(
+                "recovery target refund origin link differs"
+                if refund
+                else "recovery target has an unexpected reversal origin"
+            )
         singular_links = (
             "auto_post_origin_id",
             "origin_payment_id",
@@ -8124,7 +9150,6 @@ class OdooWriteHandlers:
             "statement_id",
             "tax_cash_basis_rec_id",
             "tax_cash_basis_origin_move_id",
-            "reversed_entry_id",
             "asset_id",
             "closing_return_id",
             "transfer_model_id",
@@ -8619,6 +9644,594 @@ class OdooWriteHandlers:
             "tax_analytic_reconciliation_and_external_links_absent",
             "line_guard_graph_matched_approved_allowed_delta",
             "no_delete_or_button_cancel_path_used",
+        ]
+
+    def _assert_refund_origin_guard(
+        self,
+        origin: Any,
+        lines: list[Any],
+        refund: Any,
+        company: Any,
+        *,
+        vendor: bool,
+    ) -> None:
+        if (
+            str(getattr(origin, "state", "")) != "posted"
+            or str(getattr(origin, "move_type", ""))
+            != ("in_invoice" if vendor else "out_invoice")
+            or str(getattr(origin, "name", "") or "") in {"", "/"}
+            or getattr(origin, "posted_before", None) is not True
+            or str(getattr(origin, "auto_post", "")) != "no"
+            or getattr(origin, "auto_post_until", None) not in {False, None}
+            or _record_id(getattr(origin, "company_id", None)) != company.id
+            or _ids(getattr(origin, "reversal_move_ids", []))
+            != [refund.id]
+            or _record_id(getattr(origin, "reversed_entry_id", None))
+            is not None
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin document identity or reversal graph differs"
+            )
+        journal = getattr(origin, "journal_id", None)
+        if (
+            _record_id(journal) is None
+            or _record_id(getattr(journal, "company_id", None)) != company.id
+            or str(getattr(journal, "type", ""))
+            != ("purchase" if vendor else "sale")
+            or getattr(journal, "active", True) is False
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin journal is not an active compatible journal"
+            )
+        if not self._valid_sha_binding(
+            getattr(origin, "odoo_cli_v3_document_binding", None)
+        ) or not self._valid_sha_binding(
+            getattr(origin, "odoo_cli_v3_business_binding", None)
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin lacks immutable V3 bindings"
+            )
+        currency = getattr(origin, "currency_id", None)
+        if _record_id(currency) is None:
+            raise OdooWriteHandlerError(
+                "refund origin has no auditable currency"
+            )
+        if str(getattr(origin, "payment_state", "")) != "not_paid":
+            raise OdooWriteHandlerError(
+                "refund origin is not fully unpaid"
+            )
+        origin_total = abs(
+            _decimal(
+                getattr(origin, "amount_total", None),
+                "origin amount_total",
+            )
+        )
+        if origin_total <= 0:
+            raise OdooWriteHandlerError(
+                "refund origin total must be positive"
+            )
+        self.assert_amount(
+            abs(
+                _decimal(
+                    getattr(origin, "amount_residual", None),
+                    "origin amount_residual",
+                )
+            ),
+            origin_total,
+            currency,
+            "refund origin unpaid residual",
+        )
+        singular_links = (
+            "auto_post_origin_id",
+            "origin_payment_id",
+            "statement_line_id",
+            "statement_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "asset_id",
+            "closing_return_id",
+            "transfer_model_id",
+            "purchase_id",
+            "debit_origin_id",
+            "invoice_pdf_report_id",
+            "invoice_vendor_bill_id",
+            "purchase_vendor_bill_id",
+            "ubl_cii_xml_id",
+            "l10n_es_edi_facturae_xml_id",
+            "signing_user",
+            "message_main_attachment_id",
+        )
+        plural_links = (
+            "payment_ids",
+            "matched_payment_ids",
+            "reconciled_payment_ids",
+            "tax_cash_basis_created_move_ids",
+            "adjusting_entry_origin_move_ids",
+            "adjusting_entries_move_ids",
+            "exchange_diff_partial_ids",
+            "deferred_move_ids",
+            "deferred_original_move_ids",
+            "edi_document_ids",
+            "expense_ids",
+            "pos_order_ids",
+            "statement_line_ids",
+            "transaction_ids",
+            "authorized_transaction_ids",
+            "asset_ids",
+            "stock_move_ids",
+            "landed_costs_ids",
+            "debit_note_ids",
+            "attachment_ids",
+        )
+        if any(
+            _record_id(getattr(origin, field, None)) is not None
+            for field in singular_links
+        ) or any(_ids(getattr(origin, field, [])) for field in plural_links):
+            raise OdooWriteHandlerError(
+                "refund origin has external accounting or business effects"
+            )
+        if (
+            bool(getattr(origin, "signature", False))
+            or any(
+                _is_present(getattr(origin, field, False))
+                for field in (
+                    "access_token",
+                    "invoice_pdf_report_file",
+                    "l10n_es_edi_facturae_xml_file",
+                    "ubl_cii_xml_file",
+                )
+            )
+            or bool(getattr(origin, "is_move_sent", False))
+            or getattr(origin, "sending_data", False)
+            not in (False, None, {})
+            or bool(getattr(origin, "is_being_sent", False))
+            or getattr(origin, "invoice_source_email", False)
+            not in (False, None, "")
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin has EDI, OCR, sending, signature, or attachment effects"
+            )
+        if set(_ids(getattr(origin, "line_ids", []))) != {
+            line.id for line in lines
+        }:
+            raise OdooWriteHandlerError(
+                "refund origin complete line graph differs"
+            )
+        for line in lines:
+            if (
+                _record_id(getattr(line, "move_id", None)) != origin.id
+                or _record_id(getattr(line, "company_id", None))
+                != company.id
+                or str(getattr(line, "parent_state", "")) != "posted"
+                or bool(getattr(line, "reconciled", False))
+                or _record_id(getattr(line, "full_reconcile_id", None))
+                is not None
+                or _ids(getattr(line, "matched_debit_ids", []))
+                or _ids(getattr(line, "matched_credit_ids", []))
+                or _record_id(getattr(line, "statement_line_id", None))
+                is not None
+                or _record_id(getattr(line, "payment_id", None)) is not None
+                or _record_id(getattr(line, "statement_id", None)) is not None
+                or _record_id(getattr(line, "purchase_order_id", None))
+                is not None
+                or _record_id(getattr(line, "reconcile_model_id", None))
+                is not None
+                or _ids(getattr(line, "asset_ids", []))
+                or _ids(getattr(line, "sale_line_ids", []))
+                or _ids(
+                    getattr(
+                        line, "distribution_analytic_account_ids", []
+                    )
+                )
+                or _ids(getattr(line, "reconciled_lines_ids", []))
+                or _ids(
+                    getattr(
+                        line,
+                        "reconciled_lines_excluding_exchange_diff_ids",
+                        [],
+                    )
+                )
+                or _record_id(getattr(line, "purchase_line_id", None))
+                is not None
+                or _record_id(getattr(line, "expense_id", None)) is not None
+                or _record_id(getattr(line, "cogs_origin_id", None))
+                is not None
+                or bool(getattr(line, "is_landed_costs_line", False))
+                or _ids(getattr(line, "move_attachment_ids", []))
+                or bool(getattr(line, "is_imported", False))
+                or bool(getattr(line, "is_downpayment", False))
+                or getattr(line, "analytic_distribution", False)
+                not in (False, None, {})
+                or _ids(getattr(line, "analytic_line_ids", []))
+                or getattr(line, "deferred_start_date", None)
+                not in {None, False}
+                or getattr(line, "deferred_end_date", None)
+                not in {None, False}
+                or str(getattr(line, "display_type", "")) == "cogs"
+            ):
+                raise OdooWriteHandlerError(
+                    "refund origin line graph has reconciliation or external effects"
+                )
+
+    def _refund_draft_cancel_graph(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+    ) -> tuple[
+        Any,
+        list[Any],
+        Any,
+        list[Any],
+        list[tuple[str, Any]],
+        Any,
+        list[tuple[str, Any]],
+    ]:
+        if self.context.trusted_recovery_plan is not None:
+            raise OdooWriteHandlerError(
+                "trusted recovery plan must be null for refund cancellation"
+            )
+        vendor = p["expected_move_type"] == "in_refund"
+        if p["expected_move_type"] not in {"out_refund", "in_refund"}:
+            raise OdooWriteHandlerError(
+                "refund cancellation move type is not allowlisted"
+            )
+        refund = self.record(
+            "account.move", p["move_id"], company, write=True
+        )
+        origin = self.record(
+            "account.move", p["expected_origin_move_id"], company
+        )
+        if refund.id == origin.id:
+            raise OdooWriteHandlerError(
+                "refund and origin identities must differ"
+            )
+        refund_line_ids = _ids(getattr(refund, "line_ids", []))
+        origin_line_ids = _ids(getattr(origin, "line_ids", []))
+        if (
+            refund_line_ids != p["expected_line_ids"]
+            or origin_line_ids != p["expected_origin_line_ids"]
+            or set(refund_line_ids) & set(origin_line_ids)
+        ):
+            raise OdooWriteHandlerError(
+                "refund cancellation complete graph differs"
+            )
+        refund_lines = [
+            self.record(
+                "account.move.line", line_id, company, write=True
+            )
+            for line_id in refund_line_ids
+        ]
+        origin_lines = [
+            self.record("account.move.line", line_id, company)
+            for line_id in origin_line_ids
+        ]
+        self._assert_pristine_draft_document(
+            refund,
+            refund_lines,
+            company,
+            expected_state="draft",
+            vendor=vendor,
+            refund=True,
+            expected_origin_move_id=origin.id,
+        )
+        self._assert_refund_origin_guard(
+            origin, origin_lines, refund, company, vendor=vendor
+        )
+        origin_line_dependencies, _origin_graph_parameters = (
+            self._assert_create_document_bindings_from_graph(
+                origin,
+                origin_lines,
+                company,
+                vendor=vendor,
+                expected_document_binding=p[
+                    "expected_origin_document_binding"
+                ],
+                expected_business_binding=p[
+                    "expected_origin_business_binding"
+                ],
+                allowed_posting_modes=("draft", "post"),
+            )
+        )
+        refund_line_dependencies = self._assert_refund_bindings_from_graph(
+            refund,
+            refund_lines,
+            origin,
+            company,
+            vendor=vendor,
+            expected_document_binding=p["expected_document_binding"],
+            expected_business_binding=p["expected_business_binding"],
+        )
+        partner = self.check_partner(p["expected_partner_id"], company)
+        journal = self.check_journal(
+            {"journal_id": p["expected_journal_id"]},
+            company,
+            {"purchase" if vendor else "sale"},
+        )
+        expected_identity = (
+            p["expected_partner_id"],
+            p["expected_journal_id"],
+            p["expected_currency_id"],
+        )
+        refund_identity = (
+            _record_id(getattr(refund, "partner_id", None)),
+            _record_id(getattr(refund, "journal_id", None)),
+            _record_id(getattr(refund, "currency_id", None)),
+        )
+        origin_identity = (
+            _record_id(getattr(origin, "partner_id", None)),
+            _record_id(getattr(origin, "journal_id", None)),
+            _record_id(getattr(origin, "currency_id", None)),
+        )
+        if (
+            refund_identity != expected_identity
+            or origin_identity != expected_identity
+            or str(
+                getattr(refund, "invoice_date", None)
+                or getattr(refund, "date", "")
+            )
+            != p["expected_refund_date"]
+        ):
+            raise OdooWriteHandlerError(
+                "refund cancellation approved identity differs"
+            )
+        if _as_date(
+            p["expected_refund_date"], "expected_refund_date"
+        ) < _as_date(
+            getattr(origin, "invoice_date", None)
+            or getattr(origin, "date", None),
+            "origin invoice date",
+        ):
+            raise OdooWriteHandlerError(
+                "expected_refund_date precedes the origin document"
+            )
+        currency = self.assert_currency(
+            p["expected_currency_id"], company, journal
+        )
+        if (
+            _decimal(refund.amount_total, "refund amount_total") <= 0
+            or _decimal(
+                refund.amount_residual, "refund amount_residual"
+            )
+            <= 0
+        ):
+            raise OdooWriteHandlerError(
+                "refund cancellation total and residual must be positive"
+            )
+        self.assert_amount(
+            abs(_decimal(refund.amount_total, "refund amount_total")),
+            p["expected_total_amount"],
+            currency,
+            "expected_total_amount",
+        )
+        for move in (refund, origin):
+            if self.search_records(
+                "account.partial.reconcile",
+                [("exchange_move_id", "=", move.id)],
+                company,
+                limit=1,
+            ) or self.search_records(
+                "account.move",
+                [("tax_cash_basis_origin_move_id", "=", move.id)],
+                company,
+                limit=1,
+            ):
+                raise OdooWriteHandlerError(
+                    "refund cancellation graph has exchange or CABA external effects"
+                )
+        records = self.unique_records(
+            [
+                ("account.move", refund),
+                *(("account.move.line", line) for line in refund_lines),
+                ("account.move", origin),
+                *(("account.move.line", line) for line in origin_lines),
+            ]
+        )
+        dependencies = self.unique_records(
+            [
+                ("res.company", company),
+                ("res.partner", partner),
+                ("account.journal", journal),
+                ("res.currency", currency),
+                *origin_line_dependencies,
+                *refund_line_dependencies,
+            ]
+        )
+        return (
+            refund,
+            refund_lines,
+            origin,
+            origin_lines,
+            records,
+            currency,
+            dependencies,
+        )
+
+    def precheck_refund_draft_cancel(self, p, company):
+        (
+            refund,
+            _refund_lines,
+            _origin,
+            _origin_lines,
+            records,
+            currency,
+            dependencies,
+        ) = self._refund_draft_cancel_graph(p, company)
+        return {
+            "checks": [
+                "single_pristine_v3_draft_refund",
+                "refund_type_fixed_to_capability_input",
+                "refund_and_origin_bindings_match",
+                "refund_and_origin_complete_graphs_match",
+                "refund_and_origin_fully_unpaid_and_unreconciled",
+                "payment_edi_ocr_purchase_stock_auto_post_and_external_effects_absent",
+                "origin_document_guarded_unchanged",
+                "write_acl",
+            ],
+            "before": self.snapshots(records, company),
+            "dependencies": self.snapshots(dependencies, company),
+        }
+
+    def _assert_refund_draft_cancel_exact_delta(
+        self,
+        p: Mapping[str, Any],
+        refund: Any,
+        refund_lines: list[Any],
+        origin: Any,
+        origin_lines: list[Any],
+        company: Any,
+        before: Mapping[tuple[str, int], dict[str, Any]],
+    ) -> None:
+        vendor = p["expected_move_type"] == "in_refund"
+        self._assert_pristine_draft_document(
+            refund,
+            refund_lines,
+            company,
+            expected_state="cancel",
+            vendor=vendor,
+            refund=True,
+            expected_origin_move_id=origin.id,
+        )
+        self._assert_refund_origin_guard(
+            origin, origin_lines, refund, company, vendor=vendor
+        )
+        refund_before = before.get(("account.move", refund.id))
+        if (
+            not isinstance(refund_before, Mapping)
+            or refund_before.get("state") != "draft"
+            or refund_before.get("posted_before") is not False
+        ):
+            raise OdooWriteHandlerError(
+                "refund cancellation before evidence is invalid"
+            )
+        refund_current = self.assert_approved_record_delta(
+            "account.move",
+            refund,
+            company,
+            refund_before,
+            allowed_changed_fields=frozenset(
+                {"state", "write_uid", "write_date"}
+            ),
+            label="cancelled draft refund",
+        )
+        transaction_write_date = self.assert_controlled_log_access_delta(
+            refund_current,
+            refund_before,
+            label="cancelled draft refund",
+        )
+        for line in refund_lines:
+            if self._assert_recovery_line_exact_delta(
+                line,
+                company,
+                before.get(("account.move.line", line.id)),
+                move_id=refund.id,
+            ) != transaction_write_date:
+                raise OdooWriteHandlerError(
+                    "refund cancellation audit timestamps differ"
+                )
+        for model_name, record in [
+            ("account.move", origin),
+            *(("account.move.line", line) for line in origin_lines),
+        ]:
+            self.assert_approved_record_delta(
+                model_name,
+                record,
+                company,
+                before.get((model_name, record.id)),
+                allowed_changed_fields=frozenset(),
+                label="refund origin",
+            )
+
+    def execute_refund_draft_cancel(self, p, company, checked):
+        (
+            refund,
+            refund_lines,
+            origin,
+            origin_lines,
+            records,
+            _currency,
+            _dependencies,
+        ) = self._refund_draft_cancel_graph(p, company)
+        before = self.trusted_before_values(checked, company)
+        self._assert_graph_matches_approved_before(
+            records,
+            company,
+            before,
+            label="refund cancellation",
+        )
+        result = refund.with_context(
+            tracking_disable=True,
+            skip_account_move_synchronization=True,
+            skip_invoice_sync=True,
+            skip_is_manually_modified=True,
+        ).write({"state": "cancel"})
+        if result is not True or str(getattr(refund, "state", "")) != "cancel":
+            raise OdooWriteHandlerError(
+                "draft refund cancellation returned no exact result"
+            )
+        self._assert_refund_draft_cancel_exact_delta(
+            p,
+            refund,
+            refund_lines,
+            origin,
+            origin_lines,
+            company,
+            before,
+        )
+        return records, _recovery(
+            "not_applicable", "refund_draft_cancel_completed", []
+        )
+
+    def verify_refund_draft_cancel(self, p, company, records, before):
+        keyed = {
+            (model_name, record.id): record
+            for model_name, record in records
+        }
+        expected_keys = {
+            ("account.move", p["move_id"]),
+            ("account.move", p["expected_origin_move_id"]),
+            *(("account.move.line", line_id) for line_id in p["expected_line_ids"]),
+            *(
+                ("account.move.line", line_id)
+                for line_id in p["expected_origin_line_ids"]
+            ),
+        }
+        if (
+            len(keyed) != len(records)
+            or set(keyed) != expected_keys
+            or set(before) != expected_keys
+        ):
+            raise OdooWriteHandlerError(
+                "refund cancellation read-back graph differs"
+            )
+        refund = keyed[("account.move", p["move_id"])]
+        origin = keyed[
+            ("account.move", p["expected_origin_move_id"])
+        ]
+        refund_lines = [
+            keyed[("account.move.line", line_id)]
+            for line_id in p["expected_line_ids"]
+        ]
+        origin_lines = [
+            keyed[("account.move.line", line_id)]
+            for line_id in p["expected_origin_line_ids"]
+        ]
+        self._assert_refund_draft_cancel_exact_delta(
+            p,
+            refund,
+            refund_lines,
+            origin,
+            origin_lines,
+            company,
+            before,
+        )
+        return [
+            "draft_refund_cancelled_exactly",
+            "never_posted_evidence_preserved",
+            "refund_and_origin_bindings_preserved",
+            "complete_refund_and_origin_graphs_preserved",
+            "origin_document_graph_unchanged",
+            "payment_reconciliation_and_external_effects_absent",
+            "no_delete_button_cancel_or_auto_reopen_path_used",
         ]
 
     def _draft_document_recovery_graph(

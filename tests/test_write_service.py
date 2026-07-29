@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -90,6 +91,16 @@ def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
         "account.move", "account.move.line",
     }
     assert _ALLOWED_MODELS["acct.refund.create.v1"] == {
+        "account.move", "account.move.line",
+    }
+    for capability_id in (
+        "acct.invoice.customer_post.v1",
+        "acct.bill.vendor_post.v1",
+    ):
+        assert _ALLOWED_MODELS[capability_id] == {
+            "account.move", "account.move.line", "res.partner",
+        }
+    assert _ALLOWED_MODELS["acct.refund.draft_cancel.v1"] == {
         "account.move", "account.move.line",
     }
     assert _ALLOWED_MODELS["acct.payment.register.v1"] == {
@@ -190,6 +201,140 @@ def test_companyless_full_reconcile_rejects_missing_or_unbound_journal_items():
     ):
         _index_company_bound_fresh_snapshots(
             [ordinary_without_company, full_snapshot], 7
+        )
+
+
+def _document_post_partner_difference(
+    *,
+    partner_company_id=False,
+    partner_company_ids=None,
+    move_partner_id=101,
+):
+    move_before = create_record_snapshot(
+        model="account.move",
+        record_id=501,
+        exists=True,
+        record_state="draft",
+        values={
+            "company_id": [7, "Sandbox Company"],
+            "partner_id": [move_partner_id, "Partner"],
+            "commercial_partner_id": [101, "Partner"],
+            "state": "draft",
+        },
+    )
+    move_after = create_record_snapshot(
+        model="account.move",
+        record_id=501,
+        exists=True,
+        record_state="posted",
+        values={
+            "company_id": [7, "Sandbox Company"],
+            "partner_id": [move_partner_id, "Partner"],
+            "commercial_partner_id": [101, "Partner"],
+            "state": "posted",
+        },
+    )
+    partner_before_values = {
+        "company_id": partner_company_id,
+        "commercial_partner_id": [101, "Partner"],
+        "customer_rank": 0,
+    }
+    partner_after_values = {
+        **partner_before_values,
+        "customer_rank": 1,
+    }
+    if partner_company_ids is not None:
+        partner_before_values["company_ids"] = partner_company_ids
+        partner_after_values["company_ids"] = partner_company_ids
+    partner_before = create_record_snapshot(
+        model="res.partner",
+        record_id=101,
+        exists=True,
+        record_state="active",
+        values=partner_before_values,
+    )
+    partner_after = create_record_snapshot(
+        model="res.partner",
+        record_id=101,
+        exists=True,
+        record_state="active",
+        values=partner_after_values,
+    )
+    return create_difference(
+        before=[move_before, partner_before],
+        after=[move_after, partner_after],
+        changed_fields=["customer_rank", "state"],
+    )
+
+
+def test_document_post_accepts_only_the_move_bound_shared_commercial_partner():
+    operation = SimpleNamespace(
+        capability_id="acct.invoice.customer_post.v1",
+        company_id=7,
+        parameters={"move_id": 501, "expected_partner_id": 101},
+    )
+    difference = _document_post_partner_difference()
+    records = {
+        (snapshot["model"], snapshot["record_id"]): {
+            "record_state": snapshot["record_state"],
+            "record_fingerprint": hashlib.sha256(
+                canonical_json(snapshot)
+            ).hexdigest(),
+        }
+        for snapshot in difference["after"]
+    }
+    DurableWriteService._validate_difference_binding(
+        difference,
+        operation=operation,
+        allowed_models=_ALLOWED_MODELS[operation.capability_id],
+        records_by_key=records,
+    )
+    assert set(
+        _index_company_bound_fresh_snapshots(
+            difference["after"], operation.company_id
+        )
+    ) == set(records)
+    custom_company_ids = _document_post_partner_difference(
+        partner_company_ids=[]
+    )
+    assert set(
+        _index_company_bound_fresh_snapshots(
+            custom_company_ids["after"], operation.company_id
+        )
+    ) == set(records)
+    with pytest.raises(
+        WriteServiceError,
+        match="snapshot identity or company is invalid",
+    ):
+        _index_company_bound_fresh_snapshots(
+            _document_post_partner_difference(
+                partner_company_ids=[8]
+            )["after"],
+            operation.company_id,
+        )
+
+    with pytest.raises(
+        WriteServiceError,
+        match="verifiable operation company binding",
+    ):
+        DurableWriteService._validate_difference_binding(
+            _document_post_partner_difference(move_partner_id=102),
+            operation=operation,
+            allowed_models=_ALLOWED_MODELS[operation.capability_id],
+            records_by_key=records,
+        )
+    with pytest.raises(
+        WriteServiceError,
+        match="verifiable operation company binding",
+    ):
+        DurableWriteService._validate_difference_binding(
+            _document_post_partner_difference(
+                partner_company_id=[8, "Other Company"],
+                partner_company_ids=[8],
+            ),
+            operation=operation,
+            allowed_models=_ALLOWED_MODELS[operation.capability_id],
+            records_by_key=records,
         )
 
 

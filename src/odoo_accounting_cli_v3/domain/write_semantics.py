@@ -705,6 +705,209 @@ def _validate_draft_cancel_v2(parameters: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bounded_sorted_unique_ids(
+    parameters: dict[str, Any], field: str
+) -> list[int]:
+    value = _field(parameters, field)
+    if not isinstance(value, list) or not 2 <= len(value) <= 1000:
+        raise WriteSemanticError(
+            f"{field} must contain between 2 and 1000 lines"
+        )
+    for item in value:
+        _positive_id(item, field)
+    if len(value) != len(set(value)):
+        raise WriteSemanticError(f"{field} must be unique")
+    if value != sorted(value):
+        raise WriteSemanticError(f"{field} must be sorted")
+    return list(value)
+
+
+def _validate_document_post(
+    parameters: dict[str, Any], *, expected_move_type: str
+) -> dict[str, Any]:
+    move_id = _positive_id(_field(parameters, "move_id"), "move_id")
+    move_type = _field(parameters, "expected_move_type")
+    if move_type != expected_move_type:
+        raise WriteSemanticError(
+            f"expected_move_type must be {expected_move_type}"
+        )
+    document_binding = _sha256_digest(
+        _field(parameters, "expected_document_binding"),
+        "expected_document_binding",
+    )
+    business_binding = _sha256_digest(
+        _field(parameters, "expected_business_binding"),
+        "expected_business_binding",
+    )
+    partner_id = _positive_id(
+        _field(parameters, "expected_partner_id"), "expected_partner_id"
+    )
+    journal_id = _positive_id(
+        _field(parameters, "expected_journal_id"), "expected_journal_id"
+    )
+    currency_id = _positive_id(
+        _field(parameters, "expected_currency_id"), "expected_currency_id"
+    )
+    invoice_date = _date(
+        _field(parameters, "expected_invoice_date"), "expected_invoice_date"
+    )
+    accounting_date = _date(
+        _field(parameters, "expected_accounting_date"),
+        "expected_accounting_date",
+    )
+    due_date = _date(
+        _field(parameters, "expected_due_date"), "expected_due_date"
+    )
+    if due_date < invoice_date:
+        raise WriteSemanticError(
+            "expected_due_date cannot precede expected_invoice_date"
+        )
+    reference = _field(parameters, "expected_reference")
+    if not isinstance(reference, str):
+        raise WriteSemanticError("expected_reference must be text")
+    untaxed = _decimal(
+        _field(parameters, "expected_amount_untaxed"),
+        "expected_amount_untaxed",
+    )
+    tax = _decimal(
+        _field(parameters, "expected_amount_tax"), "expected_amount_tax"
+    )
+    total = _decimal(
+        _field(parameters, "expected_amount_total"),
+        "expected_amount_total",
+        positive=True,
+    )
+    residual = _decimal(
+        _field(parameters, "expected_amount_residual"),
+        "expected_amount_residual",
+        positive=True,
+    )
+    if untaxed + tax != total:
+        raise WriteSemanticError(
+            "expected_amount_total must equal expected untaxed plus tax"
+        )
+    if residual != total:
+        raise WriteSemanticError(
+            "expected_amount_residual must equal expected_amount_total"
+        )
+    line_ids = _bounded_sorted_unique_ids(parameters, "expected_line_ids")
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    _non_empty_text(
+        _field(parameters, "idempotency_key"), "idempotency_key"
+    )
+    return {
+        "checks": (
+            "document_post_type_fixed",
+            "document_post_bindings_explicit",
+            "document_post_identity_explicit",
+            "document_post_dates_valid",
+            "document_post_amounts_consistent",
+            "document_post_fully_unpaid",
+            "document_post_complete_line_set_explicit",
+        ),
+        "computed": {
+            "move_id": move_id,
+            "expected_move_type": move_type,
+            "expected_document_binding": document_binding,
+            "expected_business_binding": business_binding,
+            "expected_partner_id": partner_id,
+            "expected_journal_id": journal_id,
+            "expected_currency_id": currency_id,
+            "expected_invoice_date": invoice_date.isoformat(),
+            "expected_accounting_date": accounting_date.isoformat(),
+            "expected_due_date": due_date.isoformat(),
+            "expected_reference": reference,
+            "expected_amount_untaxed": _format(untaxed),
+            "expected_amount_tax": _format(tax),
+            "expected_amount_total": _format(total),
+            "expected_amount_residual": _format(residual),
+            "expected_line_ids": line_ids,
+            "expected_line_count": len(line_ids),
+        },
+    }
+
+
+def _validate_refund_draft_cancel(
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    move_id = _positive_id(_field(parameters, "move_id"), "move_id")
+    origin_move_id = _positive_id(
+        _field(parameters, "expected_origin_move_id"),
+        "expected_origin_move_id",
+    )
+    if move_id == origin_move_id:
+        raise WriteSemanticError(
+            "move_id and expected_origin_move_id must differ"
+        )
+    move_type = _field(parameters, "expected_move_type")
+    if move_type not in {"out_refund", "in_refund"}:
+        raise WriteSemanticError(
+            "expected_move_type must be out_refund or in_refund"
+        )
+    bindings = {
+        field: _sha256_digest(_field(parameters, field), field)
+        for field in (
+            "expected_document_binding",
+            "expected_business_binding",
+            "expected_origin_document_binding",
+            "expected_origin_business_binding",
+        )
+    }
+    partner_id = _positive_id(
+        _field(parameters, "expected_partner_id"), "expected_partner_id"
+    )
+    journal_id = _positive_id(
+        _field(parameters, "expected_journal_id"), "expected_journal_id"
+    )
+    currency_id = _positive_id(
+        _field(parameters, "expected_currency_id"), "expected_currency_id"
+    )
+    refund_date = _date(
+        _field(parameters, "expected_refund_date"), "expected_refund_date"
+    )
+    total = _decimal(
+        _field(parameters, "expected_total_amount"),
+        "expected_total_amount",
+        positive=True,
+    )
+    line_ids = _bounded_sorted_unique_ids(parameters, "expected_line_ids")
+    origin_line_ids = _bounded_sorted_unique_ids(
+        parameters, "expected_origin_line_ids"
+    )
+    if set(line_ids) & set(origin_line_ids):
+        raise WriteSemanticError(
+            "expected_line_ids and expected_origin_line_ids must not overlap"
+        )
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    _non_empty_text(
+        _field(parameters, "idempotency_key"), "idempotency_key"
+    )
+    return {
+        "checks": (
+            "refund_draft_cancel_type_fixed",
+            "refund_draft_cancel_bindings_explicit",
+            "refund_draft_cancel_identity_explicit",
+            "refund_draft_cancel_total_explicit",
+            "refund_draft_cancel_complete_disjoint_graphs_explicit",
+        ),
+        "computed": {
+            "move_id": move_id,
+            "expected_origin_move_id": origin_move_id,
+            "expected_move_type": move_type,
+            **bindings,
+            "expected_partner_id": partner_id,
+            "expected_journal_id": journal_id,
+            "expected_currency_id": currency_id,
+            "expected_refund_date": refund_date.isoformat(),
+            "expected_total_amount": _format(total),
+            "expected_line_ids": line_ids,
+            "expected_origin_line_ids": origin_line_ids,
+            "expected_line_count": len(line_ids),
+            "expected_origin_line_count": len(origin_line_ids),
+        },
+    }
+
+
 def _validate_recovery(parameters: dict[str, Any]) -> dict[str, Any]:
     _date(_field(parameters, "recovery_date"), "recovery_date")
     digest = _field(parameters, "expected_recovery_plan_digest")
@@ -851,6 +1054,13 @@ _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.move.reverse.v1": _validate_reversal,
     "acct.move.draft_cancel.v1": _validate_draft_cancel,
     "acct.move.draft_cancel.v2": _validate_draft_cancel_v2,
+    "acct.invoice.customer_post.v1": lambda value: _validate_document_post(
+        value, expected_move_type="out_invoice"
+    ),
+    "acct.bill.vendor_post.v1": lambda value: _validate_document_post(
+        value, expected_move_type="in_invoice"
+    ),
+    "acct.refund.draft_cancel.v1": _validate_refund_draft_cancel,
     "acct.recovery.execute.v1": _validate_recovery,
     "acct.reconciliation.undo.v1": _validate_reconciliation_undo,
     "acct.bank.statement_compensate.v1": _validate_bank_statement_compensate,

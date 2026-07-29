@@ -35,9 +35,16 @@ from odoo_accounting_cli_v3.domain.report_read import (
     canonical_period_key,
 )
 from odoo_accounting_cli_v3.domain.trial_balance import AccountInfo, Aggregate, CurrencyInfo
+from odoo_accounting_cli_v3.contracts import validate_value
+from odoo_accounting_cli_v3.draft_invoice_recovery import (
+    customer_invoice_business_binding,
+    customer_invoice_document_binding,
+    vendor_bill_business_binding,
+    vendor_bill_document_binding,
+)
 from odoo_accounting_cli_v3.gateway import RequestContext
 from odoo_accounting_cli_v3.odoo.executor import OdooExecutionError, OdooReadExecutor
-from odoo_accounting_cli_v3.registry import validate_registry
+from odoo_accounting_cli_v3.registry import Capability, validate_registry
 
 
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
@@ -88,6 +95,11 @@ class Company:
 
     def __init__(self):
         self.access_checks = []
+        self.currency_id = SimpleRecord(
+            id=12,
+            active=True,
+            rounding="0.01",
+        )
 
     def browse(self, company_id):
         if company_id != self.id:
@@ -122,9 +134,10 @@ class MissingCompany:
 
 
 class SimpleRecord:
-    def __init__(self, **values):
+    def __init__(self, *, denied_operations=(), **values):
         self.__dict__.update(values)
         self.access_checks = []
+        self.denied_operations = frozenset(denied_operations)
 
     def exists(self):
         return self
@@ -137,17 +150,31 @@ class SimpleRecord:
 
     def check_access_rights(self, operation):
         self.access_checks.append(("rights", operation))
+        if operation in self.denied_operations:
+            raise PermissionError(f"{operation} access denied")
 
     def check_access_rule(self, operation):
         self.access_checks.append(("rule", operation))
+        if operation in self.denied_operations:
+            raise PermissionError(f"{operation} access denied")
 
 
 class RecordModel:
-    def __init__(self, records):
+    def __init__(self, records, *, search_records=()):
         self._records = records
+        self._search_records = list(search_records)
+        self.access_checks = []
 
     def browse(self, record_id):
         return self._records.get(record_id, MissingCompany())
+
+    def check_access_rights(self, operation):
+        self.access_checks.append(("rights", operation))
+
+    def search(self, _domain, limit=None):
+        if limit is None:
+            return list(self._search_records)
+        return list(self._search_records[:limit])
 
 
 class Environment:
@@ -175,6 +202,28 @@ class DraftCancelEnvironment(Environment):
             return self.company
         if name == "account.move":
             return RecordModel({self.move.id: self.move})
+        raise AssertionError(f"unexpected model: {name}")
+
+
+class MoveEnvironment(Environment):
+    def __init__(self, records, *, groups=None, external_effects=None):
+        super().__init__(groups=groups)
+        self.records = {record.id: record for record in records}
+        self.external_effects = external_effects or {}
+
+    def __getitem__(self, name):
+        if name == "res.company":
+            return self.company
+        if name == "account.move":
+            return RecordModel(
+                self.records,
+                search_records=self.external_effects.get(name, []),
+            )
+        if name == "account.partial.reconcile":
+            return RecordModel(
+                {},
+                search_records=self.external_effects.get(name, []),
+            )
         raise AssertionError(f"unexpected model: {name}")
 
 
@@ -218,6 +267,503 @@ def pristine_draft_move(company, *, move_type="out_invoice", state="draft", **ov
     }
     values.update(overrides)
     return SimpleRecord(**values)
+
+
+def document_post_move(company, *, move_type="out_invoice", **overrides):
+    move_id = overrides.pop("id", 4101)
+    vendor = move_type == "in_invoice"
+    currency = SimpleRecord(id=12, active=True, rounding="0.01")
+    company.currency_id = currency
+    partner = SimpleRecord(
+        id=5101,
+        company_id=company,
+        active=True,
+        customer_rank=0,
+        supplier_rank=0,
+    )
+    partner.commercial_partner_id = partner
+    journal = SimpleRecord(
+        id=5201,
+        company_id=company,
+        type="purchase" if vendor else "sale",
+        active=True,
+        currency_id=currency,
+    )
+    invoice_account = SimpleRecord(
+        id=5601,
+        company_ids=[company],
+        account_type="expense" if vendor else "income",
+        deprecated=False,
+    )
+    term_account = SimpleRecord(
+        id=5501,
+        company_ids=[company],
+        account_type="liability_payable" if vendor else "asset_receivable",
+        deprecated=False,
+    )
+    invoice_line = SimpleRecord(
+        id=5301,
+        move_id=SimpleRecord(id=move_id),
+        company_id=company,
+        parent_state="draft",
+        display_type="product",
+        odoo_cli_v3_line_reference="line-1",
+        name="Consulting",
+        product_id=False,
+        account_id=invoice_account,
+        partner_id=partner,
+        currency_id=currency,
+        quantity="1",
+        price_unit="100",
+        price_subtotal="100",
+        price_total="100",
+        tax_ids=[],
+        tax_line_id=False,
+        debit="100" if vendor else "0",
+        credit="0" if vendor else "100",
+        balance="100" if vendor else "-100",
+        amount_currency="100" if vendor else "-100",
+        matching_number=False,
+        deductible_amount="100",
+        date_maturity=False,
+        reconciled=False,
+    )
+    term_line = SimpleRecord(
+        id=5302,
+        move_id=SimpleRecord(id=move_id),
+        company_id=company,
+        parent_state="draft",
+        display_type="payment_term",
+        name="Payment term",
+        product_id=False,
+        account_id=term_account,
+        partner_id=partner,
+        currency_id=currency,
+        tax_ids=[],
+        tax_line_id=False,
+        debit="0" if vendor else "100",
+        credit="100" if vendor else "0",
+        balance="-100" if vendor else "100",
+        amount_currency="-100" if vendor else "100",
+        matching_number=False,
+        deductible_amount="100",
+        date_maturity=date(2026, 7, 13),
+        reconciled=False,
+    )
+    lines = [invoice_line, term_line]
+    values = {
+        "id": move_id,
+        "company_id": company,
+        "move_type": move_type,
+        "state": "draft",
+        "name": "/",
+        "posted_before": False,
+        "auto_post": "no",
+        "auto_post_until": False,
+        "sequence_prefix": False,
+        "sequence_number": False,
+        "made_sequence_gap": False,
+        "checked": False,
+        "journal_id": journal,
+        "currency_id": currency,
+        "partner_id": partner,
+        "commercial_partner_id": partner,
+        "partner_bank_id": False,
+        "invoice_date": date(2026, 7, 13),
+        "date": date(2026, 7, 13),
+        "invoice_date_due": date(2026, 7, 13),
+        "ref": "V3-DOC-4101",
+        "payment_state": "not_paid",
+        "amount_untaxed": "100.00",
+        "amount_tax": "0.00",
+        "amount_total": "100.00",
+        "amount_residual": "100.00",
+        "secure_sequence_number": 0,
+        "inalterable_hash": False,
+        "need_cancel_request": False,
+        "is_manually_modified": False,
+        "line_ids": lines,
+        "invoice_line_ids": [invoice_line],
+        "_affect_tax_report": lambda: False,
+        "_get_violated_lock_dates": lambda _date, _affects_tax: [],
+    }
+    graph_parameters = {
+        "company_id": company.id,
+        "partner_id": partner.id,
+        "invoice_date": "2026-07-13",
+        "accounting_date": "2026-07-13",
+        "due_date": "2026-07-13",
+        "currency_id": currency.id,
+        "journal_id": journal.id,
+        "posting_mode": "draft",
+        (
+            "vendor_reference"
+            if move_type == "in_invoice"
+            else "reference"
+        ): "V3-DOC-4101",
+        "lines": [
+            {
+                "line_reference": "line-1",
+                "name": "Consulting",
+                "product_id": None,
+                "account_id": 5601,
+                "quantity": "1",
+                "price_unit": "100",
+                "tax_ids": [],
+            }
+        ],
+    }
+    if move_type == "in_invoice":
+        values["odoo_cli_v3_document_binding"] = (
+            vendor_bill_document_binding(graph_parameters)
+        )
+        values["odoo_cli_v3_business_binding"] = (
+            vendor_bill_business_binding(graph_parameters)
+        )
+    else:
+        values["odoo_cli_v3_document_binding"] = (
+            customer_invoice_document_binding(graph_parameters)
+        )
+        values["odoo_cli_v3_business_binding"] = (
+            customer_invoice_business_binding(graph_parameters)
+        )
+    values.update(overrides)
+    return SimpleRecord(**values)
+
+
+def _refund_bindings(parameters):
+    document = hashlib.sha256(
+        json.dumps(
+            {
+                "capability_kind": "refund",
+                "parameters": {
+                    key: parameters[key] for key in sorted(parameters)
+                },
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    business = hashlib.sha256(
+        json.dumps(
+            {
+                "business_kind": "refund",
+                "identity": {
+                    "origin_move_id": parameters["origin_move_id"],
+                    "refund_mode": parameters["refund_mode"],
+                    "line_references": sorted(
+                        line["line_reference"]
+                        for line in parameters["lines"]
+                    ),
+                },
+            },
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return document, business
+
+
+def draft_refund_graph(
+    company,
+    *,
+    move_type="out_refund",
+    refund_mode="full",
+    origin_posting_mode="post",
+):
+    origin_id = 6101
+    refund_id = 6102
+    invoice_type = "out_invoice" if move_type == "out_refund" else "in_invoice"
+    vendor = move_type == "in_refund"
+    refund_total = "100" if refund_mode == "full" else "40"
+    currency = SimpleRecord(id=12, active=True, rounding="0.01")
+    company.currency_id = currency
+    journal = SimpleRecord(
+        id=6201,
+        company_id=company,
+        type="purchase" if vendor else "sale",
+        active=True,
+        currency_id=currency,
+    )
+    partner = SimpleRecord(
+        id=6301,
+        company_id=company,
+        active=True,
+        customer_rank=0,
+        supplier_rank=0,
+    )
+    partner.commercial_partner_id = partner
+    invoice_account = SimpleRecord(
+        id=6601,
+        company_ids=[company],
+        account_type="expense" if vendor else "income",
+        deprecated=False,
+    )
+    term_account = SimpleRecord(
+        id=6602,
+        company_ids=[company],
+        account_type="liability_payable" if vendor else "asset_receivable",
+        deprecated=False,
+    )
+    origin_lines = [
+        SimpleRecord(
+            id=6401,
+            move_id=SimpleRecord(id=origin_id),
+            company_id=company,
+            parent_state="posted",
+            display_type="product",
+            odoo_cli_v3_line_reference="origin-line-1",
+            name="Consulting",
+            product_id=False,
+            account_id=invoice_account,
+            partner_id=partner,
+            currency_id=currency,
+            quantity="1",
+            price_unit="100",
+            price_subtotal="100",
+            price_total="100",
+            tax_ids=[],
+            tax_line_id=False,
+            debit="100" if vendor else "0",
+            credit="0" if vendor else "100",
+            balance="100" if vendor else "-100",
+            amount_currency="100" if vendor else "-100",
+            matching_number=False,
+            deductible_amount="100",
+            date_maturity=False,
+            reconciled=False,
+        ),
+        SimpleRecord(
+            id=6402,
+            move_id=SimpleRecord(id=origin_id),
+            company_id=company,
+            parent_state="posted",
+            display_type="payment_term",
+            name="Payment term",
+            product_id=False,
+            account_id=term_account,
+            partner_id=partner,
+            currency_id=currency,
+            tax_ids=[],
+            tax_line_id=False,
+            debit="0" if vendor else "100",
+            credit="100" if vendor else "0",
+            balance="-100" if vendor else "100",
+            amount_currency="-100" if vendor else "100",
+            matching_number=False,
+            deductible_amount="100",
+            date_maturity=date(2026, 7, 13),
+            reconciled=False,
+        ),
+    ]
+    refund_lines = [
+        SimpleRecord(
+            id=6501,
+            move_id=SimpleRecord(id=refund_id),
+            company_id=company,
+            parent_state="draft",
+            display_type="product",
+            odoo_cli_v3_line_reference="origin-line-1",
+            name="Consulting",
+            product_id=False,
+            account_id=invoice_account,
+            partner_id=partner,
+            currency_id=currency,
+            quantity="1",
+            price_unit=refund_total,
+            price_subtotal=refund_total,
+            price_total=refund_total,
+            tax_ids=[],
+            tax_line_id=False,
+            debit="0" if vendor else refund_total,
+            credit=refund_total if vendor else "0",
+            balance=f"-{refund_total}" if vendor else refund_total,
+            amount_currency=(
+                f"-{refund_total}" if vendor else refund_total
+            ),
+            matching_number=False,
+            deductible_amount="100",
+            date_maturity=False,
+            reconciled=False,
+        ),
+        SimpleRecord(
+            id=6502,
+            move_id=SimpleRecord(id=refund_id),
+            company_id=company,
+            parent_state="draft",
+            display_type="payment_term",
+            name="Payment term",
+            product_id=False,
+            account_id=term_account,
+            partner_id=partner,
+            currency_id=currency,
+            tax_ids=[],
+            tax_line_id=False,
+            debit=refund_total if vendor else "0",
+            credit="0" if vendor else refund_total,
+            balance=refund_total if vendor else f"-{refund_total}",
+            amount_currency=(
+                refund_total if vendor else f"-{refund_total}"
+            ),
+            matching_number=False,
+            deductible_amount="100",
+            date_maturity=date(2026, 7, 13),
+            reconciled=False,
+        ),
+    ]
+    origin_parameters = {
+        "company_id": company.id,
+        "partner_id": partner.id,
+        "invoice_date": "2026-07-13",
+        "accounting_date": "2026-07-13",
+        "due_date": "2026-07-13",
+        "currency_id": currency.id,
+        "journal_id": journal.id,
+        "posting_mode": origin_posting_mode,
+        (
+            "vendor_reference"
+            if invoice_type == "in_invoice"
+            else "reference"
+        ): (
+            "BILL/2026/6101"
+            if invoice_type == "in_invoice"
+            else "INV/2026/6101"
+        ),
+        "lines": [
+            {
+                "line_reference": "origin-line-1",
+                "name": "Consulting",
+                "product_id": None,
+                "account_id": 6601,
+                "quantity": "1",
+                "price_unit": "100",
+                "tax_ids": [],
+            }
+        ],
+    }
+    if invoice_type == "in_invoice":
+        origin_document_binding = vendor_bill_document_binding(
+            origin_parameters
+        )
+        origin_business_binding = vendor_bill_business_binding(
+            origin_parameters
+        )
+    else:
+        origin_document_binding = customer_invoice_document_binding(
+            origin_parameters
+        )
+        origin_business_binding = customer_invoice_business_binding(
+            origin_parameters
+        )
+    origin = SimpleRecord(
+        id=origin_id,
+        company_id=company,
+        move_type=invoice_type,
+        state="posted",
+        name="INV/2026/6101" if invoice_type == "out_invoice" else "BILL/2026/6101",
+        posted_before=True,
+        auto_post="no",
+        auto_post_until=False,
+        journal_id=journal,
+        currency_id=currency,
+        partner_id=partner,
+        payment_state="not_paid",
+        amount_untaxed="100.00",
+        amount_tax="0.00",
+        amount_total="100.00",
+        amount_residual="100.00",
+        invoice_date=date(2026, 7, 13),
+        date=date(2026, 7, 13),
+        invoice_date_due=date(2026, 7, 13),
+        ref=origin_parameters[
+            (
+                "vendor_reference"
+                if invoice_type == "in_invoice"
+                else "reference"
+            )
+        ],
+        line_ids=origin_lines,
+        invoice_line_ids=[origin_lines[0]],
+        odoo_cli_v3_document_binding=origin_document_binding,
+        odoo_cli_v3_business_binding=origin_business_binding,
+    )
+    refund_lines_parameter = (
+        []
+        if refund_mode == "full"
+        else [
+            {
+                "line_reference": "origin-line-1",
+                "name": "Consulting",
+                "account_id": 6601,
+                "quantity": "1",
+                "price_unit": refund_total,
+                "tax_ids": [],
+            }
+        ]
+    )
+    refund_parameters = {
+        "company_id": company.id,
+        "origin_move_id": origin_id,
+        "refund_type": (
+            "vendor_debit_note"
+            if move_type == "in_refund"
+            else "customer_credit_note"
+        ),
+        "refund_mode": refund_mode,
+        "refund_date": "2026-07-13",
+        "journal_id": journal.id,
+        "currency_id": currency.id,
+        "expected_total_amount": refund_total,
+        "reason": "V3 refund",
+        "posting_mode": "draft",
+        "lines": refund_lines_parameter,
+    }
+    refund_document_binding, refund_business_binding = _refund_bindings(
+        refund_parameters
+    )
+    refund = SimpleRecord(
+        id=refund_id,
+        company_id=company,
+        move_type=move_type,
+        state="draft",
+        name="/",
+        posted_before=False,
+        auto_post="no",
+        auto_post_until=False,
+        sequence_prefix=False,
+        sequence_number=False,
+        made_sequence_gap=False,
+        checked=False,
+        journal_id=journal,
+        currency_id=currency,
+        partner_id=partner,
+        invoice_date=date(2026, 7, 13),
+        date=date(2026, 7, 13),
+        invoice_date_due=date(2026, 7, 13),
+        invoice_payment_term_id=False,
+        payment_state="not_paid",
+        amount_untaxed=f"{refund_total}.00",
+        amount_tax="0.00",
+        amount_total=f"{refund_total}.00",
+        amount_residual=f"{refund_total}.00",
+        secure_sequence_number=0,
+        inalterable_hash=False,
+        need_cancel_request=False,
+        is_manually_modified=False,
+        line_ids=refund_lines,
+        invoice_line_ids=[refund_lines[0]],
+        reversed_entry_id=origin,
+        reversal_move_ids=[],
+        odoo_cli_v3_reason="V3 refund",
+        odoo_cli_v3_document_binding=refund_document_binding,
+        odoo_cli_v3_business_binding=refund_business_binding,
+    )
+    origin.reversal_move_ids = [refund]
+    return origin, refund
 
 
 class Backend:
@@ -653,6 +1199,25 @@ def capabilities():
 
 def capability(capability_id="acct.gl.trial_balance.v1"):
     return next(item for item in capabilities() if item.id == capability_id)
+
+
+def synthetic_read_capability(capability_id):
+    existing = next(
+        (item for item in capabilities() if item.id == capability_id),
+        None,
+    )
+    if existing is not None:
+        return existing
+    data = capability("acct.move.draft_cancel_eligibility.v1").data
+    data["id"] = capability_id
+    return Capability.from_dict(data)
+
+
+def registry_with(cap):
+    return [
+        *(item for item in capabilities() if item.id != cap.id),
+        cap,
+    ]
 
 
 class OdooReadExecutorTest(unittest.TestCase):
@@ -1096,6 +1661,1187 @@ class OdooReadExecutorTest(unittest.TestCase):
                         "company_id": 7,
                         "move_id": 1101,
                         "expected_move_type": "out_invoice",
+                    },
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+        create_receipt.assert_not_called()
+
+    def test_document_post_eligibility_returns_exact_customer_write_binding(self) -> None:
+        move = document_post_move(Company())
+        env = MoveEnvironment([move])
+        cap = synthetic_read_capability(
+            "acct.move.document_post_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 4101,
+            "expected_move_type": "out_invoice",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        validate_value(result, cap.data["output_schema"])
+        self.assertIs(result["eligible"], True)
+        self.assertEqual(result["eligibility_failures"], [])
+        self.assertEqual(
+            result["candidate_write_capability_id"],
+            "acct.invoice.customer_post.v1",
+        )
+        self.assertEqual(
+            result["required_user_parameters"],
+            ["idempotency_key", "reason"],
+        )
+        self.assertEqual(
+            result["write_parameters"],
+            {
+                "company_id": 7,
+                "move_id": 4101,
+                "expected_move_type": "out_invoice",
+                "expected_document_binding": (
+                    move.odoo_cli_v3_document_binding
+                ),
+                "expected_business_binding": (
+                    move.odoo_cli_v3_business_binding
+                ),
+                "expected_partner_id": 5101,
+                "expected_journal_id": 5201,
+                "expected_currency_id": 12,
+                "expected_invoice_date": "2026-07-13",
+                "expected_accounting_date": "2026-07-13",
+                "expected_due_date": "2026-07-13",
+                "expected_reference": "V3-DOC-4101",
+                "expected_amount_untaxed": "100.00",
+                "expected_amount_tax": "0.00",
+                "expected_amount_total": "100.00",
+                "expected_amount_residual": "100.00",
+                "expected_line_ids": [5301, 5302],
+            },
+        )
+        self.assertEqual(
+            result["target"],
+            {
+                "company_id": 7,
+                "move_id": 4101,
+                "move_type": "out_invoice",
+                "state": "draft",
+                "posted_before": False,
+                "payment_state": "not_paid",
+                "document_binding": move.odoo_cli_v3_document_binding,
+                "business_binding": move.odoo_cli_v3_business_binding,
+                "partner_id": 5101,
+                "journal_id": 5201,
+                "currency_id": 12,
+                "invoice_date": "2026-07-13",
+                "accounting_date": "2026-07-13",
+                "due_date": "2026-07-13",
+                "reference": "V3-DOC-4101",
+                "amount_untaxed": "100.00",
+                "amount_tax": "0.00",
+                "amount_total": "100.00",
+                "amount_residual": "100.00",
+                "line_ids": [5301, 5302],
+                "invoice_line_ids": [5301],
+            },
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_document_post_eligibility_signs_fail_closed_reasons(self) -> None:
+        company = Company()
+        move = document_post_move(
+            company,
+            state="posted",
+            posted_before=True,
+            payment_state="paid",
+            amount_residual="0.00",
+            odoo_cli_v3_document_binding="not-a-binding",
+            payment_ids=[SimpleRecord(id=9911)],
+        )
+        move.line_ids[0].reconciled = True
+        env = MoveEnvironment([move])
+        cap = synthetic_read_capability(
+            "acct.move.document_post_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 4101,
+            "expected_move_type": "out_invoice",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        validate_value(result, cap.data["output_schema"])
+        self.assertIs(result["eligible"], False)
+        self.assertIsNone(result["write_parameters"])
+        self.assertIn("move_is_not_draft", result["eligibility_failures"])
+        self.assertIn(
+            "document_binding_missing_or_invalid",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "payment_state_not_not_paid", result["eligibility_failures"]
+        )
+        self.assertIn(
+            "move_payment_or_external_effect_present",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "line_reconciliation_or_external_effect_present",
+            result["eligibility_failures"],
+        )
+        self.assertEqual(result["failed_line_ids"], [5301])
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_document_post_eligibility_rejects_zero_value_and_search_only_effects(
+        self,
+    ) -> None:
+        company = Company()
+        move = document_post_move(
+            company,
+            amount_untaxed="0.00",
+            amount_tax="0.00",
+            amount_total="0.00",
+            amount_residual="0.00",
+        )
+        external = SimpleRecord(id=9951)
+        env = MoveEnvironment(
+            [move],
+            external_effects={"account.partial.reconcile": [external]},
+        )
+        cap = synthetic_read_capability(
+            "acct.move.document_post_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 4101,
+            "expected_move_type": "out_invoice",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertIs(result["eligible"], False)
+        self.assertIsNone(result["write_parameters"])
+        self.assertIn(
+            "document_total_or_residual_not_positive",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "move_payment_or_external_effect_present",
+            result["eligibility_failures"],
+        )
+        self.assertEqual(
+            external.access_checks,
+            [("rights", "read"), ("rule", "read")],
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_document_post_eligibility_rejects_unrecoverable_lexical_and_forged_bindings(
+        self,
+    ) -> None:
+        company = Company()
+        lexical_move = document_post_move(company)
+        lexical_parameters = {
+            "company_id": 7,
+            "partner_id": 5101,
+            "invoice_date": "2026-07-15",
+            "accounting_date": "2026-07-15",
+            "due_date": "2026-07-15",
+            "currency_id": 12,
+            "journal_id": 5201,
+            "posting_mode": "draft",
+            "reference": "V3-DOC-4101",
+            "lines": [
+                {
+                    "line_reference": "line-1",
+                    "name": "Consulting",
+                    "product_id": None,
+                    "account_id": 5601,
+                    "quantity": "1.00",
+                    "price_unit": "90.00",
+                    "tax_ids": [5401],
+                }
+            ],
+        }
+        lexical_move.odoo_cli_v3_document_binding = (
+            customer_invoice_document_binding(lexical_parameters)
+        )
+        forged_move = document_post_move(company, id=4102)
+        forged_move.odoo_cli_v3_document_binding = "0" * 64
+        forged_move.odoo_cli_v3_business_binding = "1" * 64
+        cases = (
+            ("lexically_unrecoverable", lexical_move),
+            ("forged_sha256_shape", forged_move),
+        )
+        for label, move in cases:
+            with self.subTest(label=label):
+                env = MoveEnvironment([move])
+                cap = synthetic_read_capability(
+                    "acct.move.document_post_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": move.id,
+                    "expected_move_type": "out_invoice",
+                }
+
+                result = executor(
+                    context(),
+                    cap,
+                    requested,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIn(
+                    "document_graph_binding_mismatch",
+                    result["eligibility_failures"],
+                )
+                self.assertNotIn(
+                    "document_binding_missing_or_invalid",
+                    result["eligibility_failures"],
+                )
+                executor.verify(
+                    context(),
+                    cap,
+                    requested,
+                    result,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+    def test_document_post_eligibility_supports_only_bound_vendor_bill_path(self) -> None:
+        env = MoveEnvironment(
+            [document_post_move(Company(), move_type="in_invoice")]
+        )
+        cap = synthetic_read_capability(
+            "acct.move.document_post_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 4101,
+            "expected_move_type": "in_invoice",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        validate_value(result, cap.data["output_schema"])
+        self.assertIs(result["eligible"], True)
+        self.assertEqual(
+            result["candidate_write_capability_id"],
+            "acct.bill.vendor_post.v1",
+        )
+        self.assertEqual(
+            result["write_parameters"]["expected_move_type"],
+            "in_invoice",
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_document_post_eligibility_rejects_write_acl_denials(self) -> None:
+        cases = (
+            ("move", "move_write_acl_denied"),
+            ("line", "line_write_acl_denied"),
+            ("partner", "posting_partner_write_acl_denied"),
+        )
+        for target, failure in cases:
+            with self.subTest(target=target):
+                move = document_post_move(Company())
+                denied = {
+                    "move": move,
+                    "line": move.line_ids[0],
+                    "partner": move.partner_id,
+                }[target]
+                denied.denied_operations = frozenset({"write"})
+                env = MoveEnvironment([move])
+                cap = synthetic_read_capability(
+                    "acct.move.document_post_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 4101,
+                    "expected_move_type": "out_invoice",
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIn(failure, result["eligibility_failures"])
+                executor.verify(
+                    context(),
+                    cap,
+                    requested,
+                    result,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+    def test_document_post_eligibility_rejects_partner_and_configuration_drift(
+        self,
+    ) -> None:
+        def inactive_partner(move):
+            move.partner_id.active = False
+
+        def nonzero_rank(move):
+            move.partner_id.customer_rank = 1
+
+        def nonself_commercial(move):
+            other = SimpleRecord(
+                id=5102,
+                company_id=move.company_id,
+                active=True,
+                customer_rank=0,
+            )
+            other.commercial_partner_id = other
+            move.partner_id.commercial_partner_id = other
+            move.commercial_partner_id = other
+
+        def inactive_currency(move):
+            move.currency_id.active = False
+
+        def mismatched_journal_currency(move):
+            move.journal_id.currency_id = SimpleRecord(
+                id=99,
+                active=True,
+                rounding="0.01",
+            )
+
+        cases = (
+            (
+                "inactive_partner",
+                inactive_partner,
+                "posting_partner_commercial_rank_or_scope_invalid",
+            ),
+            (
+                "nonzero_rank",
+                nonzero_rank,
+                "posting_partner_commercial_rank_or_scope_invalid",
+            ),
+            (
+                "nonself_commercial",
+                nonself_commercial,
+                "posting_partner_commercial_rank_or_scope_invalid",
+            ),
+            (
+                "inactive_currency",
+                inactive_currency,
+                "currency_journal_or_company_configuration_invalid",
+            ),
+            (
+                "mismatched_journal_currency",
+                mismatched_journal_currency,
+                "currency_journal_or_company_configuration_invalid",
+            ),
+        )
+        for label, mutate, failure in cases:
+            with self.subTest(label=label):
+                move = document_post_move(Company())
+                mutate(move)
+                env = MoveEnvironment([move])
+                cap = synthetic_read_capability(
+                    "acct.move.document_post_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 4101,
+                    "expected_move_type": "out_invoice",
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIn(failure, result["eligibility_failures"])
+                executor.verify(
+                    context(),
+                    cap,
+                    requested,
+                    result,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+    def test_document_post_eligibility_rejects_lock_and_line_guard_drift(
+        self,
+    ) -> None:
+        def future_date(move):
+            move.date = date(2026, 7, 14)
+
+        def violated_lock(move):
+            move._get_violated_lock_dates = (
+                lambda _date, _affects_tax: ["hard_lock_date"]
+            )
+
+        def line_partner(move):
+            move.invoice_line_ids[0].partner_id = SimpleRecord(id=5999)
+
+        def line_matching(move):
+            move.invoice_line_ids[0].matching_number = "P"
+
+        def line_deductible(move):
+            move.invoice_line_ids[0].deductible_amount = "99"
+
+        cases = (
+            (
+                "future_date",
+                future_date,
+                "effective_posting_date_in_future",
+            ),
+            (
+                "violated_lock",
+                violated_lock,
+                "effective_lock_date_violated",
+            ),
+            (
+                "line_partner",
+                line_partner,
+                "line_partner_matching_or_deductibility_side_effect",
+            ),
+            (
+                "line_matching",
+                line_matching,
+                "line_partner_matching_or_deductibility_side_effect",
+            ),
+            (
+                "line_deductible",
+                line_deductible,
+                "line_partner_matching_or_deductibility_side_effect",
+            ),
+        )
+        for label, mutate, failure in cases:
+            with self.subTest(label=label):
+                move = document_post_move(Company())
+                mutate(move)
+                env = MoveEnvironment([move])
+                cap = synthetic_read_capability(
+                    "acct.move.document_post_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 4101,
+                    "expected_move_type": "out_invoice",
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIn(failure, result["eligibility_failures"])
+                executor.verify(
+                    context(),
+                    cap,
+                    requested,
+                    result,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+    def test_refund_draft_cancel_eligibility_returns_exact_origin_graph_binding(self) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(company)
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.draft_cancel_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 6102,
+            "expected_move_type": "out_refund",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertIs(result["eligible"], True)
+        self.assertEqual(result["eligibility_failures"], [])
+        self.assertEqual(
+            result["candidate_write_capability_id"],
+            "acct.refund.draft_cancel.v1",
+        )
+        self.assertEqual(
+            result["required_user_parameters"],
+            ["idempotency_key", "reason"],
+        )
+        self.assertEqual(
+            result["write_parameters"],
+            {
+                "company_id": 7,
+                "move_id": 6102,
+                "expected_move_type": "out_refund",
+                "expected_origin_move_id": 6101,
+                "expected_document_binding": (
+                    refund.odoo_cli_v3_document_binding
+                ),
+                "expected_business_binding": (
+                    refund.odoo_cli_v3_business_binding
+                ),
+                "expected_origin_document_binding": (
+                    origin.odoo_cli_v3_document_binding
+                ),
+                "expected_origin_business_binding": (
+                    origin.odoo_cli_v3_business_binding
+                ),
+                "expected_partner_id": 6301,
+                "expected_journal_id": 6201,
+                "expected_currency_id": 12,
+                "expected_refund_date": "2026-07-13",
+                "expected_total_amount": "100.00",
+                "expected_line_ids": [6501, 6502],
+                "expected_origin_line_ids": [6401, 6402],
+            },
+        )
+        self.assertEqual(
+            result["target"]["refund"]["line_ids"],
+            [6501, 6502],
+        )
+        self.assertEqual(
+            result["target"]["origin"]["line_ids"],
+            [6401, 6402],
+        )
+        self.assertEqual(
+            result["target"]["origin"]["reversal_move_ids"], [6102]
+        )
+        self.assertEqual(
+            result["target"]["origin"]["source_posting_mode"], "post"
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_refund_draft_cancel_eligibility_accepts_origin_created_draft_then_posted(
+        self,
+    ) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(
+            company,
+            origin_posting_mode="draft",
+        )
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.draft_cancel_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 6102,
+            "expected_move_type": "out_refund",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        validate_value(result, cap.data["output_schema"])
+        self.assertIs(result["eligible"], True)
+        self.assertEqual(
+            result["target"]["origin"]["source_posting_mode"], "draft"
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_refund_draft_cancel_eligibility_rejects_zero_or_ambiguous_origin_provenance(
+        self,
+    ) -> None:
+        company = Company()
+        zero_origin, zero_refund = draft_refund_graph(company)
+        zero_origin.odoo_cli_v3_document_binding = "0" * 64
+        zero_origin.odoo_cli_v3_business_binding = "1" * 64
+        cases = (
+            (
+                "zero_exact_matches",
+                zero_origin,
+                zero_refund,
+                None,
+            ),
+            (
+                "two_exact_matches",
+                *draft_refund_graph(company),
+                mock.patch(
+                    "odoo_accounting_cli_v3.odoo.executor."
+                    "_document_graph_binding_candidate",
+                    return_value=(
+                        zero_origin.odoo_cli_v3_document_binding,
+                        zero_origin.odoo_cli_v3_business_binding,
+                    ),
+                ),
+            ),
+        )
+        for label, origin, refund, binding_patch in cases:
+            with self.subTest(label=label):
+                if label == "two_exact_matches":
+                    origin.odoo_cli_v3_document_binding = (
+                        zero_origin.odoo_cli_v3_document_binding
+                    )
+                    origin.odoo_cli_v3_business_binding = (
+                        zero_origin.odoo_cli_v3_business_binding
+                    )
+                env = MoveEnvironment([origin, refund])
+                cap = synthetic_read_capability(
+                    "acct.refund.draft_cancel_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 6102,
+                    "expected_move_type": "out_refund",
+                }
+                if binding_patch is None:
+                    result = executor(
+                        context(),
+                        cap,
+                        requested,
+                        "c" * 64,
+                        "d" * 64,
+                    )
+                else:
+                    with binding_patch:
+                        result = executor(
+                            context(),
+                            cap,
+                            requested,
+                            "c" * 64,
+                            "d" * 64,
+                        )
+
+                validate_value(result, cap.data["output_schema"])
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIsNone(
+                    result["target"]["origin"]["source_posting_mode"]
+                )
+                self.assertIn(
+                    "origin_graph_binding_mismatch",
+                    result["eligibility_failures"],
+                )
+                self.assertNotIn(
+                    "origin_document_binding_missing_or_invalid",
+                    result["eligibility_failures"],
+                )
+                self.assertNotIn(
+                    "origin_business_binding_missing_or_invalid",
+                    result["eligibility_failures"],
+                )
+
+    def test_refund_draft_cancel_eligibility_rejects_effects_and_origin_drift(self) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(company)
+        refund.state = "posted"
+        refund.posted_before = True
+        refund.payment_state = "paid"
+        refund.amount_residual = "0.00"
+        refund.payment_ids = [SimpleRecord(id=9911)]
+        refund.line_ids[0].reconciled = True
+        refund.odoo_cli_v3_document_binding = "0" * 64
+        origin.reversal_move_ids = []
+        origin.payment_ids = [SimpleRecord(id=9912)]
+        origin.line_ids[0].matched_debit_ids = [SimpleRecord(id=9913)]
+        origin.odoo_cli_v3_document_binding = "not-a-binding"
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.draft_cancel_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 6102,
+            "expected_move_type": "out_refund",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        validate_value(result, cap.data["output_schema"])
+        self.assertIs(result["eligible"], False)
+        self.assertIsNone(result["write_parameters"])
+        self.assertIn("refund_is_not_draft", result["eligibility_failures"])
+        self.assertIn(
+            "refund_payment_or_external_effect_present",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "refund_line_reconciliation_or_external_effect_present",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "origin_refund_graph_mismatch",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "origin_document_binding_missing_or_invalid",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "refund_graph_binding_mismatch",
+            result["eligibility_failures"],
+        )
+        self.assertNotIn(
+            "refund_document_binding_missing_or_invalid",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "origin_payment_or_external_effect_present",
+            result["eligibility_failures"],
+        )
+        self.assertIn(
+            "origin_line_reconciliation_or_external_effect_present",
+            result["eligibility_failures"],
+        )
+        self.assertEqual(result["failed_refund_line_ids"], [6501])
+        self.assertEqual(result["failed_origin_line_ids"], [6401])
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_refund_draft_cancel_eligibility_supports_vendor_refund_graph(self) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(
+            company,
+            move_type="in_refund",
+            refund_mode="partial",
+        )
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.draft_cancel_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 6102,
+            "expected_move_type": "in_refund",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertIs(result["eligible"], True)
+        self.assertEqual(
+            result["write_parameters"]["expected_move_type"],
+            "in_refund",
+        )
+        self.assertEqual(
+            result["target"]["origin"]["move_type"], "in_invoice"
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_refund_draft_cancel_eligibility_rejects_acl_and_configuration_drift(
+        self,
+    ) -> None:
+        def refund_acl(_origin, refund):
+            refund.denied_operations = frozenset({"write"})
+
+        def refund_line_acl(_origin, refund):
+            refund.line_ids[0].denied_operations = frozenset({"write"})
+
+        def inactive_currency(_origin, refund):
+            refund.currency_id.active = False
+
+        def mismatched_journal_currency(_origin, refund):
+            refund.journal_id.currency_id = SimpleRecord(
+                id=99,
+                active=True,
+                rounding="0.01",
+            )
+
+        cases = (
+            ("refund_acl", refund_acl, "refund_write_acl_denied"),
+            (
+                "refund_line_acl",
+                refund_line_acl,
+                "refund_line_write_acl_denied",
+            ),
+            (
+                "inactive_currency",
+                inactive_currency,
+                "refund_currency_journal_or_company_configuration_invalid",
+            ),
+            (
+                "mismatched_journal_currency",
+                mismatched_journal_currency,
+                "refund_currency_journal_or_company_configuration_invalid",
+            ),
+        )
+        for label, mutate, failure in cases:
+            with self.subTest(label=label):
+                company = Company()
+                origin, refund = draft_refund_graph(company)
+                mutate(origin, refund)
+                env = MoveEnvironment([origin, refund])
+                cap = synthetic_read_capability(
+                    "acct.refund.draft_cancel_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 6102,
+                    "expected_move_type": "out_refund",
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIn(failure, result["eligibility_failures"])
+                executor.verify(
+                    context(),
+                    cap,
+                    requested,
+                    result,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+    def test_refund_draft_cancel_eligibility_rejects_financial_graph_drift(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "full_missing_line_reference",
+                "full",
+                lambda origin, refund: delattr(
+                    refund.invoice_line_ids[0],
+                    "odoo_cli_v3_line_reference",
+                ),
+                "refund_graph_binding_mismatch",
+            ),
+            (
+                "origin_zero_total_and_residual",
+                "full",
+                lambda origin, _refund: (
+                    setattr(origin, "amount_total", "0.00"),
+                    setattr(origin, "amount_residual", "0.00"),
+                ),
+                "origin_total_or_residual_not_positive",
+            ),
+            (
+                "full_linewise_name_drift",
+                "full",
+                lambda _origin, refund: setattr(
+                    refund.invoice_line_ids[0],
+                    "name",
+                    "Drifted refund line",
+                ),
+                "full_refund_linewise_reversal_not_exact",
+            ),
+            (
+                "full_line_reference_replaced",
+                "full",
+                lambda _origin, refund: setattr(
+                    refund.invoice_line_ids[0],
+                    "odoo_cli_v3_line_reference",
+                    "replacement-line-1",
+                ),
+                "full_refund_linewise_reversal_not_exact",
+            ),
+            (
+                "partial_line_total_drift",
+                "partial",
+                lambda _origin, refund: setattr(
+                    refund.invoice_line_ids[0],
+                    "price_total",
+                    "39",
+                ),
+                "refund_taxless_financial_dependency_graph_not_exact",
+            ),
+        )
+        for label, refund_mode, mutate, failure in cases:
+            with self.subTest(label=label):
+                company = Company()
+                origin, refund = draft_refund_graph(
+                    company,
+                    refund_mode=refund_mode,
+                )
+                mutate(origin, refund)
+                env = MoveEnvironment([origin, refund])
+                cap = synthetic_read_capability(
+                    "acct.refund.draft_cancel_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 6102,
+                    "expected_move_type": "out_refund",
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIn(failure, result["eligibility_failures"])
+                executor.verify(
+                    context(),
+                    cap,
+                    requested,
+                    result,
+                    "c" * 64,
+                    "d" * 64,
+                )
+
+    def test_partial_refund_draft_cancel_eligibility_requires_auditable_origin_line_relation(
+        self,
+    ) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(
+            company, refund_mode="partial"
+        )
+        refund.invoice_line_ids[0].odoo_cli_v3_line_reference = (
+            "unrelated-line-1"
+        )
+        source = {
+            "company_id": 7,
+            "origin_move_id": 6101,
+            "refund_type": "customer_credit_note",
+            "refund_mode": "partial",
+            "refund_date": "2026-07-13",
+            "journal_id": 6201,
+            "currency_id": 12,
+            "expected_total_amount": "40",
+            "reason": "V3 refund",
+            "posting_mode": "draft",
+            "lines": [
+                {
+                    "line_reference": "unrelated-line-1",
+                    "name": "Consulting",
+                    "account_id": 6601,
+                    "quantity": "1",
+                    "price_unit": "40",
+                    "tax_ids": [],
+                }
+            ],
+        }
+        (
+            refund.odoo_cli_v3_document_binding,
+            refund.odoo_cli_v3_business_binding,
+        ) = _refund_bindings(source)
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.draft_cancel_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 6102,
+            "expected_move_type": "out_refund",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertIs(result["eligible"], False)
+        self.assertIsNone(result["write_parameters"])
+        self.assertIn(
+            "partial_refund_origin_line_relation_not_exact",
+            result["eligibility_failures"],
+        )
+        self.assertNotIn(
+            "refund_graph_binding_mismatch",
+            result["eligibility_failures"],
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_partial_refund_draft_cancel_eligibility_rejects_total_above_origin(
+        self,
+    ) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(
+            company, refund_mode="partial"
+        )
+        invoice_line, term_line = refund.line_ids
+        refund.amount_untaxed = "120.00"
+        refund.amount_total = "120.00"
+        refund.amount_residual = "120.00"
+        invoice_line.price_unit = "120"
+        invoice_line.price_subtotal = "120"
+        invoice_line.price_total = "120"
+        invoice_line.debit = "120"
+        invoice_line.balance = "120"
+        invoice_line.amount_currency = "120"
+        term_line.credit = "120"
+        term_line.balance = "-120"
+        term_line.amount_currency = "-120"
+        source = {
+            "company_id": 7,
+            "origin_move_id": 6101,
+            "refund_type": "customer_credit_note",
+            "refund_mode": "partial",
+            "refund_date": "2026-07-13",
+            "journal_id": 6201,
+            "currency_id": 12,
+            "expected_total_amount": "120",
+            "reason": "V3 refund",
+            "posting_mode": "draft",
+            "lines": [
+                {
+                    "line_reference": "origin-line-1",
+                    "name": "Consulting",
+                    "account_id": 6601,
+                    "quantity": "1",
+                    "price_unit": "120",
+                    "tax_ids": [],
+                }
+            ],
+        }
+        (
+            refund.odoo_cli_v3_document_binding,
+            refund.odoo_cli_v3_business_binding,
+        ) = _refund_bindings(source)
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.draft_cancel_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 6102,
+            "expected_move_type": "out_refund",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        self.assertIs(result["eligible"], False)
+        self.assertIsNone(result["write_parameters"])
+        self.assertIn(
+            "partial_refund_total_exceeds_origin",
+            result["eligibility_failures"],
+        )
+        self.assertNotIn(
+            "refund_graph_binding_mismatch",
+            result["eligibility_failures"],
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_new_eligibility_handlers_reject_non_exact_integer_ids_without_receipt(
+        self,
+    ) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(company)
+        cases = (
+            (
+                MoveEnvironment([document_post_move(company)]),
+                "acct.move.document_post_eligibility.v1",
+                {
+                    "company_id": 7.0,
+                    "move_id": 4101,
+                    "expected_move_type": "out_invoice",
+                },
+            ),
+            (
+                MoveEnvironment([origin, refund]),
+                "acct.refund.draft_cancel_eligibility.v1",
+                {
+                    "company_id": 7,
+                    "move_id": 6102.0,
+                    "expected_move_type": "out_refund",
+                },
+            ),
+        )
+        for env, capability_id, requested in cases:
+            with self.subTest(capability_id=capability_id):
+                cap = synthetic_read_capability(capability_id)
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                with mock.patch(
+                    "odoo_accounting_cli_v3.odoo.executor.create_read_receipt"
+                ) as create_receipt:
+                    with self.assertRaises(OdooExecutionError):
+                        executor(
+                            context(),
+                            cap,
+                            requested,
+                            "c" * 64,
+                            "d" * 64,
+                        )
+                create_receipt.assert_not_called()
+
+    def test_refund_draft_cancel_eligibility_rejects_cross_company_origin_without_receipt(
+        self,
+    ) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(company)
+        origin.company_id = SimpleRecord(id=8)
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.draft_cancel_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+
+        with mock.patch(
+            "odoo_accounting_cli_v3.odoo.executor.create_read_receipt"
+        ) as create_receipt:
+            with self.assertRaisesRegex(
+                OdooExecutionError, "origin is outside the bound company"
+            ):
+                executor(
+                    context(),
+                    cap,
+                    {
+                        "company_id": 7,
+                        "move_id": 6102,
+                        "expected_move_type": "out_refund",
                     },
                     "c" * 64,
                     "d" * 64,

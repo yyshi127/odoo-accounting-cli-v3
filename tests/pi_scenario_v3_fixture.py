@@ -270,12 +270,14 @@ def _string_for_pattern(pattern: str, path: str, seed: int) -> str:
         r"^[0-9a-f]{64}$": digest,
         r"^-?[0-9]+(?:\.[0-9]+)?$": str(seed),
         r"^[0-9]+(?:\.[0-9]+)?$": str(seed),
+        r"^.*$": f"value-{seed}",
         r"^.*\S.*$": f"value-{seed}",
         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$": "2026-07-17",
         r"^period-[0-9a-f]{64}$": f"period-{digest}",
         r"^(?:0\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\.[0-9]+)?)$": (
             "1"
         ),
+        r"^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$": str(seed),
         r"^line-[0-9a-f]{64}$": f"line-{digest}",
         r"^(?:0(?:\.[0-9]+)?|[1-9][0-9]*(?:\.[0-9]+)?)$": (
             str(seed)
@@ -369,6 +371,13 @@ def _schema_example(
         return value[:maximum]
     if schema_type == "array":
         count = schema.get("minItems", 0)
+        if schema.get("uniqueItems") and "enum" in schema["items"]:
+            candidates = schema["items"]["enum"]
+            if len(candidates) < count:
+                raise AssertionError(
+                    f"not enough enum values for unique fixture at {path}"
+                )
+            return copy.deepcopy(candidates[:count])
         return [
             _schema_example(
                 schema["items"],

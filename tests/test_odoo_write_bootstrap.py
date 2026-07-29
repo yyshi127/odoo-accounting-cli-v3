@@ -247,6 +247,129 @@ def test_generic_bank_recovery_combines_graph_and_sequence_locks_once():
         )
 
 
+@pytest.mark.parametrize(
+    "capability_id",
+    [
+        "acct.invoice.customer_post.v1",
+        "acct.bill.vendor_post.v1",
+    ],
+)
+def test_document_post_locks_the_move_and_selected_commercial_partner(
+    capability_id,
+):
+    parameters = {"move_id": 501, "expected_partner_id": 601}
+    post = _resource_lock_digests(
+        capability_id,
+        7,
+        parameters,
+        None,
+    )
+    reversal = _resource_lock_digests(
+        "acct.move.reverse.v1",
+        7,
+        {"move_id": 501},
+        None,
+    )
+    same_partner_other_move = _resource_lock_digests(
+        capability_id,
+        7,
+        {"move_id": 502, "expected_partner_id": 601},
+        None,
+    )
+
+    assert set(reversal) < set(post)
+    assert len(post) == 2
+    assert len(set(post) & set(same_partner_other_move)) == 1
+
+
+def test_refund_draft_cancel_locks_refund_and_origin_in_stable_order():
+    parameters = {"move_id": 501, "expected_origin_move_id": 401}
+
+    locks = _resource_lock_digests(
+        "acct.refund.draft_cancel.v1",
+        7,
+        parameters,
+        None,
+    )
+    reversed_parameters = _resource_lock_digests(
+        "acct.refund.draft_cancel.v1",
+        7,
+        {"expected_origin_move_id": 401, "move_id": 501},
+        None,
+    )
+    refund_lock = _resource_lock_digests(
+        "acct.move.reverse.v1",
+        7,
+        {"move_id": 501},
+        None,
+    )
+    origin_lock = _resource_lock_digests(
+        "acct.move.reverse.v1",
+        7,
+        {"move_id": 401},
+        None,
+    )
+
+    assert locks == reversed_parameters
+    assert locks == sorted(set(locks))
+    assert len(locks) == 2
+    assert set(locks) == {*refund_lock, *origin_lock}
+
+
+def test_refund_draft_cancel_complete_refund_origin_graph_has_fixed_exclusive_row_order():
+    def snapshot(model, record_id):
+        values = {"company_id": [7, "Sandbox Company"], "state": "draft"}
+        return {
+            "model": model,
+            "record_id": record_id,
+            "company_id": 7,
+            "state": "draft",
+            "values": values,
+            "values_digest": hashlib.sha256(
+                canonical_json(values)
+            ).hexdigest(),
+        }
+
+    evidence = {
+        "handler_details": {
+            "before": [
+                snapshot("account.move", 501),
+                snapshot("account.move.line", 503),
+                snapshot("account.move", 401),
+                snapshot("account.move.line", 403),
+            ],
+            "dependencies": [],
+            "strict_dependencies": [],
+        }
+    }
+
+    assert write_bootstrap._precheck_lock_targets(
+        evidence,
+        company_id=7,
+        exclusive_before=True,
+    ) == [
+        ("account.move", [401, 501], False),
+        ("account.move.line", [403, 503], False),
+    ]
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    [
+        "acct.invoice.customer_post.v1",
+        "acct.bill.vendor_post.v1",
+        "acct.refund.draft_cancel.v1",
+    ],
+)
+def test_document_state_transitions_require_exclusive_complete_before_graph(
+    capability_id,
+):
+    assert (
+        capability_id
+        in write_bootstrap.EXCLUSIVE_BEFORE_LOCK_CAPABILITIES
+    )
+
+
 def test_draft_cancel_uses_the_same_move_resource_lock_as_move_reversal():
     draft_cancel = _resource_lock_digests(
         "acct.move.draft_cancel.v1",
@@ -267,10 +390,22 @@ def test_draft_cancel_uses_the_same_move_resource_lock_as_move_reversal():
 
 def test_phase_b_move_capabilities_have_exact_move_model_allowlists():
     expected = frozenset({"account.move", "account.move.line"})
+    document_post_expected = frozenset(
+        {"account.move", "account.move.line", "res.partner"}
+    )
 
     assert _ALLOWED_MODELS["acct.journal.entry_create.v1"] == expected
     assert _ALLOWED_MODELS["acct.move.post.v1"] == expected
     assert _ALLOWED_MODELS["acct.move.draft_cancel.v2"] == expected
+    assert (
+        _ALLOWED_MODELS["acct.invoice.customer_post.v1"]
+        == document_post_expected
+    )
+    assert (
+        _ALLOWED_MODELS["acct.bill.vendor_post.v1"]
+        == document_post_expected
+    )
+    assert _ALLOWED_MODELS["acct.refund.draft_cancel.v1"] == expected
 
 
 def test_payment_cancel_has_exact_models_locks_and_exclusive_before_graph():
@@ -339,6 +474,191 @@ def test_phase_b_post_and_cancel_require_exclusive_before_graph_locks():
         "acct.move.post.v1",
         "acct.move.draft_cancel.v2",
     } <= write_bootstrap.EXCLUSIVE_BEFORE_LOCK_CAPABILITIES
+
+
+def _state_transition_snapshot(model, record_id, state):
+    values = {
+        "company_id": [7, "Sandbox Company"],
+        "state": state,
+    }
+    return {
+        "model": model,
+        "record_id": record_id,
+        "company_id": 7,
+        "state": state,
+        "values": values,
+        "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize(
+    ("capability_id", "method"),
+    [
+        (
+            "acct.invoice.customer_post.v1",
+            "manual_review_customer_invoice_recovery",
+        ),
+        (
+            "acct.bill.vendor_post.v1",
+            "manual_review_vendor_bill_recovery",
+        ),
+    ],
+)
+def test_document_post_receipt_exposes_only_manual_separately_approved_recovery(
+    capability_id,
+    method,
+):
+    parameters = {"company_id": 7, "move_id": 501}
+    operation = SimpleNamespace(
+        capability_id=capability_id,
+        company_id=7,
+        parameters=parameters,
+        environment="sandbox",
+        operation_id=f"op-{capability_id}",
+    )
+    before = [_state_transition_snapshot("account.move", 501, "draft")]
+    after = [_state_transition_snapshot("account.move", 501, "posted")]
+    evidence = _execution_evidence(
+        operation,
+        {
+            "capability_id": capability_id,
+            "company_id": 7,
+            "parameters_digest": hashlib.sha256(
+                canonical_json(parameters)
+            ).hexdigest(),
+            "before": before,
+            "after": after,
+            "records": [{"model": "account.move", "record_id": 501}],
+            "recovery": {
+                "status": "manual_escalation",
+                "method": method,
+                "targets": [{"model": "account.move", "record_id": 501}],
+            },
+        },
+    )
+
+    assert evidence["recovery_plan"]["status"] == "manual_escalation"
+    assert evidence["recovery_plan"]["method"] == method
+    assert evidence["recovery_plan"]["action_targets"] == []
+    assert evidence["recovery_plan"]["guard_records"][0][
+        "expected_outcome"
+    ] == "manual_review"
+    assert evidence["recovery_parameters"]["oracle_id"] == "manual_escalation"
+
+
+def test_refund_draft_cancel_receipt_is_terminal_and_has_no_recovery_target():
+    parameters = {
+        "company_id": 7,
+        "move_id": 501,
+        "expected_origin_move_id": 401,
+    }
+    operation = SimpleNamespace(
+        capability_id="acct.refund.draft_cancel.v1",
+        company_id=7,
+        parameters=parameters,
+        environment="sandbox",
+        operation_id="op-refund-draft-cancel",
+    )
+    before = [_state_transition_snapshot("account.move", 501, "draft")]
+    after = [_state_transition_snapshot("account.move", 501, "cancel")]
+    evidence = _execution_evidence(
+        operation,
+        {
+            "capability_id": operation.capability_id,
+            "company_id": 7,
+            "parameters_digest": hashlib.sha256(
+                canonical_json(parameters)
+            ).hexdigest(),
+            "before": before,
+            "after": after,
+            "records": [{"model": "account.move", "record_id": 501}],
+            "recovery": {
+                "status": "not_applicable",
+                "method": "refund_draft_cancel_completed",
+                "targets": [],
+            },
+        },
+    )
+
+    assert evidence["recovery_plan"]["status"] == "not_applicable"
+    assert evidence["recovery_plan"]["method"] == "refund_draft_cancel_completed"
+    assert evidence["recovery_plan"]["action_targets"] == []
+    assert evidence["recovery_plan"]["guard_records"] == []
+    assert evidence["recovery_parameters"]["oracle_id"] == "not_applicable"
+
+
+@pytest.mark.parametrize(
+    ("capability_id", "method", "oracle_id"),
+    [
+        (
+            "acct.invoice.customer_post.v1",
+            "reverse_posted_customer_invoice_v1",
+            "reverse_posted_customer_invoice_exact_v1",
+        ),
+        (
+            "acct.bill.vendor_post.v1",
+            "reverse_posted_vendor_bill_v1",
+            "reverse_posted_vendor_bill_exact_v1",
+        ),
+        (
+            "acct.refund.draft_cancel.v1",
+            "cancel_draft_refund_v1",
+            "cancel_draft_refund_exact_v1",
+        ),
+    ],
+)
+def test_new_state_transitions_reject_reused_or_fabricated_automatic_recovery(
+    capability_id,
+    method,
+    oracle_id,
+):
+    parameters = {"company_id": 7, "move_id": 501}
+    operation = SimpleNamespace(
+        capability_id=capability_id,
+        company_id=7,
+        parameters=parameters,
+        environment="sandbox",
+        operation_id=f"op-{capability_id}",
+    )
+    after = [
+        _state_transition_snapshot("account.move", 501, "posted"),
+        _state_transition_snapshot("account.move.line", 502, "posted"),
+    ]
+
+    with pytest.raises(
+        OdooWriteBootstrapError,
+        match="available recovery action contract is invalid",
+    ):
+        _execution_evidence(
+            operation,
+            {
+                "capability_id": capability_id,
+                "company_id": 7,
+                "parameters_digest": hashlib.sha256(
+                    canonical_json(parameters)
+                ).hexdigest(),
+                "module_graph": TEST_MODULE_GRAPH.evidence,
+                "before": [],
+                "after": after,
+                "records": [
+                    {"model": "account.move", "record_id": 501},
+                    {"model": "account.move.line", "record_id": 502},
+                ],
+                "recovery": {
+                    "status": "available",
+                    "method": method,
+                    "targets": [{"model": "account.move", "record_id": 501}],
+                    "guards": [
+                        {
+                            "model": "account.move.line",
+                            "record_id": 502,
+                            "expected_outcome": "survive_exact",
+                        }
+                    ],
+                    "oracle_id": oracle_id,
+                },
+            },
+        )
 
 
 def test_difference_marks_every_created_record_absent_before_it_exists():

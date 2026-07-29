@@ -331,6 +331,54 @@ def draft_cancel_v2_parameters() -> dict:
     return result
 
 
+def document_post_parameters(*, vendor: bool = False) -> dict:
+    return {
+        "company_id": 7,
+        "move_id": 883,
+        "expected_move_type": "in_invoice" if vendor else "out_invoice",
+        "expected_document_binding": "1" * 64,
+        "expected_business_binding": "2" * 64,
+        "expected_partner_id": 10,
+        "expected_journal_id": 4,
+        "expected_currency_id": 12,
+        "expected_invoice_date": "2026-07-15",
+        "expected_accounting_date": "2026-07-16",
+        "expected_due_date": "2026-08-15",
+        "expected_reference": "VENDOR-REF-1" if vendor else "CUSTOMER-REF-1",
+        "expected_amount_untaxed": "100.00",
+        "expected_amount_tax": "13.00",
+        "expected_amount_total": "113.00",
+        "expected_amount_residual": "113.00",
+        "expected_line_ids": [2101, 2102, 2103],
+        "reason": "Approved document posting",
+        "idempotency_key": (
+            "post-vendor-bill-883" if vendor else "post-customer-invoice-883"
+        ),
+    }
+
+
+def refund_draft_cancel_parameters() -> dict:
+    return {
+        "company_id": 7,
+        "move_id": 884,
+        "expected_move_type": "out_refund",
+        "expected_origin_move_id": 880,
+        "expected_document_binding": "3" * 64,
+        "expected_business_binding": "4" * 64,
+        "expected_origin_document_binding": "5" * 64,
+        "expected_origin_business_binding": "6" * 64,
+        "expected_partner_id": 10,
+        "expected_journal_id": 4,
+        "expected_currency_id": 12,
+        "expected_refund_date": "2026-07-16",
+        "expected_total_amount": "113.00",
+        "expected_line_ids": [2201, 2202, 2203],
+        "expected_origin_line_ids": [2101, 2102, 2103],
+        "reason": "Cancel duplicate pristine draft refund",
+        "idempotency_key": "cancel-draft-refund-884",
+    }
+
+
 def recovery_parameters() -> dict:
     return {
         "company_id": 7,
@@ -390,6 +438,9 @@ VALID_CASES = {
     "acct.move.reverse.v1": reversal_parameters,
     "acct.move.draft_cancel.v1": draft_cancel_parameters,
     "acct.move.draft_cancel.v2": draft_cancel_v2_parameters,
+    "acct.invoice.customer_post.v1": document_post_parameters,
+    "acct.bill.vendor_post.v1": lambda: document_post_parameters(vendor=True),
+    "acct.refund.draft_cancel.v1": refund_draft_cancel_parameters,
     "acct.recovery.execute.v1": recovery_parameters,
     "acct.reconciliation.undo.v1": reconciliation_undo_parameters,
     "acct.bank.statement_compensate.v1": bank_statement_compensate_parameters,
@@ -860,6 +911,150 @@ def test_draft_cancel_v2_requires_exact_bindings_and_line_set(mutate, error):
 
     with pytest.raises(WriteSemanticError, match=error):
         validate_write_semantics("acct.move.draft_cancel.v2", parameters)
+
+
+@pytest.mark.parametrize(
+    ("capability_id", "vendor", "wrong_type"),
+    (
+        ("acct.invoice.customer_post.v1", False, "in_invoice"),
+        ("acct.bill.vendor_post.v1", True, "out_invoice"),
+    ),
+)
+def test_document_post_semantics_fix_document_type_and_complete_identity(
+    capability_id, vendor, wrong_type
+):
+    parameters = document_post_parameters(vendor=vendor)
+    result = validate_write_semantics(capability_id, parameters)
+
+    assert result["computed"]["expected_move_type"] == parameters[
+        "expected_move_type"
+    ]
+    assert result["computed"]["expected_line_count"] == 3
+
+    parameters["expected_move_type"] = wrong_type
+    with pytest.raises(WriteSemanticError, match="expected_move_type"):
+        validate_write_semantics(capability_id, parameters)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error"),
+    (
+        (
+            lambda value: value.update(expected_due_date="2026-07-14"),
+            "expected_due_date",
+        ),
+        (
+            lambda value: value.update(expected_amount_total="112.99"),
+            "untaxed plus tax",
+        ),
+        (
+            lambda value: value.update(expected_amount_residual="0"),
+            "residual",
+        ),
+        (
+            lambda value: value.update(expected_amount_tax="-1"),
+            "canonical decimal",
+        ),
+        (
+            lambda value: value.update(
+                expected_amount_untaxed="0",
+                expected_amount_tax="0",
+                expected_amount_total="0",
+                expected_amount_residual="0",
+            ),
+            "expected_amount_total must be positive",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=[2102, 2101]),
+            "sorted",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=[2101, 2101]),
+            "unique",
+        ),
+        (
+            lambda value: value.update(expected_reference=7),
+            "expected_reference",
+        ),
+        (
+            lambda value: value.update(idempotency_key=" "),
+            "idempotency_key",
+        ),
+    ),
+)
+def test_document_post_semantics_reject_ambiguous_or_unbound_graph(mutate, error):
+    parameters = document_post_parameters()
+    mutate(parameters)
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.invoice.customer_post.v1", parameters)
+
+
+@pytest.mark.parametrize("move_type", ("out_refund", "in_refund"))
+def test_refund_draft_cancel_semantics_bind_both_complete_graphs(move_type):
+    parameters = refund_draft_cancel_parameters()
+    parameters["expected_move_type"] = move_type
+
+    result = validate_write_semantics(
+        "acct.refund.draft_cancel.v1", parameters
+    )
+
+    assert result["computed"]["expected_move_type"] == move_type
+    assert result["computed"]["expected_line_count"] == 3
+    assert result["computed"]["expected_origin_line_count"] == 3
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error"),
+    (
+        (
+            lambda value: value.update(expected_move_type="out_invoice"),
+            "expected_move_type",
+        ),
+        (
+            lambda value: value.update(expected_origin_move_id=884),
+            "must differ",
+        ),
+        (
+            lambda value: value.update(expected_origin_document_binding="bad"),
+            "origin_document_binding",
+        ),
+        (
+            lambda value: value.update(expected_total_amount="-1"),
+            "canonical decimal",
+        ),
+        (
+            lambda value: value.update(expected_total_amount="0"),
+            "expected_total_amount must be positive",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=[2202, 2201]),
+            "sorted",
+        ),
+        (
+            lambda value: value.update(expected_origin_line_ids=[2101]),
+            "expected_origin_line_ids",
+        ),
+        (
+            lambda value: value.update(
+                expected_origin_line_ids=[2101, 2102, 2201]
+            ),
+            "must not overlap",
+        ),
+        (
+            lambda value: value.update(reason=""),
+            "reason",
+        ),
+    ),
+)
+def test_refund_draft_cancel_semantics_reject_unbound_or_overlapping_graphs(
+    mutate, error
+):
+    parameters = refund_draft_cancel_parameters()
+    mutate(parameters)
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.refund.draft_cancel.v1", parameters)
 
 
 def test_depreciation_requires_real_asset_move_reference():

@@ -98,7 +98,16 @@ _ALLOWED_MODELS = {
     "acct.bill.vendor_create.v1": frozenset(
         {"account.move", "account.move.line"}
     ),
+    "acct.invoice.customer_post.v1": frozenset(
+        {"account.move", "account.move.line", "res.partner"}
+    ),
+    "acct.bill.vendor_post.v1": frozenset(
+        {"account.move", "account.move.line", "res.partner"}
+    ),
     "acct.refund.create.v1": frozenset(
+        {"account.move", "account.move.line"}
+    ),
+    "acct.refund.draft_cancel.v1": frozenset(
         {"account.move", "account.move.line"}
     ),
     "acct.payment.register.v1": frozenset(
@@ -294,6 +303,47 @@ def _digest(value: Any) -> str:
         raise WriteServiceError("backend evidence is not canonical JSON") from exc
 
 
+def _snapshot_relation_id(value: Any) -> int | None:
+    if type(value) is int and value > 0:
+        return value
+    if (
+        isinstance(value, list)
+        and len(value) == 2
+        and type(value[0]) is int
+        and value[0] > 0
+        and isinstance(value[1], str)
+    ):
+        return value[0]
+    return None
+
+
+def _snapshot_company_bound(
+    values: dict[str, Any],
+    company_id: int,
+    *,
+    allow_shared_partner: bool = False,
+) -> bool:
+    raw_company_id = values.get("company_id")
+    bound_company_id = _snapshot_relation_id(raw_company_id)
+    if bound_company_id is not None:
+        return bound_company_id == company_id
+    if (
+        not allow_shared_partner
+        or (raw_company_id is not False and raw_company_id is not None)
+    ):
+        return False
+    if "company_ids" not in values:
+        return True
+    company_ids = values["company_ids"]
+    if (
+        not isinstance(company_ids, list)
+        or any(type(item) is not int or item <= 0 for item in company_ids)
+        or len(company_ids) != len(set(company_ids))
+    ):
+        return False
+    return not company_ids or company_id in company_ids
+
+
 def _index_company_bound_fresh_snapshots(
     snapshots: list[dict[str, Any]], company_id: int
 ) -> dict[tuple[str, int], dict[str, Any]]:
@@ -309,8 +359,13 @@ def _index_company_bound_fresh_snapshots(
             raise WriteServiceError(
                 "fresh verification snapshot identity or company is invalid"
             )
-        if key[0] != "account.full.reconcile" and (
-            values.get("company_id") != company_id
+        if (
+            key[0] != "account.full.reconcile"
+            and not _snapshot_company_bound(
+                values,
+                company_id,
+                allow_shared_partner=key[0] == "res.partner",
+            )
         ):
             raise WriteServiceError(
                 "fresh verification snapshot identity or company is invalid"
@@ -336,10 +391,10 @@ def _index_company_bound_fresh_snapshots(
                 )
                 or len(record_ids) != len(set(record_ids))
                 or any(
-                    values_by_key.get((model_name, record_id), {}).get(
-                        "company_id"
+                    not _snapshot_company_bound(
+                        values_by_key.get((model_name, record_id), {}),
+                        company_id,
                     )
-                    != company_id
                     for record_id in record_ids
                 )
             ):
@@ -998,14 +1053,66 @@ class DurableWriteService:
             }
             for phase in ("before", "after")
         }
+        parameters = (
+            operation.parameters
+            if isinstance(getattr(operation, "parameters", None), dict)
+            else {}
+        )
+
+        def posting_partner_bound(
+            key: tuple[str, int],
+            values: dict[str, Any],
+            phase_values: dict[tuple[str, int], dict[str, Any]],
+        ) -> bool:
+            move_id = parameters.get("move_id")
+            partner_id = parameters.get("expected_partner_id")
+            if (
+                operation.capability_id
+                not in {
+                    "acct.invoice.customer_post.v1",
+                    "acct.bill.vendor_post.v1",
+                }
+                or type(move_id) is not int
+                or move_id <= 0
+                or type(partner_id) is not int
+                or partner_id <= 0
+                or key != ("res.partner", partner_id)
+                or not _snapshot_company_bound(
+                    values,
+                    operation.company_id,
+                    allow_shared_partner=True,
+                )
+            ):
+                return False
+            move_values = phase_values.get(("account.move", move_id))
+            return (
+                isinstance(move_values, dict)
+                and _snapshot_company_bound(
+                    move_values, operation.company_id
+                )
+                and _snapshot_relation_id(move_values.get("partner_id"))
+                == partner_id
+                and _snapshot_relation_id(
+                    move_values.get("commercial_partner_id")
+                )
+                == partner_id
+                and _snapshot_relation_id(
+                    values.get("commercial_partner_id")
+                )
+                == partner_id
+            )
 
         def company_bound(
             key: tuple[str, int],
             values: dict[str, Any],
             phase_values: dict[tuple[str, int], dict[str, Any]],
         ) -> bool:
+            if key[0] == "res.partner":
+                return posting_partner_bound(key, values, phase_values)
             if key[0] != "account.full.reconcile":
-                return values.get("company_id") == operation.company_id
+                return _snapshot_company_bound(
+                    values, operation.company_id
+                )
             line_ids = values.get("reconciled_line_ids")
             if (
                 not isinstance(line_ids, list)
@@ -1020,10 +1127,12 @@ class DurableWriteService:
             ):
                 return False
             return all(
-                phase_values.get(("account.move.line", line_id), {}).get(
-                    "company_id"
+                _snapshot_company_bound(
+                    phase_values.get(
+                        ("account.move.line", line_id), {}
+                    ),
+                    operation.company_id,
                 )
-                == operation.company_id
                 for line_id in line_ids
             )
 
@@ -1036,13 +1145,6 @@ class DurableWriteService:
                         "difference snapshot model is not allowed for the capability"
                     )
                 values = json.loads(snapshot["values_json"])
-                if (
-                    "company_id" in values
-                    and values["company_id"] != operation.company_id
-                ):
-                    raise WriteServiceError(
-                        "difference snapshot company does not match the operation"
-                    )
                 if snapshot["exists"] is False and (
                     snapshot["record_state"] != "absent" or values
                 ):
