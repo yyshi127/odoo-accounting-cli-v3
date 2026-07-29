@@ -1,7 +1,7 @@
 {
   "schema_version": "odoo-accounting-cli-v3.pi-scenarios.v1",
   "corpus_id": "xiaojing-accounting-key-scenarios-v1",
-  "frozen_revision": 3,
+  "frozen_revision": 4,
   "description": "小兢会计 Pi Agent 的冻结中文关键场景；只由已捕获的 Pi 轨迹评分，不由评分器调用模型。",
   "fixture_bindings": {
     "company_primary_id": {"json_type": "integer", "description": "沙箱主公司 ID", "example": 101},
@@ -46,6 +46,9 @@
     "draft_manual_entry_cancel_document_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 手工分录单据绑定", "example": "9bef9ff60ca971676105c4def52b6d5de1e71f97ba88db2e6fd44f120bbcdf8b"},
     "draft_manual_entry_cancel_business_binding": {"json_type": "string", "description": "可信候选读取返回的待取消 V3 手工分录业务绑定", "example": "67819435e13b74e033805f70ecf1aee39a3afeb56ff04bf2d4a7fc95c06b1c5d"},
     "draft_manual_entry_cancel_line_ids": {"json_type": "array", "description": "可信候选读取返回的待取消 V3 手工分录完整行 ID", "example": [1406, 1407]},
+    "payment_cancel_payment_id": {"json_type": "integer", "description": "可信候选读取返回的待取消未核销处理中付款 ID", "example": 1501},
+    "payment_cancel_move_id": {"json_type": "integer", "description": "可信候选读取返回的待取消付款已过账分录 ID", "example": 1502},
+    "payment_cancel_line_ids": {"json_type": "array", "description": "可信候选读取返回的待取消付款完整两条分录行 ID", "example": [1503, 1504]},
     "failed_operation_id": {"json_type": "string", "description": "沙箱失败操作 ID", "example": "op-failed-001"},
     "recovery_plan_digest": {"json_type": "string", "description": "沙箱已验证恢复计划摘要", "example": "91e3271c8ebb67c97f1e8acbbe8e7e798a9309cee0911e8e8e1c425f8d5f4ed3"}
   },
@@ -180,6 +183,26 @@
           "payment_date": "2026-06-25", "currency_id": {"$fixture": "currency_usd_id"}, "amount": "1000.00",
           "journal_id": {"$fixture": "bank_journal_id"}, "payment_method_line_id": {"$fixture": "payment_method_line_id"},
           "memo": "PI-PAY-001", "idempotency_key": "pi-v1-payment"
+        }
+      }
+    },
+    {
+      "id": "pi-v1-payment-cancel",
+      "category": "ordinary",
+      "input": "取消主公司这笔尚未核销、状态仍为 in_process 的客户收款，不是退款、解除核销或银行流水补偿。可信候选读取已经核对付款 ID、已过账付款分录 ID、付款日 2026-06-25、客户、customer、inbound、公司本位币人民币 7000 元、银行日记账、收款方式、已发送标志和完整两条分录行 ID；取消原因是付款录入错误。请完整保留这些参数，先预览并等待审批。",
+      "expected": {
+        "capability_id": "acct.payment.cancel.v1",
+        "clarification": {"outcome": "not_required", "fields": []},
+        "material_parameters": {
+          "company_id": {"$fixture": "company_primary_id"}, "payment_id": {"$fixture": "payment_cancel_payment_id"},
+          "move_id": {"$fixture": "payment_cancel_move_id"}, "expected_payment_state": "in_process",
+          "expected_move_state": "posted", "expected_payment_date": "2026-06-25",
+          "expected_partner_id": {"$fixture": "customer_id"}, "expected_partner_type": "customer",
+          "expected_direction": "inbound", "expected_amount": "7000.00",
+          "expected_currency_id": {"$fixture": "currency_cny_id"}, "expected_journal_id": {"$fixture": "bank_journal_id"},
+          "expected_payment_method_line_id": {"$fixture": "payment_method_line_id"}, "expected_is_sent": true,
+          "expected_line_ids": {"$fixture": "payment_cancel_line_ids"}, "reason": "付款录入错误",
+          "idempotency_key": "pi-v1-payment-cancel"
         }
       }
     },

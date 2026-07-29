@@ -87,6 +87,28 @@ def payment_parameters() -> dict:
     }
 
 
+def payment_cancel_parameters() -> dict:
+    return {
+        "company_id": 7,
+        "payment_id": 991,
+        "move_id": 1991,
+        "expected_payment_state": "in_process",
+        "expected_move_state": "posted",
+        "expected_payment_date": "2026-07-16",
+        "expected_partner_id": 101,
+        "expected_partner_type": "customer",
+        "expected_direction": "inbound",
+        "expected_amount": "251.00",
+        "expected_currency_id": 12,
+        "expected_journal_id": 9,
+        "expected_payment_method_line_id": 3,
+        "expected_is_sent": True,
+        "expected_line_ids": [3001, 3002],
+        "reason": "Cancel an unreconciled duplicate payment",
+        "idempotency_key": "payment-cancel-991",
+    }
+
+
 def bank_parameters() -> dict:
     return {
         "company_id": 7,
@@ -325,6 +347,7 @@ VALID_CASES = {
     "acct.bill.vendor_create.v1": bill_parameters,
     "acct.refund.create.v1": refund_parameters,
     "acct.payment.register.v1": payment_parameters,
+    "acct.payment.cancel.v1": payment_cancel_parameters,
     "acct.bank.statement_import.v1": bank_parameters,
     "acct.reconciliation.apply.v1": reconcile_parameters,
     "acct.asset.create.v1": asset_parameters,
@@ -372,6 +395,52 @@ def test_refund_full_and_partial_line_rules_are_fail_closed():
     partial["lines"] = []
     with pytest.raises(WriteSemanticError, match="partial refund"):
         validate_write_semantics("acct.refund.create.v1", partial)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("expected_payment_state", "paid", "expected_payment_state"),
+        ("expected_move_state", "draft", "expected_move_state"),
+        ("expected_partner_type", "employee", "expected_partner_type"),
+        ("expected_direction", "transfer", "expected_direction"),
+        ("expected_amount", "0", "expected_amount"),
+        ("expected_is_sent", False, "expected_is_sent"),
+        ("expected_line_ids", [3001], "exactly two"),
+        ("expected_line_ids", [3001, 3001], "unique"),
+        ("expected_line_ids", [3002, 3001], "sorted"),
+    ),
+)
+def test_payment_cancel_semantics_are_narrow_and_fail_closed(field, value, error):
+    parameters = payment_cancel_parameters()
+    parameters[field] = value
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.payment.cancel.v1", parameters)
+
+
+def test_payment_cancel_semantics_bind_the_exact_two_line_payment_identity():
+    result = validate_write_semantics(
+        "acct.payment.cancel.v1", payment_cancel_parameters()
+    )
+
+    assert result["computed"] == {
+        "payment_id": 991,
+        "move_id": 1991,
+        "expected_payment_state": "in_process",
+        "expected_move_state": "posted",
+        "expected_payment_date": "2026-07-16",
+        "expected_partner_id": 101,
+        "expected_partner_type": "customer",
+        "expected_direction": "inbound",
+        "expected_amount": "251.00",
+        "expected_currency_id": 12,
+        "expected_journal_id": 9,
+        "expected_payment_method_line_id": 3,
+        "expected_is_sent": True,
+        "expected_line_ids": [3001, 3002],
+        "expected_line_count": 2,
+    }
 
 
 def test_bank_balances_foreign_pairs_dates_and_unique_external_ids():

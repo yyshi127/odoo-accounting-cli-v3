@@ -64,10 +64,10 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert payload["command"] == "registry.audit"
     assert data["registry_audit_ready"] is True
     assert data["blockers"] == []
-    assert data["total_count"] == 27
-    assert data["access_counts"] == {"read": 10, "write": 17}
+    assert data["total_count"] == 28
+    assert data["access_counts"] == {"read": 10, "write": 18}
     assert data["read_count"] == 10
-    assert data["write_count"] == 17
+    assert data["write_count"] == 18
     assert data["strict_schema"]["input_strict_count"] == data["total_count"]
     assert data["strict_schema"]["output_strict_count"] == data["total_count"]
     assert data["policy_counts"]["write_approval_required"] == data["write_count"]
@@ -92,6 +92,32 @@ def test_registry_get_returns_exact_capability() -> None:
     assert payload["data"]["capability"]["id"] == capability_id
     assert payload["data"]["capability"]["staged_environments"] == ["test"]
     assert payload["data"]["capability"]["enabled_environments"] == []
+
+
+def test_registry_get_returns_declared_disabled_payment_cancel_contract() -> None:
+    capability_id = "acct.payment.cancel.v1"
+    result = _run("registry", "get", "--capability-id", capability_id)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    capability = json.loads(result.stdout)["data"]["capability"]
+    assert capability["id"] == capability_id
+    assert capability["risk_level"] == "critical"
+    assert capability["approval"] == {
+        "required": True, "policy": "payment_cancel", "ttl_seconds": 600,
+    }
+    assert capability["verification"] == {
+        "method": (
+            "read_back_exact_unreconciled_in_process_payment_cancel_graph_"
+            "and_allowed_delta_v1"
+        ),
+    }
+    assert capability["recovery"] == {
+        "method": "manual_escalation_after_terminal_payment_cancel",
+    }
+    assert capability["evidence"] == {"level": "declared", "receipts": []}
+    assert capability.get("staged_environments", []) == []
+    assert capability["enabled_environments"] == []
 
 
 def test_registry_get_unknown_id_is_structured_failure() -> None:

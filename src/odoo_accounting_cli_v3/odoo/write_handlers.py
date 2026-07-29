@@ -77,6 +77,7 @@ _CAPABILITIES = frozenset(
         "acct.bill.vendor_create.v1",
         "acct.refund.create.v1",
         "acct.payment.register.v1",
+        "acct.payment.cancel.v1",
         "acct.bank.statement_import.v1",
         "acct.reconciliation.apply.v1",
         "acct.asset.create.v1",
@@ -218,8 +219,14 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
         "name", "state", "company_id", "partner_id", "journal_id", "currency_id",
         "date", "amount", "payment_type", "partner_type", "memo",
         "payment_reference", "payment_method_line_id", "destination_account_id",
-        "move_id", "reconciled_invoice_ids", "reconciled_bill_ids",
+        "outstanding_account_id", "move_id", "is_sent", "is_reconciled",
+        "is_matched", "invoice_ids", "is_internal_transfer",
+        "paired_internal_transfer_payment_id", "destination_journal_id",
+        "reconciled_invoice_ids", "reconciled_bill_ids",
+        "reconciled_statement_line_ids", "payment_transaction_id",
+        "payment_token_id", "batch_payment_id", "check_number",
         "odoo_cli_v3_payment_binding",
+        "create_uid", "create_date", "write_uid", "write_date",
     ),
     "account.payment.method.line": (
         "name", "active", "company_id", "journal_id", "payment_method_id",
@@ -252,7 +259,7 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     "account.account": (
         "name", "code", "company_ids", "account_type", "deprecated",
-        "create_asset", "multiple_assets_per_line",
+        "reconcile", "create_asset", "multiple_assets_per_line",
     ),
     "account.journal": (
         "name", "code", "company_id", "type", "active", "currency_id",
@@ -359,7 +366,9 @@ _REQUIRED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
     "account.payment": frozenset(
         {
             "state", "company_id", "partner_id", "journal_id", "currency_id",
-            "date", "amount", "move_id", "odoo_cli_v3_payment_binding",
+            "date", "amount", "move_id", "is_sent", "is_reconciled",
+            "is_matched", "invoice_ids",
+            "odoo_cli_v3_payment_binding",
         }
     ),
     "account.payment.method.line": frozenset(
@@ -382,7 +391,10 @@ _REQUIRED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
     ),
     "account.asset": frozenset(_SNAPSHOT_FIELDS["account.asset"]),
     "account.account": frozenset(
-        {"name", "code", "company_ids", "account_type", "deprecated"}
+        {
+            "name", "code", "company_ids", "account_type", "deprecated",
+            "reconcile",
+        }
     ),
     "account.journal": frozenset(
         {"name", "code", "company_id", "type", "active", "currency_id"}
@@ -1283,6 +1295,7 @@ class OdooWriteHandlers:
         if capability_id in {
             "acct.refund.create.v1",
             "acct.payment.register.v1",
+            "acct.payment.cancel.v1",
             "acct.reconciliation.apply.v1",
             "acct.asset.create.v1",
             "acct.depreciation.post.v1",
@@ -1418,6 +1431,7 @@ class OdooWriteHandlers:
             "acct.bill.vendor_create.v1": "vendor_bill",
             "acct.refund.create.v1": "refund",
             "acct.payment.register.v1": "payment",
+            "acct.payment.cancel.v1": "payment_cancel",
             "acct.bank.statement_import.v1": "bank",
             "acct.reconciliation.apply.v1": "reconciliation",
             "acct.asset.create.v1": "asset",
@@ -3650,6 +3664,719 @@ class OdooWriteHandlers:
             "trusted_target_before_graph_matches",
             "partial_reconcile_amount_matches", "payment_binding_matches",
             "full_reconcile_graph_exact", "record_graph_exact",
+        ]
+
+    def _payment_cancel_records(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+        *,
+        write: bool,
+    ) -> tuple[Any, Any, list[Any], list[tuple[str, Any]]]:
+        if self.context.trusted_recovery_plan is not None:
+            raise OdooWriteHandlerError(
+                "trusted recovery plan must be null for payment cancellation"
+            )
+        payment = self.record(
+            "account.payment", p["payment_id"], company, write=write
+        )
+        if _record_id(getattr(payment, "move_id", None)) != p["move_id"]:
+            raise OdooWriteHandlerError(
+                "payment accounting move differs from the approved move"
+            )
+        move = self.record("account.move", p["move_id"], company, write=write)
+        line_ids = _ids(getattr(move, "line_ids", []))
+        if (
+            line_ids != sorted(p["expected_line_ids"])
+            or len(line_ids) != 2
+        ):
+            raise OdooWriteHandlerError(
+                "payment journal-item graph differs from the approved IDs"
+            )
+        lines = [
+            self.record("account.move.line", line_id, company, write=write)
+            for line_id in line_ids
+        ]
+        records = [
+            ("account.payment", payment),
+            ("account.move", move),
+            *(("account.move.line", line) for line in lines),
+        ]
+        return payment, move, lines, records
+
+    def _assert_unreconciled_payment_cancel_source(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+        payment: Any,
+        move: Any,
+        lines: list[Any],
+    ) -> list[tuple[str, Any]]:
+        if (
+            str(getattr(payment, "state", "")) != p["expected_payment_state"]
+            or p["expected_payment_state"] != "in_process"
+            or str(getattr(move, "state", "")) != p["expected_move_state"]
+            or p["expected_move_state"] != "posted"
+            or str(getattr(move, "move_type", "")) != "entry"
+            or getattr(payment, "is_sent", None) is not p["expected_is_sent"]
+            or p["expected_is_sent"] is not True
+        ):
+            raise OdooWriteHandlerError(
+                "payment is not an approved sent in-process posted payment"
+            )
+        if (
+            _record_id(getattr(payment, "company_id", None)) != company.id
+            or _record_id(getattr(move, "company_id", None)) != company.id
+            or _record_id(getattr(payment, "partner_id", None))
+            != p["expected_partner_id"]
+            or _record_id(getattr(move, "partner_id", None))
+            != p["expected_partner_id"]
+            or str(getattr(payment, "partner_type", ""))
+            != p["expected_partner_type"]
+            or str(getattr(payment, "payment_type", ""))
+            != p["expected_direction"]
+            or str(getattr(payment, "date", ""))
+            != p["expected_payment_date"]
+            or str(getattr(move, "date", ""))
+            != p["expected_payment_date"]
+            or _record_id(getattr(payment, "journal_id", None))
+            != p["expected_journal_id"]
+            or _record_id(getattr(move, "journal_id", None))
+            != p["expected_journal_id"]
+            or _record_id(getattr(payment, "currency_id", None))
+            != p["expected_currency_id"]
+            or _record_id(getattr(move, "currency_id", None))
+            != p["expected_currency_id"]
+            or _record_id(getattr(payment, "payment_method_line_id", None))
+            != p["expected_payment_method_line_id"]
+        ):
+            raise OdooWriteHandlerError(
+                "payment business identity differs from the approved input"
+            )
+        journal = self.record(
+            "account.journal", p["expected_journal_id"], company
+        )
+        if (
+            str(getattr(journal, "type", "")) not in {"bank", "cash", "credit"}
+            or getattr(journal, "active", True) is False
+        ):
+            raise OdooWriteHandlerError(
+                "payment journal is not an active payment journal"
+            )
+        company_currency_id = _record_id(getattr(company, "currency_id", None))
+        if (
+            company_currency_id != p["expected_currency_id"]
+            or _record_id(getattr(journal, "currency_id", None))
+            not in {None, company_currency_id}
+        ):
+            raise OdooWriteHandlerError(
+                "payment cancellation v1 requires company currency"
+            )
+        currency = self.assert_currency(
+            p["expected_currency_id"], company, journal
+        )
+        self.assert_amount(
+            getattr(payment, "amount", None),
+            p["expected_amount"],
+            currency,
+            "payment amount",
+        )
+        partner = self.check_partner(p["expected_partner_id"], company)
+        method_line = self.record(
+            "account.payment.method.line",
+            p["expected_payment_method_line_id"],
+            company,
+        )
+        method_id = _record_id(
+            getattr(method_line, "payment_method_id", None)
+        )
+        if method_id is None:
+            raise OdooWriteHandlerError(
+                "payment method line has no auditable method"
+            )
+        method = self.record(
+            "account.payment.method",
+            method_id,
+            company,
+            shared=True,
+        )
+        if (
+            _record_id(getattr(method_line, "company_id", None)) != company.id
+            or _record_id(getattr(method_line, "journal_id", None))
+            != journal.id
+            or str(getattr(method_line, "payment_type", ""))
+            != p["expected_direction"]
+            or str(getattr(method, "code", "")) != "manual"
+            or str(getattr(method, "payment_type", ""))
+            != p["expected_direction"]
+        ):
+            raise OdooWriteHandlerError(
+                "payment cancellation v1 requires the approved manual method"
+            )
+        destination_account_id = _record_id(
+            getattr(payment, "destination_account_id", None)
+        )
+        outstanding_account_id = _record_id(
+            getattr(payment, "outstanding_account_id", None)
+        )
+        if (
+            destination_account_id is None
+            or outstanding_account_id is None
+            or destination_account_id == outstanding_account_id
+        ):
+            raise OdooWriteHandlerError(
+                "payment destination or outstanding account is ambiguous"
+            )
+        if (
+            _record_id(getattr(method_line, "payment_account_id", None))
+            != outstanding_account_id
+        ):
+            raise OdooWriteHandlerError(
+                "payment method outstanding account differs from the payment"
+            )
+        destination_account = self.check_account(
+            destination_account_id, company
+        )
+        outstanding_account = self.check_account(
+            outstanding_account_id, company
+        )
+        expected_destination_type = (
+            "asset_receivable"
+            if p["expected_partner_type"] == "customer"
+            else "liability_payable"
+        )
+        if (
+            str(getattr(destination_account, "account_type", ""))
+            != expected_destination_type
+            or str(getattr(outstanding_account, "account_type", ""))
+            not in {"asset_cash", "asset_current", "liability_current"}
+            or getattr(destination_account, "reconcile", None) is not True
+            or getattr(outstanding_account, "reconcile", None) is not True
+        ):
+            raise OdooWriteHandlerError(
+                "payment accounts are outside the standard cancellation slice"
+            )
+        if (
+            _record_id(getattr(move, "origin_payment_id", None)) != payment.id
+            or _ids(getattr(move, "payment_ids", [])) != [payment.id]
+            or getattr(move, "posted_before", None) is not True
+            or str(getattr(move, "auto_post", "")) != "no"
+            or bool(getattr(move, "sending_data", False))
+            or bool(getattr(move, "inalterable_hash", False))
+            or bool(getattr(move, "need_cancel_request", False))
+        ):
+            raise OdooWriteHandlerError(
+                "payment move has unsupported origin, posting, or lock evidence"
+            )
+        payment_external_plural = (
+            "invoice_ids",
+            "reconciled_invoice_ids",
+            "reconciled_bill_ids",
+            "reconciled_statement_line_ids",
+        )
+        payment_external_singular = (
+            "paired_internal_transfer_payment_id",
+            "destination_journal_id",
+            "payment_transaction_id",
+            "payment_token_id",
+            "batch_payment_id",
+        )
+        if (
+            bool(getattr(payment, "is_reconciled", False))
+            or bool(getattr(payment, "is_matched", False))
+            or bool(getattr(payment, "is_internal_transfer", False))
+            or any(
+                _ids(getattr(payment, field, []))
+                for field in payment_external_plural
+            )
+            or any(
+                _record_id(getattr(payment, field, None)) is not None
+                for field in payment_external_singular
+            )
+            or _is_present(getattr(payment, "check_number", False))
+            or _is_present(
+                getattr(payment, "odoo_cli_v3_payment_binding", False)
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "payment has target, bank, transfer, provider, batch, check, or V3 allocation effects"
+            )
+        move_external_singular = (
+            "statement_line_id",
+            "statement_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "reversed_entry_id",
+            "asset_id",
+            "closing_return_id",
+            "transfer_model_id",
+            "purchase_id",
+            "debit_origin_id",
+            "invoice_pdf_report_id",
+            "invoice_vendor_bill_id",
+            "purchase_vendor_bill_id",
+            "ubl_cii_xml_id",
+            "l10n_es_edi_facturae_xml_id",
+            "message_main_attachment_id",
+        )
+        move_external_plural = (
+            "statement_line_ids",
+            "tax_cash_basis_created_move_ids",
+            "reversal_move_ids",
+            "adjusting_entry_origin_move_ids",
+            "adjusting_entries_move_ids",
+            "exchange_diff_partial_ids",
+            "transaction_ids",
+            "authorized_transaction_ids",
+            "asset_ids",
+            "deferred_move_ids",
+            "deferred_original_move_ids",
+            "edi_document_ids",
+            "expense_ids",
+            "pos_order_ids",
+            "stock_move_ids",
+            "landed_costs_ids",
+            "attachment_ids",
+        )
+        if (
+            any(
+                _record_id(getattr(move, field, None)) is not None
+                for field in move_external_singular
+            )
+            or any(
+                _ids(getattr(move, field, []))
+                for field in move_external_plural
+            )
+            or any(
+            _is_present(getattr(move, field, False))
+            for field in (
+                "invoice_pdf_report_file",
+                "ubl_cii_xml_file",
+                "l10n_es_edi_facturae_xml_file",
+                "signature",
+            )
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "payment move has tax, FX, statement, reversal, asset, EDI, attachment, or external effects"
+            )
+        account_ids = {_record_id(getattr(line, "account_id", None)) for line in lines}
+        if account_ids != {destination_account_id, outstanding_account_id}:
+            raise OdooWriteHandlerError(
+                "payment journal items do not use the exact approved account pair"
+            )
+        debit = Decimal("0")
+        credit = Decimal("0")
+        balances_by_account = {
+            destination_account_id: Decimal("0"),
+            outstanding_account_id: Decimal("0"),
+        }
+        for line in lines:
+            line_debit = _decimal(getattr(line, "debit", None), "payment line debit")
+            line_credit = _decimal(
+                getattr(line, "credit", None), "payment line credit"
+            )
+            line_balance = _decimal(
+                getattr(line, "balance", None), "payment line balance"
+            )
+            line_amount_currency = _decimal(
+                getattr(line, "amount_currency", None),
+                "payment line amount_currency",
+            )
+            if (
+                _record_id(getattr(line, "move_id", None)) != move.id
+                or _record_id(getattr(line, "company_id", None)) != company.id
+                or _record_id(getattr(line, "partner_id", None))
+                not in {None, p["expected_partner_id"]}
+                or _record_id(getattr(line, "currency_id", None))
+                != p["expected_currency_id"]
+                or str(getattr(line, "parent_state", "")) != "posted"
+                or bool(getattr(line, "reconciled", False))
+                or _record_id(getattr(line, "full_reconcile_id", None))
+                is not None
+                or _ids(getattr(line, "matched_debit_ids", []))
+                or _ids(getattr(line, "matched_credit_ids", []))
+                or bool(getattr(line, "matching_number", False))
+                or _record_id(getattr(line, "statement_line_id", None))
+                is not None
+                or _record_id(getattr(line, "statement_id", None))
+                is not None
+                or _record_id(getattr(line, "payment_id", None))
+                not in {None, payment.id}
+                or _ids(getattr(line, "tax_ids", []))
+                or _record_id(getattr(line, "tax_line_id", None)) is not None
+                or _ids(getattr(line, "tax_tag_ids", []))
+                or _record_id(
+                    getattr(line, "tax_repartition_line_id", None)
+                )
+                is not None
+                or getattr(line, "analytic_distribution", False)
+                not in (False, None, {})
+                or _ids(getattr(line, "analytic_line_ids", []))
+                or _ids(getattr(line, "asset_ids", []))
+                or getattr(line, "deferred_start_date", None)
+                not in {False, None}
+                or getattr(line, "deferred_end_date", None)
+                not in {False, None}
+                or _ids(getattr(line, "reconciled_lines_ids", []))
+                or _ids(
+                    getattr(
+                        line,
+                        "reconciled_lines_excluding_exchange_diff_ids",
+                        [],
+                    )
+                )
+                or (line_debit > 0) == (line_credit > 0)
+            ):
+                raise OdooWriteHandlerError(
+                    "payment journal item has reconciliation, tax, analytic, asset, deferred, statement, or malformed amount effects"
+                )
+            self.assert_amount(
+                line_balance,
+                line_debit - line_credit,
+                currency,
+                "payment line balance",
+            )
+            self.assert_amount(
+                line_amount_currency,
+                line_balance,
+                currency,
+                "payment line amount_currency",
+            )
+            debit += line_debit
+            credit += line_credit
+            balances_by_account[
+                _record_id(getattr(line, "account_id", None))
+            ] += line_balance
+        self.assert_amount(debit, credit, currency, "payment move balance")
+        self.assert_amount(
+            debit, p["expected_amount"], currency, "payment move debit"
+        )
+        self.assert_amount(
+            credit, p["expected_amount"], currency, "payment move credit"
+        )
+        direction_sign = (
+            Decimal("1")
+            if p["expected_direction"] == "inbound"
+            else Decimal("-1")
+        )
+        self.assert_amount(
+            balances_by_account[outstanding_account_id],
+            direction_sign * _decimal(
+                p["expected_amount"], "expected payment amount"
+            ),
+            currency,
+            "payment outstanding-account balance",
+        )
+        self.assert_amount(
+            balances_by_account[destination_account_id],
+            -direction_sign * _decimal(
+                p["expected_amount"], "expected payment amount"
+            ),
+            currency,
+            "payment destination-account balance",
+        )
+        line_ids = [line.id for line in lines]
+        if self.search_records(
+            "account.partial.reconcile",
+            [("debit_move_id", "in", line_ids)],
+            company,
+            limit=1,
+        ) or self.search_records(
+            "account.partial.reconcile",
+            [("credit_move_id", "in", line_ids)],
+            company,
+            limit=1,
+        ):
+            raise OdooWriteHandlerError(
+                "payment has a hidden partial reconciliation"
+            )
+        self.assert_effective_open_date(
+            company,
+            p["expected_payment_date"],
+            "expected_payment_date",
+            journal=journal,
+            taxes=False,
+            move=move,
+        )
+        return [
+            ("res.company", company),
+            ("res.currency", currency),
+            ("res.partner", partner),
+            ("account.journal", journal),
+            ("account.payment.method.line", method_line),
+            ("account.payment.method", method),
+            ("account.account", destination_account),
+            ("account.account", outstanding_account),
+        ]
+
+    def precheck_payment_cancel(
+        self, p: dict[str, Any], company: Any
+    ) -> dict[str, Any]:
+        payment, move, lines, records = self._payment_cancel_records(
+            p, company, write=True
+        )
+        dependencies = self._assert_unreconciled_payment_cancel_source(
+            p, company, payment, move, lines
+        )
+        return {
+            "checks": [
+                "single_sent_in_process_payment",
+                "posted_standard_two_line_payment_move",
+                "company_currency_manual_payment_method",
+                "approved_payment_business_identity_matches",
+                "partial_and_full_reconcile_graph_empty",
+                "target_bank_transfer_provider_batch_and_check_graph_empty",
+                "tax_fx_analytic_asset_deferred_edi_and_attachment_graph_empty",
+                "effective_odoo_lock_dates_open",
+                "write_acl",
+            ],
+            "before": self.snapshots(
+                records,
+                company,
+                required_fields_by_model={
+                    "account.payment": {
+                        "state",
+                        "write_uid",
+                        "write_date",
+                    },
+                    "account.move": {
+                        "state",
+                        "auto_post",
+                        "sending_data",
+                        "payment_state",
+                        "write_uid",
+                        "write_date",
+                    },
+                    "account.move.line": {
+                        "parent_state",
+                        "write_uid",
+                        "write_date",
+                    },
+                },
+            ),
+            "dependencies": self.snapshots(dependencies, company),
+        }
+
+    @staticmethod
+    def _assert_unchanged_or_controlled_log_delta(
+        current: Mapping[str, Any],
+        approved: Mapping[str, Any],
+        *,
+        user_id: int,
+        label: str,
+    ) -> None:
+        log_fields = {"write_uid", "write_date"}
+        if not log_fields.issubset(current) or not log_fields.issubset(approved):
+            raise OdooWriteHandlerError(
+                f"{label} log-access audit fields are incomplete"
+            )
+        if all(current[field] == approved[field] for field in log_fields):
+            return
+        if classic_read_many2one_id(current["write_uid"]) != user_id:
+            raise OdooWriteHandlerError(
+                f"{label} was not written by the bound execution user"
+            )
+        try:
+            before = datetime.fromisoformat(str(approved["write_date"]))
+            after = datetime.fromisoformat(str(current["write_date"]))
+        except (TypeError, ValueError) as exc:
+            raise OdooWriteHandlerError(
+                f"{label} write_date is not an auditable Odoo datetime"
+            ) from exc
+        if (
+            before.tzinfo is not None
+            or after.tzinfo is not None
+            or after < before
+        ):
+            raise OdooWriteHandlerError(
+                f"{label} write_date is outside the approved monotonic delta"
+            )
+
+    def _assert_payment_cancel_exact_delta(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+        payment: Any,
+        move: Any,
+        lines: list[Any],
+        before: Mapping[tuple[str, int], dict[str, Any]],
+    ) -> None:
+        expected_keys = {
+            ("account.payment", payment.id),
+            ("account.move", move.id),
+            *(("account.move.line", line.id) for line in lines),
+        }
+        if set(before) != expected_keys:
+            raise OdooWriteHandlerError(
+                "payment cancellation approval graph differs"
+            )
+        if (
+            str(getattr(payment, "state", "")) != "canceled"
+            or str(getattr(move, "state", "")) != "cancel"
+            or _record_id(getattr(payment, "move_id", None)) != move.id
+            or _ids(getattr(move, "line_ids", []))
+            != sorted(p["expected_line_ids"])
+        ):
+            raise OdooWriteHandlerError(
+                "payment cancellation terminal state or graph differs"
+            )
+        approved_move = before[("account.move", move.id)]
+        if (
+            str(getattr(move, "auto_post", "")) != "no"
+            or bool(getattr(move, "sending_data", False))
+            or _snapshot_primitive(
+                "payment_state", getattr(move, "payment_state", False)
+            )
+            != approved_move.get("payment_state")
+        ):
+            raise OdooWriteHandlerError(
+                "payment move cancellation control fields differ"
+            )
+        allowed_by_model = {
+            "account.payment": frozenset(
+                {"state", "write_uid", "write_date"}
+            ),
+            "account.move": frozenset(
+                {
+                    "state",
+                    "write_uid",
+                    "write_date",
+                }
+            ),
+            "account.move.line": frozenset(
+                {"parent_state", "write_uid", "write_date"}
+            ),
+        }
+        for model_name, record in [
+            ("account.payment", payment),
+            ("account.move", move),
+            *(("account.move.line", line) for line in lines),
+        ]:
+            approved = before[(model_name, record.id)]
+            current = self.snapshot(model_name, record, company)["values"]
+            allowed = allowed_by_model[model_name]
+            if set(current) != set(approved) or any(
+                current[field] != approved[field]
+                for field in set(current) - allowed
+            ):
+                raise OdooWriteHandlerError(
+                    f"{model_name} changed outside the approved payment cancellation allowlist"
+                )
+            self._assert_unchanged_or_controlled_log_delta(
+                current,
+                approved,
+                user_id=self.context.user_id,
+                label=model_name,
+            )
+        for line in lines:
+            if (
+                str(getattr(line, "parent_state", "")) != "cancel"
+                or bool(getattr(line, "reconciled", False))
+                or _record_id(getattr(line, "full_reconcile_id", None))
+                is not None
+                or _ids(getattr(line, "matched_debit_ids", []))
+                or _ids(getattr(line, "matched_credit_ids", []))
+            ):
+                raise OdooWriteHandlerError(
+                    "cancelled payment journal item graph differs"
+                )
+        line_ids = [line.id for line in lines]
+        if self.search_records(
+            "account.partial.reconcile",
+            [("debit_move_id", "in", line_ids)],
+            company,
+            limit=1,
+        ) or self.search_records(
+            "account.partial.reconcile",
+            [("credit_move_id", "in", line_ids)],
+            company,
+            limit=1,
+        ):
+            raise OdooWriteHandlerError(
+                "payment cancellation unexpectedly changed a reconciliation graph"
+            )
+        self.assert_move_balanced(move, company)
+
+    def execute_payment_cancel(self, p, company, checked):
+        payment, move, lines, records = self._payment_cancel_records(
+            p, company, write=True
+        )
+        self._assert_unreconciled_payment_cancel_source(
+            p, company, payment, move, lines
+        )
+        approved = self.trusted_before_values(
+            {"before": checked.get("before")}, company
+        )
+        for model_name, record in records:
+            if (
+                self.snapshot(model_name, record, company)["values"]
+                != approved.get((model_name, record.id))
+            ):
+                raise OdooWriteHandlerError(
+                    "payment cancellation graph changed after approval"
+                )
+        action = getattr(
+            payment.with_context(
+                tracking_disable=True,
+                mail_notrack=True,
+            ),
+            "action_cancel",
+            None,
+        )
+        if not callable(action):
+            raise OdooWriteHandlerError(
+                "Odoo public payment cancellation API is unavailable"
+            )
+        action()
+        self._assert_payment_cancel_exact_delta(
+            p, company, payment, move, lines, approved
+        )
+        return records, _recovery(
+            "manual_escalation",
+            "manual_review_terminal_payment_cancel",
+            [
+                {"model": "account.payment", "record_id": payment.id},
+                {"model": "account.move", "record_id": move.id},
+            ],
+        )
+
+    def verify_payment_cancel(self, p, company, records, before):
+        keyed = {
+            (model_name, record.id): record
+            for model_name, record in records
+        }
+        if len(keyed) != len(records):
+            raise OdooWriteHandlerError(
+                "payment cancellation result graph contains a duplicate"
+            )
+        expected_keys = {
+            ("account.payment", p["payment_id"]),
+            ("account.move", p["move_id"]),
+            *(("account.move.line", line_id) for line_id in p["expected_line_ids"]),
+        }
+        if set(keyed) != expected_keys:
+            raise OdooWriteHandlerError(
+                "payment cancellation result graph differs"
+            )
+        payment = keyed[("account.payment", p["payment_id"])]
+        move = keyed[("account.move", p["move_id"])]
+        lines = [
+            keyed[("account.move.line", line_id)]
+            for line_id in sorted(p["expected_line_ids"])
+        ]
+        self._assert_payment_cancel_exact_delta(
+            p, company, payment, move, lines, before
+        )
+        return [
+            "payment_cancelled_fresh",
+            "payment_move_cancelled_fresh",
+            "approved_payment_and_two_line_graph_preserved",
+            "payment_reconciliation_graph_remained_empty",
+            "tax_fx_analytic_asset_deferred_and_external_graph_remained_empty",
+            "move_name_sequence_and_posting_history_preserved",
+            "payment_move_balanced",
+            "record_graph_exact",
         ]
 
     def precheck_bank(self, p: dict[str, Any], company: Any) -> dict[str, Any]:

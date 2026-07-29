@@ -496,6 +496,25 @@ function writeParameterFixtures() {
 			memo: "客户回款 CN/2026/0001",
 			idempotency_key: "payment-2026-0001",
 		},
+		"acct.payment.cancel.v1": {
+			company_id: 7,
+			payment_id: 7001,
+			move_id: 7002,
+			expected_payment_state: "in_process",
+			expected_move_state: "posted",
+			expected_payment_date: "2026-07-15",
+			expected_partner_id: 901,
+			expected_partner_type: "customer",
+			expected_direction: "inbound",
+			expected_amount: "128.50",
+			expected_currency_id: 12,
+			expected_journal_id: 41,
+			expected_payment_method_line_id: 51,
+			expected_is_sent: true,
+			expected_line_ids: [7101, 7102],
+			reason: "Cancel the reviewed, unreconciled payment entered in error",
+			idempotency_key: "payment-cancel-7001",
+		},
 		"acct.bank.statement_import.v1": {
 			company_id: 7,
 			journal_id: 41,
@@ -1245,12 +1264,12 @@ test("complex financial parameters are retained byte-for-byte through the test b
 	assert.deepEqual(result.data.argv, ["operation", "prepare"]);
 });
 
-test("all 17 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
+test("all 18 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
 	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
 	const registry = JSON.parse(await readFile(registryPath, "utf8"));
 	const writeCapabilities = registry.capabilities.filter((item) => item.access === "write");
 	const fixtures = writeParameterFixtures();
-	assert.equal(writeCapabilities.length, 17);
+	assert.equal(writeCapabilities.length, 18);
 	assert.deepEqual(Object.keys(fixtures).sort(), writeCapabilities.map((item) => item.id).sort());
 
 	const run = createBoundRunner({

@@ -31,9 +31,10 @@ where practical, then record actual execution evidence separately.
   PostgreSQL read-only transaction. Both remain `contract_tested` and
   `test`-staged only; neither is production-enabled.
 - No capability is enabled and no write capability is staged.
-- The current registry contains 17 write capabilities: the original 14-capability
+- The current registry contains 18 write capabilities: the original 14-capability
   baseline plus `acct.journal.entry_create.v1`, `acct.move.post.v1`, and
-  `acct.move.draft_cancel.v2`. These three Phase B additions remain
+  `acct.move.draft_cancel.v2`, plus the narrowly scoped
+  `acct.payment.cancel.v1`. All four additions remain
   `declared`, have no retained evidence receipts, and are neither staged nor
   enabled. `tests/test_phaseb_move_write_capability_closure.py` is an offline
   schema, semantics, idempotency, signed-failure, tamper, and dispatch test; it
@@ -335,6 +336,26 @@ draft invoice and one for a vendor draft bill. Each preserves all seven strict
 input parameters through CLI input and preview and binds that same parameter
 digest to approval. Their document and business bindings model values returned
 by a trusted candidate read, never free-form values invented by Pi or the user.
+
+The `acct.payment.cancel.v1` scenario is declared/offline only. It preserves
+all 17 strict parameters for one explicitly bound, unreconciled
+`in_process` payment through CLI input, preview, and approval binding, and
+distinguishes payment cancellation from refund creation, reconciliation undo,
+and bank-statement compensation. This frozen scenario and its synthetic trace
+tests are not real Odoo evidence, do not stage or enable the capability, and do
+not authorize any sandbox or production write.
+
+Payment cancellation v1 is limited to the bound company's own currency and a
+standard manual, sent, bank-unmatched two-line payment. Odoo 19's public
+`account.payment.action_cancel()` reaches `account.move.button_draft()`, whose
+attachment-detach path at the target's fixed Odoo commit performs a privileged
+attachment search without a move-type filter. A normal payment entry should
+not carry an invoice-PDF field attachment, but the fixed source itself does not
+provide that guarantee. ACL-hidden attachments, concurrent inserts, and
+installed-module behavior are not proven by these mocks. Before staging, an
+exact installed-module review and real Odoo transaction test must prove that
+no unreceipted attachment mutation can escape, or the handler must add a
+complete attachment lock and verification design.
 
 `tools/pi_scenario_gate.py` is an offline scorer. It requires an HMAC-attested
 Pi trace export and a host-local trusted key file; it does not invoke Pi, an

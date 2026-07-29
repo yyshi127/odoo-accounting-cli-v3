@@ -110,6 +110,9 @@ _ALLOWED_MODELS = {
             "account.full.reconcile",
         }
     ),
+    "acct.payment.cancel.v1": frozenset(
+        {"account.payment", "account.move", "account.move.line"}
+    ),
     "acct.bank.statement_import.v1": frozenset(
         {
             "account.bank.statement",

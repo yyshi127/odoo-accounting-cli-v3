@@ -164,6 +164,85 @@ def _validate_payment(parameters: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_payment_cancel(parameters: dict[str, Any]) -> dict[str, Any]:
+    payment_id = _positive_id(_field(parameters, "payment_id"), "payment_id")
+    move_id = _positive_id(_field(parameters, "move_id"), "move_id")
+    if _field(parameters, "expected_payment_state") != "in_process":
+        raise WriteSemanticError(
+            "expected_payment_state must be in_process"
+        )
+    if _field(parameters, "expected_move_state") != "posted":
+        raise WriteSemanticError("expected_move_state must be posted")
+    payment_date = _date(
+        _field(parameters, "expected_payment_date"),
+        "expected_payment_date",
+    )
+    partner_id = _positive_id(
+        _field(parameters, "expected_partner_id"), "expected_partner_id"
+    )
+    partner_type = _field(parameters, "expected_partner_type")
+    if partner_type not in {"customer", "supplier"}:
+        raise WriteSemanticError("expected_partner_type is invalid")
+    direction = _field(parameters, "expected_direction")
+    if direction not in {"inbound", "outbound"}:
+        raise WriteSemanticError("expected_direction is invalid")
+    amount = _decimal(
+        _field(parameters, "expected_amount"),
+        "expected_amount",
+        positive=True,
+    )
+    currency_id = _positive_id(
+        _field(parameters, "expected_currency_id"), "expected_currency_id"
+    )
+    journal_id = _positive_id(
+        _field(parameters, "expected_journal_id"), "expected_journal_id"
+    )
+    payment_method_line_id = _positive_id(
+        _field(parameters, "expected_payment_method_line_id"),
+        "expected_payment_method_line_id",
+    )
+    if _field(parameters, "expected_is_sent") is not True:
+        raise WriteSemanticError("expected_is_sent must be true")
+    line_ids = _field(parameters, "expected_line_ids")
+    if not isinstance(line_ids, list) or len(line_ids) != 2:
+        raise WriteSemanticError("expected_line_ids must contain exactly two lines")
+    for item in line_ids:
+        _positive_id(item, "expected_line_ids")
+    if len(line_ids) != len(set(line_ids)):
+        raise WriteSemanticError("expected_line_ids must be unique")
+    if line_ids != sorted(line_ids):
+        raise WriteSemanticError("expected_line_ids must be sorted")
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    _non_empty_text(_field(parameters, "idempotency_key"), "idempotency_key")
+    return {
+        "checks": (
+            "payment_cancel_target_explicit",
+            "payment_cancel_in_process_posted_only",
+            "payment_cancel_identity_graph_explicit",
+            "payment_cancel_sent_only",
+            "payment_cancel_two_line_set_sorted_unique",
+            "payment_cancel_amount_positive",
+        ),
+        "computed": {
+            "payment_id": payment_id,
+            "move_id": move_id,
+            "expected_payment_state": "in_process",
+            "expected_move_state": "posted",
+            "expected_payment_date": payment_date.isoformat(),
+            "expected_partner_id": partner_id,
+            "expected_partner_type": partner_type,
+            "expected_direction": direction,
+            "expected_amount": _format(amount),
+            "expected_currency_id": currency_id,
+            "expected_journal_id": journal_id,
+            "expected_payment_method_line_id": payment_method_line_id,
+            "expected_is_sent": True,
+            "expected_line_ids": list(line_ids),
+            "expected_line_count": 2,
+        },
+    }
+
+
 def _validate_bank(parameters: dict[str, Any]) -> dict[str, Any]:
     statement_date = _date(_field(parameters, "statement_date"), "statement_date")
     currency_id = _positive_id(_field(parameters, "currency_id"), "currency_id")
@@ -642,6 +721,7 @@ _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.bill.vendor_create.v1": lambda value: _validate_document(value, vendor=True),
     "acct.refund.create.v1": _validate_refund,
     "acct.payment.register.v1": _validate_payment,
+    "acct.payment.cancel.v1": _validate_payment_cancel,
     "acct.bank.statement_import.v1": _validate_bank,
     "acct.reconciliation.apply.v1": _validate_reconciliation,
     "acct.asset.create.v1": _validate_asset,

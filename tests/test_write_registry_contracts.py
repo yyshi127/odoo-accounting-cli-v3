@@ -33,9 +33,13 @@ PHASE_B_WRITE_IDS = (
     "acct.move.post.v1",
     "acct.move.draft_cancel.v2",
 )
+PAYMENT_CANCEL_WRITE_IDS = (
+    "acct.payment.cancel.v1",
+)
 WRITE_IDS = (
     *BASELINE_WRITE_IDS[:13],
     *PHASE_B_WRITE_IDS,
+    *PAYMENT_CANCEL_WRITE_IDS,
     BASELINE_WRITE_IDS[13],
 )
 
@@ -59,6 +63,14 @@ EXPECTED_INPUT_FIELDS = {
         "company_id", "target_move_ids", "partner_id", "partner_type",
         "direction", "payment_date", "currency_id", "amount", "journal_id",
         "payment_method_line_id", "memo", "idempotency_key",
+    },
+    "acct.payment.cancel.v1": {
+        "company_id", "payment_id", "move_id", "expected_payment_state",
+        "expected_move_state", "expected_payment_date", "expected_partner_id",
+        "expected_partner_type", "expected_direction", "expected_amount",
+        "expected_currency_id", "expected_journal_id",
+        "expected_payment_method_line_id", "expected_is_sent",
+        "expected_line_ids", "reason", "idempotency_key",
     },
     "acct.bank.statement_import.v1": {
         "company_id", "journal_id", "statement_date", "currency_id",
@@ -279,6 +291,19 @@ VALID_INPUTS = {
         "payment_date": "2026-07-15", "currency_id": 12, "amount": "100.00",
         "journal_id": 7, "payment_method_line_id": 9, "memo": "INV-201",
         "idempotency_key": "payment-1",
+    },
+    "acct.payment.cancel.v1": {
+        "company_id": 7, "payment_id": 991, "move_id": 1991,
+        "expected_payment_state": "in_process",
+        "expected_move_state": "posted",
+        "expected_payment_date": "2026-07-16",
+        "expected_partner_id": 101, "expected_partner_type": "customer",
+        "expected_direction": "inbound", "expected_amount": "251.00",
+        "expected_currency_id": 12, "expected_journal_id": 9,
+        "expected_payment_method_line_id": 3, "expected_is_sent": True,
+        "expected_line_ids": [3001, 3002],
+        "reason": "Cancel an unreconciled duplicate payment",
+        "idempotency_key": "payment-cancel-991",
     },
     "acct.bank.statement_import.v1": {
         "company_id": 7, "journal_id": 7, "statement_date": "2026-07-15",
@@ -507,6 +532,11 @@ def test_exact_write_capability_set_and_safety_gates_remain_closed():
         for capability_id in WRITE_IDS
         if capability_id in PHASE_B_WRITE_IDS
     ) == PHASE_B_WRITE_IDS
+    assert tuple(
+        capability_id
+        for capability_id in WRITE_IDS
+        if capability_id in PAYMENT_CANCEL_WRITE_IDS
+    ) == PAYMENT_CANCEL_WRITE_IDS
     for item in writes.values():
         assert item["evidence"] == {"level": "declared", "receipts": []}
         assert item.get("staged_environments", []) == []
@@ -715,6 +745,80 @@ def test_phase_b_draft_cancel_v2_contract_binds_supported_type_and_exact_line_se
         ("expected_line_ids", list(range(1, 1002))),
     ):
         invalid = copy.deepcopy(VALID_INPUTS["acct.move.draft_cancel.v2"])
+        invalid[field] = value
+        with pytest.raises(ContractError):
+            validate_value(invalid, schema)
+
+
+def test_payment_cancel_contract_is_exact_terminal_and_disabled():
+    writes = _writes()
+    capability = writes["acct.payment.cancel.v1"]
+    schema = capability["input_schema"]
+    properties = schema["properties"]
+
+    assert capability["risk_level"] == "critical"
+    assert "company-currency-only" in capability["business_description"]
+    assert "foreign-currency" in capability["business_description"]
+    assert capability["odoo_permissions"] == ["account.group_account_manager"]
+    assert capability["company_scope"] == "explicit_single_company"
+    assert capability["approval"] == {
+        "required": True, "policy": "payment_cancel", "ttl_seconds": 600,
+    }
+    assert capability["idempotency"] == {
+        "required": True, "scope": "company_origin_move",
+    }
+    assert capability["verification"] == {
+        "method": (
+            "read_back_exact_unreconciled_in_process_payment_cancel_graph_"
+            "and_allowed_delta_v1"
+        ),
+    }
+    assert capability["recovery"] == {
+        "method": "manual_escalation_after_terminal_payment_cancel",
+    }
+    assert capability["evidence"] == {"level": "declared", "receipts": []}
+    assert capability.get("staged_environments", []) == []
+    assert capability["enabled_environments"] == []
+    assert set(properties) == EXPECTED_INPUT_FIELDS["acct.payment.cancel.v1"]
+    assert set(schema["required"]) == set(properties)
+    assert schema["additionalProperties"] is False
+
+    for name in (
+        "company_id", "payment_id", "move_id", "expected_partner_id",
+        "expected_currency_id", "expected_journal_id",
+        "expected_payment_method_line_id",
+    ):
+        assert properties[name] == {"type": "integer", "minimum": 1}
+    assert properties["expected_payment_state"]["enum"] == ["in_process"]
+    assert properties["expected_move_state"]["enum"] == ["posted"]
+    assert properties["expected_partner_type"]["enum"] == [
+        "customer", "supplier",
+    ]
+    assert properties["expected_direction"]["enum"] == [
+        "inbound", "outbound",
+    ]
+    assert properties["expected_is_sent"] == {
+        "type": "boolean", "enum": [True],
+    }
+    assert properties["expected_line_ids"] == {
+        "type": "array", "minItems": 2, "maxItems": 2,
+        "uniqueItems": True, "items": {"type": "integer", "minimum": 1},
+    }
+    assert capability["output_schema"] == writes[
+        BASELINE_WRITE_IDS[0]
+    ]["output_schema"]
+
+    for field, value in (
+        ("expected_payment_state", "paid"),
+        ("expected_move_state", "draft"),
+        ("expected_partner_type", "employee"),
+        ("expected_direction", "transfer"),
+        ("expected_amount", "0"),
+        ("expected_is_sent", False),
+        ("expected_line_ids", [3001]),
+        ("expected_line_ids", [3001, 3001]),
+    ):
+        invalid = copy.deepcopy(VALID_INPUTS["acct.payment.cancel.v1"])
         invalid[field] = value
         with pytest.raises(ContractError):
             validate_value(invalid, schema)

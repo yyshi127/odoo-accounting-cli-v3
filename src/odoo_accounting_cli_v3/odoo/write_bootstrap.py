@@ -169,6 +169,7 @@ EXCLUSIVE_BEFORE_LOCK_CAPABILITIES = frozenset(
         "acct.move.draft_cancel.v1",
         "acct.move.draft_cancel.v2",
         "acct.move.post.v1",
+        "acct.payment.cancel.v1",
         "acct.recovery.execute.v1",
     }
 )
@@ -228,6 +229,11 @@ def _resource_lock_digests(
 
     if capability_id == "acct.refund.create.v1":
         add("account.move", parameters.get("origin_move_id"))
+    elif capability_id == "acct.payment.cancel.v1":
+        add("account.payment", parameters.get("payment_id"))
+        add("account.move", parameters.get("move_id"))
+        for record_id in parameters.get("expected_line_ids", []):
+            add("account.move.line", record_id)
     elif capability_id == "acct.payment.register.v1":
         for record_id in parameters.get("target_move_ids", []):
             add("account.move", record_id)

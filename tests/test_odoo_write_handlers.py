@@ -570,9 +570,10 @@ def test_source_has_no_privilege_or_transaction_escape_and_no_private_orm_calls(
     assert "._reverse_moves(" not in source
     assert "._generate_deferred_entries(" not in source
     assert "._post(" not in source
+    assert ".remove_move_reconcile(" not in source
 
 
-def test_all_seventeen_registered_write_capabilities_have_three_real_dispatch_phases():
+def test_all_eighteen_registered_write_capabilities_have_three_real_dispatch_phases():
     baseline_identifiers = {
         "acct.invoice.customer_create.v1",
         "acct.bill.vendor_create.v1",
@@ -594,6 +595,9 @@ def test_all_seventeen_registered_write_capabilities_have_three_real_dispatch_ph
         "acct.move.post.v1",
         "acct.move.draft_cancel.v2",
     }
+    payment_close_identifiers = {
+        "acct.payment.cancel.v1",
+    }
     identifiers = {
         capability.id
         for capability in load_registry(ROOT / "registry" / "capabilities.json")
@@ -601,7 +605,12 @@ def test_all_seventeen_registered_write_capabilities_have_three_real_dispatch_ph
     }
     assert len(baseline_identifiers) == 14
     assert len(phase_b_identifiers) == 3
-    assert identifiers == baseline_identifiers | phase_b_identifiers
+    assert len(payment_close_identifiers) == 1
+    assert identifiers == (
+        baseline_identifiers
+        | phase_b_identifiers
+        | payment_close_identifiers
+    )
     for identifier in sorted(identifiers):
         for phase in ("precheck", "execute", "verify"):
             assert callable(getattr(OdooWriteHandlers, OdooWriteHandlers.dispatch_name(identifier, phase)))
@@ -5908,6 +5917,336 @@ def draft_cancel_v2_entry_parameters():
     }
 
 
+def payment_cancel_parameters():
+    return {
+        "company_id": 7,
+        "payment_id": 920,
+        "move_id": 921,
+        "expected_payment_state": "in_process",
+        "expected_move_state": "posted",
+        "expected_payment_date": "2026-07-15",
+        "expected_partner_id": 101,
+        "expected_partner_type": "customer",
+        "expected_direction": "inbound",
+        "expected_amount": "100.00",
+        "expected_currency_id": 1,
+        "expected_journal_id": 2,
+        "expected_payment_method_line_id": 3,
+        "expected_is_sent": True,
+        "expected_line_ids": [922, 923],
+        "reason": "Cancel an unallocated duplicate payment",
+        "idempotency_key": "cancel-payment-920",
+    }
+
+
+def unallocated_payment_fixture():
+    currency = Record(1, active=True, rounding=0.01)
+    comp = company(currency_id=currency)
+    journal = Record(
+        2,
+        company_id=comp,
+        type="bank",
+        active=True,
+        currency_id=None,
+    )
+    partner = Record(101, active=True, company_id=None, company_ids=[])
+    payment_method = Record(
+        4,
+        code="manual",
+        payment_type="inbound",
+    )
+    payment_method_line = Record(
+        3,
+        active=True,
+        company_id=comp,
+        journal_id=journal,
+        payment_method_id=payment_method,
+        payment_type="inbound",
+    )
+    receivable = Record(
+        10,
+        company_id=comp,
+        company_ids=[comp],
+        deprecated=False,
+        account_type="asset_receivable",
+        reconcile=True,
+    )
+    outstanding = Record(
+        11,
+        company_id=comp,
+        company_ids=[comp],
+        deprecated=False,
+        account_type="asset_current",
+        reconcile=True,
+    )
+    payment_method_line.payment_account_id = outstanding
+    move = Record(
+        921,
+        state="posted",
+        name="BNK1/2026/00001",
+        move_type="entry",
+        company_id=comp,
+        journal_id=journal,
+        currency_id=currency,
+        partner_id=partner,
+        date="2026-07-15",
+        ref="Unallocated receipt",
+        line_ids=[],
+        posted_before=True,
+        auto_post="no",
+        inalterable_hash=False,
+        need_cancel_request=False,
+        sending_data=False,
+        payment_state="not_paid",
+        affects_tax_report=False,
+    )
+    payment = Record(
+        920,
+        state="in_process",
+        name="BNK1/2026/00001",
+        company_id=comp,
+        partner_id=partner,
+        journal_id=journal,
+        currency_id=currency,
+        date="2026-07-15",
+        amount=Decimal("100.00"),
+        payment_type="inbound",
+        partner_type="customer",
+        memo="Unallocated receipt",
+        payment_method_line_id=payment_method_line,
+        destination_account_id=receivable,
+        outstanding_account_id=outstanding,
+        move_id=move,
+        is_sent=True,
+        is_reconciled=False,
+        is_matched=False,
+        invoice_ids=[],
+        is_internal_transfer=False,
+        reconciled_invoice_ids=[],
+        reconciled_bill_ids=[],
+        reconciled_statement_line_ids=[],
+        paired_internal_transfer_payment_id=None,
+        destination_journal_id=None,
+        payment_transaction_id=None,
+        payment_token_id=None,
+        batch_payment_id=None,
+        check_number=False,
+        odoo_cli_v3_payment_binding=False,
+    )
+    debit = Record(
+        922,
+        move_id=move,
+        company_id=comp,
+        account_id=outstanding,
+        partner_id=partner,
+        currency_id=currency,
+        parent_state="posted",
+        date="2026-07-15",
+        name="Unallocated receipt",
+        debit=Decimal("100.00"),
+        credit=Decimal("0"),
+        balance=Decimal("100.00"),
+        amount_currency=Decimal("100.00"),
+        amount_residual=Decimal("100.00"),
+        amount_residual_currency=Decimal("100.00"),
+        reconciled=False,
+        full_reconcile_id=None,
+        matched_debit_ids=[],
+        matched_credit_ids=[],
+        matching_number=False,
+        statement_line_id=None,
+        statement_id=None,
+        payment_id=payment,
+        tax_ids=[],
+        tax_line_id=None,
+        tax_tag_ids=[],
+        tax_repartition_line_id=None,
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        asset_ids=[],
+        deferred_start_date=None,
+        deferred_end_date=None,
+        reconciled_lines_ids=[],
+        reconciled_lines_excluding_exchange_diff_ids=[],
+    )
+    credit = Record(
+        923,
+        move_id=move,
+        company_id=comp,
+        account_id=receivable,
+        partner_id=partner,
+        currency_id=currency,
+        parent_state="posted",
+        date="2026-07-15",
+        name="Unallocated receipt",
+        debit=Decimal("0"),
+        credit=Decimal("100.00"),
+        balance=Decimal("-100.00"),
+        amount_currency=Decimal("-100.00"),
+        amount_residual=Decimal("-100.00"),
+        amount_residual_currency=Decimal("-100.00"),
+        reconciled=False,
+        full_reconcile_id=None,
+        matched_debit_ids=[],
+        matched_credit_ids=[],
+        matching_number=False,
+        statement_line_id=None,
+        statement_id=None,
+        payment_id=payment,
+        tax_ids=[],
+        tax_line_id=None,
+        tax_tag_ids=[],
+        tax_repartition_line_id=None,
+        analytic_distribution=False,
+        analytic_line_ids=[],
+        asset_ids=[],
+        deferred_start_date=None,
+        deferred_end_date=None,
+        reconciled_lines_ids=[],
+        reconciled_lines_excluding_exchange_diff_ids=[],
+    )
+    move.line_ids = [debit, credit]
+    move.origin_payment_id = payment
+    move.payment_ids = [payment]
+    payment.snapshot_values = {
+        "name": payment.name,
+        "state": "in_process",
+        "company_id": [7, "Test company"],
+        "partner_id": [101, "Test customer"],
+        "journal_id": [2, "Bank"],
+        "currency_id": [1, "USD"],
+        "date": "2026-07-15",
+        "amount": 100.0,
+        "payment_type": "inbound",
+        "partner_type": "customer",
+        "payment_method_line_id": [3, "Manual"],
+        "destination_account_id": [10, "Receivable"],
+        "outstanding_account_id": [11, "Outstanding receipts"],
+        "move_id": [921, move.name],
+        "is_sent": True,
+        "is_reconciled": False,
+        "is_matched": False,
+        "invoice_ids": [],
+        "is_internal_transfer": False,
+        "reconciled_invoice_ids": [],
+        "reconciled_bill_ids": [],
+        "reconciled_statement_line_ids": [],
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-15 09:00:00",
+    }
+    move.snapshot_values = {
+        "name": move.name,
+        "state": "posted",
+        "move_type": "entry",
+        "company_id": [7, "Test company"],
+        "journal_id": [2, "Bank"],
+        "currency_id": [1, "USD"],
+        "partner_id": [101, "Test customer"],
+        "date": "2026-07-15",
+        "ref": "Unallocated receipt",
+        "line_ids": [922, 923],
+        "origin_payment_id": [920, payment.name],
+        "payment_ids": [920],
+        "posted_before": True,
+        "auto_post": "no",
+        "sending_data": False,
+        "payment_state": "not_paid",
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-15 09:00:00",
+    }
+    for line in (debit, credit):
+        line.snapshot_values = {
+            "move_id": [921, move.name],
+            "company_id": [7, "Test company"],
+            "parent_state": "posted",
+            "account_id": [line.account_id.id, "Payment account"],
+            "partner_id": [101, "Test customer"],
+            "currency_id": [1, "USD"],
+            "date": "2026-07-15",
+            "debit": float(line.debit),
+            "credit": float(line.credit),
+            "balance": float(line.balance),
+            "amount_currency": float(line.amount_currency),
+            "reconciled": False,
+            "full_reconcile_id": False,
+            "matched_debit_ids": [],
+            "matched_credit_ids": [],
+            "tax_ids": [],
+            "tax_line_id": False,
+            "tax_tag_ids": [],
+            "analytic_distribution": False,
+            "analytic_line_ids": [],
+            "write_uid": [42, "V3 Executor"],
+            "write_date": "2026-07-15 09:00:00",
+        }
+    records = {
+        ("res.currency", 1): currency,
+        ("res.partner", 101): partner,
+        ("account.journal", 2): journal,
+        ("account.payment.method.line", 3): payment_method_line,
+        ("account.payment.method", 4): payment_method,
+        ("account.account", 10): receivable,
+        ("account.account", 11): outstanding,
+        ("account.payment", 920): payment,
+        ("account.move", 921): move,
+        ("account.move.line", 922): debit,
+        ("account.move.line", 923): credit,
+    }
+    return comp, payment, move, debit, credit, records
+
+
+def install_exact_payment_cancel(
+    payment,
+    move,
+    lines,
+    *,
+    payment_drift=False,
+    move_control_drift=None,
+):
+    payment.action_cancel_calls = 0
+
+    def action_cancel():
+        payment.action_cancel_calls += 1
+        payment.state = "canceled"
+        payment.snapshot_values.update(
+            {
+                "state": "canceled",
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-15 09:01:00",
+            }
+        )
+        move.state = "cancel"
+        move.snapshot_values.update(
+            {
+                "state": "cancel",
+                "auto_post": "no",
+                "sending_data": False,
+                "payment_state": "not_paid",
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-15 09:01:00",
+            }
+        )
+        for line in lines:
+            line.parent_state = "cancel"
+            line.snapshot_values["parent_state"] = "cancel"
+        if payment_drift:
+            payment.amount = Decimal("101.00")
+            payment.snapshot_values["amount"] = 101.0
+        if move_control_drift == "auto_post":
+            move.auto_post = "at_date"
+            move.snapshot_values["auto_post"] = "at_date"
+        elif move_control_drift == "sending_data":
+            move.sending_data = {"author": "unexpected"}
+            move.snapshot_values["sending_data"] = {
+                "author": "unexpected"
+            }
+        elif move_control_drift == "payment_state":
+            move.payment_state = "paid"
+            move.snapshot_values["payment_state"] = "paid"
+
+    payment.action_cancel = action_cancel
+
+
 def pristine_manual_entry_fixture(
     *,
     document_binding=None,
@@ -6490,6 +6829,288 @@ def test_move_post_rejects_date_or_chatter_drift_before_execution_returns(
         )
 
     assert move.action_post_calls == 1
+
+
+def test_payment_cancel_calls_only_public_action_once_and_verifies_exact_delta():
+    comp, payment, move, debit, credit, records = (
+        unallocated_payment_fixture()
+    )
+    install_exact_payment_cancel(payment, move, [debit, credit])
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = payment_cancel_parameters()
+
+    checked = handler.precheck("acct.payment.cancel.v1", parameters)
+    execution = handler.execute_prechecked(
+        "acct.payment.cancel.v1", parameters, checked
+    )
+    verification = handler.verify(
+        "acct.payment.cancel.v1", parameters, execution
+    )
+
+    assert payment.action_cancel_calls == 1
+    assert payment.contexts[-1] == {
+        "tracking_disable": True,
+        "mail_notrack": True,
+    }
+    assert payment.writes == []
+    assert move.writes == []
+    assert payment.state == "canceled"
+    assert move.state == "cancel"
+    assert [debit.parent_state, credit.parent_state] == [
+        "cancel",
+        "cancel",
+    ]
+    assert move.tax_effect_checks == 2
+    assert move.lock_date_checks == [
+        (date(2026, 7, 15), False),
+        (date(2026, 7, 15), False),
+    ]
+    assert execution["recovery"] == {
+        "status": "manual_escalation",
+        "method": "manual_review_terminal_payment_cancel",
+        "targets": [
+            {"model": "account.payment", "record_id": 920},
+            {"model": "account.move", "record_id": 921},
+        ],
+    }
+    assert verification["passed"] is True
+    assert "payment_cancelled_fresh" in verification["checks"]
+    assert "payment_reconciliation_graph_remained_empty" in (
+        verification["checks"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("unsafe_case", "error"),
+    (
+        ("paid", "not an approved sent in-process posted payment"),
+        (
+            "partial",
+            "reconciliation, tax, analytic, asset, deferred",
+        ),
+        (
+            "tax",
+            "reconciliation, tax, analytic, asset, deferred",
+        ),
+        (
+            "provider",
+            "target, bank, transfer, provider, batch, check",
+        ),
+        (
+            "matched",
+            "target, bank, transfer, provider, batch, check",
+        ),
+        (
+            "targeted",
+            "target, bank, transfer, provider, batch, check",
+        ),
+        (
+            "sending",
+            "unsupported origin, posting, or lock evidence",
+        ),
+    ),
+)
+def test_payment_cancel_rejects_paid_reconciled_tax_or_provider_sources(
+    unsafe_case,
+    error,
+):
+    comp, payment, _move, debit, _credit, records = (
+        unallocated_payment_fixture()
+    )
+    if unsafe_case == "paid":
+        payment.state = "paid"
+    elif unsafe_case == "partial":
+        debit.matched_credit_ids = [Record(3001)]
+    elif unsafe_case == "tax":
+        debit.tax_ids = [Record(301)]
+    elif unsafe_case == "provider":
+        payment.payment_transaction_id = Record(401)
+    elif unsafe_case == "matched":
+        payment.is_matched = True
+    elif unsafe_case == "targeted":
+        payment.invoice_ids = [Record(501)]
+    else:
+        records[("account.move", 921)].sending_data = {
+            "author": "in-flight"
+        }
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(OdooWriteHandlerError, match=error):
+        handler.precheck(
+            "acct.payment.cancel.v1", payment_cancel_parameters()
+        )
+
+
+def test_payment_cancel_rejects_reversed_accounting_direction():
+    comp, _payment, _move, debit, credit, records = (
+        unallocated_payment_fixture()
+    )
+    debit.account_id, credit.account_id = credit.account_id, debit.account_id
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="outstanding-account balance differs",
+    ):
+        handler.precheck(
+            "acct.payment.cancel.v1", payment_cancel_parameters()
+        )
+
+
+def test_payment_cancel_rejects_payment_method_account_drift():
+    comp, _payment, _move, _debit, _credit, records = (
+        unallocated_payment_fixture()
+    )
+    records[("account.payment.method.line", 3)].payment_account_id = (
+        records[("account.account", 10)]
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="method outstanding account differs",
+    ):
+        handler.precheck(
+            "acct.payment.cancel.v1", payment_cancel_parameters()
+        )
+
+
+def test_payment_cancel_rejects_hidden_partial_reconcile_search_result():
+    comp, _payment, _move, _debit, _credit, records = (
+        unallocated_payment_fixture()
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    def search_records(model_name, domain, company, *, limit=1):
+        assert company is comp
+        assert limit == 1
+        if model_name == "account.partial.reconcile":
+            return [Record(3001)]
+        return []
+
+    handler.search_records = search_records
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="hidden partial reconciliation",
+    ):
+        handler.precheck(
+            "acct.payment.cancel.v1", payment_cancel_parameters()
+        )
+
+
+def test_payment_cancel_rejects_graph_drift_after_approval_before_action():
+    comp, payment, move, debit, credit, records = (
+        unallocated_payment_fixture()
+    )
+    install_exact_payment_cancel(payment, move, [debit, credit])
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = payment_cancel_parameters()
+    checked = handler.precheck("acct.payment.cancel.v1", parameters)
+    move.line_ids = [debit]
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="journal-item graph differs",
+    ):
+        handler.execute_prechecked(
+            "acct.payment.cancel.v1", parameters, checked
+        )
+
+    assert payment.action_cancel_calls == 0
+
+
+def test_payment_cancel_rechecks_effective_lock_before_public_action():
+    comp, payment, move, debit, credit, records = (
+        unallocated_payment_fixture()
+    )
+    install_exact_payment_cancel(payment, move, [debit, credit])
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = payment_cancel_parameters()
+    checked = handler.precheck("acct.payment.cancel.v1", parameters)
+    move.violated_lock_dates = [
+        (date(2026, 7, 15), "fiscalyear_lock_date")
+    ]
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="violates effective Odoo lock dates",
+    ):
+        handler.execute_prechecked(
+            "acct.payment.cancel.v1", parameters, checked
+        )
+
+    assert payment.action_cancel_calls == 0
+    assert move.tax_effect_checks == 2
+    assert move.lock_date_checks == [
+        (date(2026, 7, 15), False),
+        (date(2026, 7, 15), False),
+    ]
+
+
+def test_payment_cancel_rejects_material_action_side_effect_in_transaction():
+    comp, payment, move, debit, credit, records = (
+        unallocated_payment_fixture()
+    )
+    install_exact_payment_cancel(
+        payment,
+        move,
+        [debit, credit],
+        payment_drift=True,
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = payment_cancel_parameters()
+    checked = handler.precheck("acct.payment.cancel.v1", parameters)
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="outside the approved payment cancellation allowlist",
+    ):
+        handler.execute_prechecked(
+            "acct.payment.cancel.v1", parameters, checked
+        )
+
+    assert payment.action_cancel_calls == 1
+
+
+@pytest.mark.parametrize(
+    "control_field",
+    ("auto_post", "sending_data", "payment_state"),
+)
+def test_payment_cancel_rejects_wrong_move_control_terminal_value(
+    control_field,
+):
+    comp, payment, move, debit, credit, records = (
+        unallocated_payment_fixture()
+    )
+    install_exact_payment_cancel(
+        payment,
+        move,
+        [debit, credit],
+        move_control_drift=control_field,
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = payment_cancel_parameters()
+    checked = handler.precheck("acct.payment.cancel.v1", parameters)
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="cancellation control fields differ",
+    ):
+        handler.execute_prechecked(
+            "acct.payment.cancel.v1", parameters, checked
+        )
+
+    assert payment.action_cancel_calls == 1
 
 
 def test_draft_cancel_v2_cancels_pristine_manual_entry_exactly():

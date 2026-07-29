@@ -195,7 +195,8 @@ class PiScenarioGateTest(unittest.TestCase):
             for scenario in self.corpus["scenarios"]
         }
         self.assertEqual(covered, registered)
-        self.assertEqual(len(self.corpus["scenarios"]), 32)
+        self.assertEqual(self.corpus["frozen_revision"], 4)
+        self.assertEqual(len(self.corpus["scenarios"]), 33)
         self.assertEqual(
             {scenario["category"] for scenario in self.corpus["scenarios"]},
             {
@@ -349,6 +350,80 @@ class PiScenarioGateTest(unittest.TestCase):
             all("手工分录" in scenario["input"] for scenario in move_post_scenarios)
         )
 
+        payment_cancel_scenarios = [
+            scenario
+            for scenario in self.corpus["scenarios"]
+            if scenario["expected"]["capability_id"] == "acct.payment.cancel.v1"
+        ]
+        self.assertEqual(
+            [scenario["id"] for scenario in payment_cancel_scenarios],
+            ["pi-v1-payment-cancel"],
+        )
+        payment_cancel_scenario = payment_cancel_scenarios[0]
+        self.assertEqual(
+            set(payment_cancel_scenario["expected"]["material_parameters"]),
+            {
+                "company_id",
+                "payment_id",
+                "move_id",
+                "expected_payment_state",
+                "expected_move_state",
+                "expected_payment_date",
+                "expected_partner_id",
+                "expected_partner_type",
+                "expected_direction",
+                "expected_amount",
+                "expected_currency_id",
+                "expected_journal_id",
+                "expected_payment_method_line_id",
+                "expected_is_sent",
+                "expected_line_ids",
+                "reason",
+                "idempotency_key",
+            },
+        )
+        self.assertEqual(
+            payment_cancel_scenario["expected"]["material_parameters"][
+                "expected_payment_state"
+            ],
+            "in_process",
+        )
+        self.assertEqual(
+            payment_cancel_scenario["expected"]["material_parameters"][
+                "expected_move_state"
+            ],
+            "posted",
+        )
+        self.assertIs(
+            payment_cancel_scenario["expected"]["material_parameters"][
+                "expected_is_sent"
+            ],
+            True,
+        )
+        payment_cancel_parameters = resolve_fixture_bindings(
+            payment_cancel_scenario["expected"]["material_parameters"],
+            self._bindings(),
+        )
+        payment_cancel_line_ids = payment_cancel_parameters["expected_line_ids"]
+        self.assertEqual(len(payment_cancel_line_ids), 2)
+        self.assertEqual(
+            payment_cancel_line_ids,
+            sorted(set(payment_cancel_line_ids)),
+        )
+        self.assertEqual(
+            payment_cancel_scenario["expected"]["material_parameters"][
+                "expected_currency_id"
+            ],
+            {"$fixture": "currency_cny_id"},
+        )
+        for required_phrase in (
+            "尚未核销",
+            "状态仍为 in_process",
+            "不是退款、解除核销或银行流水补偿",
+            "公司本位币人民币",
+        ):
+            self.assertIn(required_phrase, payment_cancel_scenario["input"])
+
         invoice_post_route = next(
             scenario
             for scenario in self.corpus["scenarios"]
@@ -460,6 +535,31 @@ class PiScenarioGateTest(unittest.TestCase):
                     "approval_digest": TEST_APPROVAL_DIGEST,
                 },
             )
+        payment_cancel_trace = traces[payment_cancel_scenario["id"]]
+        resolved_payment_cancel = resolve_fixture_bindings(
+            payment_cancel_scenario["expected"]["material_parameters"],
+            self._bindings(),
+        )
+        self.assertEqual(
+            payment_cancel_trace["events"][4]["data"],
+            {"parameters": resolved_payment_cancel},
+        )
+        self.assertEqual(
+            payment_cancel_trace["events"][5]["data"],
+            {"applicable": True, "parameters": resolved_payment_cancel},
+        )
+        self.assertEqual(
+            payment_cancel_trace["events"][6]["data"],
+            {"applicable": True, "parameters": resolved_payment_cancel},
+        )
+        self.assertEqual(
+            payment_cancel_trace["events"][7]["data"],
+            {
+                "applicable": True,
+                "parameters_sha256": canonical_sha256(resolved_payment_cancel),
+                "approval_digest": TEST_APPROVAL_DIGEST,
+            },
+        )
 
     def test_corpus_rejects_duplicate_ids_unknown_fields_and_incomplete_parameters(self) -> None:
         duplicate = copy.deepcopy(self.corpus)
@@ -554,15 +654,15 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertEqual(
             report["trace_coverage"],
             {
-                "captured": 32,
-                "expected": 32,
+                "captured": 33,
+                "expected": 33,
                 "passed": True,
                 "missing_scenario_ids": [],
             },
         )
         for gate_id in ("F01", "F02", "F03", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 32)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 32)
+            self.assertEqual(report["gates"][gate_id]["numerator"], 33)
+            self.assertEqual(report["gates"][gate_id]["denominator"], 33)
             self.assertEqual(report["gates"][gate_id]["percent"], "100.00")
             self.assertTrue(report["gates"][gate_id]["passed"])
 
@@ -579,9 +679,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 30)
-        self.assertEqual(report["gates"]["F01"]["denominator"], 32)
-        self.assertEqual(report["gates"]["F01"]["percent"], "93.75")
+        self.assertEqual(report["gates"]["F01"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F01"]["denominator"], 33)
+        self.assertEqual(report["gates"]["F01"]["percent"], "93.94")
         self.assertEqual(report["gates"]["F01"]["minimum_percent"], "95.00")
         self.assertFalse(report["gates"]["F01"]["passed"])
         self.assertFalse(report["acceptance_passed"])
@@ -599,8 +699,8 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 31)
-        self.assertEqual(report["gates"]["F01"]["percent"], "96.88")
+        self.assertEqual(report["gates"]["F01"]["numerator"], 32)
+        self.assertEqual(report["gates"]["F01"]["percent"], "96.97")
         self.assertTrue(report["gates"]["F01"]["passed"])
 
     def test_clarification_and_parameter_loss_are_scored_independently(self) -> None:
@@ -621,9 +721,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 32)
-        self.assertEqual(report["gates"]["F02"]["numerator"], 31)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F01"]["numerator"], 33)
+        self.assertEqual(report["gates"]["F02"]["numerator"], 32)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 32)
         self.assertEqual(len(report["gates"]["F02"]["failures"]), 1)
         self.assertEqual(len(report["gates"]["F03"]["failures"]), 1)
 
@@ -649,7 +749,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 32)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -676,7 +776,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 32)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -707,7 +807,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F05"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F05"]["numerator"], 32)
         self.assertFalse(report["gates"]["F05"]["passed"])
         self.assertFalse(report["acceptance_passed"])
         failure = report["gates"]["F05"]["failures"][
@@ -732,8 +832,8 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F02"]["numerator"], 31)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 32)
+        self.assertEqual(report["gates"]["F02"]["numerator"], 32)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 33)
         self.assertIn(
             "company_id",
             report["gates"]["F02"]["failures"]["pi-v1-registry-list"][
@@ -755,8 +855,8 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertFalse(report["trace_coverage"]["passed"])
         self.assertEqual(report["trace_coverage"]["missing_scenario_ids"], [missing_id])
         for gate_id in ("F01", "F02", "F03", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 31)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 32)
+            self.assertEqual(report["gates"][gate_id]["numerator"], 32)
+            self.assertEqual(report["gates"][gate_id]["denominator"], 33)
             self.assertIn(missing_id, report["gates"][gate_id]["failures"])
 
     def test_trace_is_bound_to_corpus_input_and_rejects_unknown_event_fields(self) -> None:

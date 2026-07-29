@@ -96,6 +96,9 @@ def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
         "account.payment", "account.move", "account.move.line",
         "account.partial.reconcile", "account.full.reconcile",
     }
+    assert _ALLOWED_MODELS["acct.payment.cancel.v1"] == {
+        "account.payment", "account.move", "account.move.line",
+    }
     assert _ALLOWED_MODELS["acct.bank.statement_import.v1"] == {
         "account.bank.statement", "account.bank.statement.line",
         "account.move", "account.move.line",

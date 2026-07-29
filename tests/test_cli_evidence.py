@@ -230,8 +230,8 @@ def _ready_pi_scenario_report(
         "run_id": "pi-run-1",
         "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v1",
         "trace_coverage": {
-            "captured": 32,
-            "expected": 32,
+            "captured": 33,
+            "expected": 33,
             "missing_scenario_ids": [],
             "passed": True,
         },
@@ -253,8 +253,8 @@ def _ready_write_pipeline_report(tmp_path: Path, release_identity: dict) -> Path
             "rejected_count": 0,
             "release_identity": release_identity,
             "sandbox_pipeline_ready": True,
-            "total_write_capabilities": 17,
-            "verified_count": 17,
+            "total_write_capabilities": 18,
+            "verified_count": 18,
         },
         "ok": True,
     }
@@ -268,7 +268,7 @@ def _ready_write_evidence_index(
     release_identity: dict,
     *,
     evidence_root: str | None = None,
-    verified_count: int = 17,
+    verified_count: int = 18,
 ) -> Path:
     index = {
         "business_succeeded": False,
@@ -283,7 +283,7 @@ def _ready_write_evidence_index(
             "rejected_count": 0,
             "release_identity": release_identity,
             "sandbox_pipeline_ready": True,
-            "total_write_capabilities": 17,
+            "total_write_capabilities": 18,
             "verified_count": verified_count,
         },
         "ok": True,
@@ -1961,10 +1961,10 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
     assert payload["data"]["evidence_root"]["ready"] is True
     assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
-    assert len(payload["data"]["capabilities"]) == 17
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 17
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 17
-    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 17
+    assert len(payload["data"]["capabilities"]) == 18
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 18
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 18
+    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 18
     assert payload["data"]["capability_summary"][
         "sandbox_staging_promotion_ready_count"
     ] == 0
@@ -1972,8 +1972,8 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
         "registry evidence level is not sandbox_verified",
         "registry has no retained sandbox write evidence receipts",
     ]
-    assert payload["data"]["total_write_capabilities"] == 17
-    assert payload["data"]["sandbox_drill_admissible_count"] == 17
+    assert payload["data"]["total_write_capabilities"] == 18
+    assert payload["data"]["sandbox_drill_admissible_count"] == 18
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
@@ -2023,9 +2023,9 @@ def test_evidence_sandbox_write_environment_audit_summary_omits_capability_detai
     assert "capabilities" not in payload["data"]
     assert payload["data"]["onboarding"]["ready"] is True
     assert payload["data"]["environment_ready_for_sandbox_write_drills"] is True
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 17
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 17
-    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 17
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 18
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 18
+    assert payload["data"]["capability_summary"]["sandbox_drill_admissible_count"] == 18
     assert payload["data"]["capability_summary"][
         "sandbox_staging_promotion_ready_count"
     ] == 0
@@ -2081,8 +2081,8 @@ def test_evidence_sandbox_write_environment_audit_reports_missing_inputs(
     assert payload["data"]["onboarding"]["blockers"] == [
         "sandbox onboarding readiness receipt was not supplied"
     ]
-    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 17
-    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 17
+    assert payload["data"]["capability_summary"]["total_write_capabilities"] == 18
+    assert payload["data"]["capability_summary"]["not_staging_ready_count"] == 18
     assert payload["data"]["sandbox_staging_promotion_ready_count"] == 0
 
 
@@ -3849,8 +3849,8 @@ def test_evidence_write_capabilities_readiness_reports_all_registered_writes():
         item["sandbox_staging_promotion_ready"] is False
         for item in payload["data"]["capabilities"]
     )
-    assert payload["data"]["total_write_capabilities"] == 17
-    assert payload["data"]["admissible_count"] == 17
+    assert payload["data"]["total_write_capabilities"] == 18
+    assert payload["data"]["admissible_count"] == 18
     reported = [item["capability"]["id"] for item in payload["data"]["capabilities"]]
     assert reported == sorted(reported)
     assert "acct.invoice.customer_create.v1" in reported
@@ -3896,9 +3896,9 @@ def test_evidence_write_pipeline_readiness_reports_verified_and_missing(
     assert payload["command"] == "evidence.write-pipeline-readiness"
     assert payload["business_succeeded"] is False
     data = payload["data"]
-    assert data["total_write_capabilities"] == 17
+    assert data["total_write_capabilities"] == 18
     assert data["verified_count"] == 1
-    assert data["missing_count"] == 16
+    assert data["missing_count"] == 17
     assert data["rejected_count"] == 0
     assert data["sandbox_pipeline_ready"] is False
     invoice = next(
@@ -3989,7 +3989,7 @@ def test_evidence_write_pipeline_readiness_reports_rejected_release_mismatch(
     assert result.exit_code == 0, result.output
     data = __import__("json").loads(result.output)["data"]
     assert data["verified_count"] == 0
-    assert data["missing_count"] == 16
+    assert data["missing_count"] == 17
     assert data["rejected_count"] == 1
     invoice = next(
         item
@@ -4038,9 +4038,9 @@ def test_evidence_write_evidence_index_reports_compact_handoff(tmp_path: Path):
     assert payload["business_succeeded"] is False
     data = payload["data"]
     assert data["index_kind"] == "odoo-accounting-cli-v3.sandbox-write-evidence-index.v1"
-    assert data["total_write_capabilities"] == 17
+    assert data["total_write_capabilities"] == 18
     assert data["verified_count"] == 1
-    assert data["missing_count"] == 16
+    assert data["missing_count"] == 17
     assert data["rejected_count"] == 0
     invoice = next(
         item
@@ -4687,7 +4687,7 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         is True
     )
     assert data["read_capabilities_readiness"]["admissible_count"] == 10
-    assert data["write_static_readiness"]["admissible_count"] == 17
+    assert data["write_static_readiness"]["admissible_count"] == 18
 
 
 def test_evidence_goal_readiness_rejects_mismatched_write_evidence_index(
@@ -4879,7 +4879,7 @@ def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
     assert payload["command"] == "evidence.pi-trace-capture-check"
     assert payload["business_succeeded"] is False
     assert payload["data"]["trace_capture_ready"] is True
-    assert payload["data"]["trace_count"] == 32
+    assert payload["data"]["trace_count"] == 33
     assert payload["data"]["real_odoo_write_performed"] is False
 
 

@@ -139,6 +139,38 @@ def test_phase_b_move_capabilities_have_exact_move_model_allowlists():
     assert _ALLOWED_MODELS["acct.move.draft_cancel.v2"] == expected
 
 
+def test_payment_cancel_has_exact_models_locks_and_exclusive_before_graph():
+    assert _ALLOWED_MODELS["acct.payment.cancel.v1"] == frozenset(
+        {"account.payment", "account.move", "account.move.line"}
+    )
+    parameters = {
+        "payment_id": 500,
+        "move_id": 501,
+        "expected_line_ids": [502, 503],
+    }
+    locks = _resource_lock_digests(
+        "acct.payment.cancel.v1", 7, parameters, None
+    )
+    reordered = _resource_lock_digests(
+        "acct.payment.cancel.v1",
+        7,
+        {**parameters, "expected_line_ids": [503, 502]},
+        None,
+    )
+    move_lock = _resource_lock_digests(
+        "acct.move.reverse.v1", 7, {"move_id": 501}, None
+    )
+
+    assert locks == reordered
+    assert locks == sorted(locks)
+    assert len(locks) == len(set(locks)) == 4
+    assert len(set(locks) & set(move_lock)) == 1
+    assert (
+        "acct.payment.cancel.v1"
+        in write_bootstrap.EXCLUSIVE_BEFORE_LOCK_CAPABILITIES
+    )
+
+
 def test_phase_b_journal_entry_create_locks_the_journal_reference():
     parameters = {"journal_id": 5, "reference": "ENTRY-2026-001"}
 
