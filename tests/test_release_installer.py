@@ -252,6 +252,16 @@ def test_installer_and_runbook_fix_the_side_load_only_boundary(installer):
     assert "does not create or\nchange `current`" in deployment
 
 
+def test_rollback_runbook_names_the_current_write_runtime_schema():
+    deployment = (PROJECT_ROOT / "docs/DEPLOYMENT.md").read_text("utf-8")
+    runtime = (PROJECT_ROOT / "docs/RUNTIME_CONFIGURATION.md").read_text("utf-8")
+    expected = "write runtime\nconfiguration document is schema v2"
+
+    assert expected in deployment
+    assert "write runtime\nconfiguration document is schema v1" not in deployment
+    assert "write runtime document has schema version `2`" in runtime
+
+
 def test_json_and_manifest_schema_are_strict(installer):
     with pytest.raises(installer.InstallError, match="non-finite"):
         installer._load_json(b'{"value":NaN}', label="test")

@@ -1943,6 +1943,9 @@ def _classify_trusted_read_rejection(
 
     from ..auth import AuthenticationError
     from ..domain.ar_open_items import OpenItemsError
+    from ..domain.multicompany_consolidated import (
+        MulticompanyConsolidatedError,
+    )
     from ..domain.multicurrency_balance import MulticurrencyBalanceError
     from ..domain.trial_balance import TrialBalanceError
     from ..gateway import GatewayError
@@ -1977,7 +1980,12 @@ def _classify_trusted_read_rejection(
         }:
             return "company_binding_rejected"
         return None
-    if type(exc) in {OpenItemsError, MulticurrencyBalanceError, TrialBalanceError}:
+    if type(exc) in {
+        MulticompanyConsolidatedError,
+        OpenItemsError,
+        MulticurrencyBalanceError,
+        TrialBalanceError,
+    }:
         if message in {
             "company is outside the authenticated allowed companies",
             "company does not exist or is not visible",

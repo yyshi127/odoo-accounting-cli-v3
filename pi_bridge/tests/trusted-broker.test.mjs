@@ -80,6 +80,95 @@ function databaseFinalization(operationId = "op-1") {
 	};
 }
 
+function diagnosticsResponse(request) {
+	return {
+		command: "operation.diagnostics",
+		data: {
+			operation: {
+				operation_id: request.operation_id,
+				capability_id: "acct.bill.vendor_create.v1",
+				company_id: request.company_id,
+				state: "prepared",
+				revision: 0,
+				terminal: false,
+				business_succeeded: false,
+				allowed_next_states: ["failed", "prechecked"],
+			},
+			audit: {
+				chain_verified: true,
+				event_count: 0,
+				event_types: [],
+				event_types_offset: 0,
+				event_types_truncated: false,
+				last_event_id: null,
+				last_event_hash: null,
+				global_head_hash: null,
+			},
+			verification: {
+				trusted_terminal_result_verified: false,
+				passed: null,
+				method: null,
+				evidence_digest: null,
+			},
+			failure: {
+				present: false,
+				stage: null,
+				result_id: null,
+				evidence_digest: null,
+			},
+			recovery: {
+				lifecycle_status: "not_started",
+				available: false,
+				plan_status: null,
+				plan_digest: null,
+				recovery_capability_id: null,
+				requires_approval: null,
+				attempt_count: 0,
+				latest_attempt_plan_digest: null,
+				bound_operation_ids: [],
+				completion_evidence_digest: null,
+				completion_receipt_body_digest: null,
+				completion_receipt_id: null,
+			},
+			odoo_refs: [],
+			receipts: {
+				unique_final_receipt_verified: false,
+				current_candidate_count: 0,
+				durable_final_receipt_id: null,
+				durable_final_receipt_body_digest: null,
+				write_audit_receipt_id: null,
+				write_audit_result_digest: null,
+				write_audit_head: null,
+				difference_digest: null,
+				database_finalization_digest: null,
+			},
+			page: { count: 1, total_count: 1 },
+			receipt: {
+				id: "diagnostics-receipt-1",
+				odoo_instance_id: "odoo19@test",
+				database_name: "odoo_v3_test",
+				database_uuid: "11111111-1111-4111-8111-111111111111",
+				company_id: request.company_id,
+				user_id: 42,
+				capability_id: "acct.diagnostics.operation_read.v1",
+				environment: "test",
+				capability_channel: "staged",
+				request_digest: "a".repeat(64),
+				result_digest: "b".repeat(64),
+				registry_digest: REGISTRY_DIGEST,
+				release_digest: RELEASE_DIGEST,
+				record_count: 1,
+				observed_at: "2026-07-15T08:01:00Z",
+				signature_version: 2,
+				signature_purpose: "read_receipt_v2",
+				signature_key_id: "read-key-1",
+				signature: "e".repeat(64),
+			},
+		},
+		ok: true,
+	};
+}
+
 function responseFor(action, request) {
 	if (action === "read") {
 		return {
@@ -139,6 +228,9 @@ function responseFor(action, request) {
 			ok: true,
 		};
 	}
+	if (action === "operation.diagnostics") {
+		return diagnosticsResponse(request);
+	}
 	return {
 		command: action,
 		data: { accepted_business_request: request },
@@ -184,6 +276,7 @@ test("model-facing business requests cross the fixed broker socket byte-for-byte
 		"operation.approve_execute": { operation_id: "op-1" },
 		"operation.status": { operation_id: "op-1" },
 		"operation.result": { operation_id: "op-1" },
+		"operation.diagnostics": { company_id: 7, operation_id: "op-1" },
 		"operation.recover": {
 			origin_operation_id: "op-origin",
 			recovery_date: "2026-07-16",
@@ -209,6 +302,109 @@ test("model-facing business requests cross the fixed broker socket byte-for-byte
 				assert.equal(Object.hasOwn(request, forbidden), false);
 		});
 	}
+});
+
+test("operation diagnostics accepts one release-bound receipt and rejects tampering", async (t) => {
+	const request = { company_id: 7, operation_id: "op-1" };
+	const { client } = brokerHarness();
+	const accepted = await client("operation.diagnostics", request);
+	assert.equal(accepted.ok, true);
+	assert.equal(accepted.data.operation.operation_id, request.operation_id);
+	assert.equal(accepted.data.receipt.company_id, request.company_id);
+	assert.equal(
+		accepted.data.receipt.capability_id,
+		"acct.diagnostics.operation_read.v1",
+	);
+
+	for (const [name, mutate] of [
+		["operation id", (response) => {
+			response.data.operation.operation_id = "op-tampered";
+		}],
+		["operation company", (response) => {
+			response.data.operation.company_id = 8;
+		}],
+		["receipt company", (response) => {
+			response.data.receipt.company_id = 8;
+		}],
+		["receipt release", (response) => {
+			response.data.receipt.release_digest = "f".repeat(64);
+		}],
+		["receipt registry", (response) => {
+			response.data.receipt.registry_digest = "f".repeat(64);
+		}],
+		["receipt count", (response) => {
+			response.data.receipt.record_count = 0;
+		}],
+		["receipt signature", (response) => {
+			delete response.data.receipt.signature;
+		}],
+	]) {
+		await t.test(name, async () => {
+			const harness = brokerHarness((_action, requested) => {
+				const response = diagnosticsResponse(requested);
+				mutate(response);
+				return response;
+			});
+			const rejected = await harness.client(
+				"operation.diagnostics",
+				request,
+			);
+			assert.equal(rejected.ok, false);
+			assert.equal(
+				rejected.error.code,
+				"bridge_invalid_v3_broker_response",
+			);
+		});
+	}
+});
+
+test("operation diagnostics cannot switch to a broker-selected historical release", async () => {
+	const historicalRelease = "c".repeat(64);
+	const historicalRegistry = "d".repeat(64);
+	const { client } = brokerHarness((_action, request) => {
+		const response = diagnosticsResponse(request);
+		response.data.receipt.release_digest = historicalRelease;
+		response.data.receipt.registry_digest = historicalRegistry;
+		return response;
+	}, {
+		registryDigest: historicalRegistry,
+		releaseDigest: historicalRelease,
+	});
+
+	const rejected = await client(
+		"operation.diagnostics",
+		{ company_id: 7, operation_id: "op-1" },
+	);
+	assert.equal(rejected.ok, false);
+	assert.equal(
+		rejected.error.code,
+		"bridge_invalid_v3_broker_response",
+	);
+});
+
+test("operation diagnostics keeps company authority fields strict before broker transport", async () => {
+	const { calls, client } = brokerHarness();
+	for (const [request, expectedCode] of [
+		[{ operation_id: "op-1" }, "bridge_invalid_request_json"],
+		[{ company_id: 0, operation_id: "op-1" }, "bridge_invalid_request_json"],
+		[
+			{ company_id: 7, operation_id: "op-1", user_id: 1 },
+			"bridge_untrusted_authority_field",
+		],
+		[
+			{
+				company_id: 7,
+				context: { allowed_company_ids: [7, 8], user_id: 1 },
+				operation_id: "op-1",
+			},
+			"bridge_untrusted_authority_field",
+		],
+	]) {
+		const result = await client("operation.diagnostics", request);
+		assert.equal(result.ok, false);
+		assert.equal(result.error.code, expectedCode);
+	}
+	assert.equal(calls.length, 0);
 });
 
 test("approval execution exposes only operation_id and cannot mint an approval", async () => {

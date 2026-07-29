@@ -842,7 +842,7 @@ def test_dev251_plan_is_fixed_and_disclaims_accounting_oracle() -> None:
         )
 
 
-def test_current_cli_readiness_output_matches_both_independent_contracts() -> None:
+def test_current_cli_readiness_requires_a_new_protocol_after_frozen_dev251() -> None:
     from odoo_accounting_cli_v3.cli import (
         _load_read_capability_implementation,
         _read_capabilities_readiness_report,
@@ -868,17 +868,26 @@ def test_current_cli_readiness_output_matches_both_independent_contracts() -> No
         "ok": True,
     }
 
-    collector._validate_targeted_readiness(
-        document,
-        expected_identity=identity,
-    )
-    verifier._validate_readiness(
-        document,
-        release_identity=identity,
-    )
-    assert data["admissible_count"] == 8
+    with pytest.raises(
+        collector.CollectionError,
+        match="read readiness probe has unsafe semantics",
+    ):
+        collector._validate_targeted_readiness(
+            document,
+            expected_identity=identity,
+        )
+    with pytest.raises(
+        verifier.EvidenceVerificationError,
+        match="read readiness evidence is invalid",
+    ):
+        verifier._validate_readiness(
+            document,
+            release_identity=identity,
+        )
+    assert data["read_static_readiness_ready"] is True
+    assert data["admissible_count"] == 10
     assert data["total_read_capabilities"] == 10
-    assert data["unready_capability_ids"] == list(DECLARED_READ_GAPS)
+    assert data["unready_capability_ids"] == []
 
 
 def test_runtime_validation_rejects_non_string_paths_without_type_leaks(

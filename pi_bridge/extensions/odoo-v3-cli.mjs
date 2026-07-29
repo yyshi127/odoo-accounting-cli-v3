@@ -1337,7 +1337,7 @@ export function createV3BrokerClient(options = {}) {
 			&& (
 				!executedIdentityValid
 				|| (
-					["read", "operation.prepare"].includes(action)
+					["read", "operation.prepare", "operation.diagnostics"].includes(action)
 					&& (
 						response.executedReleaseDigest !== expectedReleaseDigest
 						|| response.executedRegistryDigest !== expectedRegistryDigest

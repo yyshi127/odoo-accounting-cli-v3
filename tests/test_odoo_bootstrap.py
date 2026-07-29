@@ -593,16 +593,18 @@ class OdooBootstrapTest(unittest.TestCase):
             [
                 "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
+                "acct.diagnostics.operation_read.v1",
                 "acct.gl.trial_balance.v1",
+                "acct.multicompany.consolidated_read.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
                 "acct.report.financial_read.v1",
                 "acct.tax.report_read.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 7, "total_count": 7})
+        self.assertEqual(result["page"], {"count": 9, "total_count": 9})
         self.assertEqual(result["receipt"]["capability_id"], "acct.registry.list.v1")
-        self.assertEqual(result["receipt"]["record_count"], 7)
+        self.assertEqual(result["receipt"]["record_count"], 9)
 
     def test_report_handlers_keep_all_parameters_through_bootstrap(self):
         base_parameters = {

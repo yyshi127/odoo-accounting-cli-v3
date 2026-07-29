@@ -23,6 +23,11 @@ from .write_receipts import (
 )
 
 
+TRUSTED_LOCAL_PERSISTENCE_READ_CAPABILITIES = frozenset(
+    {"acct.diagnostics.operation_read.v1"}
+)
+
+
 class OperationDiagnosticsError(ValueError):
     """A diagnostic projection could not be built without weakening trust."""
 

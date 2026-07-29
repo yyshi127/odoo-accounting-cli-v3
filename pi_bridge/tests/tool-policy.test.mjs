@@ -26,7 +26,31 @@ test("the hardened V3 sidecar never grants a legacy V2 tool", () => {
 		assert.equal(selected.some((name) => V2_TOOL_NAMES.includes(name)), false);
 	}
 	assert.equal(V3_QUERY_TOOL_NAMES.length, 2);
-	assert.equal(AUTHENTICATED_V3_BROKER_TOOL_NAMES.length, 7);
+	assert.equal(AUTHENTICATED_V3_BROKER_TOOL_NAMES.length, 8);
+	assert.equal(
+		AUTHENTICATED_V3_BROKER_TOOL_NAMES.includes(
+			"odoo_v3_operation_diagnostics",
+		),
+		true,
+	);
+});
+
+test("operation diagnostics is available only through the authenticated broker policy", () => {
+	const brokerDisabled = enabledPiToolNames({
+		brokerEnabled: false,
+		hardenedV3Only: true,
+		v3Ready: true,
+	});
+	assert.deepEqual(brokerDisabled, V3_QUERY_TOOL_NAMES);
+	assert.equal(brokerDisabled.includes("odoo_v3_operation_diagnostics"), false);
+
+	const brokerEnabled = enabledPiToolNames({
+		brokerEnabled: true,
+		hardenedV3Only: true,
+		v3Ready: true,
+	});
+	assert.equal(brokerEnabled.includes("odoo_v3_operation_diagnostics"), true);
+	assert.equal(brokerEnabled.some((name) => V2_TOOL_NAMES.includes(name)), false);
 });
 
 test("the hardened V3 child receives no legacy Odoo credential or selector", () => {

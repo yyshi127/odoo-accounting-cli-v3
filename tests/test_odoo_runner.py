@@ -19,6 +19,9 @@ from unittest.mock import Mock, patch
 import pytest
 
 from odoo_accounting_cli_v3.domain.ar_open_items import OpenItemsError
+from odoo_accounting_cli_v3.domain.multicompany_consolidated import (
+    MulticompanyConsolidatedError,
+)
 from odoo_accounting_cli_v3.domain.multicurrency_balance import MulticurrencyBalanceError
 from odoo_accounting_cli_v3.domain.trial_balance import TrialBalanceError
 from odoo_accounting_cli_v3.odoo.runner import (
@@ -473,6 +476,13 @@ def response(runtime, result=None):
         ),
         (
             MulticurrencyBalanceError("company does not exist or is not visible"),
+            False,
+            "company_binding_rejected",
+        ),
+        (
+            MulticompanyConsolidatedError(
+                "company does not exist or is not visible"
+            ),
             False,
             "company_binding_rejected",
         ),

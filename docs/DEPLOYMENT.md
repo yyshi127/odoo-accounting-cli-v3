@@ -1492,7 +1492,7 @@ again report the same identity.
 
 Before changing a route, verify the selected binary supports the current state
 schema. Write persistence is currently schema v4, while the write runtime
-configuration document is schema v1 and the isolated finalizer runtime document
+configuration document is schema v2 and the isolated finalizer runtime document
 is schema v2. Restore a pre-upgrade state snapshot only as part of a coordinated
 rollback with all traffic stopped and only with the exact release,
 configuration fingerprint, Key IDs, and verified snapshot that belong together.

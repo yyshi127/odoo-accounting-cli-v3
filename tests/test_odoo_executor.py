@@ -1,7 +1,7 @@
 import hashlib
 import json
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
@@ -10,6 +10,12 @@ from odoo_accounting_cli_v3.domain.ar_open_items import (
     CurrencyInfo as ArCurrencyInfo,
     OpenItemPartial,
     OpenItemSource,
+)
+from odoo_accounting_cli_v3.domain.multicompany_consolidated import (
+    CompanyAccountLedgerAggregate as MulticompanyLedgerAggregate,
+    CurrencyInfo as MulticompanyCurrencyInfo,
+    TechnicalRateSource as MulticompanyTechnicalRateSource,
+    TranslationRate as MulticompanyTranslationRate,
 )
 from odoo_accounting_cli_v3.domain.multicurrency_balance import (
     AccountInfo as MulticurrencyAccountInfo,
@@ -380,6 +386,108 @@ class MulticurrencyBackend:
         )
 
 
+class MulticompanyBackend:
+    cny = MulticompanyCurrencyInfo(6, "CNY", "CNY", Decimal("0.01"))
+    usd = MulticompanyCurrencyInfo(1, "USD", "$", Decimal("0.01"))
+
+    def assert_read_access(self, *, company_ids, presentation_currency_id):
+        if not set(company_ids).issubset({7, 8}) or presentation_currency_id != 1:
+            raise AssertionError("unexpected multi-company scope")
+
+    def presentation_currency(self, *, company_ids, currency_id):
+        if not company_ids or currency_id != 1:
+            raise AssertionError("unexpected presentation currency scope")
+        return self.usd
+
+    def company_currency(self, *, company_id):
+        return {7: self.cny, 8: self.usd}[company_id]
+
+    def ledger_account_aggregates(
+        self,
+        *,
+        company_id,
+        date_from,
+        date_to,
+        posted_only,
+        exclude_off_balance,
+    ):
+        if not posted_only or not exclude_off_balance:
+            raise AssertionError("multi-company ledger safety flags were weakened")
+        prefix = 100 if company_id == 7 else 500
+        opening = Decimal("100") if company_id == 7 else Decimal("50")
+        activity = Decimal("20") if company_id == 7 else Decimal("10")
+        return (
+            MulticompanyLedgerAggregate(
+                company_id,
+                prefix + 1,
+                "1000",
+                "Cash",
+                "asset_cash",
+                opening,
+                1,
+                activity,
+                Decimal("0"),
+                1,
+            ),
+            MulticompanyLedgerAggregate(
+                company_id,
+                prefix + 2,
+                "3000",
+                "Equity",
+                "equity",
+                -opening,
+                1,
+                Decimal("0"),
+                activity,
+                1,
+            ),
+        )
+
+    def translation_rate(
+        self,
+        *,
+        company_id,
+        rate_date,
+        source_currency,
+        presentation_currency,
+    ):
+        if company_id == 8:
+            identity = MulticompanyTechnicalRateSource.no_rate_identity(
+                currency_id=1
+            )
+            return MulticompanyTranslationRate(
+                company_id=8,
+                rate_company_id=8,
+                source_currency_id=1,
+                presentation_currency_id=1,
+                rate_date=rate_date,
+                source_technical_source=identity,
+                presentation_technical_source=identity,
+                source_to_presentation_rate=Decimal("1"),
+            )
+        source = MulticompanyTechnicalRateSource.no_rate_identity(
+            currency_id=source_currency.id
+        )
+        presentation = MulticompanyTechnicalRateSource(
+            currency_id=presentation_currency.id,
+            effective_date=date(2026, 6, 1),
+            source_scope="company_specific",
+            source_company_id=company_id,
+            source_record_id=701,
+            technical_rate=Decimal("0.14"),
+        )
+        return MulticompanyTranslationRate(
+            company_id=company_id,
+            rate_company_id=company_id,
+            source_currency_id=source_currency.id,
+            presentation_currency_id=presentation_currency.id,
+            rate_date=rate_date,
+            source_technical_source=source,
+            presentation_technical_source=presentation,
+            source_to_presentation_rate=Decimal("0.14"),
+        )
+
+
 class ReportBackend:
     currency_info = ReportCurrencyInfo(12, "CNY", "CNY", Decimal("0.01"))
 
@@ -575,6 +683,9 @@ class OdooReadExecutorTest(unittest.TestCase):
             trial_balance_backend_factory=lambda _env, _user, _companies: Backend(),
             ar_open_items_backend_factory=lambda _env, _user, _companies: ArBackend(),
             ap_open_items_backend_factory=lambda _env, _user, _companies: ApBackend(),
+            multicompany_consolidated_backend_factory=(
+                lambda _env, _user, _companies: MulticompanyBackend()
+            ),
             multicurrency_balance_backend_factory=(
                 lambda _env, _user, _companies: MulticurrencyBackend()
             ),
@@ -625,6 +736,7 @@ class OdooReadExecutorTest(unittest.TestCase):
                 "acct.gl.trial_balance.v1",
                 "acct.ar.open_items.v1",
                 "acct.ap.open_items.v1",
+                "acct.multicompany.consolidated_read.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.move.draft_cancel_eligibility.v1",
                 "acct.report.financial_read.v1",
@@ -695,6 +807,19 @@ class OdooReadExecutorTest(unittest.TestCase):
                 "acct.ap.open_items.v1",
                 open_items_parameters,
                 ApBackend(),
+            ),
+            (
+                "_multicompany_consolidated_backend_factory",
+                "acct.multicompany.consolidated_read.v1",
+                {
+                    "company_ids": [7],
+                    "date_from": "2026-01-01",
+                    "date_to": "2026-06-30",
+                    "presentation_currency_id": 1,
+                    "limit": 100,
+                    "offset": 0,
+                },
+                MulticompanyBackend(),
             ),
             (
                 "_multicurrency_balance_backend_factory",
@@ -768,6 +893,53 @@ class OdooReadExecutorTest(unittest.TestCase):
                     frozenset({7}),
                 )
 
+    def test_multicompany_receipt_binds_the_full_signed_company_set(self) -> None:
+        executor = self.executor()
+        requested = {
+            "company_ids": [8, 7],
+            "date_from": "2026-01-01",
+            "date_to": "2026-06-30",
+            "presentation_currency_id": 1,
+            "limit": 100,
+            "offset": 0,
+        }
+        bound_context = context(allowed_company_ids=frozenset({7, 8}))
+        multi = capability("acct.multicompany.consolidated_read.v1")
+
+        result = executor(
+            bound_context,
+            multi,
+            requested,
+            "c" * 64,
+            "d" * 64,
+        )
+
+        self.assertEqual(result["filters"]["company_ids"], [7, 8])
+        self.assertEqual(
+            result["page"],
+            {"limit": 100, "offset": 0, "count": 4, "total_count": 4},
+        )
+        self.assertEqual(result["receipt"]["record_count"], 4)
+        executor.verify(
+            bound_context,
+            multi,
+            requested,
+            result,
+            "c" * 64,
+            "d" * 64,
+        )
+
+        tampered = {**requested, "company_ids": [7]}
+        with self.assertRaisesRegex(ValueError, "content digest mismatch"):
+            self.executor().verify(
+                bound_context,
+                multi,
+                tampered,
+                result,
+                "c" * 64,
+                "d" * 64,
+            )
+
     def test_registry_list_is_acl_filtered_sorted_and_receipted(self) -> None:
         env = Environment()
         executor = self.executor(env=env)
@@ -782,15 +954,17 @@ class OdooReadExecutorTest(unittest.TestCase):
             [
                 "acct.ap.open_items.v1",
                 "acct.ar.open_items.v1",
+                "acct.diagnostics.operation_read.v1",
                 "acct.gl.trial_balance.v1",
+                "acct.multicompany.consolidated_read.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.registry.list.v1",
                 "acct.report.financial_read.v1",
                 "acct.tax.report_read.v1",
             ],
         )
-        self.assertEqual(result["page"], {"count": 7, "total_count": 7})
-        self.assertEqual(result["receipt"]["record_count"], 7)
+        self.assertEqual(result["page"], {"count": 9, "total_count": 9})
+        self.assertEqual(result["receipt"]["record_count"], 9)
         self.assertEqual(env.company.access_checks, [("rights", "read"), ("rule", "read")])
         for descriptor in result["capabilities"]:
             source = capability(descriptor["id"]).data
@@ -951,7 +1125,10 @@ class OdooReadExecutorTest(unittest.TestCase):
         )
         self.assertEqual(
             [item["id"] for item in result["capabilities"]],
-            ["acct.registry.list.v1"],
+            [
+                "acct.diagnostics.operation_read.v1",
+                "acct.registry.list.v1",
+            ],
         )
 
     def test_ar_open_items_executes_trusted_handler_and_verifies_receipt(self) -> None:

@@ -353,7 +353,8 @@
         "clarification": {"outcome": "not_required", "fields": []},
         "material_parameters": {
           "company_ids": [{"$fixture": "company_primary_id"}, {"$fixture": "company_secondary_id"}],
-          "date_from": "2026-01-01", "date_to": "2026-06-30", "presentation_currency_id": {"$fixture": "currency_cny_id"}
+          "date_from": "2026-01-01", "date_to": "2026-06-30", "presentation_currency_id": {"$fixture": "currency_cny_id"},
+          "limit": 100, "offset": 0
         }
       }
     },

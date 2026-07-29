@@ -20,6 +20,7 @@ export const AUTHENTICATED_V3_BROKER_TOOL_NAMES = Object.freeze([
 	V3_TOOL_NAMES.approveExecute,
 	V3_TOOL_NAMES.status,
 	V3_TOOL_NAMES.result,
+	V3_TOOL_NAMES.diagnostics,
 	V3_TOOL_NAMES.recover,
 ]);
 

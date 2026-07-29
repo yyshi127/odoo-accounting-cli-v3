@@ -712,16 +712,54 @@ def execute_write_action(
                 message="Accounting write lifecycle mutations are disabled by runtime policy.",
                 odoo_effect="none",
             )
-        # The persistence receipt verifier is exclusively for read receipts.
-        # Write receipts are release-pinned and verified by the write service
-        # and Broker response verifier, so the shared write-state database must
-        # not be bound to one release's write-receipt key.
-        store = SQLitePersistence(config.write_state_path)
         availability_channel = (
             "staged"
             if config.write_execution_mode == "sandbox_staged"
             else config.base_runtime.capability_channel
         )
+        diagnostics_capability: Capability | None = None
+        if action == "operation.diagnostics":
+            diagnostics_capability = next(
+                (
+                    item
+                    for item in capabilities
+                    if item.id == _DIAGNOSTICS_CAPABILITY_ID
+                ),
+                None,
+            )
+            if (
+                diagnostics_capability is None
+                or diagnostics_capability.data.get("access") != "read"
+            ):
+                raise WriteApplicationError(
+                    code="operation_diagnostics_registry_rejected",
+                    message="The diagnostics capability is not registered as a read.",
+                    odoo_effect="none",
+                    operation_id=parsed.payload["operation_id"],
+                    exit_code=5,
+                )
+            environment_field = (
+                "enabled_environments"
+                if availability_channel == "enabled"
+                else "staged_environments"
+            )
+            if parsed.context.environment not in diagnostics_capability.data.get(
+                environment_field, []
+            ):
+                raise WriteApplicationError(
+                    code="operation_diagnostics_not_available",
+                    message=(
+                        "The diagnostics capability is not available in this "
+                        "environment and channel."
+                    ),
+                    odoo_effect="none",
+                    operation_id=parsed.payload["operation_id"],
+                )
+        # The persistence receipt verifier is exclusively for read receipts.
+        # Write receipts are release-pinned and verified by the write service
+        # and Broker response verifier, so the shared write-state database must
+        # not be bound to one release's write-receipt key.
+        store = SQLitePersistence(config.write_state_path)
         release_digest = identity["manifest_sha256"]
         executor_acl_cache: dict[tuple[Any, ...], bool] = {}
         approver_acl_cache: dict[tuple[Any, ...], bool] = {}
@@ -1051,15 +1089,8 @@ def execute_write_action(
         if action == "operation.result":
             return service.result(parsed.context, payload["operation_id"])
         if action == "operation.diagnostics":
-            capability = next(
-                (
-                    item
-                    for item in capabilities
-                    if item.id == _DIAGNOSTICS_CAPABILITY_ID
-                ),
-                None,
-            )
-            if capability is None or capability.data.get("access") != "read":
+            capability = diagnostics_capability
+            if capability is None:  # pragma: no cover - pre-store invariant
                 raise WriteApplicationError(
                     code="operation_diagnostics_registry_rejected",
                     message="The diagnostics capability is not registered as a read.",

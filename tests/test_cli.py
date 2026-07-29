@@ -73,7 +73,11 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert data["policy_counts"]["write_approval_required"] == data["write_count"]
     assert data["policy_counts"]["write_idempotency_required"] == data["write_count"]
     assert data["enabled_environment_counts"] == {"production": 0, "sandbox": 0, "test": 0}
-    assert data["staged_environment_counts"] == {"production": 0, "sandbox": 0, "test": 8}
+    assert data["staged_environment_counts"] == {
+        "production": 0,
+        "sandbox": 0,
+        "test": 10,
+    }
     assert data["production_promotion_allowed"] is False
     assert data["real_odoo_write_performed"] is False
     assert len(data["registry_digest"]) == 64

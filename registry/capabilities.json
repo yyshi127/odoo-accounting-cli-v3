@@ -393,10 +393,411 @@
       "access": "read", "risk_level": "low", "odoo_permissions": ["account.group_account_readonly"], "company_scope": "explicit_single_company", "approval": {"required": false}, "idempotency": {"required": false}, "verification": {"method": "signed_native_odoo_report_receipt_period_and_column_context"}, "recovery": {"method": "not_applicable"}, "evidence": {"level": "contract_tested", "receipts": []}, "staged_environments": ["test"], "enabled_environments": []
     },
     {
-      "id": "acct.multicompany.consolidated_read.v1", "domain": "multi_company", "business_description": "Read a consolidated view across explicitly allowed companies without mixing unauthorized records.",
-      "input_schema": {"type": "object", "properties": {"company_ids": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}, "date_from": {"type": "string", "format": "date", "minLength": 10, "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}, "date_to": {"type": "string", "format": "date", "minLength": 10, "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}, "presentation_currency_id": {"type": "integer", "minimum": 1}}, "required": ["company_ids", "date_from", "date_to", "presentation_currency_id"], "additionalProperties": false},
-      "output_schema": {"type": "object", "properties": {"companies": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": {"type": "object", "properties": {"company_id": {"type": "integer", "minimum": 1}, "currency_id": {"type": "integer", "minimum": 1}, "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}, "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}, "source_receipt_digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}}, "required": ["company_id", "currency_id", "period_balance", "closing_balance", "source_receipt_digest"], "additionalProperties": false}}, "eliminations": {"type": "array", "minItems": 0, "maxItems": 5000, "items": {"type": "object", "properties": {"elimination_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}, "description": {"type": "string", "minLength": 1, "maxLength": 512, "pattern": "^.*\\S.*$"}, "amount": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}, "source_company_ids": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}, "basis": {"type": "string", "enum": ["intercompany_counterparty_match", "manual_consolidation_adjustment", "not_applicable"]}}, "required": ["elimination_id", "description", "amount", "source_company_ids", "basis"], "additionalProperties": false}}, "receipt": {"type": "object", "properties": {"capability_id": {"type": "string", "enum": ["acct.multicompany.consolidated_read.v1"]}, "company_ids": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}}, "presentation_currency_id": {"type": "integer", "minimum": 1}, "odoo_instance_id": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^.*\\S.*$"}, "database_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"}, "request_digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}, "result_digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}, "registry_digest": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}, "observed_at": {"type": "string", "format": "date-time", "minLength": 20, "maxLength": 27, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$"}, "signature": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}}, "required": ["capability_id", "company_ids", "presentation_currency_id", "odoo_instance_id", "database_name", "request_digest", "result_digest", "registry_digest", "observed_at", "signature"], "additionalProperties": false}}, "required": ["companies", "eliminations", "receipt"], "additionalProperties": false},
-      "access": "read", "risk_level": "medium", "odoo_permissions": ["account.group_account_readonly"], "company_scope": "allowed_companies", "approval": {"required": false}, "idempotency": {"required": false}, "verification": {"method": "per_company_receipts_acl_and_translation_totals"}, "recovery": {"method": "not_applicable"}, "evidence": {"level": "declared", "receipts": []}, "enabled_environments": []
+      "id": "acct.multicompany.consolidated_read.v1",
+      "domain": "multi_company",
+      "business_description": "Read posted, off-balance-excluded ledger aggregates for explicit signed companies and translate each gross balance at a disclosed date-to Odoo spot rate into one ACL-visible presentation currency. This is not a completed or statutory consolidation: eliminations, historical or average rates, CTA/translation reserves, and consolidated financial statements are not computed.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "company_ids": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+          "date_from": {"type": "string", "format": "date", "minLength": 10, "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+          "date_to": {"type": "string", "format": "date", "minLength": 10, "maxLength": 10, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+          "presentation_currency_id": {"type": "integer", "minimum": 1},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+          "offset": {"type": "integer", "minimum": 0, "maximum": 1000000}
+        },
+        "required": ["company_ids", "date_from", "date_to", "presentation_currency_id", "limit", "offset"],
+        "additionalProperties": false
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "basis": {"type": "string", "enum": ["posted_account_trial_balance_gross_translation"]},
+          "filters": {
+            "type": "object",
+            "properties": {
+              "company_ids": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+              "date_from": {"type": "string", "format": "date"},
+              "date_to": {"type": "string", "format": "date"},
+              "presentation_currency_id": {"type": "integer", "minimum": 1},
+              "move_state": {"type": "string", "enum": ["posted"]},
+              "off_balance_policy": {"type": "string", "enum": ["exclude"]},
+              "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+              "offset": {"type": "integer", "minimum": 0, "maximum": 1000000}
+            },
+            "required": ["company_ids", "date_from", "date_to", "presentation_currency_id", "move_state", "off_balance_policy", "limit", "offset"],
+            "additionalProperties": false
+          },
+          "mapping_policy": {
+            "type": "object",
+            "properties": {
+              "status": {"type": "string", "enum": ["odoo_standard_account_type_only"]},
+              "cross_company_account_mapping_computed": {"type": "boolean", "enum": [false]}
+            },
+            "required": ["status", "cross_company_account_mapping_computed"],
+            "additionalProperties": false
+          },
+          "translation_policy": {
+            "type": "object",
+            "properties": {
+              "policy_id": {"type": "string", "enum": ["closing_spot_rate_gross_v1"]},
+              "rate_date": {"type": "string", "format": "date"},
+              "direction": {"type": "string", "enum": ["company_currency_to_presentation_currency"]},
+              "formula": {"type": "string", "enum": ["source_amount * (presentation_technical_rate / source_technical_rate)"]},
+              "rounding": {"type": "string", "enum": ["round_each_account_half_up_then_sum_visible_full_set"]},
+              "opening_rate_basis": {"type": "string", "enum": ["date_to_closing_spot"]},
+              "period_rate_basis": {"type": "string", "enum": ["date_to_closing_spot"]},
+              "historical_or_average_rates_applied": {"type": "boolean", "enum": [false]},
+              "translation_reserve_computed": {"type": "boolean", "enum": [false]}
+            },
+            "required": ["policy_id", "rate_date", "direction", "formula", "rounding", "opening_rate_basis", "period_rate_basis", "historical_or_average_rates_applied", "translation_reserve_computed"],
+            "additionalProperties": false
+          },
+          "elimination_policy": {
+            "type": "object",
+            "properties": {
+              "status": {"type": "string", "enum": ["not_computed"]},
+              "reason": {"type": "string", "enum": ["no_explicit_elimination_dataset_or_mapping"]},
+              "adjustments": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": 0,
+                "items": {"type": "null", "enum": [null]}
+              }
+            },
+            "required": ["status", "reason", "adjustments"],
+            "additionalProperties": false
+          },
+          "consolidation_status": {
+            "type": "object",
+            "properties": {
+              "status": {"type": "string", "enum": ["gross_translation_only"]},
+              "complete_consolidation": {"type": "boolean", "enum": [false]},
+              "statement": {"type": "string", "enum": ["This result is a gross posted account trial-balance translation only; it is not a completed consolidation or consolidated financial statement."]}
+            },
+            "required": ["status", "complete_consolidation", "statement"],
+            "additionalProperties": false
+          },
+          "presentation_currency": {
+            "type": "object",
+            "properties": {
+              "id": {"type": "integer", "minimum": 1},
+              "name": {"type": "string", "minLength": 1, "maxLength": 64},
+              "symbol": {"type": "string", "minLength": 1, "maxLength": 32},
+              "rounding": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+            },
+            "required": ["id", "name", "symbol", "rounding"],
+            "additionalProperties": false
+          },
+          "companies": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "properties": {
+                "company_id": {"type": "integer", "minimum": 1},
+                "company_currency": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "integer", "minimum": 1},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "symbol": {"type": "string", "minLength": 1, "maxLength": 32},
+                    "rounding": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["id", "name", "symbol", "rounding"],
+                  "additionalProperties": false
+                },
+                "account_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+                "source_balances": {
+                  "type": "object",
+                  "properties": {
+                    "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                  "additionalProperties": false
+                },
+                "translation_rate": {
+                  "type": "object",
+                  "properties": {
+                    "company_id": {"type": "integer", "minimum": 1},
+                    "rate_company_id": {"type": "integer", "minimum": 1},
+                    "source_currency_id": {"type": "integer", "minimum": 1},
+                    "source_currency_name": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "presentation_currency_id": {"type": "integer", "minimum": 1},
+                    "presentation_currency_name": {"type": "string", "minLength": 1, "maxLength": 64},
+                    "rate_date": {"type": "string", "format": "date"},
+                    "direction": {"type": "string", "enum": ["company_currency_to_presentation_currency"]},
+                    "formula": {"type": "string", "enum": ["presentation_technical_rate / source_technical_rate"]},
+                    "source_technical_source": {
+                      "type": "object",
+                      "properties": {
+                        "currency_id": {"type": "integer", "minimum": 1},
+                        "currency_name": {"type": "string", "minLength": 1, "maxLength": 64},
+                        "effective_date": {"type": ["string", "null"], "format": "date"},
+                        "source_model": {"type": "string", "enum": ["res.currency.rate", "no_rate_identity"]},
+                        "source_scope": {"type": "string", "enum": ["company_specific", "global", "no_rate_identity"]},
+                        "source_company_id": {"type": ["integer", "null"], "minimum": 1},
+                        "source_record_id": {"type": ["integer", "null"], "minimum": 1},
+                        "odoo_technical_rate": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                      },
+                      "required": ["currency_id", "currency_name", "effective_date", "source_model", "source_scope", "source_company_id", "source_record_id", "odoo_technical_rate"],
+                      "additionalProperties": false
+                    },
+                    "presentation_technical_source": {
+                      "type": "object",
+                      "properties": {
+                        "currency_id": {"type": "integer", "minimum": 1},
+                        "currency_name": {"type": "string", "minLength": 1, "maxLength": 64},
+                        "effective_date": {"type": ["string", "null"], "format": "date"},
+                        "source_model": {"type": "string", "enum": ["res.currency.rate", "no_rate_identity"]},
+                        "source_scope": {"type": "string", "enum": ["company_specific", "global", "no_rate_identity"]},
+                        "source_company_id": {"type": ["integer", "null"], "minimum": 1},
+                        "source_record_id": {"type": ["integer", "null"], "minimum": 1},
+                        "odoo_technical_rate": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                      },
+                      "required": ["currency_id", "currency_name", "effective_date", "source_model", "source_scope", "source_company_id", "source_record_id", "odoo_technical_rate"],
+                      "additionalProperties": false
+                    },
+                    "source_to_presentation_rate": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "presentation_to_source_rate": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["company_id", "rate_company_id", "source_currency_id", "source_currency_name", "presentation_currency_id", "presentation_currency_name", "rate_date", "direction", "formula", "source_technical_source", "presentation_technical_source", "source_to_presentation_rate", "presentation_to_source_rate"],
+                  "additionalProperties": false
+                },
+                "translated_balances": {
+                  "type": "object",
+                  "properties": {
+                    "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                  "additionalProperties": false
+                },
+                "translation_rounding_residuals": {
+                  "type": "object",
+                  "properties": {
+                    "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                  "additionalProperties": false
+                },
+                "ledger_control": {
+                  "type": "object",
+                  "properties": {
+                    "opening_difference": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit_credit_difference": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_difference": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "is_balanced": {"type": "boolean"}
+                  },
+                  "required": ["opening_difference", "period_debit_credit_difference", "closing_difference", "is_balanced"],
+                  "additionalProperties": false
+                },
+                "posted_move_line_count": {"type": "integer", "minimum": 0}
+              },
+              "required": ["company_id", "company_currency", "account_count", "source_balances", "translation_rate", "translated_balances", "translation_rounding_residuals", "ledger_control", "posted_move_line_count"],
+              "additionalProperties": false
+            }
+          },
+          "account_type_summaries": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "properties": {
+                "account_type": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$"},
+                "company_ids": {"type": "array", "minItems": 1, "maxItems": 50, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+                "company_count": {"type": "integer", "minimum": 1, "maximum": 50},
+                "account_count": {"type": "integer", "minimum": 1, "maximum": 20000},
+                "translated_balances": {
+                  "type": "object",
+                  "properties": {
+                    "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                  "additionalProperties": false
+                },
+                "posted_move_line_count": {"type": "integer", "minimum": 0}
+              },
+              "required": ["account_type", "company_ids", "company_count", "account_count", "translated_balances", "posted_move_line_count"],
+              "additionalProperties": false
+            }
+          },
+          "account_lines": {
+            "type": "array",
+            "minItems": 0,
+            "maxItems": 1000,
+            "uniqueItems": true,
+            "items": {
+              "type": "object",
+              "properties": {
+                "company_id": {"type": "integer", "minimum": 1},
+                "account": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "integer", "minimum": 1},
+                    "code": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^.*\\S.*$"},
+                    "name": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^.*\\S.*$"},
+                    "account_type": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_]*$"}
+                  },
+                  "required": ["id", "code", "name", "account_type"],
+                  "additionalProperties": false
+                },
+                "source_currency_id": {"type": "integer", "minimum": 1},
+                "presentation_currency_id": {"type": "integer", "minimum": 1},
+                "source_balances": {
+                  "type": "object",
+                  "properties": {
+                    "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                  "additionalProperties": false
+                },
+                "translated_balances": {
+                  "type": "object",
+                  "properties": {
+                    "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                  "additionalProperties": false
+                },
+                "translation_rounding_residuals": {
+                  "type": "object",
+                  "properties": {
+                    "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                  },
+                  "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                  "additionalProperties": false
+                },
+                "balance_equation_control": {
+                  "type": "object",
+                  "properties": {
+                    "source_period_equals_debit_minus_credit": {"type": "boolean", "enum": [true]},
+                    "source_closing_equals_opening_plus_period": {"type": "boolean", "enum": [true]},
+                    "translated_period_equals_debit_minus_credit": {"type": "boolean", "enum": [true]},
+                    "translated_closing_equals_opening_plus_period": {"type": "boolean", "enum": [true]}
+                  },
+                  "required": ["source_period_equals_debit_minus_credit", "source_closing_equals_opening_plus_period", "translated_period_equals_debit_minus_credit", "translated_closing_equals_opening_plus_period"],
+                  "additionalProperties": false
+                },
+                "posted_move_line_count": {"type": "integer", "minimum": 0}
+              },
+              "required": ["company_id", "account", "source_currency_id", "presentation_currency_id", "source_balances", "translated_balances", "translation_rounding_residuals", "balance_equation_control", "posted_move_line_count"],
+              "additionalProperties": false
+            }
+          },
+          "gross_summary": {
+            "type": "object",
+            "properties": {
+              "company_count": {"type": "integer", "minimum": 1, "maximum": 50},
+              "account_count": {"type": "integer", "minimum": 0, "maximum": 20000},
+              "account_type_count": {"type": "integer", "minimum": 0, "maximum": 128},
+              "posted_move_line_count": {"type": "integer", "minimum": 0},
+              "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+              "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+              "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+              "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+              "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+              "balanced_company_count": {"type": "integer", "minimum": 0, "maximum": 50},
+              "unbalanced_company_ids": {"type": "array", "minItems": 0, "maxItems": 50, "uniqueItems": true, "items": {"type": "integer", "minimum": 1}},
+              "translation_rounding_residuals": {
+                "type": "object",
+                "properties": {
+                  "opening_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                  "period_debit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                  "period_credit": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                  "period_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                  "closing_balance": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^-?(?:0(?:\\.[0-9]+)?|[1-9][0-9]*(?:\\.[0-9]+)?)$"}
+                },
+                "required": ["opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance"],
+                "additionalProperties": false
+              }
+            },
+            "required": ["company_count", "account_count", "account_type_count", "posted_move_line_count", "opening_balance", "period_debit", "period_credit", "period_balance", "closing_balance", "balanced_company_count", "unbalanced_company_ids", "translation_rounding_residuals"],
+            "additionalProperties": false
+          },
+          "page": {
+            "type": "object",
+            "properties": {
+              "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+              "offset": {"type": "integer", "minimum": 0, "maximum": 1000000},
+              "count": {"type": "integer", "minimum": 0, "maximum": 1000},
+              "total_count": {"type": "integer", "minimum": 0, "maximum": 20000}
+            },
+            "required": ["limit", "offset", "count", "total_count"],
+            "additionalProperties": false
+          },
+          "receipt": {
+            "type": "object",
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "odoo_instance_id": {"type": "string", "minLength": 1},
+              "database_name": {"type": "string", "minLength": 1},
+              "database_uuid": {"type": "string", "minLength": 1},
+              "company_id": {"type": "integer", "minimum": 1},
+              "user_id": {"type": "integer", "minimum": 1},
+              "capability_id": {"type": "string", "enum": ["acct.multicompany.consolidated_read.v1"]},
+              "environment": {"type": "string", "enum": ["test", "sandbox", "production"]},
+              "capability_channel": {"type": "string", "enum": ["staged", "enabled"]},
+              "request_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "result_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "registry_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "release_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "record_count": {"type": "integer", "minimum": 0},
+              "observed_at": {"type": "string", "format": "date-time"},
+              "signature_version": {"type": "integer", "enum": [2]},
+              "signature_purpose": {"type": "string", "enum": ["read_receipt_v2"]},
+              "signature_key_id": {"type": "string", "minLength": 1},
+              "signature": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "required": ["id", "odoo_instance_id", "database_name", "database_uuid", "company_id", "user_id", "capability_id", "environment", "capability_channel", "request_digest", "result_digest", "registry_digest", "release_digest", "record_count", "observed_at", "signature_version", "signature_purpose", "signature_key_id", "signature"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["basis", "filters", "mapping_policy", "translation_policy", "elimination_policy", "consolidation_status", "presentation_currency", "companies", "account_type_summaries", "account_lines", "gross_summary", "page", "receipt"],
+        "additionalProperties": false
+      },
+      "access": "read",
+      "risk_level": "medium",
+      "odoo_permissions": ["account.group_account_readonly"],
+      "company_scope": "allowed_companies",
+      "approval": {"required": false},
+      "idempotency": {"required": false},
+      "verification": {"method": "signed_common_read_receipt_per_company_non_su_acl_posted_ledger_gross_totals_and_dual_technical_rate_ratio; complete_consolidation_false_no_eliminations_no_cta_no_historical_or_average_rates"},
+      "recovery": {"method": "not_applicable"},
+      "evidence": {"level": "contract_tested", "receipts": []},
+      "staged_environments": ["test"],
+      "enabled_environments": []
     },
     {
       "id": "acct.multicurrency.balance_read.v1", "domain": "multi_currency", "business_description": "Read posted, ledger-cumulative account balances through an inclusive cutoff for one explicit company, preserving booked company-currency balance and transaction-currency amount separately while disclosing both transaction and company cutoff-date Odoo technical-rate sources and their verified conversion ratio; off-balance accounts are excluded.",
@@ -651,7 +1052,7 @@
         "required": ["operation", "audit", "verification", "failure", "recovery", "odoo_refs", "receipts", "page", "receipt"],
         "additionalProperties": false
       },
-      "access": "read", "risk_level": "medium", "odoo_permissions": ["base.group_user"], "company_scope": "bound_company", "approval": {"required": false}, "idempotency": {"required": false}, "verification": {"method": "signed_read_receipt_v2_and_durable_write_evidence_reverification"}, "recovery": {"method": "not_applicable"}, "evidence": {"level": "contract_tested", "receipts": []}, "enabled_environments": []
+      "access": "read", "risk_level": "medium", "odoo_permissions": ["base.group_user"], "company_scope": "bound_company", "approval": {"required": false}, "idempotency": {"required": false}, "verification": {"method": "signed_read_receipt_v2_and_durable_write_evidence_reverification"}, "recovery": {"method": "not_applicable"}, "evidence": {"level": "contract_tested", "receipts": []}, "staged_environments": ["test"], "enabled_environments": []
     },
     {
       "id": "acct.recovery.execute.v1", "domain": "recovery", "business_description": "Resolve one failed-verification accounting incident by executing its receipt-bound compensating plan as a distinct approved operation without mutating the failed origin history; completed origins and execution-only failures are not eligible.",

@@ -75,13 +75,29 @@ class OdooTrialBalanceBackend:
             for record in records
         ]
 
-    def _aggregate(self, *, company_id: int, domain: list[Any]) -> dict[int, Aggregate]:
+    def _aggregate(
+        self,
+        *,
+        company_id: int,
+        domain: list[Any],
+        group_limit: int | None = None,
+    ) -> dict[int, Aggregate]:
         company = self._company(company_id)
+        kwargs: dict[str, Any] = {
+            "groupby": ["account_id"],
+            "aggregates": [
+                "debit:sum",
+                "credit:sum",
+                "balance:sum",
+                "__count",
+            ],
+            "order": "account_id",
+        }
+        if group_limit is not None:
+            kwargs["limit"] = group_limit
         rows = self._bound("account.move.line", company)._read_group(
             domain,
-            groupby=["account_id"],
-            aggregates=["debit:sum", "credit:sum", "balance:sum", "__count"],
-            order="account_id",
+            **kwargs,
         )
         result: dict[int, Aggregate] = {}
         for grouped_account, debit, credit, balance, line_count in rows:
@@ -111,16 +127,24 @@ class OdooTrialBalanceBackend:
 
     def opening_aggregates(
         self, *, company_id: int, before: date, account_id: int | None,
-        include_off_balance: bool
+        include_off_balance: bool, group_limit: int | None = None
     ) -> dict[int, Aggregate]:
         domain = self._base_domain(company_id, account_id, include_off_balance)
         domain.append(("date", "<", before))
-        return self._aggregate(company_id=company_id, domain=domain)
+        return self._aggregate(
+            company_id=company_id,
+            domain=domain,
+            group_limit=group_limit,
+        )
 
     def period_aggregates(
         self, *, company_id: int, date_from: date, date_to: date, account_id: int | None,
-        include_off_balance: bool
+        include_off_balance: bool, group_limit: int | None = None
     ) -> dict[int, Aggregate]:
         domain = self._base_domain(company_id, account_id, include_off_balance)
         domain.extend((("date", ">=", date_from), ("date", "<=", date_to)))
-        return self._aggregate(company_id=company_id, domain=domain)
+        return self._aggregate(
+            company_id=company_id,
+            domain=domain,
+            group_limit=group_limit,
+        )

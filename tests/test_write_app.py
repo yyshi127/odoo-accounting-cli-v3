@@ -24,6 +24,7 @@ from odoo_accounting_cli_v3.effect_finalizer_runtime import (
     EffectFinalizerClientRuntime,
 )
 from odoo_accounting_cli_v3.operations import (
+    Operation,
     canonical_json,
     record_execution_result,
     sign_approval,
@@ -95,13 +96,13 @@ TEST_MODULE_GRAPH = build_trusted_module_graph(
 )
 
 
-def _capabilities():
+def _capabilities(*, write_staged_environment: str = "sandbox"):
     document = json.loads(
         (ROOT / "registry" / "capabilities.json").read_text(encoding="utf-8")
     )
     for item in document["capabilities"]:
         if item["access"] == "write":
-            item["staged_environments"] = ["sandbox"]
+            item["staged_environments"] = [write_staged_environment]
             item["evidence"]["level"] = "contract_tested"
     return validate_registry(document)
 
@@ -750,14 +751,14 @@ class Harness:
         self._token += 1
         context = sign_write_action_context(
             auth_token_id=f"write-app-token-{self._token}",
-            principal="pi:sandbox-user-42",
+            principal=f"pi:{self.config.base_runtime.environment}-user-42",
             odoo_instance_id=self.config.base_runtime.instance_id,
             database_name=self.config.base_runtime.database_name,
             database_uuid=self.config.base_runtime.database_uuid,
             user_id=42,
             company_id=7,
             allowed_company_ids=frozenset({7}),
-            environment="sandbox",
+            environment=self.config.base_runtime.environment,
             action=signed_action or action,
             request=copy.deepcopy(signed_payload if signed_payload is not None else payload),
             issued_at=NOW - timedelta(seconds=30),
@@ -851,19 +852,40 @@ def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     return Harness(tmp_path, monkeypatch)
 
 
-def test_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
-    harness: Harness,
+def test_test_staged_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    prepared = harness.call(
-        "operation.prepare",
-        {
-            "operation_id": "op-diagnostics",
-            "request_id": "req-diagnostics",
-            "capability_id": CAPABILITY_ID,
-            "parameters": _parameters("diagnostics-idempotency"),
-        },
+    harness = Harness(tmp_path, monkeypatch)
+    harness.capabilities = _capabilities(write_staged_environment="test")
+    harness.registry_digest = registry_digest(harness.capabilities)
+    harness.identity["registry_digest"] = harness.registry_digest
+    harness.config.base_runtime.environment = "test"
+    harness.config.write_execution_mode = "disabled"
+    parameters = _parameters("diagnostics-idempotency")
+    prepared = Operation.prepare(
+        operation_id="op-diagnostics",
+        request_id="req-diagnostics",
+        capability_id=CAPABILITY_ID,
+        parameters=parameters,
+        principal="pi:test-user-42",
+        user_id=42,
+        company_id=7,
+        idempotency_key=parameters["idempotency_key"],
+        odoo_instance_id=harness.config.base_runtime.instance_id,
+        database_name=harness.config.base_runtime.database_name,
+        database_uuid=harness.config.base_runtime.database_uuid,
+        environment="test",
+        registry_digest=harness.registry_digest,
+        release_digest=RELEASE_DIGEST,
     )
-    before = harness.store().get_operation(prepared["operation_id"])
+    harness.store().get_or_create_operation(
+        prepared,
+        scope=hashlib.sha256(
+            canonical_json({"idempotency_key": parameters["idempotency_key"]})
+        ).hexdigest(),
+    )
+    before = harness.store().get_operation(prepared.operation_id)
     odoo_call_counts = (
         len(harness.odoo.executor_requests),
         len(harness.odoo.approver_requests),
@@ -872,7 +894,7 @@ def test_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
     )
     request = {
         "company_id": 7,
-        "operation_id": prepared["operation_id"],
+        "operation_id": prepared.operation_id,
     }
 
     first = harness.call("operation.diagnostics", request)
@@ -886,7 +908,7 @@ def test_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
     validate_value(first, capability.data["output_schema"])
     validate_value(second, capability.data["output_schema"])
     assert first["operation"] == second["operation"]
-    assert first["operation"]["operation_id"] == prepared["operation_id"]
+    assert first["operation"]["operation_id"] == prepared.operation_id
     assert first["operation"]["company_id"] == 7
     assert first["operation"]["state"] == "prepared"
     assert first["operation"]["business_succeeded"] is False
@@ -898,8 +920,8 @@ def test_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
     assert first["receipt"]["request_digest"] == read_request_digest(
         capability_id="acct.diagnostics.operation_read.v1",
         parameters=request,
-        auth_token_id="write-app-token-2",
-        principal="pi:sandbox-user-42",
+        auth_token_id="write-app-token-1",
+        principal="pi:test-user-42",
         odoo_instance_id=harness.config.base_runtime.instance_id,
         database_name=harness.config.base_runtime.database_name,
         database_uuid=harness.config.base_runtime.database_uuid,
@@ -907,10 +929,10 @@ def test_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
         user_id=42,
         registry_digest=harness.registry_digest,
         release_digest=RELEASE_DIGEST,
-        environment="sandbox",
+        environment="test",
         capability_channel="staged",
     )
-    after = harness.store().get_operation(prepared["operation_id"])
+    after = harness.store().get_operation(prepared.operation_id)
     assert after == before
     assert (
         len(harness.odoo.executor_requests),
@@ -935,6 +957,41 @@ def test_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
         first["receipt"]["request_digest"],
         second["receipt"]["request_digest"],
     }
+
+
+@pytest.mark.parametrize(
+    ("environment", "capability_channel", "write_execution_mode"),
+    (
+        ("sandbox", "staged", "sandbox_staged"),
+        ("production", "enabled", "enabled"),
+    ),
+)
+def test_diagnostics_rejects_an_environment_where_registry_does_not_open_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    environment: str,
+    capability_channel: str,
+    write_execution_mode: str,
+) -> None:
+    harness = Harness(tmp_path, monkeypatch)
+    harness.config.base_runtime.environment = environment
+    harness.config.base_runtime.capability_channel = capability_channel
+    harness.config.write_execution_mode = write_execution_mode
+
+    with pytest.raises(WriteApplicationError) as rejected:
+        harness.call(
+            "operation.diagnostics",
+            {
+                "company_id": 7,
+                "operation_id": "op-diagnostics-not-open",
+            },
+        )
+
+    assert rejected.value.code == "operation_diagnostics_not_available"
+    assert rejected.value.odoo_effect == "none"
+    assert rejected.value.operation_id == "op-diagnostics-not-open"
+    assert not harness.config.write_state_path.exists()
+    assert not harness.config.base_runtime.receipt_state_path.exists()
 
 
 def _install_trusted_runtime_handoff(
@@ -1655,20 +1712,13 @@ def test_recovery_operation_executes_with_trusted_plan_and_returns_verified_rece
         "recovery_completion": completion,
         "recovery_completion_digest": completion_record.evidence_digest,
     }
-    diagnostics = harness.call(
-        "operation.diagnostics",
-        {"company_id": 7, "operation_id": prepared["operation_id"]},
-    )
-    assert diagnostics["operation"]["business_succeeded"] is False
-    assert diagnostics["recovery"]["lifecycle_status"] == "recovered_verified"
-    assert diagnostics["recovery"]["completion_evidence_digest"] == (
-        completion_record.evidence_digest
-    )
-    assert diagnostics["recovery"]["completion_receipt_id"] == (
-        recovered_receipts[0].receipt_id
-    )
-    assert diagnostics["recovery"]["completion_receipt_body_digest"] == (
-        recovered_receipts[0].body_digest
+    with pytest.raises(WriteApplicationError) as diagnostics_rejected:
+        harness.call(
+            "operation.diagnostics",
+            {"company_id": 7, "operation_id": prepared["operation_id"]},
+        )
+    assert diagnostics_rejected.value.code == (
+        "operation_diagnostics_not_available"
     )
 
 

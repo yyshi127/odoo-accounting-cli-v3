@@ -28,7 +28,7 @@ The current corpus is `tests/fixtures/pi_scenarios.v1.json`:
 
 | Property | Value |
 | --- | ---: |
-| Scenario count | 25 |
+| Scenario count | 28 |
 | Registered capability count covered | 24 |
 | Write capability count covered | 14 |
 | Required categories | ordinary, ambiguous, adversarial, multi_company, multi_currency, recovery |

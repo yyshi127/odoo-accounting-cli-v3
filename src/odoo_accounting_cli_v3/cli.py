@@ -3898,11 +3898,37 @@ _REQUIRED_READ_CAPABILITY_IDS = frozenset(
         "acct.tax.report_read.v1",
     }
 )
+_TRUSTED_READ_HANDLER_KINDS = frozenset(
+    {"odoo", "trusted_local_persistence"}
+)
+
+
+def _schema_has_at_least_constraints(
+    candidate: Any,
+    required: dict[str, Any],
+) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    for key, value in required.items():
+        observed = candidate.get(key)
+        if key in {"minimum", "minLength"}:
+            if (
+                type(observed) is not int
+                or type(value) is not int
+                or observed < value
+            ):
+                return False
+        elif observed != value:
+            return False
+    return True
 
 
 def _load_read_capability_implementation(command: str) -> dict[str, str]:
     try:
         from .odoo.executor import _CAPABILITIES as odoo_read_capabilities
+        from .operation_diagnostics import (
+            TRUSTED_LOCAL_PERSISTENCE_READ_CAPABILITIES,
+        )
     except Exception as exc:
         raise CliFailure(
             command=command,
@@ -3910,12 +3936,27 @@ def _load_read_capability_implementation(command: str) -> dict[str, str]:
             message="The trusted read capability implementation allowlist is unavailable.",
             exit_code=5,
         ) from exc
+    handler_allowlists = {
+        "odoo": odoo_read_capabilities,
+        "trusted_local_persistence": (
+            TRUSTED_LOCAL_PERSISTENCE_READ_CAPABILITIES
+        ),
+    }
     if (
-        not isinstance(odoo_read_capabilities, frozenset)
-        or not odoo_read_capabilities
+        set(handler_allowlists) != _TRUSTED_READ_HANDLER_KINDS
         or any(
-            not isinstance(capability_id, str) or not capability_id
-            for capability_id in odoo_read_capabilities
+            not isinstance(allowlist, frozenset)
+            or not allowlist
+            or any(
+                not isinstance(capability_id, str) or not capability_id
+                for capability_id in allowlist
+            )
+            for allowlist in handler_allowlists.values()
+        )
+        or len(set().union(*handler_allowlists.values()))
+        != sum(len(allowlist) for allowlist in handler_allowlists.values())
+        or not set().union(*handler_allowlists.values()).issubset(
+            _REQUIRED_READ_CAPABILITY_IDS
         )
     ):
         raise CliFailure(
@@ -3925,8 +3966,9 @@ def _load_read_capability_implementation(command: str) -> dict[str, str]:
             exit_code=5,
         )
     return {
-        capability_id: "odoo"
-        for capability_id in sorted(odoo_read_capabilities)
+        capability_id: handler_kind
+        for handler_kind, allowlist in sorted(handler_allowlists.items())
+        for capability_id in sorted(allowlist)
     }
 
 
@@ -3966,6 +4008,27 @@ def _read_capability_readiness_report(
         for key, value in _READ_RECEIPT_PROPERTY_SCHEMAS.items()
         if key != "capability_id"
     }
+    trusted_handler_kind = trusted_read_handlers.get(capability.id)
+    if trusted_handler_kind == "odoo":
+        read_receipt_properties_match = (
+            receipt_properties_without_capability
+            == expected_receipt_properties_without_capability
+        )
+    elif trusted_handler_kind == "trusted_local_persistence":
+        read_receipt_properties_match = (
+            set(receipt_properties_without_capability)
+            == set(expected_receipt_properties_without_capability)
+            and all(
+                _schema_has_at_least_constraints(
+                    receipt_properties_without_capability[key],
+                    expected_schema,
+                )
+                for key, expected_schema
+                in expected_receipt_properties_without_capability.items()
+            )
+        )
+    else:
+        read_receipt_properties_match = False
     evidence = data["evidence"]
     evidence_level = evidence.get("level")
     evidence_receipts = evidence.get("receipts", [])
@@ -4012,8 +4075,7 @@ def _read_capability_readiness_report(
             and receipt_schema.get("additionalProperties") is False
             and isinstance(output_required, list)
             and "receipt" in output_required
-            and receipt_properties_without_capability
-            == expected_receipt_properties_without_capability
+            and read_receipt_properties_match
             and receipt_capability_schema
             in (
                 _READ_RECEIPT_PROPERTY_SCHEMAS["capability_id"],
@@ -4055,7 +4117,7 @@ def _read_capability_readiness_report(
         "missing_goal_evidence_kinds": missing_goal_evidence_kinds,
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
-        "trusted_handler_kind": trusted_read_handlers.get(capability.id),
+        "trusted_handler_kind": trusted_handler_kind,
         "trusted_read_admissible": trusted_read_admissible,
         "read_completion_ready": (
             trusted_read_admissible and goal_evidence_ready

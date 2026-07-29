@@ -3517,7 +3517,7 @@ def test_evidence_write_runtime_config_plan_reports_base_runtime_scope_blocker(
     ]
 
 
-def test_evidence_read_capabilities_readiness_exposes_remaining_handler_gaps():
+def test_evidence_read_capabilities_readiness_keeps_external_evidence_gate_closed():
     expected_identity = {
         "commit": "1" * 40,
         "manifest_sha256": "d" * 64,
@@ -3545,15 +3545,11 @@ def test_evidence_read_capabilities_readiness_exposes_remaining_handler_gaps():
     data = payload["data"]
     assert payload["command"] == "evidence.read-capabilities-readiness"
     assert payload["business_succeeded"] is False
-    assert data["read_static_readiness_ready"] is False
-    assert data["admissible_count"] == 8
+    assert data["read_static_readiness_ready"] is True
+    assert data["admissible_count"] == 10
     assert data["total_read_capabilities"] == 10
-    assert data["unready_capability_ids"] == [
-        "acct.diagnostics.operation_read.v1",
-        "acct.multicompany.consolidated_read.v1",
-    ]
+    assert data["unready_capability_ids"] == []
     assert data["blockers"] == [
-        "not every registered read capability is statically admissible for trusted execution",
         "trusted external read evidence is not independently verified for every registered read capability",
     ]
     assert data["read_goal_readiness_ready"] is False
@@ -3574,6 +3570,43 @@ def test_evidence_read_capabilities_readiness_exposes_remaining_handler_gaps():
     assert tax_report["checks"]["test_execution_routed"] is True
     assert tax_report["goal_evidence_ready"] is False
     assert tax_report["missing_goal_evidence_kinds"] == READ_GOAL_EVIDENCE_KINDS
+    diagnostics_report = next(
+        item
+        for item in data["capabilities"]
+        if item["capability"]["id"] == "acct.diagnostics.operation_read.v1"
+    )
+    assert diagnostics_report["trusted_handler_kind"] == (
+        "trusted_local_persistence"
+    )
+    assert diagnostics_report["trusted_read_admissible"] is True
+    assert all(diagnostics_report["checks"].values())
+    assert diagnostics_report["external_read_evidence_verified"] is False
+    assert diagnostics_report["goal_evidence_ready"] is False
+    assert diagnostics_report["production_promotion_allowed"] is False
+
+
+def test_read_capability_implementation_keeps_diagnostics_out_of_odoo_executor():
+    from odoo_accounting_cli_v3.odoo.executor import (
+        _CAPABILITIES as odoo_read_capabilities,
+    )
+
+    handlers = cli_module._load_read_capability_implementation(
+        "evidence.read-capabilities-readiness"
+    )
+
+    assert "acct.diagnostics.operation_read.v1" not in odoo_read_capabilities
+    assert handlers["acct.diagnostics.operation_read.v1"] == (
+        "trusted_local_persistence"
+    )
+    assert {
+        capability_id
+        for capability_id, kind in handlers.items()
+        if kind == "trusted_local_persistence"
+    } == {"acct.diagnostics.operation_read.v1"}
+    assert set(handlers) == set(odoo_read_capabilities) | {
+        "acct.diagnostics.operation_read.v1"
+    }
+    assert set(handlers.values()) == {"odoo", "trusted_local_persistence"}
 
 
 def test_read_capabilities_readiness_rejects_empty_registry():
@@ -4056,9 +4089,9 @@ def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
     assert data["registry"]["registry_audit_ready"] is True
     assert (
         data["read_capabilities_readiness"]["read_static_readiness_ready"]
-        is False
+        is True
     )
-    assert data["read_capabilities_readiness"]["admissible_count"] == 8
+    assert data["read_capabilities_readiness"]["admissible_count"] == 10
     assert (
         data["read_capabilities_readiness"]["read_goal_readiness_ready"]
         is False
@@ -4066,7 +4099,7 @@ def test_evidence_goal_readiness_fails_closed_without_retained_e2e_reports():
     assert data["write_static_readiness"]["write_static_readiness_ready"] is True
     assert (
         "not every registered read capability is statically admissible for trusted execution"
-        in data["blockers"]
+        not in data["blockers"]
     )
     assert (
         "trusted external read evidence is not independently verified for every registered read capability"

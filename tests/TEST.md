@@ -305,8 +305,8 @@ requests across all enabled domains.
 
 ### Frozen F01-F03/F05 scoring contract
 
-`tests/fixtures/pi_scenarios.v1.json` is the revision-1 frozen Chinese key
-scenario corpus. Its 25 scenarios cover every one of the 24 registered
+`tests/fixtures/pi_scenarios.v1.json` is the revision-2 frozen Chinese key
+scenario corpus. Its 28 scenarios cover every one of the 24 registered
 capabilities and the
 ordinary, ambiguous, adversarial, multi-company, multi-currency, and recovery
 classes. Environment-specific Odoo record IDs are named fixture bindings, so a

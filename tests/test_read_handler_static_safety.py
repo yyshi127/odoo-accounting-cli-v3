@@ -24,6 +24,7 @@ TRUSTED_READ_HANDLER_MODULES = frozenset(
         "odoo_accounting_cli_v3.odoo.executor",
         "odoo_accounting_cli_v3.odoo.ap_open_items",
         "odoo_accounting_cli_v3.odoo.ar_open_items",
+        "odoo_accounting_cli_v3.odoo.multicompany_consolidated",
         "odoo_accounting_cli_v3.odoo.multicurrency_balance",
         "odoo_accounting_cli_v3.odoo.report_definition_guard",
         "odoo_accounting_cli_v3.odoo.report_definition_observer",
@@ -31,6 +32,7 @@ TRUSTED_READ_HANDLER_MODULES = frozenset(
         "odoo_accounting_cli_v3.odoo.trial_balance",
         "odoo_accounting_cli_v3.domain.ap_open_items",
         "odoo_accounting_cli_v3.domain.ar_open_items",
+        "odoo_accounting_cli_v3.domain.multicompany_consolidated",
         "odoo_accounting_cli_v3.domain.multicurrency_balance",
         "odoo_accounting_cli_v3.domain.report_read",
         "odoo_accounting_cli_v3.domain.trial_balance",
@@ -48,6 +50,7 @@ REVIEWED_READ_IMPORT_CLOSURE = frozenset(
         "odoo_accounting_cli_v3.domain",
         "odoo_accounting_cli_v3.domain.ap_open_items",
         "odoo_accounting_cli_v3.domain.ar_open_items",
+        "odoo_accounting_cli_v3.domain.multicompany_consolidated",
         "odoo_accounting_cli_v3.domain.multicurrency_balance",
         "odoo_accounting_cli_v3.domain.report_read",
         "odoo_accounting_cli_v3.domain.trial_balance",
@@ -58,6 +61,7 @@ REVIEWED_READ_IMPORT_CLOSURE = frozenset(
         "odoo_accounting_cli_v3.odoo.ar_open_items",
         "odoo_accounting_cli_v3.odoo.bootstrap",
         "odoo_accounting_cli_v3.odoo.executor",
+        "odoo_accounting_cli_v3.odoo.multicompany_consolidated",
         "odoo_accounting_cli_v3.odoo.multicurrency_balance",
         "odoo_accounting_cli_v3.odoo.report_definition_guard",
         "odoo_accounting_cli_v3.odoo.report_definition_observer",
@@ -110,22 +114,28 @@ REVIEWED_EXTERNAL_IMPORTS = frozenset(
     }
 )
 REVIEWED_EXTERNAL_IMPORT_BINDINGS_SHA256 = (
-    "5d091992525864a547881fdc51866b241241eb07fbd9ba96d2d835767a387cbc"
+    "454e88f3acc168ffb8e6bd85d5174b0fc44b5fa196da1a26d793c25aaad01e1e"
 )
 REVIEWED_EXPLICIT_IMPORT_BINDINGS_SHA256 = (
-    "2c771c74ca2ba9aa041097a1245ba8430f2e342fadbbf2db20b9f550d5893abe"
+    "d3b62267026599ccb55d6a303a3b8cf9f61231b5f3c71dca5c1c66d9caccdd66"
 )
 REVIEWED_READ_DISPATCH = {
     "acct.registry.list.v1": "_read_registry",
     "acct.gl.trial_balance.v1": "_read_trial_balance",
     "acct.ar.open_items.v1": "_read_ar_open_items",
     "acct.ap.open_items.v1": "_read_ap_open_items",
+    "acct.multicompany.consolidated_read.v1": "_read_multicompany_consolidated",
     "acct.multicurrency.balance_read.v1": "_read_multicurrency_balance",
     "acct.move.draft_cancel_eligibility.v1": "_read_draft_cancel_eligibility",
     "acct.report.financial_read.v1": "_read_financial_report",
     "acct.tax.report_read.v1": "_read_tax_report",
 }
-REVIEWED_ACTIVE_READ_CAPABILITIES = frozenset(REVIEWED_READ_DISPATCH)
+REVIEWED_TRUSTED_LOCAL_READ_CAPABILITIES = frozenset(
+    {"acct.diagnostics.operation_read.v1"}
+)
+REVIEWED_ACTIVE_READ_CAPABILITIES = frozenset(REVIEWED_READ_DISPATCH) | (
+    REVIEWED_TRUSTED_LOCAL_READ_CAPABILITIES
+)
 READ_TRANSACTION_SOURCE_SHA256 = (
     "c34c536c0bf335cced59546aac4c5873c83acd90d34cf77757fc379e6667e016"
 )
@@ -133,7 +143,7 @@ READ_BOOTSTRAP_SOURCE_SHA256 = (
     "e089b7c0d7607d65ee49cf40c527dbc2ae28b5f025e9b36fe716c0f4b4909ec7"
 )
 READ_EXECUTOR_SOURCE_SHA256 = (
-    "d13798cfb497338e4b963df2a6ef9ca3b920729fb8a6cfc55ae570ded9206258"
+    "d383ed0650e55aa8704c6c7dfafa87435ea06084755b2c3ada44a75d2714e4ed"
 )
 REVIEWED_INITIALIZER_ATTRIBUTES = {
     ("odoo_accounting_cli_v3.gateway", "CapabilityGateway"): frozenset(
@@ -173,8 +183,20 @@ REVIEWED_INITIALIZER_ATTRIBUTES = {
             "_trial_balance_backend_factory",
             "_ar_open_items_backend_factory",
             "_ap_open_items_backend_factory",
+            "_multicompany_consolidated_backend_factory",
             "_multicurrency_balance_backend_factory",
             "_report_read_backend_factory",
+        }
+    ),
+    (
+        "odoo_accounting_cli_v3.odoo.multicompany_consolidated",
+        "OdooMulticompanyConsolidatedBackend",
+    ): frozenset(
+        {
+            "_env",
+            "_user_id",
+            "_allowed_company_ids",
+            "_trial_balance_backend",
         }
     ),
     (
@@ -201,6 +223,21 @@ REVIEWED_INITIALIZER_ATTRIBUTES = {
 REVIEWED_SUBSCRIPT_MUTATIONS = frozenset(
     {
         (
+            "odoo_accounting_cli_v3.domain.multicompany_consolidated",
+            "read_multicompany_consolidated",
+            "raw_company_totals",
+        ),
+        (
+            "odoo_accounting_cli_v3.domain.multicompany_consolidated",
+            "read_multicompany_consolidated",
+            "source_visible",
+        ),
+        (
+            "odoo_accounting_cli_v3.domain.multicompany_consolidated",
+            "read_multicompany_consolidated",
+            "translated_visible",
+        ),
+        (
             "odoo_accounting_cli_v3.domain.write_semantics",
             "_validate_draft_cancel",
             "computed",
@@ -216,6 +253,11 @@ REVIEWED_SUBSCRIPT_MUTATIONS = frozenset(
             "odoo_accounting_cli_v3.odoo.bootstrap",
             "_reject_duplicate_keys",
             "result",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.trial_balance",
+            "_aggregate",
+            "kwargs",
         ),
         (
             "odoo_accounting_cli_v3.odoo.trial_balance",
@@ -340,7 +382,27 @@ REVIEWED_COPY_CALLS = frozenset(
 )
 REVIEWED_SOURCE_VIOLATIONS = frozenset(
     {
+        (
+            "odoo_accounting_cli_v3.domain.multicompany_consolidated",
+            780,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.domain.multicompany_consolidated",
+            781,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.domain.multicompany_consolidated",
+            785,
+            "mutation:assignment-target",
+        ),
         ("odoo_accounting_cli_v3.odoo.ar_open_items", 18, "attribute:__class__"),
+        (
+            "odoo_accounting_cli_v3.odoo.multicompany_consolidated",
+            22,
+            "attribute:__class__",
+        ),
         (
             "odoo_accounting_cli_v3.odoo.multicurrency_balance",
             22,
@@ -1098,7 +1160,13 @@ def test_policy_covers_every_staged_or_enabled_read_capability():
     }
     assert active_reads == set(REVIEWED_ACTIVE_READ_CAPABILITIES)
     assert _executor_dispatch_contract() == REVIEWED_READ_DISPATCH
-    assert set(REVIEWED_READ_DISPATCH) == active_reads
+    assert set(REVIEWED_READ_DISPATCH) == (
+        active_reads - set(REVIEWED_TRUSTED_LOCAL_READ_CAPABILITIES)
+    )
+    assert not (
+        set(REVIEWED_READ_DISPATCH)
+        & set(REVIEWED_TRUSTED_LOCAL_READ_CAPABILITIES)
+    )
 
 
 def test_read_entrypoint_has_exact_reviewed_transitive_import_closure():
@@ -1113,11 +1181,11 @@ def test_read_entrypoint_has_exact_reviewed_transitive_import_closure():
     }
     assert observed == set(REVIEWED_READ_IMPORT_CLOSURE)
     assert external_imports == set(REVIEWED_EXTERNAL_IMPORTS)
-    assert len(external_import_bindings) == 211
+    assert len(external_import_bindings) == 224
     assert _import_binding_digest(external_import_bindings) == (
         REVIEWED_EXTERNAL_IMPORT_BINDINGS_SHA256
     )
-    assert len(explicit_import_bindings) == 318
+    assert len(explicit_import_bindings) == 342
     assert _import_binding_digest(explicit_import_bindings) == (
         REVIEWED_EXPLICIT_IMPORT_BINDINGS_SHA256
     )

@@ -12,6 +12,10 @@ from typing import Any, Callable, Iterable
 
 from ..domain.ap_open_items import ApOpenItemsBackend, read_ap_open_items
 from ..domain.ar_open_items import ArOpenItemsBackend, read_ar_open_items
+from ..domain.multicompany_consolidated import (
+    MulticompanyConsolidatedBackend,
+    read_multicompany_consolidated,
+)
 from ..domain.multicurrency_balance import (
     MulticurrencyBalanceBackend,
     read_multicurrency_balance,
@@ -31,6 +35,7 @@ from ..receipts import (
 from ..registry import Capability
 from .ap_open_items import OdooApOpenItemsBackend
 from .ar_open_items import OdooArOpenItemsBackend
+from .multicompany_consolidated import OdooMulticompanyConsolidatedBackend
 from .multicurrency_balance import OdooMulticurrencyBalanceBackend
 from .report_read import OdooReportReadBackend
 from .trial_balance import OdooTrialBalanceBackend
@@ -51,6 +56,7 @@ _CAPABILITIES = frozenset(
         "acct.gl.trial_balance.v1",
         "acct.ar.open_items.v1",
         "acct.ap.open_items.v1",
+        "acct.multicompany.consolidated_read.v1",
         "acct.multicurrency.balance_read.v1",
         "acct.move.draft_cancel_eligibility.v1",
         "acct.report.financial_read.v1",
@@ -215,6 +221,10 @@ class OdooReadExecutor:
             [Any, int, frozenset[int]], ApOpenItemsBackend
         ]
         | None = None,
+        multicompany_consolidated_backend_factory: Callable[
+            [Any, int, frozenset[int]], MulticompanyConsolidatedBackend
+        ]
+        | None = None,
         multicurrency_balance_backend_factory: Callable[
             [Any, int, frozenset[int]], MulticurrencyBalanceBackend
         ]
@@ -268,6 +278,18 @@ class OdooReadExecutor:
         self._ap_open_items_backend_factory = ap_open_items_backend_factory or (
             lambda bound_env, user_id, allowed: OdooApOpenItemsBackend(
                 bound_env, user_id=user_id, allowed_company_ids=allowed
+            )
+        )
+        self._multicompany_consolidated_backend_factory = (
+            multicompany_consolidated_backend_factory
+            or (
+                lambda bound_env, user_id, allowed: (
+                    OdooMulticompanyConsolidatedBackend(
+                        bound_env,
+                        user_id=user_id,
+                        allowed_company_ids=allowed,
+                    )
+                )
             )
         )
         self._multicurrency_balance_backend_factory = (
@@ -397,6 +419,14 @@ class OdooReadExecutor:
             self._env, context.user_id, context.allowed_company_ids
         )
         return read_ap_open_items(backend, parameters)
+
+    def _read_multicompany_consolidated(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        backend = self._multicompany_consolidated_backend_factory(
+            self._env, context.user_id, context.allowed_company_ids
+        )
+        return read_multicompany_consolidated(backend, parameters)
 
     def _read_multicurrency_balance(
         self, context: RequestContext, parameters: dict[str, Any]
@@ -620,6 +650,7 @@ class OdooReadExecutor:
             "acct.gl.trial_balance.v1": self._read_trial_balance,
             "acct.ar.open_items.v1": self._read_ar_open_items,
             "acct.ap.open_items.v1": self._read_ap_open_items,
+            "acct.multicompany.consolidated_read.v1": self._read_multicompany_consolidated,
             "acct.multicurrency.balance_read.v1": self._read_multicurrency_balance,
             "acct.move.draft_cancel_eligibility.v1": self._read_draft_cancel_eligibility,
             "acct.report.financial_read.v1": self._read_financial_report,
