@@ -199,6 +199,11 @@ class RegistryTest(unittest.TestCase):
             ],
         )
         self.assertIn("oneOf", output["properties"]["write_parameters"])
+        basis = "odoo_pristine_v3_draft_cancel_eligibility_read"
+        basis_schema = output["properties"]["basis"]
+        self.assertEqual(basis_schema["minLength"], len(basis))
+        self.assertEqual(basis_schema["maxLength"], len(basis))
+        validate_value(basis, basis_schema)
 
     def test_ap_open_items_contract_matches_strict_historical_open_item_shape(self) -> None:
         item = next(

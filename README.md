@@ -151,6 +151,21 @@ requires an Odoo-bound signed receipt. CLI-Anything v0.4.0 supplies the CLI and
 test-harness conventions only; Odoo 19 remains the backend and accounting
 source of truth. See `docs/CLI_ANYTHING_V040_ADOPTION.md`.
 
+Pi scenario acceptance does not trust a retained report's own passing fields.
+`evidence pi-scenario-report-check` recomputes it from the original raw trace,
+the independent capture binding, root-managed authorities, and the routed
+release/registry, then emits a purpose-separated HMAC recomputation
+attestation. `goal-readiness` and `final-evidence-manifest-check` independently
+reopen the retained trusted-key path and verify that attestation and its exact
+claims. Zero-trace, unsigned self-reported, or forged checks fail closed. On the
+Linux deployment path, the key file must be an absolute canonical root-owned
+non-symlink, must not be group/world writable, and all ancestors must be
+root-owned directories that are not group/world writable; verification also
+uses no-follow, open-file identity, before/after identity, and bounded-read
+checks. The contract-tested FD4 terminal-answer boundary is not the complete
+live Pi 38-scenario trace gate, which has not yet been evidenced for the target
+release. See `docs/PI_SCENARIO_ACCEPTANCE.md`.
+
 ## Development
 
 ```powershell

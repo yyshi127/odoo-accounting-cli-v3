@@ -5,7 +5,7 @@ strictly shaped, and closed for production until environment-specific evidence
 exists. It is a registry and control-plane audit only. It is not a real Odoo
 business receipt, sandbox-write receipt, or production-write authorization.
 
-## Retained target-host audit example
+## Historical retained target-host audit example
 
 The retained target-host audit that introduced this command was run against:
 
@@ -32,6 +32,13 @@ RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/0.1.0.dev218-c68fd23c7ef8
 
 The route returned `current_route_ready:true`, an empty blocker list, and the
 registry digest shown above.
+
+This is deliberately a historical Dev218 evidence record. Its 24 total and
+14 write capabilities are not the current development registry. Never copy
+these counts into a current readiness claim; run the machine audit from the
+exact routed release and retain that output. The current development registry
+has subsequently grown, but a dirty checkout is not a release or target-host
+receipt.
 
 ## Machine audit command
 
@@ -61,7 +68,7 @@ An acceptable registry audit must satisfy all of the following:
 - `production_promotion_allowed:false`
 - `real_odoo_write_performed:false`
 
-For that audited release, the target host returned:
+For that historical audited release, the target host returned:
 
 | Metric | Value |
 | --- | ---: |

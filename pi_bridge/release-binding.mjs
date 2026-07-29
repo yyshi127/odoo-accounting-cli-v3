@@ -9,8 +9,10 @@ const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_RUNTIME_FILE_BYTES = 4 * 1024 * 1024;
 
 export const PI_BRIDGE_RUNTIME_MEMBERS = Object.freeze([
+	"pi_bridge/SYSTEM_PROMPT.md",
 	"pi_bridge/extensions/odoo-tools.ts",
 	"pi_bridge/extensions/odoo-v3-cli.mjs",
+	"pi_bridge/final-evidence.mjs",
 	"pi_bridge/odoo-session-header-resolver.mjs",
 	"pi_bridge/package-lock.json",
 	"pi_bridge/package.json",

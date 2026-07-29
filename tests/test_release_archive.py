@@ -13,6 +13,7 @@ import unittest
 from unittest import mock
 from pathlib import Path
 
+from odoo_accounting_cli_v3.release import ReleaseError, verify_manifest
 from tools import build_release as release_builder
 
 
@@ -336,6 +337,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/odoo/write_runner.py",
         "src/odoo_accounting_cli_v3/operations.py",
         "src/odoo_accounting_cli_v3/persistence.py",
+        "src/odoo_accounting_cli_v3/pi_evidence.py",
         "src/odoo_accounting_cli_v3/receipts.py",
         "src/odoo_accounting_cli_v3/registry.py",
         "src/odoo_accounting_cli_v3/release.py",
@@ -417,13 +419,17 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "odoo_addons/odoo_accounting_cli_v3_control/security/odoo_accounting_cli_v3_security.xml",
         "odoo_addons/odoo_accounting_cli_v3_control/sql/module_guard_v1.sql",
         "odoo_addons/odoo_accounting_cli_v3_control/views/approval_wizard_views.xml",
+        "pi_bridge/SYSTEM_PROMPT.md",
         "pi_bridge/extensions/odoo-tools.ts",
         "pi_bridge/extensions/odoo-v3-cli.mjs",
+        "pi_bridge/final-evidence.mjs",
         "pi_bridge/package-lock.json",
         "pi_bridge/package.json",
         "pi_bridge/README.md",
         "pi_bridge/server.mjs",
+        "pi_bridge/tests/final-evidence.test.mjs",
         "pi_bridge/tests/odoo-v3-cli.test.mjs",
+        "pi_bridge/tests/server-final-evidence.test.mjs",
         "pi_bridge/tests/trusted-broker.test.mjs",
         "pi_bridge/trusted-session.mjs",
     }
@@ -442,6 +448,75 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
 
 
 class ReleaseArchiveTest(unittest.TestCase):
+    def test_pi_evidence_runtime_is_a_required_release_member(self) -> None:
+        name = "src/odoo_accounting_cli_v3/pi_evidence.py"
+
+        self.assertTrue((PROJECT_ROOT / name).is_file())
+        self.assertIn(name, WRITE_RUNTIME_RELEASE_MEMBERS)
+        self.assertIn(name, REQUIRED_WRITE_RELEASE_MEMBERS)
+
+    def test_fd4_final_evidence_is_a_required_release_member(self) -> None:
+        name = "pi_bridge/final-evidence.mjs"
+
+        self.assertTrue((PROJECT_ROOT / name).is_file())
+        self.assertIn(name, WRITE_RUNTIME_RELEASE_MEMBERS)
+        self.assertIn(name, REQUIRED_WRITE_RELEASE_MEMBERS)
+
+    def test_extracted_archive_rejects_missing_fd4_final_evidence(self) -> None:
+        name = "pi_bridge/final-evidence.mjs"
+        payload = (PROJECT_ROOT / name).read_bytes()
+        unsigned = {
+            "commit": "a" * 40,
+            "files": [
+                {
+                    "path": name,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size": len(payload),
+                }
+            ],
+            "schema_version": 1,
+            "version": "1.2.3-test",
+        }
+        manifest_sha256 = hashlib.sha256(
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        manifest = {**unsigned, "manifest_sha256": manifest_sha256}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / name
+            target.parent.mkdir(parents=True)
+            target.write_bytes(payload)
+            (root / "RELEASE-MANIFEST.json").write_text(
+                json.dumps(manifest),
+                encoding="utf-8",
+            )
+            verify_manifest(
+                root,
+                manifest,
+                expected_manifest_sha256=manifest_sha256,
+            )
+            target.unlink()
+
+            with self.assertRaisesRegex(
+                ReleaseError,
+                r"release file mismatch: pi_bridge/final-evidence\.mjs",
+            ):
+                verify_manifest(
+                    root,
+                    manifest,
+                    expected_manifest_sha256=manifest_sha256,
+                )
+
+    def test_fixed_pi_system_prompt_is_an_explicit_release_member(self) -> None:
+        name = "pi_bridge/SYSTEM_PROMPT.md"
+
+        self.assertTrue((PROJECT_ROOT / name).is_file())
+        self.assertIn(name, WRITE_RUNTIME_RELEASE_MEMBERS)
+        self.assertIn(name, REQUIRED_WRITE_RELEASE_MEMBERS)
+
     def test_phase_b_move_closure_is_an_explicit_release_member(self) -> None:
         name = "tests/test_phaseb_move_write_capability_closure.py"
 

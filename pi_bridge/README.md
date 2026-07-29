@@ -2,9 +2,9 @@
 
 This directory is the release-owned Pi Agent gateway for V3. Legacy direct
 startup can retain the five V2 tools for the separately running V2 service,
-but the canonical/bootstrap Dev11 sidecar is strictly V3-only. Without a
-broker session it exposes only the two V3 registry queries; with a session it
-adds only the seven V3 broker tools. It never passes legacy `ODOO_TOOL_*`
+but the canonical/bootstrap sidecar is strictly V3-only. Without a valid
+broker session it exposes no tools; with a session it exposes only the ten
+release-bound V3 tools. It never passes legacy `ODOO_TOOL_*`
 credentials or selectors to that hardened Pi child. The model never receives fields for user/database context,
 authentication signatures, approval signatures, approver identity, or signing
 keys.
@@ -76,7 +76,16 @@ Without the release self-binding, every V3 tool is omitted. Without the
 injected resolver, a valid resolved session, or the broker socket, V3
 read/write tools are omitted from the Pi invocation and the broker client also
 rejects direct calls before any CLI can run. The caller-supplied `session_id`
-remains conversation-memory naming only and is never an identity source.
+is not accepted by the hardened `/chat` request and is never an identity source.
+
+`odoo_v3_capability_list` performs `acct.registry.list.v1` through that same
+authenticated broker. Its model-facing request is exactly empty; only after
+session authentication does the broker bind the trusted company ID, sign the
+read context, execute Odoo ACL and company filtering, and return the complete
+signed read envelope. `odoo_v3_capability_get` performs a fresh authenticated
+registry read and selects one item locally. That selected item is explicitly
+unsigned and always retains the unmodified complete signed source, receipt ID,
+and result digest. A local static registry is never authorization evidence.
 
 Approval is a separate authenticated product channel, not a Pi tool and not a
 route in this bridge. `odoo_v3_operation_approve_execute` exposes only
@@ -101,6 +110,28 @@ unverified business outcome. The bridge adds
 `operation.status`/operator-review action for such responses; the model must
 not convert them into accounting success, create a replacement operation, or
 hide the missing verification/audit receipt from the user.
+
+The hardened `/chat` path has a second, dedicated evidence channel on child
+file descriptor 4. The release-bound extension emits one small canonical event
+only after the Broker client has verified a successful read, preview,
+diagnostic, or write result. At Pi `session_shutdown` it writes a terminal
+event-count/stream-digest commit and closes the descriptor. The parent accepts
+the child only after clean evidence EOF and exit zero, then requires Pi stdout
+to be exactly one bounded canonical seven-field JSON object with an exact
+action/capability match to one committed terminal event. Missing, truncated,
+duplicated, reordered, oversized, or digest-mismatched evidence fails closed.
+A clarification or refusal may have only the authenticated registry-list read
+as supporting evidence; that receipt can never satisfy business success. A
+diagnostic answer is explicitly `business_succeeded:false`: its receipt proves
+the query, not success of the inspected operation. This
+terminal-answer control does not by itself prove the full 38-scenario
+natural-language gate or financial correctness; those require the separately
+retained evidence described in `docs/PI_SCENARIO_ACCEPTANCE.md`.
+The seven-field answer is currently an evidence locator, not the user-facing
+accounting payload. Before production use, the parent must obtain the exact
+verified result body from the trusted Broker/receipt store, recheck its digest,
+and render a bounded business result plus audit receipt without asking Pi to
+restate numbers. That result-delivery path is not yet implemented.
 
 Production remains disabled until the authenticated-session resolver, broker
 socket ownership/permissions, broker session mapping, independent approval
@@ -140,4 +171,11 @@ Run the bridge contract tests with:
 ```text
 npm ci --ignore-scripts
 npm test
+npm audit --omit=dev
 ```
+
+`npm audit` must be clean (or an explicitly reviewed, release-bound exception
+must exist) before production promotion. At the time of this development
+snapshot the pinned Pi dependency tree still produces a nonzero audit result;
+root-level `overrides` do not repair the package's published shrinkwrap
+reproducibly and therefore are not treated as a fix.

@@ -21,7 +21,7 @@ import {
 
 const VERSION = "1.2.3-test";
 const COMMIT = "a".repeat(40);
-const PYTHON_MANIFEST_DIGEST = "9702dff156e913e09adb3dfce644a2712814eba44b2128d6ea5e2c757370d64e";
+const PYTHON_MANIFEST_DIGEST = "db76efa7f3bbb9febcbdda582f741afa0bd23e65611e26554b6dc975d7d3bfb7";
 const temporaryRoots = [];
 
 function canonicalString(value) {
@@ -166,6 +166,76 @@ test("every executing Bridge member must be declared by the release", async () =
 		}),
 		new RegExp(`omits ${omittedMember.replace(".", "\\.")}`),
 	);
+});
+
+test("the fixed system prompt is mandatory and immutable", async (t) => {
+	await t.test("manifest omission", async () => {
+		const omittedMember = "pi_bridge/SYSTEM_PROMPT.md";
+		const fixture = await createFixture({ omittedMember });
+
+		assert.throws(
+			() => verifyPiBridgeReleaseBinding({
+				bridgeRoot: fixture.bridgeRoot,
+				expectedManifestSha256: fixture.manifest.manifest_sha256,
+				manifestPath: fixture.manifestPath,
+			}),
+			/omits pi_bridge\/SYSTEM_PROMPT\.md/,
+		);
+	});
+
+	await t.test("runtime tampering", async () => {
+		const fixture = await createFixture();
+		const promptPath = path.join(fixture.bridgeRoot, "SYSTEM_PROMPT.md");
+		await writeFile(promptPath, `${await readFile(promptPath, "utf8")}tampered\n`);
+
+		assert.throws(
+			() => verifyPiBridgeReleaseBinding({
+				bridgeRoot: fixture.bridgeRoot,
+				expectedManifestSha256: fixture.manifest.manifest_sha256,
+				manifestPath: fixture.manifestPath,
+			}),
+			/runtime file does not match pi_bridge\/SYSTEM_PROMPT\.md/,
+		);
+	});
+});
+
+test("the FD4 final-evidence runtime is mandatory and immutable", async (t) => {
+	const releasePath = "pi_bridge/final-evidence.mjs";
+	assert.ok(PI_BRIDGE_RUNTIME_MEMBERS.includes(releasePath));
+
+	await t.test("manifest omission", async () => {
+		const fixture = await createFixture({ omittedMember: releasePath });
+
+		assert.throws(
+			() => verifyPiBridgeReleaseBinding({
+				bridgeRoot: fixture.bridgeRoot,
+				expectedManifestSha256: fixture.manifest.manifest_sha256,
+				manifestPath: fixture.manifestPath,
+			}),
+			/omits pi_bridge\/final-evidence\.mjs/,
+		);
+	});
+
+	await t.test("runtime tampering", async () => {
+		const fixture = await createFixture();
+		const evidencePath = path.join(
+			fixture.bridgeRoot,
+			"final-evidence.mjs",
+		);
+		await writeFile(
+			evidencePath,
+			`${await readFile(evidencePath, "utf8")}tampered\n`,
+		);
+
+		assert.throws(
+			() => verifyPiBridgeReleaseBinding({
+				bridgeRoot: fixture.bridgeRoot,
+				expectedManifestSha256: fixture.manifest.manifest_sha256,
+				manifestPath: fixture.manifestPath,
+			}),
+			/runtime file does not match pi_bridge\/final-evidence\.mjs/,
+		);
+	});
 });
 
 test("writable runtime bytes and non-root-managed trees are rejected", async (t) => {

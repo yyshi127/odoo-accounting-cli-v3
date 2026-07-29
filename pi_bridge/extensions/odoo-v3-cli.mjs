@@ -58,6 +58,34 @@ const UTC_TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:
 const DATABASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
 const DIAGNOSTICS_CAPABILITY_ID = "acct.diagnostics.operation_read.v1";
+const REGISTRY_LIST_CAPABILITY_ID = "acct.registry.list.v1";
+const V3_BROKER_PREFLIGHT_OPTION_KEYS = Object.freeze([
+	"brokerSocketPath",
+	"expectedRegistryDigest",
+	"expectedReleaseDigest",
+	"sessionHandle",
+	"timeoutMs",
+	"transport",
+]);
+
+const REGISTRY_DESCRIPTOR_KEYS = Object.freeze([
+	"access",
+	"approval_required",
+	"business_description",
+	"capability_channel",
+	"company_scope",
+	"contract_digest",
+	"domain",
+	"evidence_level",
+	"id",
+	"idempotency_required",
+	"input_schema_json",
+	"odoo_permissions",
+	"output_schema_json",
+	"recovery_method",
+	"risk_level",
+	"verification_method",
+].sort());
 
 const DATABASE_FINALIZATION_KEYS = Object.freeze([
 	"attestation_digest",
@@ -200,6 +228,84 @@ function validReadReceipt(receipt, request, expectedReleaseDigest, expectedRegis
 		&& nonEmptyString(receipt.signature_key_id);
 }
 
+function validJsonObjectText(value) {
+	if (typeof value !== "string" || value.length < 2) {
+		return false;
+	}
+	try {
+		return isObject(JSON.parse(value));
+	} catch {
+		return false;
+	}
+}
+
+function validRegistryDescriptor(value, capabilityChannel) {
+	return exactKeys(value, REGISTRY_DESCRIPTOR_KEYS)
+		&& CAPABILITY_ID.test(value.id)
+		&& nonEmptyString(value.domain)
+		&& nonEmptyString(value.business_description)
+		&& ["read", "write"].includes(value.access)
+		&& ["low", "medium", "high", "critical"].includes(value.risk_level)
+		&& [
+			"bound_company",
+			"allowed_companies",
+			"explicit_single_company",
+		].includes(value.company_scope)
+		&& Array.isArray(value.odoo_permissions)
+		&& value.odoo_permissions.length > 0
+		&& new Set(value.odoo_permissions).size === value.odoo_permissions.length
+		&& value.odoo_permissions.every(
+			(permission) => (
+				typeof permission === "string"
+				&& /^[a-z0-9_]+\.[a-z0-9_]+$/.test(permission)
+			),
+		)
+		&& typeof value.approval_required === "boolean"
+		&& typeof value.idempotency_required === "boolean"
+		&& validJsonObjectText(value.input_schema_json)
+		&& validJsonObjectText(value.output_schema_json)
+		&& SHA256.test(value.contract_digest)
+		&& [
+			"declared",
+			"contract_tested",
+			"test_verified",
+			"sandbox_verified",
+			"production_verified",
+		].includes(value.evidence_level)
+		&& nonEmptyString(value.verification_method)
+		&& nonEmptyString(value.recovery_method)
+		&& value.capability_channel === capabilityChannel;
+}
+
+function validRegistryReadResult(result) {
+	if (
+		!exactKeys(result, ["capabilities", "page", "receipt"])
+		|| !Array.isArray(result.capabilities)
+		|| !isObject(result.page)
+		|| !isObject(result.receipt)
+		|| !exactKeys(result.page, ["count", "total_count"])
+		|| !Number.isSafeInteger(result.page.count)
+		|| !Number.isSafeInteger(result.page.total_count)
+		|| result.page.count !== result.capabilities.length
+		|| result.page.total_count !== result.capabilities.length
+		|| result.receipt.record_count !== result.capabilities.length
+	) {
+		return false;
+	}
+	const identifiers = result.capabilities.map((item) => item?.id);
+	return result.capabilities.every(
+		(item) => validRegistryDescriptor(
+			item,
+			result.receipt.capability_channel,
+		),
+	)
+		&& identifiers.every(
+			(identifier, index) => (
+				index === 0 || identifiers[index - 1] < identifier
+			),
+		);
+}
+
 function validReadData(data, request, expectedReleaseDigest, expectedRegistryDigest) {
 	return exactKeys(data, ["capability_id", "release_identity", "result", "runtime"])
 		&& data.capability_id === request?.capability_id
@@ -214,6 +320,10 @@ function validReadData(data, request, expectedReleaseDigest, expectedRegistryDig
 			request,
 			expectedReleaseDigest,
 			expectedRegistryDigest,
+		)
+		&& (
+			request?.capability_id !== REGISTRY_LIST_CAPABILITY_ID
+			|| validRegistryReadResult(data.result)
 		);
 }
 
@@ -569,7 +679,12 @@ function validBrokerBusinessRequest(action, request) {
 	if (["read", "operation.prepare"].includes(action)) {
 		return exactKeys(request, ["capability_id", "parameters"])
 			&& CAPABILITY_ID.test(request.capability_id)
-			&& isObject(request.parameters);
+			&& isObject(request.parameters)
+			&& (
+				action !== "read"
+				|| request.capability_id !== REGISTRY_LIST_CAPABILITY_ID
+				|| exactKeys(request.parameters, [])
+			);
 	}
 	if ([
 		"operation.preview",
@@ -601,8 +716,31 @@ function validBrokerBusinessRequest(action, request) {
 }
 
 function requestedOperationId(action, request) {
-	const field = action === "operation.recover" ? "recovery_operation_id" : "operation_id";
-	return typeof request?.[field] === "string" ? request[field] : undefined;
+	if (action === "operation.recover") return undefined;
+	return boundedString(request?.operation_id, 128)
+		? request.operation_id
+		: undefined;
+}
+
+function requestedOriginOperationId(action, request) {
+	return action === "operation.recover"
+		&& boundedString(request?.origin_operation_id, 128)
+		? request.origin_operation_id
+		: undefined;
+}
+
+function bindRequestedOriginOperationId(payload, action, request) {
+	const originOperationId = requestedOriginOperationId(action, request);
+	if (payload?.ok !== false || !isObject(payload?.error) || !originOperationId) {
+		return payload;
+	}
+	return {
+		...payload,
+		error: {
+			...payload.error,
+			origin_operation_id: originOperationId,
+		},
+	};
 }
 
 function bridgeFailure(
@@ -622,6 +760,10 @@ function bridgeFailure(
 	const operationId = requestedOperationId(action, request);
 	if (operationId) {
 		error.operation_id = operationId;
+	}
+	const originOperationId = requestedOriginOperationId(action, request);
+	if (originOperationId) {
+		error.origin_operation_id = originOperationId;
 	}
 	return { command: action, error, ok: false };
 }
@@ -749,6 +891,7 @@ function parseCliEnvelope(
 	}
 	const error = payload.error;
 	const errorKeys = Object.keys(error ?? {});
+	const originOperationId = requestedOriginOperationId(cliCommand, request);
 	if (
 		JSON.stringify(Object.keys(payload).sort()) !== JSON.stringify(["command", "error", "ok"])
 		|| !isObject(error)
@@ -759,6 +902,17 @@ function parseCliEnvelope(
 		|| !["none", "unknown"].includes(error.odoo_effect)
 		|| typeof error.retryable !== "boolean"
 		|| (error.operation_id !== undefined && typeof error.operation_id !== "string")
+		|| (
+			error.origin_operation_id !== undefined
+			&& (
+				cliCommand !== "operation.recover"
+				|| error.origin_operation_id !== originOperationId
+			)
+		)
+		|| (
+			cliCommand === "operation.recover"
+			&& error.operation_id !== undefined
+		)
 		|| (
 			error.reconciliation_required !== undefined
 			&& typeof error.reconciliation_required !== "boolean"
@@ -773,6 +927,7 @@ function parseCliEnvelope(
 			"message",
 			"odoo_effect",
 			"operation_id",
+			"origin_operation_id",
 			"reconciliation_required",
 			"retryable",
 			"state",
@@ -1302,7 +1457,11 @@ export function createV3BrokerClient(options = {}) {
 				action,
 			);
 			if (preauthReconciliation) {
-				return preauthReconciliation;
+				return bindRequestedOriginOperationId(
+					preauthReconciliation,
+					action,
+					request,
+				);
 			}
 		}
 		if (
@@ -1387,7 +1546,7 @@ export function createV3BrokerClient(options = {}) {
 			expectedRegistryDigest,
 		);
 		if (failure) {
-			return failure;
+			return bindRequestedOriginOperationId(failure, action, request);
 		}
 		return bridgeFailure(action, request, {
 			code: "bridge_invalid_v3_broker_response",
@@ -1398,7 +1557,128 @@ export function createV3BrokerClient(options = {}) {
 	};
 }
 
+export async function preflightV3BrokerSession(options = {}) {
+	if (
+		!isObject(options)
+		|| Object.keys(options).some(
+			(key) => !V3_BROKER_PREFLIGHT_OPTION_KEYS.includes(key),
+		)
+	) {
+		return false;
+	}
+	const sessionHandle = options.sessionHandle;
+	try {
+		const run = createV3BrokerClient({
+			brokerSocketPath: options.brokerSocketPath,
+			expectedRegistryDigest: options.expectedRegistryDigest,
+			expectedReleaseDigest: options.expectedReleaseDigest,
+			sessionHandleProvider: () => sessionHandle,
+			timeoutMs: options.timeoutMs,
+			transport: options.transport,
+		});
+		const result = await run("read", {
+			capability_id: REGISTRY_LIST_CAPABILITY_ID,
+			parameters: {},
+		});
+		return result?.ok === true
+			&& result.command === "read"
+			&& result.data?.capability_id === REGISTRY_LIST_CAPABILITY_ID
+			&& result.data?.result?.receipt?.capability_id
+				=== REGISTRY_LIST_CAPABILITY_ID;
+	} catch {
+		return false;
+	}
+}
+
+export function deriveCapabilityGetFromRegistryRead(
+	signedRegistryRead,
+	requestedCapabilityId,
+) {
+	if (
+		typeof requestedCapabilityId !== "string"
+		|| !CAPABILITY_ID.test(requestedCapabilityId)
+	) {
+		return bridgeFailure("capability.get", {}, {
+			code: "bridge_invalid_request_json",
+			message: "The capability query must contain one exact capability_id.",
+			odooEffect: "none",
+			retryable: false,
+		});
+	}
+	if (signedRegistryRead?.ok === false) {
+		return signedRegistryRead;
+	}
+	const releaseDigest =
+		signedRegistryRead?.data?.release_identity?.manifest_sha256;
+	const registryDigest =
+		signedRegistryRead?.data?.release_identity?.registry_digest;
+	const sourceRequest = {
+		capability_id: REGISTRY_LIST_CAPABILITY_ID,
+		parameters: {},
+	};
+	if (
+		!exactKeys(signedRegistryRead, ["command", "data", "ok"])
+		|| signedRegistryRead.command !== "read"
+		|| signedRegistryRead.ok !== true
+		|| !SHA256.test(releaseDigest)
+		|| !SHA256.test(registryDigest)
+		|| !validReadData(
+			signedRegistryRead.data,
+			sourceRequest,
+			releaseDigest,
+			registryDigest,
+		)
+	) {
+		return bridgeFailure("capability.get", {}, {
+			code: "bridge_invalid_v3_broker_response",
+			message: "The authenticated capability registry response is invalid.",
+			odooEffect: "none",
+			retryable: false,
+		});
+	}
+	const capabilities = signedRegistryRead.data.result.capabilities;
+	const sourceIndex = capabilities.findIndex(
+		(item) => item.id === requestedCapabilityId,
+	);
+	const visible = sourceIndex >= 0;
+	const receipt = signedRegistryRead.data.result.receipt;
+	return {
+		command: "capability.get",
+		data: {
+			capability: visible ? capabilities[sourceIndex] : null,
+			selection: {
+				requested_capability_id: requestedCapabilityId,
+				signed: false,
+				source_index: visible ? sourceIndex : null,
+				source_receipt_id: receipt.id,
+				source_result_digest: receipt.result_digest,
+				visible,
+			},
+			signed_registry_read: signedRegistryRead,
+		},
+		ok: true,
+	};
+}
+
 export function addUnknownEffectGuidance(payload) {
+	if (
+		payload?.ok === false
+		&& payload?.command === "operation.recover"
+		&& payload?.error?.odoo_effect === "none"
+		&& payload?.error?.reconciliation_required === true
+		&& payload?.error?.retryable === false
+		&& typeof payload?.error?.origin_operation_id === "string"
+	) {
+		return {
+			...payload,
+			bridge_guidance: {
+				must_not_create_new_operation: true,
+				next_action: "operation.diagnostics",
+				origin_operation_id: payload.error.origin_operation_id,
+				reason: "recovery_prepare_delivery_must_be_reconciled",
+			},
+		};
+	}
 	if (
 		payload?.ok !== false
 		|| payload?.error?.odoo_effect !== "unknown"

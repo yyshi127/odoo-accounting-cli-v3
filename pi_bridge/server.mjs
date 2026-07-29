@@ -4,8 +4,17 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { verifyPiBridgeReleaseBinding } from "./release-binding.mjs";
+import { preflightV3BrokerSession } from "./extensions/odoo-v3-cli.mjs";
 import {
+  MAX_PI_PRINT_STDOUT_BYTES,
+  FinalEvidenceError,
+  collectFinalEvidenceStream,
+  validateFinalEvidenceChildResult,
+} from "./final-evidence.mjs";
+import {
+  ChatRequestPolicyError,
   enabledPiToolNames,
+  launchPolicyControlledChat,
   legacyOdooEnvironment,
   LEGACY_ODOO_ENVIRONMENT_NAMES,
   literalPiUserPrompt,
@@ -93,6 +102,9 @@ const piBin = typeof bootstrapAttestation?.piEntrypoint === "string"
   ? bootstrapAttestation.piEntrypoint
   : "";
 const chatTimeoutMs = Number(process.env.PI_AGENT_BRIDGE_TIMEOUT_MS || 120000);
+const MAX_PI_STDERR_BYTES = 64 * 1024;
+const configuredPiModel = process.env.PI_AGENT_MODEL || "";
+const configuredPiProvider = process.env.PI_AGENT_PROVIDER || "";
 const sessionDir = process.env.PI_AGENT_SESSION_DIR || "/home/odoo/.pi/sdoobot-sessions";
 const contextDir = path.join(sessionDir, "contexts");
 const sha256 = /^[0-9a-f]{64}$/;
@@ -307,6 +319,74 @@ if (hardenedV3Only && !v3Ready) {
   throw new Error("Hardened Pi Bridge requires a verified V3 release");
 }
 
+function sameFileIdentity(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function loadHardenedSystemPrompt() {
+  const promptPath = path.join(__dirname, "SYSTEM_PROMPT.md");
+  if (
+    path.resolve(promptPath) !== promptPath
+    || fs.realpathSync.native(promptPath) !== promptPath
+    || (process.platform === "linux" && !rootOwnedCanonicalFile(promptPath))
+  ) {
+    throw new Error("Hardened Pi Bridge system prompt is not release-owned");
+  }
+  const before = fs.lstatSync(promptPath, { bigint: true });
+  if (
+    before.isSymbolicLink()
+    || !before.isFile()
+    || before.nlink !== 1n
+    || before.size < 1n
+    || before.size > 64n * 1024n
+  ) {
+    throw new Error("Hardened Pi Bridge system prompt is invalid");
+  }
+  const descriptor = fs.openSync(
+    promptPath,
+    fs.constants.O_RDONLY
+      | fs.constants.O_CLOEXEC
+      | (fs.constants.O_NOFOLLOW ?? 0),
+  );
+  let content;
+  try {
+    const opened = fs.fstatSync(descriptor, { bigint: true });
+    if (!opened.isFile() || !sameFileIdentity(before, opened)) {
+      throw new Error("Hardened Pi Bridge system prompt changed while opening");
+    }
+    content = fs.readFileSync(descriptor);
+    const afterRead = fs.fstatSync(descriptor, { bigint: true });
+    if (
+      !sameFileIdentity(opened, afterRead)
+      || content.length !== Number(opened.size)
+    ) {
+      throw new Error("Hardened Pi Bridge system prompt changed while reading");
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  const after = fs.lstatSync(promptPath, { bigint: true });
+  if (!sameFileIdentity(before, after) || after.isSymbolicLink()) {
+    throw new Error("Hardened Pi Bridge system prompt changed during verification");
+  }
+  let prompt;
+  try {
+    prompt = new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    throw new Error("Hardened Pi Bridge system prompt is not valid UTF-8");
+  }
+  if (!prompt.trim() || prompt.includes("\0")) {
+    throw new Error("Hardened Pi Bridge system prompt is invalid");
+  }
+  return prompt;
+}
+
+const hardenedSystemPrompt = hardenedV3Only ? loadHardenedSystemPrompt() : "";
+
 function json(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -319,11 +399,16 @@ function json(res, status, payload) {
 function readRequestJson(req) {
   return new Promise((resolve, reject) => {
     let body = "";
+    const rejectInvalidJson = (error) => reject(
+      hardenedV3Only
+        ? new ChatRequestPolicyError("hardened_chat_request_rejected", 400)
+        : error,
+    );
     req.setEncoding("utf8");
     req.on("data", (chunk) => {
       body += chunk;
       if (body.length > 100000) {
-        reject(new Error("Request body too large"));
+        rejectInvalidJson(new Error("Request body too large"));
         req.destroy();
       }
     });
@@ -331,10 +416,10 @@ function readRequestJson(req) {
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (error) {
-        reject(error);
+        rejectInvalidJson(error);
       }
     });
-    req.on("error", reject);
+    req.on("error", rejectInvalidJson);
   });
 }
 
@@ -504,8 +589,7 @@ function runPiChat({
       selectedSkillKey,
       conversationContext,
     }) : "";
-    const brokerEnabled =
-      v3Ready
+    const brokerEnabled = v3Ready
       && v3BrokerSocketConfigured
       && validBrokerSessionHandle(brokerSessionHandle);
     const enabledToolNames = enabledPiToolNames({
@@ -542,35 +626,96 @@ function runPiChat({
     }
     args.push(literalPiUserPrompt(prompt));
 
+    const finalEvidenceEnabled = v3Ready;
     const child = spawn(process.execPath, [piBin, ...args], {
       cwd: __dirname,
       env: piChildEnvironment(),
-      stdio: ["ignore", "pipe", "pipe", "pipe"],
+      stdio: finalEvidenceEnabled
+        ? ["ignore", "pipe", "pipe", "pipe", "pipe"]
+        : ["ignore", "pipe", "pipe", "pipe"],
     });
     child.stdio[3].end(brokerEnabled ? brokerSessionHandle : "", "utf8");
-    let stdout = "";
-    let stderr = "";
+    const evidenceOutcome = finalEvidenceEnabled
+      ? collectFinalEvidenceStream(child.stdio[4]).then(
+          (buffer) => ({ buffer, ok: true }),
+          (error) => {
+            if (hardenedV3Only) child.kill("SIGTERM");
+            return { error, ok: false };
+          },
+        )
+      : Promise.resolve({ buffer: null, ok: true });
+    const stdoutChunks = [];
+    let stdoutBytes = 0;
+    let stdoutFailure = null;
+    const stderrChunks = [];
+    let stderrBytes = 0;
+    let stderrFailure = null;
+    let settled = false;
+    const settle = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback(value);
+    };
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      reject(new Error("Pi Agent timed out"));
+      settle(reject, new Error("Pi Agent timed out"));
     }, chatTimeoutMs);
     child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf8");
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new Error(stderr || `Pi exited with code ${code}`));
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stdoutBytes += bytes.length;
+      if (
+        hardenedV3Only
+        && stdoutBytes > MAX_PI_PRINT_STDOUT_BYTES
+      ) {
+        if (stdoutFailure === null) {
+          stdoutFailure = new FinalEvidenceError("final_answer_too_large");
+          child.kill("SIGTERM");
+        }
         return;
       }
-      resolve(stdout.trim());
+      stdoutChunks.push(Buffer.from(bytes));
+    });
+    child.stderr.on("data", (chunk) => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      stderrBytes += bytes.length;
+      if (stderrBytes > MAX_PI_STDERR_BYTES) {
+        if (stderrFailure === null) {
+          stderrFailure = new FinalEvidenceError("pi_stderr_too_large");
+          child.kill("SIGTERM");
+        }
+        return;
+      }
+      stderrChunks.push(Buffer.from(bytes));
+    });
+    child.on("error", (error) => {
+      settle(reject, error);
+    });
+    child.on("close", (code) => {
+      void (async () => {
+        if (stdoutFailure !== null) throw stdoutFailure;
+        if (stderrFailure !== null) throw stderrFailure;
+        const stdout = Buffer.concat(stdoutChunks, stdoutBytes);
+        if (!hardenedV3Only) {
+          if (code !== 0) {
+            const stderr = Buffer.concat(
+              stderrChunks,
+              stderrBytes,
+            ).toString("utf8");
+            throw new Error(stderr || `Pi exited with code ${code}`);
+          }
+          settle(resolve, stdout.toString("utf8").trim());
+          return;
+        }
+        const outcome = await evidenceOutcome;
+        if (!outcome.ok) throw outcome.error;
+        const answer = validateFinalEvidenceChildResult({
+          evidenceBuffer: outcome.buffer,
+          exitCode: code,
+          stdoutBuffer: stdout,
+        });
+        settle(resolve, answer);
+      })().catch((error) => settle(reject, error));
     });
   });
 }
@@ -587,6 +732,7 @@ async function authenticatedBrokerSession(req) {
       },
     );
   } catch {
+    if (hardenedV3Only) return null;
     throw new Error("Authenticated V3 broker session resolution failed");
   }
 }
@@ -636,18 +782,25 @@ const server = http.createServer((req, res) => {
         brokerSession: await authenticatedBrokerSession(req),
         payload,
       }))
-      .then(({ brokerSession, payload }) => runPiChat({
-          message: payload.message,
-          systemPrompt: payload.system_prompt,
-          provider: payload.provider || process.env.PI_AGENT_PROVIDER || "",
-          model: payload.model || process.env.PI_AGENT_MODEL || "",
-          sessionId: payload.session_id || "",
-          selectedSkillKey: payload.selected_skill_key || "",
-          conversationContext: payload.conversation_context || [],
-          brokerSessionHandle: brokerSession?.brokerSessionHandle || "",
-        }))
+      .then(({ brokerSession, payload }) => launchPolicyControlledChat({
+        brokerSessionHandle: brokerSession?.brokerSessionHandle || "",
+        configuredModel: configuredPiModel,
+        configuredProvider: configuredPiProvider,
+        hardenedSystemPrompt,
+        hardenedV3Only,
+        payload,
+      }, ({ brokerSessionHandle }) => preflightV3BrokerSession({
+        brokerSocketPath: v3BrokerSocketPath,
+        expectedRegistryDigest: v3Identity.registry_digest,
+        expectedReleaseDigest: v3Identity.manifest_sha256,
+        sessionHandle: brokerSessionHandle,
+      }), runPiChat))
       .then((answer) => json(res, 200, { ok: true, answer }))
-      .catch((error) => json(res, 502, { ok: false, error: error.message || String(error) }));
+      .catch((error) => json(
+        res,
+        Number.isInteger(error?.statusCode) ? error.statusCode : 502,
+        { ok: false, error: error?.code || error.message || String(error) },
+      ));
     return;
   }
   if (req.method === "POST" && req.url === "/session/delete") {

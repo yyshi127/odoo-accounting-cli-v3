@@ -1,13 +1,17 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	V3_TOOL_NAMES,
 	addUnknownEffectGuidance,
-	runV3BrokerOperation,
-	runV3Query,
+	deriveCapabilityGetFromRegistryRead,
 } from "./odoo-v3-cli.mjs";
+import {
+	createFinalEvidenceBrokerClient,
+	registerFinalEvidenceSessionShutdown,
+} from "../final-evidence.mjs";
 import { verifyPiBridgeReleaseBinding } from "../release-binding.mjs";
 
 type JsonValue = unknown;
@@ -36,6 +40,66 @@ function v3ReleaseIsSelfBound() {
 }
 
 const exposeV3Tools = v3ReleaseIsSelfBound();
+const finalEvidenceFd = 4;
+let finalEvidenceBrokerClient:
+	ReturnType<typeof createFinalEvidenceBrokerClient> | null = null;
+let finalEvidenceFdClosed = false;
+
+function writeFinalEvidenceFrame(frame: Buffer) {
+	if (finalEvidenceFdClosed) {
+		return Promise.reject(new Error("final evidence channel is closed"));
+	}
+	const payload = Buffer.from(frame);
+	return new Promise<void>((resolve, reject) => {
+		let offset = 0;
+		const writeNext = () => {
+			fs.write(
+				finalEvidenceFd,
+				payload,
+				offset,
+				payload.length - offset,
+				null,
+				(error, written) => {
+					if (error || written <= 0) {
+						reject(error ?? new Error("final evidence write failed"));
+						return;
+					}
+					offset += written;
+					if (offset === payload.length) {
+						resolve();
+						return;
+					}
+					writeNext();
+				},
+			);
+		};
+		writeNext();
+	});
+}
+
+function closeFinalEvidenceChannel() {
+	if (finalEvidenceFdClosed) return Promise.resolve();
+	finalEvidenceFdClosed = true;
+	return new Promise<void>((resolve, reject) => {
+		fs.close(finalEvidenceFd, (error) => {
+			if (error) {
+				reject(error);
+				return;
+			}
+			resolve();
+		});
+	});
+}
+
+function runFinalEvidenceBrokerOperation(
+	action: string,
+	request: Record<string, JsonValue>,
+) {
+	if (finalEvidenceBrokerClient === null) {
+		throw new Error("V3 final evidence client is unavailable");
+	}
+	return finalEvidenceBrokerClient.run(action, request);
+}
 
 async function callOdoo(tool: string, params: Record<string, JsonValue> = {}) {
 	const response = await fetch(endpoint, {
@@ -63,13 +127,18 @@ function textResult(result: JsonValue) {
 	};
 }
 
-async function callV3Query(action: string, request: Record<string, JsonValue>) {
-	return textResult(await runV3Query(action, request));
+async function callV3Broker(action: string, request: Record<string, JsonValue>) {
+	const result = addUnknownEffectGuidance(
+		await runFinalEvidenceBrokerOperation(action, request),
+	);
+	return textResult(result);
 }
 
-async function callV3Broker(action: string, request: Record<string, JsonValue>) {
-	const result = addUnknownEffectGuidance(await runV3BrokerOperation(action, request));
-	return textResult(result);
+async function authenticatedV3RegistryRead() {
+	return await runFinalEvidenceBrokerOperation("read", {
+		capability_id: "acct.registry.list.v1",
+		parameters: {},
+	});
 }
 
 const v3OperationReferenceSchema = Type.Object({
@@ -189,10 +258,10 @@ const v3CapabilityListTool = defineTool({
 	name: V3_TOOL_NAMES.capabilityList,
 	label: "List Odoo V3 Capabilities",
 	description:
-		"List the complete validated local V3 accounting capability registry. Use this before selecting a read or write capability; this command does not contact Odoo or execute accounting work.",
+		"Read the signed V3 accounting capabilities visible to the authenticated Odoo user and bound company. Use this before selecting a read or write capability.",
 	parameters: Type.Object({}, { additionalProperties: false }),
 	async execute() {
-		return await callV3Query("registry.list", {});
+		return textResult(await authenticatedV3RegistryRead());
 	},
 });
 
@@ -200,12 +269,16 @@ const v3CapabilityGetTool = defineTool({
 	name: V3_TOOL_NAMES.capabilityGet,
 	label: "Get Odoo V3 Capability",
 	description:
-		"Get one exact validated V3 capability definition, including its strict input/output schemas, risk, permissions, approval, idempotency, verification and recovery requirements.",
+		"Select one capability from a signed authenticated V3 registry read. The selected item is derived and explicitly unsigned; the complete signed source is retained in the result.",
 	parameters: Type.Object({
 		capability_id: Type.String({ description: "Exact registered V3 capability ID." }),
 	}, { additionalProperties: false }),
 	async execute(_toolCallId, params) {
-		return await callV3Query("registry.get", params);
+		const signedRegistryRead = await authenticatedV3RegistryRead();
+		return textResult(deriveCapabilityGetFromRegistryRead(
+			signedRegistryRead,
+			params.capability_id,
+		));
 	},
 });
 
@@ -321,6 +394,13 @@ export default function (pi: ExtensionAPI) {
 		pi.registerTool(exportReportTool);
 	}
 	if (exposeV3Tools) {
+		finalEvidenceBrokerClient = createFinalEvidenceBrokerClient({
+			writeFrame: writeFinalEvidenceFrame,
+		});
+		registerFinalEvidenceSessionShutdown(pi, {
+			close: closeFinalEvidenceChannel,
+			finalize: finalEvidenceBrokerClient.finalize,
+		});
 		pi.registerTool(v3CapabilityListTool);
 		pi.registerTool(v3CapabilityGetTool);
 		pi.registerTool(v3ReadTool);

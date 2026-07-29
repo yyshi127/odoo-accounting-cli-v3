@@ -355,7 +355,7 @@ requests across all enabled domains.
 | F07 | Denied requests | Unauthorized, cross-company, expired, replayed, and tampered requests are refused with safe actionable errors |
 | F08 | Recovery journey | Pi can diagnose a failed/incorrect operation, present its registered recovery, obtain approval, execute it, and report verified outcome |
 
-### Frozen F01-F03/F05 scoring contract
+### Frozen F01-F05 scoring contract
 
 `tests/fixtures/pi_scenarios.v1.json` is the revision-6 frozen Chinese key
 scenario corpus. Its 38 scenarios cover every one of the 30 registered
@@ -416,30 +416,48 @@ no unreceipted attachment mutation can escape, or the handler must add a
 complete attachment lock and verification design.
 
 `tools/pi_scenario_gate.py` is an offline scorer. It requires an HMAC-attested
-Pi trace export and a host-local trusted key file; it does not invoke Pi, an
+Pi trace export, a host-local trusted key file, and an independently supplied
+exact capture-binding file; it does not invoke Pi, an
 LLM, Odoo, or any network service. The signed export binds the frozen corpus,
-the exact registry, the V3 release digest, Pi/Pi Bridge versions, fixture
-bindings, and every trace event. Each captured scenario retains the exact
+the exact validated ordered capability `registry_digest`, the V3 release
+digest, Pi/Pi Bridge versions, fixture
+bindings, provider, model, fixed system-prompt digest, tool-set digest, Pi
+runtime digest, and every trace event. Each captured scenario retains the exact
 frozen user input, capability selection, questions and user answers for every
 clarified field, finalized parameters, CLI input, write preview and approval
 parameter digest when applicable, Odoo execution, Odoo result, and audit
 receipt. Every applicable stage carries the full parameters or their canonical
 SHA-256 binding.
 
-The scorer rejects unknown fields, duplicate IDs, unsigned or untrusted
+The v3 scorer rejects unknown fields, duplicate IDs, unsigned or untrusted
 exports, signature/digest mismatches, obvious placeholder SHA-256 strings in
 fixture/material evidence bindings or captured trace digests, wrong corpus or
 registry digests, empty trace sets, invalid fixture types, and traces not bound
-to the frozen input.
-Missing scenarios remain in every denominator and fail trace coverage. F01
-passes only when the exact integer ratio is at least 95%; F02, F03, and F05
-require 100%. F05 requires every captured terminal result to record
-`business_succeeded:true` and an audit receipt identifier; a bridge-guided
-`business_succeeded:false` result is valid trace evidence but fails acceptance
-rather than being converted into success. The JSON report retains the exact
+to the frozen input. Legacy trace/report schema v1 is rejected.
+The trace and report registry field uses the same
+`registry_digest(validate_registry(...))` algorithm as runtime operations and
+release routing; substituting the raw outer registry-document SHA-256 is
+rejected.
+Missing scenarios remain in every applicable denominator and fail trace
+coverage. F01 passes only when the exact integer ratio is at least 95%; F02,
+F03, F04, and F05 require 100%. F03 covers only the 31 actually executed
+scenarios. F04 covers the 18 executed writes and requires one immutable
+operation/parameter/complete-preview approval binding, recomputable operation,
+precheck and preview digests, a requester distinct from the approver, and
+approval/execution inside the trace and approval validity windows. F05 requires every
+executed terminal result to be verification-, release-, registry-, capability-,
+operation-, tool-call-, result-, and receipt-bound, with recomputable retained
+result/verification bodies and database finalization for writes. Reads require
+no durable operation ID, no database finalization, and no Odoo write effect.
+Operation, receipt, and tool-call IDs cannot be reused across traces, and the
+assistant result is strict canonical JSON bound to the same evidence.
+A forced refusal passes only with zero write-tool calls, no Odoo effect, no
+operation or receipt, and a final answer that does not report success. The JSON
+report retains the exact
 numerator, denominator, decimal percentage, capture/release/attestation
-identity, stage-level parameter failures, verified-answer failures, and
-scenario-level failures.
+identity (including provider, model, system prompt, tool set, and Pi runtime
+digests), stage-level parameter failures, approval failures, verified-answer
+failures, and scenario-level failures.
 
 Run it only with an actual capture artifact:
 
@@ -447,18 +465,49 @@ Run it only with an actual capture artifact:
 PYTHONPATH=src python tools/pi_scenario_gate.py \
   --traces /path/to/pi-traces.json \
   --attestation-keys /host/private/pi-attestation-keys.json \
-  --expected-release-sha256 "$trusted_package_sha256"
+  --expected-capture-binding /host/private/pi-expected-capture-binding.json \
+  --trusted-authority-config /host/private/trusted-authority.json \
+  --expected-package-sha256 "$trusted_package_sha256" \
+  --expected-manifest-sha256 "$trusted_manifest_sha256" \
+  --expected-registry-digest "$trusted_registry_digest"
 ```
 
 The expected release digest must come from the independently trusted canonical
-package anchor; a signed capture from any other V3 build is rejected. Exit `0`
-means F01-F03/F05 and full trace coverage passed, exit `1` means valid
+package anchor. The capture binding must independently fix Pi/Pi Bridge
+versions, provider, model, system-prompt digest, tool-set digest, and Pi runtime
+digest; a signed capture from any other runtime is rejected. Without this
+binding the Python API can produce diagnostics only and
+`acceptance_passed` remains false. Exit `0`
+means F01-F05 and full trace coverage passed, exit `1` means valid
 captured evidence was scored but a gate failed, and exit `2` means no score was
 issued because the corpus or evidence was invalid. The attestation key file is
 host-local, is never included in the release, and maps trusted key IDs to at
 least 32 bytes of hex-encoded HMAC secret. Unit tests use an explicit test-only
 key and build synthetic trace documents solely to verify scorer behavior; they
-are not Pi evidence and must never be reported as an F01-F03/F05 acceptance pass.
+are not Pi evidence and must never be reported as an F01-F05 acceptance pass.
+
+The repository does not yet contain a complete trusted live producer for the
+v3 scenario-capture schema. The hardened `/chat` path does have a separate FD4
+stream generated from verified Broker calls and refuses any final JSON not
+supported by exactly one committed event. That terminal-answer control is not
+the full tool/event trace required for the 38-scenario gate. A production
+scenario producer must retain the complete trusted journal, wait for its
+defined terminal boundary and clean child exit, and correlate normalized events
+with Broker dispatch, independent approval, and Odoo receipts. It must never
+sign a caller-provided normalized event document.
+
+The retained scenario report is not accepted on its own assertions.
+`evidence pi-scenario-report-check` must reproduce it exactly from the raw trace,
+independent capture binding, trusted authorities, and routed release/registry,
+then emit the purpose-separated HMAC recomputation attestation.
+`goal-readiness` and `final-evidence-manifest-check` independently reopen the
+retained key path, reconstruct the bound claims, and verify that signature; the
+final checker also cross-binds the report, trace check, recomputation check, and
+Goal report. The production key path must be absolute, canonical, root-owned,
+non-symlink, and non-group/world-writable, with equally root-managed ancestors;
+no-follow, open-file identity, before/after identity, and bounded-read checks
+apply. Tests must keep zero traces, unsigned self-reports, changed claims, path
+replacement, and forged signatures fail closed.
 
 ## Gate G — promotion and rollback
 

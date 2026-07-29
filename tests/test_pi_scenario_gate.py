@@ -1,22 +1,38 @@
 import copy
 import hashlib
 import hmac
+import io
 import json
 import secrets
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
+from odoo_accounting_cli_v3.pi_evidence import PiEvidenceTrust
+from odoo_accounting_cli_v3.registry import registry_digest, validate_registry
+from pi_scenario_v3_fixture import (
+    CAPTURED_AT,
+    TRACE_COMPLETED_AT,
+    TRACE_STARTED_AT,
+    PiScenarioEvidenceFactory,
+    build_evidence_trust,
+    operation_digest_input_from_exchange,
+)
 from tools.pi_scenario_gate import (
     CorpusValidationError,
     TraceValidationError,
+    approval_binding_sha256,
+    canonical_json_text,
     canonical_sha256,
     load_attestation_keys,
+    main as pi_scenario_gate_main,
     material_path_value,
     resolve_fixture_bindings,
-    score_documents,
+    score_documents as _score_documents,
     trace_attestation_payload,
     validate_corpus,
-    validate_trace_document,
+    validate_trace_document as _validate_trace_document,
 )
 
 
@@ -26,19 +42,108 @@ REGISTRY_PATH = PROJECT_ROOT / "registry" / "capabilities.json"
 TEST_ATTESTATION_KEY_ID = "test-pi-capture-key"
 TEST_ATTESTATION_KEY = secrets.token_bytes(32)
 TEST_ATTESTATION_KEYS = {TEST_ATTESTATION_KEY_ID: TEST_ATTESTATION_KEY}
-TEST_RELEASE_SHA256 = hashlib.sha256(b"test v3 release").hexdigest()
-TEST_WRONG_RELEASE_SHA256 = hashlib.sha256(b"wrong test v3 release").hexdigest()
-TEST_APPROVAL_DIGEST = hashlib.sha256(b"approval binding").hexdigest()
+TEST_PACKAGE_SHA256 = hashlib.sha256(b"test v3 package").hexdigest()
+TEST_MANIFEST_SHA256 = hashlib.sha256(b"test v3 manifest").hexdigest()
+TEST_RELEASE_SHA256 = TEST_PACKAGE_SHA256
+TEST_WRONG_RELEASE_SHA256 = hashlib.sha256(b"wrong test v3 package").hexdigest()
+TEST_WRONG_MANIFEST_SHA256 = hashlib.sha256(b"wrong test v3 manifest").hexdigest()
 TEST_WRONG_PARAMETERS_DIGEST = hashlib.sha256(b"wrong parameters").hexdigest()
 TEST_WRONG_RECEIPT_DIGEST = hashlib.sha256(b"wrong receipt parameters").hexdigest()
 TEST_WRONG_CORPUS_DIGEST = hashlib.sha256(b"wrong corpus").hexdigest()
 TEST_WRONG_REGISTRY_DIGEST = hashlib.sha256(b"wrong registry").hexdigest()
+TEST_REGISTRY_DIGEST = registry_digest(
+    validate_registry(json.loads(REGISTRY_PATH.read_text(encoding="utf-8")))
+)
+
+
+def build_test_evidence_trust(
+    registry_document: object,
+) -> PiEvidenceTrust:
+    """Return release-pinned test trust without writing authority secrets."""
+
+    capabilities = validate_registry(registry_document)
+    return build_evidence_trust(
+        capabilities,
+        package_sha256=TEST_PACKAGE_SHA256,
+        manifest_sha256=TEST_MANIFEST_SHA256,
+        registry_digest=registry_digest(capabilities),
+    )
+
+
+def validate_trace_document(
+    trace_document: object,
+    corpus_document: object,
+    registry_document: object,
+    attestation_keys: dict[str, bytes],
+    *,
+    expected_release_sha256: str,
+    expected_capture_binding: dict[str, object] | None = None,
+    evidence_trust: PiEvidenceTrust | None = None,
+) -> dict[str, object]:
+    """Keep individual tests concise while exercising the strict production API."""
+
+    return _validate_trace_document(
+        trace_document,
+        corpus_document,
+        registry_document,
+        attestation_keys,
+        expected_package_sha256=expected_release_sha256,
+        expected_manifest_sha256=TEST_MANIFEST_SHA256,
+        expected_registry_digest=registry_digest(
+            validate_registry(registry_document)
+        ),
+        evidence_trust=(
+            evidence_trust
+            if evidence_trust is not None
+            else build_test_evidence_trust(registry_document)
+        ),
+        expected_capture_binding=expected_capture_binding,
+    )
+
+
+def score_documents(
+    corpus_document: object,
+    trace_document: object,
+    registry_document: object,
+    attestation_keys: dict[str, bytes],
+    *,
+    expected_release_sha256: str,
+    expected_capture_binding: dict[str, object] | None = None,
+    evidence_trust: PiEvidenceTrust | None = None,
+) -> dict[str, object]:
+    """Keep individual tests concise while exercising the strict production API."""
+
+    return _score_documents(
+        corpus_document,
+        trace_document,
+        registry_document,
+        attestation_keys,
+        expected_package_sha256=expected_release_sha256,
+        expected_manifest_sha256=TEST_MANIFEST_SHA256,
+        expected_registry_digest=registry_digest(
+            validate_registry(registry_document)
+        ),
+        evidence_trust=(
+            evidence_trust
+            if evidence_trust is not None
+            else build_test_evidence_trust(registry_document)
+        ),
+        expected_capture_binding=expected_capture_binding,
+    )
 
 
 class PiScenarioGateTest(unittest.TestCase):
     def setUp(self) -> None:
         self.registry = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
         self.corpus = json.loads(CORPUS_PATH.read_text(encoding="utf-8"))
+        capabilities = validate_registry(self.registry)
+        self.evidence_factory = PiScenarioEvidenceFactory(
+            capabilities,
+            package_sha256=TEST_PACKAGE_SHA256,
+            manifest_sha256=TEST_MANIFEST_SHA256,
+            registry_digest=registry_digest(capabilities),
+        )
+        self.evidence_trust = self.evidence_factory.trust
 
     def _bindings(self) -> dict[str, object]:
         return {
@@ -46,14 +151,160 @@ class PiScenarioGateTest(unittest.TestCase):
             for name, definition in self.corpus["fixture_bindings"].items()
         }
 
-    def _perfect_trace_document(self) -> dict[str, object]:
-        bindings = self._bindings()
-        access_by_capability = {
-            item["id"]: item["access"] for item in self.registry["capabilities"]
+    @staticmethod
+    def _expected_capture_binding() -> dict[str, object]:
+        return {
+            "pi_agent_version": "test-pi-build",
+            "pi_bridge_version": "test-bridge-build",
+            "provider": "test-provider",
+            "model": "test-model-immutable-20260717",
+            "system_prompt_sha256": hashlib.sha256(
+                b"fixed test system prompt"
+            ).hexdigest(),
+            "tool_set_sha256": hashlib.sha256(
+                b"fixed test Pi tool set"
+            ).hexdigest(),
+            "pi_runtime_sha256": hashlib.sha256(
+                b"fixed test Pi runtime"
+            ).hexdigest(),
         }
+
+    @staticmethod
+    def _event(trace: dict[str, object], event_type: str) -> dict[str, object]:
+        return next(
+            event["data"]
+            for event in trace["events"]
+            if event["type"] == event_type
+        )
+
+    def _trace(
+        self, document: dict[str, object], scenario_id: str
+    ) -> dict[str, object]:
+        return next(
+            trace
+            for trace in document["traces"]
+            if trace["scenario_id"] == scenario_id
+        )
+
+    def _assert_write_parameter_binding(
+        self, trace: dict[str, object], parameters: dict[str, object]
+    ) -> None:
+        expected_digest = canonical_sha256(parameters)
+        prepare = self._event(trace, "prepare")
+        preview = self._event(trace, "preview")
+        approval = self._event(trace, "approval_binding")
+        execution = self._event(trace, "odoo_execution")
+        self.assertEqual(prepare["parameters"], parameters)
+        self.assertEqual(preview["parameters"], parameters)
+        self.assertEqual(preview["parameters_sha256"], expected_digest)
+        self.assertEqual(
+            set(preview["preview"]),
+            {
+                "approval",
+                "business_description",
+                "capability_id",
+                "operation_digest",
+                "operation_id",
+                "operation_state",
+                "parameters",
+                "precheck",
+                "precheck_digest",
+                "precheck_identity",
+                "recovery",
+                "risk_level",
+            },
+        )
+        self.assertEqual(
+            preview["preview"]["operation_state"], "awaiting_approval"
+        )
+        self.assertEqual(
+            preview["preview"]["operation_digest"],
+            canonical_sha256(prepare["operation_digest_input"]),
+        )
+        self.assertEqual(
+            preview["preview"]["precheck_digest"],
+            canonical_sha256(preview["preview"]["precheck"]),
+        )
+        self.assertEqual(approval["parameters_sha256"], expected_digest)
+        self.assertEqual(approval["preview_sha256"], preview["preview_sha256"])
+        self.assertEqual(
+            {
+                prepare["operation_id"],
+                preview["operation_id"],
+                approval["operation_id"],
+                execution["operation_id"],
+            },
+            {prepare["operation_id"]},
+        )
+        self.assertNotEqual(
+            approval["requester_user_id"], approval["approver_user_id"]
+        )
+        self.assertEqual(
+            approval["approval_digest"], approval_binding_sha256(approval)
+        )
+
+    def _rehash_write_preview(self, trace: dict[str, object]) -> None:
+        preview_event = self._event(trace, "preview")
+        preview = preview_event["preview"]
+        preview["precheck_digest"] = canonical_sha256(preview["precheck"])
+        preview["precheck_identity"]["precheck_digest"] = preview[
+            "precheck_digest"
+        ]
+        preview_event["parameters_sha256"] = canonical_sha256(
+            preview_event["parameters"]
+        )
+        preview_event["preview_sha256"] = canonical_sha256(preview)
+        approval = self._event(trace, "approval_binding")
+        approval["parameters_sha256"] = preview_event["parameters_sha256"]
+        approval["preview_sha256"] = preview_event["preview_sha256"]
+        approval["approval_digest"] = approval_binding_sha256(approval)
+
+    def _replace_assistant_result(
+        self,
+        trace: dict[str, object],
+        **changes: object,
+    ) -> None:
+        assistant = self._event(trace, "assistant_final")
+        result = json.loads(assistant["text"])
+        result.update(changes)
+        assistant["text"] = canonical_json_text(result)
+
+    def _set_write_operation_id(
+        self,
+        trace: dict[str, object],
+        operation_id: str,
+    ) -> None:
+        self._event(trace, "prepare")["operation_id"] = operation_id
+        preview_event = self._event(trace, "preview")
+        preview_event["operation_id"] = operation_id
+        preview_event["preview"]["operation_id"] = operation_id
+        preview_event["preview"]["precheck_identity"][
+            "operation_id"
+        ] = operation_id
+        self._event(trace, "approval_binding")[
+            "operation_id"
+        ] = operation_id
+        for event_type in (
+            "odoo_execution",
+            "odoo_result",
+            "audit_receipt",
+        ):
+            self._event(trace, event_type)["operation_id"] = operation_id
+        self._replace_assistant_result(trace, operation_id=operation_id)
+        self._rehash_write_preview(trace)
+
+    def _perfect_trace_document(
+        self, *, registry_empty: bool = False
+    ) -> dict[str, object]:
+        bindings = self._bindings()
+        capability_by_id = {
+            item["id"]: item for item in self.registry["capabilities"]
+        }
+        actual_registry_digest = registry_digest(validate_registry(self.registry))
         traces = []
         for index, scenario in enumerate(self.corpus["scenarios"], start=1):
             expected = scenario["expected"]
+            capability = capability_by_id[expected["capability_id"]]
             parameters = resolve_fixture_bindings(
                 expected["material_parameters"], bindings
             )
@@ -67,107 +318,250 @@ class PiScenarioGateTest(unittest.TestCase):
                 for field in clarification["fields"]
             ]
             parameters_sha256 = canonical_sha256(parameters)
-            is_write = access_by_capability[expected["capability_id"]] == "write"
-            traces.append(
+            is_write = capability["access"] == "write"
+            is_refused = expected["clarification"]["outcome"] == "refused"
+            trusted_evidence = None
+            events = [
                 {
-                    "scenario_id": scenario["id"],
-                    "trace_id": f"trace-{index:03d}",
-                    "started_at": "2026-07-17T00:00:00Z",
-                    "completed_at": "2026-07-17T00:00:01Z",
-                    "events": [
+                    "type": "user_input",
+                    "data": {"text": scenario["input"]},
+                },
+                {
+                    "type": "capability_selected",
+                    "data": {"capability_id": expected["capability_id"]},
+                },
+                {
+                    "type": "clarification_completed",
+                    "data": clarification,
+                },
+            ]
+            if is_refused:
+                events.extend(
+                    [
                         {
-                            "sequence": 1,
-                            "type": "user_input",
-                            "data": {"text": scenario["input"]},
-                        },
-                        {
-                            "sequence": 2,
-                            "type": "capability_selected",
+                            "type": "execution_refused",
                             "data": {
-                                "capability_id": expected["capability_id"]
+                                "business_succeeded": False,
+                                "write_tool_call_count": 0,
+                                "odoo_effect": False,
+                                "operation_id": None,
+                                "receipt_id": None,
+                                "reason": "The unsafe accounting request was refused.",
                             },
                         },
                         {
-                            "sequence": 3,
-                            "type": "clarification_completed",
-                            "data": clarification,
+                            "type": "assistant_final",
+                            "data": {
+                                "text": canonical_json_text(
+                                    {
+                                        "status": "refused",
+                                        "business_succeeded": False,
+                                        "operation_id": None,
+                                        "receipt_id": None,
+                                        "result_digest": None,
+                                    }
+                                ),
+                            },
                         },
+                    ]
+                )
+            else:
+                bundle = self.evidence_factory.build(
+                    index=index,
+                    scenario_id=scenario["id"],
+                    capability_id=expected["capability_id"],
+                    parameters=parameters,
+                    registry_empty=(
+                        registry_empty
+                        and expected["capability_id"]
+                        == "acct.registry.list.v1"
+                    ),
+                )
+                trusted_evidence = bundle.evidence
+                operation_reference = bundle.operation_id
+                receipt_id = bundle.receipt_id
+                tool_call_id = bundle.tool_call_id
+                result_body = bundle.result_body
+                result_digest = bundle.result_digest
+                verification_evidence = copy.deepcopy(
+                    bundle.verification_evidence
+                )
+                verification_digest = canonical_sha256(
+                    verification_evidence
+                )
+                execution_event = {
+                    "type": "odoo_execution",
+                    "data": {
+                        "parameters_sha256": parameters_sha256,
+                        "operation_id": operation_reference,
+                        "tool_call_id": tool_call_id,
+                        "capability_id": expected["capability_id"],
+                        "release_digest": TEST_MANIFEST_SHA256,
+                        "registry_digest": actual_registry_digest,
+                        "executed_at": bundle.executed_at,
+                    },
+                }
+                result_event = {
+                    "type": "odoo_result",
+                    "data": {
+                        "parameters_sha256": parameters_sha256,
+                        "operation_id": operation_reference,
+                        "tool_call_id": tool_call_id,
+                        "capability_id": expected["capability_id"],
+                        "release_digest": TEST_MANIFEST_SHA256,
+                        "registry_digest": actual_registry_digest,
+                        "result_body": result_body,
+                        "result_digest": result_digest,
+                        "business_succeeded": True,
+                        "verification": {
+                            "passed": True,
+                            "evidence": verification_evidence,
+                            "evidence_digest": verification_digest,
+                            "verified_at": bundle.verified_at,
+                        },
+                        "database_finalized": is_write,
+                        "odoo_effect": is_write,
+                    },
+                }
+                receipt_event = {
+                    "type": "audit_receipt",
+                    "data": {
+                        "parameters_sha256": parameters_sha256,
+                        "receipt_id": receipt_id,
+                        "operation_id": operation_reference,
+                        "tool_call_id": tool_call_id,
+                        "capability_id": expected["capability_id"],
+                        "release_digest": TEST_MANIFEST_SHA256,
+                        "registry_digest": actual_registry_digest,
+                        "result_digest": result_digest,
+                        "verification_evidence_digest": verification_digest,
+                        "issued_at": bundle.receipt_issued_at,
+                    },
+                }
+                assistant_event = {
+                    "type": "assistant_final",
+                    "data": {
+                        "text": canonical_json_text(
+                            {
+                                "status": "verified_success",
+                                "business_succeeded": True,
+                                "operation_id": operation_reference,
+                                "receipt_id": receipt_id,
+                                "result_digest": result_digest,
+                            }
+                        ),
+                        "tool_call_id": tool_call_id,
+                    },
+                }
+                events.extend(
+                    [
                         {
-                            "sequence": 4,
                             "type": "material_parameters_finalized",
                             "data": {"parameters": parameters},
                         },
                         {
-                            "sequence": 5,
                             "type": "cli_input",
                             "data": {"parameters": copy.deepcopy(parameters)},
                         },
-                        {
-                            "sequence": 6,
-                            "type": "prepare",
-                            "data": {
-                                "applicable": is_write,
-                                "parameters": copy.deepcopy(parameters) if is_write else None,
+                    ]
+                )
+                if is_write:
+                    operation_id = bundle.operation_id
+                    operation_digest_input = (
+                        operation_digest_input_from_exchange(
+                            trusted_evidence
+                        )
+                    )
+                    preview_body = copy.deepcopy(
+                        trusted_evidence["preview_exchange"][
+                            "broker_response"
+                        ]["data"]
+                    )
+                    preview_body.pop("approval_challenge")
+                    preview_sha256 = canonical_sha256(preview_body)
+                    raw_approval = trusted_evidence[
+                        "approve_execute_exchange"
+                    ]["broker_request"]["approval"]
+                    approval = {
+                        "operation_id": operation_id,
+                        "parameters_sha256": parameters_sha256,
+                        "preview_sha256": preview_sha256,
+                        "requester_user_id": raw_approval["user_id"],
+                        "approver_user_id": raw_approval[
+                            "approver_user_id"
+                        ],
+                        "approved_at": raw_approval["issued_at"],
+                        "expires_at": raw_approval["expires_at"],
+                    }
+                    approval["approval_digest"] = approval_binding_sha256(
+                        approval
+                    )
+                    events.extend(
+                        [
+                            {
+                                "type": "prepare",
+                                "data": {
+                                    "operation_id": operation_id,
+                                    "parameters": copy.deepcopy(parameters),
+                                    "operation_digest_input": (
+                                        operation_digest_input
+                                    ),
+                                },
                             },
-                        },
-                        {
-                            "sequence": 7,
-                            "type": "preview",
-                            "data": {
-                                "applicable": is_write,
-                                "parameters": copy.deepcopy(parameters) if is_write else None,
+                            {
+                                "type": "preview",
+                                "data": {
+                                    "operation_id": operation_id,
+                                    "parameters": copy.deepcopy(parameters),
+                                    "parameters_sha256": parameters_sha256,
+                                    "preview": preview_body,
+                                    "preview_sha256": preview_sha256,
+                                },
                             },
-                        },
-                        {
-                            "sequence": 8,
-                            "type": "approval_binding",
-                            "data": {
-                                "applicable": is_write,
-                                "parameters_sha256": parameters_sha256 if is_write else None,
-                                "approval_digest": TEST_APPROVAL_DIGEST if is_write else None,
+                            {
+                                "type": "approval_binding",
+                                "data": approval,
                             },
-                        },
-                        {
-                            "sequence": 9,
-                            "type": "odoo_execution",
-                            "data": {
-                                "parameters_sha256": parameters_sha256,
-                                "execution_reference": f"odoo-execution-{index:03d}",
-                            },
-                        },
-                        {
-                            "sequence": 10,
-                            "type": "odoo_result",
-                            "data": {
-                                "parameters_sha256": parameters_sha256,
-                                "result_reference": f"odoo-result-{index:03d}",
-                                "business_succeeded": True,
-                                "bridge_guidance": None,
-                            },
-                        },
-                        {
-                            "sequence": 11,
-                            "type": "audit_receipt",
-                            "data": {
-                                "parameters_sha256": parameters_sha256,
-                                "receipt_id": f"receipt-{index:03d}",
-                            },
-                        },
-                    ],
+                        ]
+                    )
+                events.extend(
+                    [
+                        execution_event,
+                        result_event,
+                        receipt_event,
+                        assistant_event,
+                    ]
+                )
+            for sequence, event in enumerate(events, start=1):
+                event["sequence"] = sequence
+            traces.append(
+                {
+                    "scenario_id": scenario["id"],
+                    "trace_id": f"trace-{index:03d}",
+                    "started_at": TRACE_STARTED_AT.isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    "completed_at": TRACE_COMPLETED_AT.isoformat().replace(
+                        "+00:00", "Z"
+                    ),
+                    "events": events,
+                    "trusted_evidence": trusted_evidence,
                 }
             )
         document = {
-            "schema_version": "odoo-accounting-cli-v3.pi-traces.v1",
+            "schema_version": "odoo-accounting-cli-v3.pi-traces.v3",
             "corpus_id": self.corpus["corpus_id"],
             "corpus_sha256": canonical_sha256(self.corpus),
-            "registry_sha256": canonical_sha256(self.registry),
+            "registry_digest": actual_registry_digest,
             "capture": {
                 "source": "pi_agent",
                 "run_id": "pi-run-20260717-001",
-                "captured_at": "2026-07-17T00:01:00Z",
-                "pi_agent_version": "test-pi-build",
-                "pi_bridge_version": "test-bridge-build",
-                "v3_release_sha256": TEST_RELEASE_SHA256,
+                "captured_at": CAPTURED_AT.isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                **self._expected_capture_binding(),
+                "v3_manifest_sha256": TEST_MANIFEST_SHA256,
+                "v3_package_sha256": TEST_PACKAGE_SHA256,
             },
             "bindings": bindings,
             "traces": traces,
@@ -186,6 +580,65 @@ class PiScenarioGateTest(unittest.TestCase):
                 TEST_ATTESTATION_KEY, payload, hashlib.sha256
             ).hexdigest(),
         }
+
+    def _run_cli(
+        self,
+        trace_document: dict[str, object],
+        expected_capture_binding: dict[str, object],
+    ) -> tuple[int, str, str]:
+        documents = {
+            "pi_scenarios.v1.json": self.corpus,
+            "capabilities.json": self.registry,
+            "pi-traces.json": trace_document,
+            "attestation-keys.json": {
+                "schema_version": (
+                    "odoo-accounting-cli-v3.pi-attestation-keys.v1"
+                ),
+                "keys": {
+                    TEST_ATTESTATION_KEY_ID: {
+                        "secret_hex": TEST_ATTESTATION_KEY.hex()
+                    }
+                },
+            },
+            "capture-binding.json": expected_capture_binding,
+        }
+
+        def load(path: Path) -> object:
+            return copy.deepcopy(documents[path.name])
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with (
+            patch(
+                "tools.pi_scenario_gate.load_json_document",
+                side_effect=load,
+            ),
+            patch(
+                "tools.pi_scenario_gate.load_pi_evidence_trust",
+                return_value=self.evidence_trust,
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            result = pi_scenario_gate_main(
+                [
+                    "--traces",
+                    "pi-traces.json",
+                    "--attestation-keys",
+                    "attestation-keys.json",
+                    "--expected-package-sha256",
+                    TEST_PACKAGE_SHA256,
+                    "--expected-manifest-sha256",
+                    TEST_MANIFEST_SHA256,
+                    "--expected-registry-digest",
+                    registry_digest(validate_registry(self.registry)),
+                    "--expected-capture-binding",
+                    "capture-binding.json",
+                    "--trusted-authority-config",
+                    "trusted-authority.json",
+                ]
+            )
+        return result, stdout.getvalue(), stderr.getvalue()
 
     def test_repository_corpus_is_strict_and_covers_every_registered_capability(self) -> None:
         validate_corpus(self.corpus, self.registry)
@@ -622,43 +1075,13 @@ class PiScenarioGateTest(unittest.TestCase):
                 scenario["expected"]["material_parameters"], self._bindings()
             )
             self.assertEqual(trace["events"][4]["data"], {"parameters": resolved})
-            self.assertEqual(
-                trace["events"][5]["data"],
-                {"applicable": True, "parameters": resolved},
-            )
-            self.assertEqual(
-                trace["events"][6]["data"],
-                {"applicable": True, "parameters": resolved},
-            )
-            self.assertEqual(
-                trace["events"][7]["data"],
-                {
-                    "applicable": True,
-                    "parameters_sha256": canonical_sha256(resolved),
-                    "approval_digest": TEST_APPROVAL_DIGEST,
-                },
-            )
+            self._assert_write_parameter_binding(trace, resolved)
         for scenario in draft_cancel_scenarios:
             trace = traces[scenario["id"]]
             resolved = resolve_fixture_bindings(
                 scenario["expected"]["material_parameters"], self._bindings()
             )
-            self.assertEqual(
-                trace["events"][5]["data"],
-                {"applicable": True, "parameters": resolved},
-            )
-            self.assertEqual(
-                trace["events"][6]["data"],
-                {"applicable": True, "parameters": resolved},
-            )
-            self.assertEqual(
-                trace["events"][7]["data"],
-                {
-                    "applicable": True,
-                    "parameters_sha256": canonical_sha256(resolved),
-                    "approval_digest": TEST_APPROVAL_DIGEST,
-                },
-            )
+            self._assert_write_parameter_binding(trace, resolved)
         payment_cancel_trace = traces[payment_cancel_scenario["id"]]
         resolved_payment_cancel = resolve_fixture_bindings(
             payment_cancel_scenario["expected"]["material_parameters"],
@@ -668,21 +1091,8 @@ class PiScenarioGateTest(unittest.TestCase):
             payment_cancel_trace["events"][4]["data"],
             {"parameters": resolved_payment_cancel},
         )
-        self.assertEqual(
-            payment_cancel_trace["events"][5]["data"],
-            {"applicable": True, "parameters": resolved_payment_cancel},
-        )
-        self.assertEqual(
-            payment_cancel_trace["events"][6]["data"],
-            {"applicable": True, "parameters": resolved_payment_cancel},
-        )
-        self.assertEqual(
-            payment_cancel_trace["events"][7]["data"],
-            {
-                "applicable": True,
-                "parameters_sha256": canonical_sha256(resolved_payment_cancel),
-                "approval_digest": TEST_APPROVAL_DIGEST,
-            },
+        self._assert_write_parameter_binding(
+            payment_cancel_trace, resolved_payment_cancel
         )
 
     def test_corpus_rejects_duplicate_ids_unknown_fields_and_incomplete_parameters(self) -> None:
@@ -781,8 +1191,18 @@ class PiScenarioGateTest(unittest.TestCase):
             self.registry,
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
+            expected_capture_binding=self._expected_capture_binding(),
         )
         self.assertTrue(report["acceptance_passed"])
+        self.assertTrue(report["capture_binding_verified"])
+        self.assertEqual(
+            report["registry_digest"],
+            registry_digest(validate_registry(self.registry)),
+        )
+        self.assertEqual(
+            report["expected_capture_binding_sha256"],
+            canonical_sha256(self._expected_capture_binding()),
+        )
         self.assertEqual(
             report["trace_coverage"],
             {
@@ -792,11 +1212,1172 @@ class PiScenarioGateTest(unittest.TestCase):
                 "missing_scenario_ids": [],
             },
         )
-        for gate_id in ("F01", "F02", "F03", "F05"):
+        self.assertEqual(
+            report["schema_version"],
+            "odoo-accounting-cli-v3.pi-gate-report.v3",
+        )
+        self.assertTrue(report["runtime_evidence_verified"])
+        self.assertEqual(
+            report["runtime_evidence"],
+            {
+                "verified": True,
+                "verified_trace_count": 31,
+                "expected_trace_count": 31,
+                "read_exchange_count": 13,
+                "write_exchange_count": 18,
+                "write_authority_signature_verified_count": 18,
+                "acl_independently_rechecked": False,
+            },
+        )
+        for gate_id in ("F01", "F02", "F05"):
             self.assertEqual(report["gates"][gate_id]["numerator"], 38)
             self.assertEqual(report["gates"][gate_id]["denominator"], 38)
             self.assertEqual(report["gates"][gate_id]["percent"], "100.00")
             self.assertTrue(report["gates"][gate_id]["passed"])
+        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F03"]["denominator"], 31)
+        self.assertEqual(report["gates"]["F03"]["percent"], "100.00")
+        self.assertTrue(report["gates"]["F03"]["passed"])
+        self.assertEqual(report["gates"]["F04"]["numerator"], 18)
+        self.assertEqual(report["gates"]["F04"]["denominator"], 18)
+        self.assertEqual(report["gates"]["F04"]["percent"], "100.00")
+        self.assertTrue(report["gates"]["F04"]["passed"])
+
+    def test_dedicated_routes_are_captured_without_generic_masquerade(
+        self,
+    ) -> None:
+        trace_document = self._perfect_trace_document()
+
+        registry = self._trace(
+            trace_document, "pi-v1-registry-list"
+        )["trusted_evidence"]["read_exchange"]
+        self.assertEqual(registry["action"], "read")
+        self.assertEqual(
+            registry["tool_name"], "odoo_v3_capability_list"
+        )
+        self.assertEqual(registry["pi_arguments"], {})
+        self.assertEqual(registry["broker_request"]["parameters"], {})
+        self.assertIsNone(registry["operation_before"])
+        self.assertIsNone(registry["operation_after"])
+
+        diagnostics = self._trace(
+            trace_document, "pi-v1-operation-diagnostics"
+        )["trusted_evidence"]["read_exchange"]
+        self.assertEqual(
+            diagnostics["action"], "operation.diagnostics"
+        )
+        self.assertEqual(
+            diagnostics["tool_name"],
+            "odoo_v3_operation_diagnostics",
+        )
+        self.assertEqual(
+            diagnostics["pi_arguments"],
+            {
+                "company_id": self._bindings()["company_primary_id"],
+                "operation_id": self._bindings()[
+                    "failed_operation_id"
+                ],
+            },
+        )
+        self.assertIsNotNone(diagnostics["operation_before"])
+        self.assertIsNone(diagnostics["operation_after"])
+
+        recovery = self._trace(
+            trace_document, "pi-v1-recovery-execute"
+        )["trusted_evidence"]
+        recover = recovery["prepare_exchange"]
+        self.assertEqual(recover["action"], "operation.recover")
+        self.assertEqual(
+            recover["tool_name"], "odoo_v3_operation_recover"
+        )
+        self.assertEqual(
+            set(recover["pi_arguments"]),
+            {
+                "origin_operation_id",
+                "recovery_date",
+                "reason",
+                "idempotency_key",
+            },
+        )
+        self.assertIn(
+            recover["operation_before"]["state"],
+            {"completed", "failed"},
+        )
+        self.assertEqual(
+            recover["operation_after"]["capability_id"],
+            "acct.recovery.execute.v1",
+        )
+        self.assertEqual(
+            recover["operation_after"]["state"], "prepared"
+        )
+        self.assertEqual(
+            recovery["preview_exchange"]["action"],
+            "operation.preview",
+        )
+        self.assertEqual(
+            recovery["approve_execute_exchange"]["action"],
+            "operation.approve_execute",
+        )
+
+    def test_trace_requires_independent_package_manifest_and_registry_identities(
+        self,
+    ) -> None:
+        trace_document = self._perfect_trace_document()
+        expected_registry = registry_digest(validate_registry(self.registry))
+
+        _validate_trace_document(
+            trace_document,
+            self.corpus,
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_package_sha256=TEST_PACKAGE_SHA256,
+            expected_manifest_sha256=TEST_MANIFEST_SHA256,
+            expected_registry_digest=expected_registry,
+            evidence_trust=self.evidence_trust,
+        )
+
+        cases = (
+            (
+                "package",
+                {
+                    "expected_package_sha256": TEST_WRONG_RELEASE_SHA256,
+                    "expected_manifest_sha256": TEST_MANIFEST_SHA256,
+                    "expected_registry_digest": expected_registry,
+                },
+                "package SHA-256 mismatch",
+            ),
+            (
+                "manifest",
+                {
+                    "expected_package_sha256": TEST_PACKAGE_SHA256,
+                    "expected_manifest_sha256": TEST_WRONG_MANIFEST_SHA256,
+                    "expected_registry_digest": expected_registry,
+                },
+                "manifest SHA-256 mismatch",
+            ),
+            (
+                "registry",
+                {
+                    "expected_package_sha256": TEST_PACKAGE_SHA256,
+                    "expected_manifest_sha256": TEST_MANIFEST_SHA256,
+                    "expected_registry_digest": TEST_WRONG_REGISTRY_DIGEST,
+                },
+                "registry_digest mismatch",
+            ),
+        )
+        for label, identities, expected_error in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(
+                TraceValidationError,
+                expected_error,
+            ):
+                _validate_trace_document(
+                    trace_document,
+                    self.corpus,
+                    self.registry,
+                    TEST_ATTESTATION_KEYS,
+                    evidence_trust=self.evidence_trust,
+                    **identities,
+                )
+
+    def test_read_and_write_effect_semantics_are_rejected_fail_closed(
+        self,
+    ) -> None:
+        cases = {
+            "read_odoo_effect": (
+                "pi-v1-trial-balance",
+                "odoo_effect",
+                True,
+            ),
+            "read_database_finalized": (
+                "pi-v1-trial-balance",
+                "database_finalized",
+                True,
+            ),
+            "write_odoo_effect": (
+                "pi-v1-customer-invoice",
+                "odoo_effect",
+                False,
+            ),
+            "write_database_finalized": (
+                "pi-v1-customer-invoice",
+                "database_finalized",
+                False,
+            ),
+        }
+        for name, (scenario_id, field, value) in cases.items():
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                trace = self._trace(trace_document, scenario_id)
+                self._event(trace, "odoo_result")[field] = value
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    "odoo_result is not the exact trusted response",
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_execution_verification_and_receipt_timeline_fail_closed(
+        self,
+    ) -> None:
+        cases = {
+            "approval_before_trace": (
+                "approval_binding",
+                ("approved_at",),
+                "2026-07-16T23:59:59.900000Z",
+            ),
+            "execution_after_trace": (
+                "odoo_execution",
+                ("executed_at",),
+                "2026-07-17T00:01:00.100000Z",
+            ),
+            "verification_before_execution": (
+                "odoo_result",
+                ("verification", "verified_at"),
+                "2026-07-17T00:00:00.200000Z",
+            ),
+            "verification_after_trace": (
+                "odoo_result",
+                ("verification", "verified_at"),
+                "2026-07-17T00:01:00.100000Z",
+            ),
+            "receipt_before_verification": (
+                "audit_receipt",
+                ("issued_at",),
+                "2026-07-17T00:00:00.312000Z",
+            ),
+            "receipt_after_trace": (
+                "audit_receipt",
+                ("issued_at",),
+                "2026-07-17T00:01:00.100000Z",
+            ),
+        }
+        for name, (event_type, path, value) in cases.items():
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                trace = self._trace(
+                    trace_document, "pi-v1-customer-invoice"
+                )
+                target = self._event(trace, event_type)
+                for field in path[:-1]:
+                    target = target[field]
+                target[path[-1]] = value
+                if event_type == "approval_binding":
+                    target["approval_digest"] = approval_binding_sha256(
+                        target
+                    )
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    r"(not raw-bound|not broker-bound)",
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_legacy_v1_and_v2_trace_schemas_are_rejected_fail_closed(
+        self,
+    ) -> None:
+        for version in ("v1", "v2"):
+            with self.subTest(version=version):
+                trace_document = self._perfect_trace_document()
+                trace_document["schema_version"] = (
+                    f"odoo-accounting-cli-v3.pi-traces.{version}"
+                )
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    r"schema_version must be "
+                    r"odoo-accounting-cli-v3\.pi-traces\.v3",
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_missing_legacy_and_forged_trusted_evidence_are_rejected(
+        self,
+    ) -> None:
+        cases = {
+            "missing": lambda trace: trace.update(
+                {"trusted_evidence": None}
+            ),
+            "legacy_summary": lambda trace: trace.update(
+                {
+                    "trusted_evidence": {
+                        "result_digest": TEST_WRONG_RECEIPT_DIGEST
+                    }
+                }
+            ),
+            "forged_pi_result": lambda trace: trace["trusted_evidence"][
+                "read_exchange"
+            ]["pi_result"].update({"details": {"ok": True}}),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                trace = self._trace(
+                    trace_document, "pi-v1-trial-balance"
+                )
+                mutate(trace)
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    "trusted_evidence rejected",
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_forged_normalized_preview_is_rejected_even_when_rehashed(
+        self,
+    ) -> None:
+        trace_document = self._perfect_trace_document()
+        trace = self._trace(
+            trace_document, "pi-v1-customer-invoice"
+        )
+        self._event(trace, "preview")["preview"][
+            "business_description"
+        ] = "Forged normalized preview"
+        self._rehash_write_preview(trace)
+        self._resign(trace_document)
+
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "preview is not the exact raw preview projection",
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_forged_normalized_verification_is_rejected_when_rehashed(
+        self,
+    ) -> None:
+        trace_document = self._perfect_trace_document()
+        trace = self._trace(trace_document, "pi-v1-trial-balance")
+        verification = self._event(trace, "odoo_result")["verification"]
+        verification["evidence"]["output_schema_verified"] = False
+        forged_digest = canonical_sha256(verification["evidence"])
+        verification["evidence_digest"] = forged_digest
+        self._event(trace, "audit_receipt")[
+            "verification_evidence_digest"
+        ] = forged_digest
+        self._resign(trace_document)
+
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "read verification is not receipt-bound",
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_whole_trace_wrapped_into_future_time_is_rejected(
+        self,
+    ) -> None:
+        trace_document = self._perfect_trace_document()
+        trace = self._trace(trace_document, "pi-v1-trial-balance")
+        trace["started_at"] = "2026-07-18T00:00:00.000000Z"
+        trace["completed_at"] = "2026-07-18T00:01:00.000000Z"
+        exchange = trace["trusted_evidence"]["read_exchange"]
+        exchange["occurred_at"] = "2026-07-18T00:00:00.300000Z"
+        exchange["broker_dispatched_at"] = (
+            "2026-07-18T00:00:00.310000Z"
+        )
+        exchange["broker_responded_at"] = (
+            "2026-07-18T00:00:00.320000Z"
+        )
+        exchange["tool_completed_at"] = (
+            "2026-07-18T00:00:00.330000Z"
+        )
+        self._event(trace, "odoo_execution")[
+            "executed_at"
+        ] = "2026-07-18T00:00:00.310000Z"
+        self._event(trace, "odoo_result")["verification"][
+            "verified_at"
+        ] = "2026-07-18T00:00:00.315000Z"
+        self._event(trace, "audit_receipt")[
+            "issued_at"
+        ] = "2026-07-18T00:00:00.315000Z"
+        self._resign(trace_document)
+
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "trusted_evidence rejected: exchange chronology is invalid",
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_trace_completed_after_capture_is_rejected(self) -> None:
+        trace_document = self._perfect_trace_document()
+        trace = self._trace(trace_document, "pi-v1-trial-balance")
+        trace["completed_at"] = "2026-07-17T00:01:00.000001Z"
+        self._resign(trace_document)
+
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            r"completed_at exceeds capture\.captured_at",
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_signed_empty_registry_response_is_rejected(self) -> None:
+        trace_document = self._perfect_trace_document(
+            registry_empty=True
+        )
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "trusted_evidence rejected: registry result is empty or "
+            "internally inconsistent",
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_capture_binds_runtime_prompt_tools_provider_and_model(self) -> None:
+        cases = {
+            "missing_provider": (
+                lambda capture: capture.pop("provider"),
+                "traces.capture fields invalid",
+            ),
+            "placeholder_system_prompt": (
+                lambda capture: capture.update({"system_prompt_sha256": "a" * 64}),
+                "system_prompt_sha256 must not be a placeholder SHA-256",
+            ),
+        }
+        for name, (mutate, expected_error) in cases.items():
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                mutate(trace_document["capture"])
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError, expected_error
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_capture_must_match_independently_supplied_binding(self) -> None:
+        trace_document = self._perfect_trace_document()
+        expected_binding = self._expected_capture_binding()
+        report = score_documents(
+            self.corpus,
+            trace_document,
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_release_sha256=TEST_RELEASE_SHA256,
+            expected_capture_binding=expected_binding,
+        )
+        self.assertTrue(report["acceptance_passed"])
+        self.assertTrue(report["capture_binding_verified"])
+        self.assertEqual(
+            report["expected_capture_binding_sha256"],
+            canonical_sha256(expected_binding),
+        )
+
+        trace_document["capture"]["provider"] = "attacker-provider"
+        self._resign(trace_document)
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "does not match expected_capture_binding",
+        ):
+            score_documents(
+                self.corpus,
+                trace_document,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+                expected_capture_binding=expected_binding,
+            )
+
+    def test_cli_requires_expected_capture_binding_path(self) -> None:
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            pi_scenario_gate_main(
+                [
+                    "--traces",
+                    "pi-traces.json",
+                    "--attestation-keys",
+                    "attestation-keys.json",
+                    "--expected-package-sha256",
+                    TEST_PACKAGE_SHA256,
+                    "--expected-manifest-sha256",
+                    TEST_MANIFEST_SHA256,
+                    "--expected-registry-digest",
+                    registry_digest(validate_registry(self.registry)),
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--expected-capture-binding", stderr.getvalue())
+
+    def test_unverified_capture_binding_cannot_pass_acceptance(self) -> None:
+        report = score_documents(
+            self.corpus,
+            self._perfect_trace_document(),
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_release_sha256=TEST_RELEASE_SHA256,
+        )
+        self.assertFalse(report["capture_binding_verified"])
+        self.assertIsNone(report["expected_capture_binding_sha256"])
+        self.assertFalse(report["acceptance_passed"])
+
+    def test_cli_report_proves_capture_binding_was_verified(self) -> None:
+        binding = self._expected_capture_binding()
+        result, stdout, stderr = self._run_cli(
+            self._perfect_trace_document(), binding
+        )
+        self.assertEqual(result, 0)
+        self.assertEqual(stderr, "")
+        report = json.loads(stdout)
+        self.assertTrue(report["capture_binding_verified"])
+        self.assertEqual(
+            report["expected_capture_binding_sha256"],
+            canonical_sha256(binding),
+        )
+        self.assertTrue(report["acceptance_passed"])
+
+    def test_cli_rejects_every_capture_binding_field_drift(self) -> None:
+        binding = self._expected_capture_binding()
+        for field in binding:
+            with self.subTest(field=field):
+                trace_document = self._perfect_trace_document()
+                if field.endswith("_sha256"):
+                    trace_document["capture"][field] = hashlib.sha256(
+                        f"drifted {field}".encode("utf-8")
+                    ).hexdigest()
+                else:
+                    trace_document["capture"][field] += "-drifted"
+                self._resign(trace_document)
+                result, stdout, stderr = self._run_cli(
+                    trace_document, binding
+                )
+                self.assertEqual(result, 2)
+                self.assertEqual(stdout, "")
+                self.assertIn(
+                    "does not match expected_capture_binding", stderr
+                )
+
+        unexpected = self._expected_capture_binding()
+        unexpected["extra"] = "not-allowed"
+        result, stdout, stderr = self._run_cli(
+            self._perfect_trace_document(), unexpected
+        )
+        self.assertEqual(result, 2)
+        self.assertEqual(stdout, "")
+        self.assertIn("expected_capture_binding fields invalid", stderr)
+
+    def test_safe_refusal_has_no_execution_path_and_passes(self) -> None:
+        trace_document = self._perfect_trace_document()
+        refused_trace = self._trace(trace_document, "pi-v1-refund")
+        self.assertEqual(
+            [event["type"] for event in refused_trace["events"]],
+            [
+                "user_input",
+                "capability_selected",
+                "clarification_completed",
+                "execution_refused",
+                "assistant_final",
+            ],
+        )
+        report = score_documents(
+            self.corpus,
+            trace_document,
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_release_sha256=TEST_RELEASE_SHA256,
+            expected_capture_binding=self._expected_capture_binding(),
+        )
+        self.assertNotIn("pi-v1-refund", report["gates"]["F03"]["failures"])
+        self.assertNotIn("pi-v1-refund", report["gates"]["F04"]["failures"])
+        self.assertNotIn("pi-v1-refund", report["gates"]["F05"]["failures"])
+        self.assertTrue(report["acceptance_passed"])
+
+    def test_refused_scenario_cannot_reuse_fake_success_execution_events(self) -> None:
+        trace_document = self._perfect_trace_document()
+        refused_trace = self._trace(trace_document, "pi-v1-refund")
+        write_trace = self._trace(trace_document, "pi-v1-customer-invoice")
+        fake_events = copy.deepcopy(write_trace["events"])
+        fake_events[0]["data"] = {"text": refused_trace["events"][0]["data"]["text"]}
+        fake_events[1]["data"] = copy.deepcopy(refused_trace["events"][1]["data"])
+        fake_events[2]["data"] = copy.deepcopy(refused_trace["events"][2]["data"])
+        refused_trace["events"] = fake_events
+        self._resign(trace_document)
+        with self.assertRaisesRegex(
+            TraceValidationError, "exactly the normalized refused Pi events"
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_write_trace_without_approval_is_rejected(self) -> None:
+        trace_document = self._perfect_trace_document()
+        invoice_trace = self._trace(trace_document, "pi-v1-customer-invoice")
+        invoice_trace["events"] = [
+            event
+            for event in invoice_trace["events"]
+            if event["type"] != "approval_binding"
+        ]
+        for sequence, event in enumerate(invoice_trace["events"], start=1):
+            event["sequence"] = sequence
+        self._resign(trace_document)
+        with self.assertRaisesRegex(
+            TraceValidationError, "exactly the normalized write Pi events"
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_opaque_preview_is_rejected_even_when_outer_digests_match(
+        self,
+    ) -> None:
+        trace_document = self._perfect_trace_document()
+        trace = self._trace(trace_document, "pi-v1-customer-invoice")
+        preview_event = self._event(trace, "preview")
+        preview_event["preview"] = {"opaque": "approved"}
+        preview_event["preview_sha256"] = canonical_sha256(
+            preview_event["preview"]
+        )
+        approval = self._event(trace, "approval_binding")
+        approval["preview_sha256"] = preview_event["preview_sha256"]
+        approval["approval_digest"] = approval_binding_sha256(approval)
+        self._resign(trace_document)
+        with self.assertRaisesRegex(
+            TraceValidationError, "preview fields invalid"
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_full_preview_binding_rejects_rehashed_tampering(self) -> None:
+        for name in (
+            "business_description",
+            "company",
+            "parameters",
+            "registry",
+            "release",
+            "operation_digest",
+        ):
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                trace = self._trace(
+                    trace_document, "pi-v1-customer-invoice"
+                )
+                prepare = self._event(trace, "prepare")
+                preview_event = self._event(trace, "preview")
+                preview = preview_event["preview"]
+                identity = prepare["operation_digest_input"]
+                if name == "business_description":
+                    preview["business_description"] = "Opaque approval"
+                elif name == "company":
+                    identity["company_id"] = 999
+                    preview["precheck"]["company_id"] = 999
+                    preview["operation_digest"] = canonical_sha256(identity)
+                elif name == "parameters":
+                    changed = copy.deepcopy(preview_event["parameters"])
+                    changed["company_id"] = 999
+                    preview_event["parameters"] = changed
+                    preview["parameters"] = copy.deepcopy(changed)
+                    identity["parameters"] = copy.deepcopy(changed)
+                    identity["company_id"] = 999
+                    preview["precheck"]["company_id"] = 999
+                    preview["precheck"]["parameters_digest"] = (
+                        canonical_sha256(changed)
+                    )
+                    preview["operation_digest"] = canonical_sha256(identity)
+                elif name == "registry":
+                    identity["registry_digest"] = TEST_WRONG_REGISTRY_DIGEST
+                    preview["precheck"]["registry_digest"] = (
+                        TEST_WRONG_REGISTRY_DIGEST
+                    )
+                    preview["precheck_identity"]["registry_digest"] = (
+                        TEST_WRONG_REGISTRY_DIGEST
+                    )
+                    preview["operation_digest"] = canonical_sha256(identity)
+                elif name == "release":
+                    identity["release_digest"] = TEST_WRONG_MANIFEST_SHA256
+                    preview["precheck"]["release_digest"] = (
+                        TEST_WRONG_MANIFEST_SHA256
+                    )
+                    preview["precheck_identity"]["release_digest"] = (
+                        TEST_WRONG_MANIFEST_SHA256
+                    )
+                    preview["operation_digest"] = canonical_sha256(identity)
+                else:
+                    preview["operation_digest"] = TEST_WRONG_RECEIPT_DIGEST
+                self._rehash_write_preview(trace)
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    "preview is not the exact raw preview projection",
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_same_user_expired_and_tampered_approvals_are_rejected(
+        self,
+    ) -> None:
+        cases = {
+            "same_user": lambda approval: approval.update(
+                {"approver_user_id": approval["requester_user_id"]}
+            ),
+            "expired": lambda approval: approval.update(
+                {"expires_at": "2026-07-17T00:00:00.250000Z"}
+            ),
+            "tampered_digest": lambda approval: approval.update(
+                {"approval_digest": TEST_WRONG_RECEIPT_DIGEST}
+            ),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                invoice_trace = self._trace(
+                    trace_document, "pi-v1-customer-invoice"
+                )
+                approval = self._event(invoice_trace, "approval_binding")
+                mutate(approval)
+                if name != "tampered_digest":
+                    approval["approval_digest"] = approval_binding_sha256(
+                        approval
+                    )
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    "approval_binding is not raw-bound",
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_refused_assistant_cannot_report_business_success(self) -> None:
+        trace_document = self._perfect_trace_document()
+        refused_trace = self._trace(trace_document, "pi-v1-refund")
+        assistant = self._event(refused_trace, "assistant_final")
+        result = json.loads(assistant["text"])
+        result["status"] = "verified_success"
+        result["business_succeeded"] = True
+        assistant["text"] = canonical_json_text(result)
+        self._resign(trace_document)
+        report = score_documents(
+            self.corpus,
+            trace_document,
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_release_sha256=TEST_RELEASE_SHA256,
+        )
+        self.assertEqual(report["gates"]["F05"]["numerator"], 37)
+        self.assertFalse(report["gates"]["F05"]["passed"])
+        failure = report["gates"]["F05"]["failures"]["pi-v1-refund"]
+        self.assertIn("assistant_final.status", failure["issues"])
+        self.assertIn("assistant_final.business_succeeded", failure["issues"])
+
+    def test_assistant_final_rejects_prose_and_noncanonical_json(self) -> None:
+        for name in ("prose", "noncanonical_json"):
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                trace = self._trace(
+                    trace_document, "pi-v1-customer-invoice"
+                )
+                assistant = self._event(trace, "assistant_final")
+                if name == "prose":
+                    assistant["text"] = "发票已经成功，但没有结构化回执。"
+                else:
+                    assistant["text"] = json.dumps(
+                        json.loads(assistant["text"]),
+                        ensure_ascii=False,
+                    )
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    "must be strict canonical JSON",
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_read_has_no_operation_and_tool_call_is_bound(self) -> None:
+        operation_trace = self._perfect_trace_document()
+        read_trace = self._trace(operation_trace, "pi-v1-trial-balance")
+        self._event(read_trace, "odoo_execution")[
+            "operation_id"
+        ] = "illegal-read-operation"
+        self._resign(operation_trace)
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "operation_id must be null for a read capability",
+        ):
+            validate_trace_document(
+                operation_trace,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+        assistant_trace = self._perfect_trace_document()
+        read_trace = self._trace(assistant_trace, "pi-v1-trial-balance")
+        self._replace_assistant_result(
+            read_trace, operation_id="illegal-read-operation"
+        )
+        self._event(read_trace, "odoo_result")[
+            "tool_call_id"
+        ] = "different-tool-call"
+        self._resign(assistant_trace)
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "odoo_result.tool_call_id is not raw-bound",
+        ):
+            validate_trace_document(
+                assistant_trace,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_refusal_cannot_claim_a_tool_call(self) -> None:
+        trace_document = self._perfect_trace_document()
+        trace = self._trace(trace_document, "pi-v1-refund")
+        self._event(trace, "execution_refused")[
+            "tool_call_id"
+        ] = "illegal-refused-tool-call"
+        self._resign(trace_document)
+        with self.assertRaisesRegex(
+            TraceValidationError, "fields invalid"
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
+
+    def test_refused_tool_calls_effects_and_receipts_fail_f05(self) -> None:
+        cases = {
+            "write_tool_call_count": 1,
+            "odoo_effect": True,
+            "operation_id": "op-refused-illegal",
+            "receipt_id": "receipt-refused-illegal",
+        }
+        for field, value in cases.items():
+            with self.subTest(field=field):
+                trace_document = self._perfect_trace_document()
+                refused_trace = self._trace(trace_document, "pi-v1-refund")
+                refusal = self._event(refused_trace, "execution_refused")
+                refusal[field] = value
+                self._resign(trace_document)
+                report = score_documents(
+                    self.corpus,
+                    trace_document,
+                    self.registry,
+                    TEST_ATTESTATION_KEYS,
+                    expected_release_sha256=TEST_RELEASE_SHA256,
+                )
+                self.assertEqual(report["gates"]["F05"]["numerator"], 37)
+                self.assertFalse(report["gates"]["F05"]["passed"])
+                failure = report["gates"]["F05"]["failures"]["pi-v1-refund"]
+                self.assertIn(f"execution_refused.{field}", failure["issues"])
+
+    def test_positive_result_receipt_and_final_bindings_fail_closed(self) -> None:
+        cases = {
+            "verification": (
+                "odoo_result",
+                ("verification", "passed"),
+                False,
+                "verification",
+            ),
+            "database_finalized": (
+                "odoo_result",
+                ("database_finalized",),
+                False,
+                "database_finalized",
+            ),
+            "release_digest": (
+                "audit_receipt",
+                ("release_digest",),
+                TEST_WRONG_MANIFEST_SHA256,
+                "release_digest",
+            ),
+            "registry_digest": (
+                "odoo_result",
+                ("registry_digest",),
+                TEST_WRONG_REGISTRY_DIGEST,
+                "registry_digest",
+            ),
+            "capability_id": (
+                "audit_receipt",
+                ("capability_id",),
+                "accounting.read.tampered.v1",
+                "capability_id",
+            ),
+            "operation_id": (
+                "odoo_result",
+                ("operation_id",),
+                "op-tampered",
+                "operation_id",
+            ),
+            "result_digest": (
+                "audit_receipt",
+                ("result_digest",),
+                TEST_WRONG_RECEIPT_DIGEST,
+                "result_digest",
+            ),
+            "verification_evidence_digest": (
+                "audit_receipt",
+                ("verification_evidence_digest",),
+                TEST_WRONG_RECEIPT_DIGEST,
+                "verification_evidence_digest",
+            ),
+            "receipt_id": (
+                "assistant_final",
+                ("receipt_id",),
+                "receipt-tampered",
+                "receipt_id",
+            ),
+            "assistant_success": (
+                "assistant_final",
+                ("business_succeeded",),
+                False,
+                "assistant_final",
+            ),
+            "assistant_status": (
+                "assistant_final",
+                ("status",),
+                "refused",
+                "assistant_final",
+            ),
+        }
+        for name, (event_type, path, value, expected_issue) in cases.items():
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                invoice_trace = self._trace(
+                    trace_document, "pi-v1-customer-invoice"
+                )
+                event_data = self._event(invoice_trace, event_type)
+                target = (
+                    json.loads(event_data["text"])
+                    if event_type == "assistant_final"
+                    else event_data
+                )
+                for field in path[:-1]:
+                    target = target[field]
+                target[path[-1]] = value
+                if event_type == "assistant_final":
+                    event_data["text"] = canonical_json_text(
+                        json.loads(event_data["text"])
+                        | {path[-1]: value}
+                    )
+                self._resign(trace_document)
+                if event_type == "assistant_final":
+                    report = score_documents(
+                        self.corpus,
+                        trace_document,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+                    self.assertEqual(
+                        report["gates"]["F05"]["numerator"], 37
+                    )
+                    self.assertFalse(report["gates"]["F05"]["passed"])
+                    failure = report["gates"]["F05"]["failures"][
+                        "pi-v1-customer-invoice"
+                    ]
+                    self.assertIn(expected_issue, failure["issues"])
+                else:
+                    with self.assertRaisesRegex(
+                        TraceValidationError,
+                        r"(not raw-bound|not the exact trusted response)",
+                    ):
+                        validate_trace_document(
+                            trace_document,
+                            self.corpus,
+                            self.registry,
+                            TEST_ATTESTATION_KEYS,
+                            expected_release_sha256=TEST_RELEASE_SHA256,
+                        )
+
+    def test_cross_trace_operation_receipt_and_tool_ids_are_unique(
+        self,
+    ) -> None:
+        for identifier in ("operation_id", "receipt_id", "tool_call_id"):
+            with self.subTest(identifier=identifier):
+                trace_document = self._perfect_trace_document()
+                if identifier == "operation_id":
+                    first = self._trace(
+                        trace_document, "pi-v1-customer-invoice"
+                    )
+                    second = self._trace(
+                        trace_document,
+                        "pi-v1-customer-invoice-create-and-post-route",
+                    )
+                    duplicate = self._event(first, "prepare")[
+                        "operation_id"
+                    ]
+                    self._set_write_operation_id(second, duplicate)
+                elif identifier == "receipt_id":
+                    first = self._trace(
+                        trace_document, "pi-v1-trial-balance"
+                    )
+                    second = self._trace(
+                        trace_document, "pi-v1-customer-invoice"
+                    )
+                    duplicate = self._event(first, "audit_receipt")[
+                        "receipt_id"
+                    ]
+                    self._event(second, "audit_receipt")[
+                        "receipt_id"
+                    ] = duplicate
+                    self._replace_assistant_result(
+                        second, receipt_id=duplicate
+                    )
+                else:
+                    first = self._trace(
+                        trace_document, "pi-v1-trial-balance"
+                    )
+                    second = self._trace(
+                        trace_document, "pi-v1-customer-invoice"
+                    )
+                    duplicate = self._event(first, "odoo_execution")[
+                        "tool_call_id"
+                    ]
+                    for event_type in (
+                        "odoo_execution",
+                        "odoo_result",
+                        "audit_receipt",
+                        "assistant_final",
+                    ):
+                        self._event(second, event_type)[
+                            "tool_call_id"
+                        ] = duplicate
+                self._resign(trace_document)
+                expected_error = {
+                    "operation_id": (
+                        "trusted_evidence does not match normalized events"
+                    ),
+                    "receipt_id": (
+                        "trusted_evidence receipt does not match"
+                    ),
+                    "tool_call_id": (
+                        "trusted_evidence tool call does not match"
+                    ),
+                }[identifier]
+                with self.assertRaisesRegex(
+                    TraceValidationError,
+                    expected_error,
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
+
+    def test_result_body_and_verification_evidence_are_recomputable(
+        self,
+    ) -> None:
+        cases = {
+            "result_body": (
+                ("result_body", "operation_state"),
+                "failed",
+                "result_digest mismatch",
+            ),
+            "verification_evidence": (
+                ("verification", "evidence", "passed"),
+                False,
+                "verification.evidence_digest mismatch",
+            ),
+        }
+        for name, (path, value, expected_error) in cases.items():
+            with self.subTest(name=name):
+                trace_document = self._perfect_trace_document()
+                trace = self._trace(
+                    trace_document, "pi-v1-customer-invoice"
+                )
+                target = self._event(trace, "odoo_result")
+                for field in path[:-1]:
+                    target = target[field]
+                target[path[-1]] = value
+                self._resign(trace_document)
+                with self.assertRaisesRegex(
+                    TraceValidationError, expected_error
+                ):
+                    validate_trace_document(
+                        trace_document,
+                        self.corpus,
+                        self.registry,
+                        TEST_ATTESTATION_KEYS,
+                        expected_release_sha256=TEST_RELEASE_SHA256,
+                    )
 
     def test_selection_gate_fails_below_95_percent(self) -> None:
         trace_document = self._perfect_trace_document()
@@ -836,28 +2417,40 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertTrue(report["gates"]["F01"]["passed"])
 
     def test_clarification_and_parameter_loss_are_scored_independently(self) -> None:
-        trace_document = self._perfect_trace_document()
-        trace_document["traces"][0]["events"][2]["data"] = {
+        clarification_document = self._perfect_trace_document()
+        clarification_document["traces"][0]["events"][2]["data"] = {
             "outcome": "refused",
             "fields": [],
             "turns": [],
         }
-        trace_document["traces"][1]["events"][3]["data"]["parameters"][
-            "company_id"
-        ] = 999999
-        self._resign(trace_document)
+        self._resign(clarification_document)
         report = score_documents(
             self.corpus,
-            trace_document,
+            clarification_document,
             self.registry,
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
         self.assertEqual(report["gates"]["F01"]["numerator"], 38)
         self.assertEqual(report["gates"]["F02"]["numerator"], 37)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 37)
         self.assertEqual(len(report["gates"]["F02"]["failures"]), 1)
-        self.assertEqual(len(report["gates"]["F03"]["failures"]), 1)
+
+        parameter_document = self._perfect_trace_document()
+        parameter_document["traces"][1]["events"][3]["data"]["parameters"][
+            "company_id"
+        ] = 999999
+        self._resign(parameter_document)
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "parameters_sha256 is not raw-bound",
+        ):
+            validate_trace_document(
+                parameter_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
 
     def test_parameter_loss_after_finalization_fails_f03(self) -> None:
         trace_document = self._perfect_trace_document()
@@ -867,12 +2460,6 @@ class PiScenarioGateTest(unittest.TestCase):
             if trace["scenario_id"] == "pi-v1-customer-invoice"
         )
         invoice_trace["events"][4]["data"]["parameters"]["company_id"] = 999999
-        invoice_trace["events"][7]["data"]["parameters_sha256"] = (
-            TEST_WRONG_PARAMETERS_DIGEST
-        )
-        invoice_trace["events"][10]["data"]["parameters_sha256"] = (
-            TEST_WRONG_RECEIPT_DIGEST
-        )
         self._resign(trace_document)
         report = score_documents(
             self.corpus,
@@ -881,14 +2468,11 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 37)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 30)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
-        self.assertEqual(
-            set(failure["stages"]),
-            {"approval_binding", "audit_receipt", "cli_input"},
-        )
+        self.assertEqual(failure["stages"], ["cli_input"])
 
     def test_write_prepare_parameter_loss_fails_f03(self) -> None:
         trace_document = self._perfect_trace_document()
@@ -908,7 +2492,7 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 37)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 30)
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -924,32 +2508,19 @@ class PiScenarioGateTest(unittest.TestCase):
             for trace in trace_document["traces"]
             if trace["scenario_id"] == "pi-v1-customer-invoice"
         )
-        invoice_trace["events"][9]["data"]["business_succeeded"] = False
-        invoice_trace["events"][9]["data"]["bridge_guidance"] = {
-            "must_not_report_business_success": True,
-            "next_action": "operation.status",
-            "operation_id": "op-1",
-            "reason": "terminal_write_result_is_not_business_verified",
-        }
+        self._event(invoice_trace, "odoo_result")["business_succeeded"] = False
         self._resign(trace_document)
-        report = score_documents(
-            self.corpus,
-            trace_document,
-            self.registry,
-            TEST_ATTESTATION_KEYS,
-            expected_release_sha256=TEST_RELEASE_SHA256,
-        )
-        self.assertEqual(report["gates"]["F05"]["numerator"], 37)
-        self.assertFalse(report["gates"]["F05"]["passed"])
-        self.assertFalse(report["acceptance_passed"])
-        failure = report["gates"]["F05"]["failures"][
-            "pi-v1-customer-invoice"
-        ]
-        self.assertEqual(failure["reason"], "verified_answer_missing")
-        self.assertEqual(
-            failure["issues"]["business_succeeded"]["reason"],
-            "terminal_result_not_business_verified",
-        )
+        with self.assertRaisesRegex(
+            TraceValidationError,
+            "odoo_result is not the exact trusted response",
+        ):
+            validate_trace_document(
+                trace_document,
+                self.corpus,
+                self.registry,
+                TEST_ATTESTATION_KEYS,
+                expected_release_sha256=TEST_RELEASE_SHA256,
+            )
 
     def test_clarification_answer_must_be_captured_and_bound_to_final_value(self) -> None:
         trace_document = self._perfect_trace_document()
@@ -965,7 +2536,7 @@ class PiScenarioGateTest(unittest.TestCase):
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
         self.assertEqual(report["gates"]["F02"]["numerator"], 37)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 38)
+        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
         self.assertIn(
             "company_id",
             report["gates"]["F02"]["failures"]["pi-v1-registry-list"][
@@ -986,14 +2557,19 @@ class PiScenarioGateTest(unittest.TestCase):
         )
         self.assertFalse(report["trace_coverage"]["passed"])
         self.assertEqual(report["trace_coverage"]["missing_scenario_ids"], [missing_id])
-        for gate_id in ("F01", "F02", "F03", "F05"):
+        for gate_id in ("F01", "F02", "F05"):
             self.assertEqual(report["gates"][gate_id]["numerator"], 37)
             self.assertEqual(report["gates"][gate_id]["denominator"], 38)
             self.assertIn(missing_id, report["gates"][gate_id]["failures"])
+        self.assertEqual(report["gates"]["F03"]["numerator"], 31)
+        self.assertEqual(report["gates"]["F03"]["denominator"], 31)
+        self.assertNotIn(missing_id, report["gates"]["F03"]["failures"])
+        self.assertEqual(report["gates"]["F04"]["numerator"], 18)
+        self.assertEqual(report["gates"]["F04"]["denominator"], 18)
 
     def test_trace_is_bound_to_corpus_input_and_rejects_unknown_event_fields(self) -> None:
         wrong_release = self._perfect_trace_document()
-        with self.assertRaisesRegex(TraceValidationError, "release SHA-256 mismatch"):
+        with self.assertRaisesRegex(TraceValidationError, "package SHA-256 mismatch"):
             validate_trace_document(
                 wrong_release,
                 self.corpus,
@@ -1015,9 +2591,14 @@ class PiScenarioGateTest(unittest.TestCase):
             )
 
         wrong_registry = self._perfect_trace_document()
-        wrong_registry["registry_sha256"] = TEST_WRONG_REGISTRY_DIGEST
+        raw_registry_document_sha256 = canonical_sha256(self.registry)
+        self.assertNotEqual(
+            raw_registry_document_sha256,
+            registry_digest(validate_registry(self.registry)),
+        )
+        wrong_registry["registry_digest"] = raw_registry_document_sha256
         self._resign(wrong_registry)
-        with self.assertRaisesRegex(TraceValidationError, "registry_sha256 mismatch"):
+        with self.assertRaisesRegex(TraceValidationError, "registry_digest mismatch"):
             validate_trace_document(
                 wrong_registry,
                 self.corpus,

@@ -17,6 +17,7 @@ from odoo_accounting_cli_v3.cli import (
 )
 from odoo_accounting_cli_v3.registry import Capability
 from odoo_accounting_cli_v3.odoo.runner import OdooRunnerError
+from tools.pi_scenario_gate import score_documents as strict_pi_score_documents
 
 from test_odoo_read_boundary_evidence_runner import (
     RELEASE_DIGEST,
@@ -27,7 +28,10 @@ from test_pi_scenario_gate import (
     PiScenarioGateTest,
     TEST_ATTESTATION_KEY,
     TEST_ATTESTATION_KEY_ID,
+    TEST_MANIFEST_SHA256,
+    TEST_REGISTRY_DIGEST,
     TEST_RELEASE_SHA256,
+    build_test_evidence_trust,
 )
 from test_verify_sandbox_write_evidence import _document as sandbox_write_document
 from test_verify_sandbox_write_evidence import _input_manifest as sandbox_write_input_manifest
@@ -101,6 +105,26 @@ WRITE_CAPABILITY_IDS = [
     "acct.recovery.execute.v1",
     "acct.refund.create.v1",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _test_pi_recomputation_key_loader_for_non_root_posix(monkeypatch):
+    os_module = __import__("os")
+    if (
+        os_module.name != "posix"
+        or not hasattr(os_module, "geteuid")
+        or os_module.geteuid() == 0
+    ):
+        return
+
+    def load_test_keys(gate, path):
+        return gate.load_attestation_keys(gate.load_json_document(path))
+
+    monkeypatch.setattr(
+        cli_module,
+        "_load_root_managed_pi_attestation_keys",
+        load_test_keys,
+    )
 
 
 def _ready_read_capabilities_report() -> dict:
@@ -225,42 +249,175 @@ def _ready_onboarding_receipt(
 def _ready_pi_scenario_report(
     tmp_path: Path,
     *,
+    manifest_sha256: str = "2" * 64,
     package_sha256: str = "4" * 64,
+    registry_digest_value: str = "4" * 64,
 ) -> Path:
+    gate_denominators = {
+        "F01": 38,
+        "F02": 38,
+        "F03": 31,
+        "F04": 18,
+        "F05": 38,
+    }
     gates = {
         gate_id: {
-            "denominator": 32,
+            "denominator": denominator,
             "failures": {},
             "minimum_percent": "95.00" if gate_id == "F01" else "100.00",
-            "numerator": 32,
+            "numerator": denominator,
             "passed": True,
             "percent": "100.00",
         }
-        for gate_id in ("F01", "F02", "F03", "F05")
+        for gate_id, denominator in gate_denominators.items()
     }
+    capture = {
+        "model": "accounting-model-v1",
+        "pi_agent_version": "0.80.6",
+        "pi_bridge_version": "0.1.0.dev258",
+        "pi_runtime_sha256": "a" * 64,
+        "provider": "trusted-provider",
+        "run_id": "pi-run-1",
+        "system_prompt_sha256": "b" * 64,
+        "tool_set_sha256": "c" * 64,
+        "v3_manifest_sha256": manifest_sha256,
+        "v3_package_sha256": package_sha256,
+    }
+    capture_binding = {
+        field: capture[field] for field in cli_module.PI_CAPTURE_BINDING_FIELDS
+    }
+    signed_payload_sha256 = cli_module._sha256_bytes(b"test signed Pi trace payload")
+    trace_document_sha256 = cli_module._sha256_bytes(b"test Pi trace document")
     report = {
         "acceptance_passed": True,
-        "attestation": {"key_id": "test-key", "signature": "ab"},
-        "capture": {
-            "run_id": "pi-run-1",
-            "v3_release_sha256": package_sha256,
+        "attestation": {
+            "algorithm": "hmac-sha256",
+            "key_id": "test-key",
+            "signature": cli_module._sha256_bytes(b"test Pi trace signature"),
+            "signed_payload_sha256": signed_payload_sha256,
         },
+        "attestation_signed_payload_sha256": signed_payload_sha256,
+        "capture": capture,
+        "capture_binding_verified": True,
         "corpus_id": "xiaojing-accounting-key-scenarios-v1",
         "corpus_sha256": "1" * 64,
+        "expected_capture_binding_sha256": cli_module._sha256_json(
+            capture_binding
+        ),
         "gates": gates,
-        "registry_sha256": "2" * 64,
+        "registry_digest": registry_digest_value,
         "run_id": "pi-run-1",
-        "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v1",
+        "runtime_evidence": {
+            "acl_independently_rechecked": False,
+            "expected_trace_count": 31,
+            "read_exchange_count": 13,
+            "verified": True,
+            "verified_trace_count": 31,
+            "write_authority_signature_verified_count": 18,
+            "write_exchange_count": 18,
+        },
+        "runtime_evidence_verified": True,
+        "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v3",
         "trace_coverage": {
             "captured": 38,
             "expected": 38,
             "missing_scenario_ids": [],
             "passed": True,
         },
+        "trace_document_sha256": trace_document_sha256,
     }
     path = tmp_path / "pi-scenario-report.json"
     path.write_text(__import__("json").dumps(report, sort_keys=True), encoding="utf-8")
     return path
+
+
+def _ready_pi_recomputation_check(
+    tmp_path: Path,
+    pi_report: Path,
+    release_identity: dict,
+    *,
+    trace_file_sha256: str | None = None,
+    capture_binding_file_sha256: str | None = None,
+) -> Path:
+    json_module = __import__("json")
+    secret = b"pi-recomputation-test-secret-material"
+    key_id = "pi-recomputation-test-key"
+    key_path = (tmp_path / "pi-recomputation-keys.json").resolve()
+    key_path.write_text(
+        json_module.dumps(
+            {
+                "keys": {
+                    key_id: {
+                        "secret_hex": secret.hex(),
+                    }
+                },
+                "schema_version": (
+                    "odoo-accounting-cli-v3.pi-attestation-keys.v1"
+                ),
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    report = json_module.loads(pi_report.read_text(encoding="utf-8"))
+    report_sha256 = _sha256_path(pi_report)
+    trace_digest = trace_file_sha256 or cli_module._sha256_bytes(
+        b"test raw Pi trace file"
+    )
+    capture_file_digest = (
+        capture_binding_file_sha256
+        or cli_module._sha256_bytes(
+            b"test expected Pi capture binding file"
+        )
+    )
+    claims = cli_module._pi_recomputation_claims(
+        report=report,
+        report_sha256=report_sha256,
+        trace_file_sha256=trace_digest,
+        capture_binding_file_sha256=capture_file_digest,
+        expected_release_identity=release_identity,
+    )
+    attestation = cli_module._create_pi_recomputation_attestation(
+        claims,
+        key_id=key_id,
+        secret=secret,
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+    check = {
+        "business_succeeded": False,
+        "command": "evidence.pi-scenario-report-check",
+        "data": {
+            "attestation_keys_path": str(key_path),
+            "blockers": [],
+            "expected_capture_binding_canonical_sha256": report[
+                "expected_capture_binding_sha256"
+            ],
+            "expected_capture_binding_sha256": capture_file_digest,
+            "pi_scenario": {
+                "report_sha256": report_sha256,
+                "scenario_acceptance_ready": True,
+            },
+            "pi_scenario_report_sha256": report_sha256,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+            "recomputation_attestation": attestation,
+            "recomputed_report_matches": True,
+            "route": route,
+            "scenario_acceptance_ready": True,
+            "trace_attestation_signed_payload_sha256": report[
+                "attestation_signed_payload_sha256"
+            ],
+            "trace_document_sha256": report["trace_document_sha256"],
+            "trace_file_sha256": trace_digest,
+        },
+        "ok": True,
+    }
+    check_path = tmp_path / "pi_scenario_report_check.json"
+    check_path.write_text(
+        json_module.dumps(check, sort_keys=True),
+        encoding="utf-8",
+    )
+    return check_path
 
 
 def _ready_write_pipeline_report(
@@ -386,7 +543,18 @@ def _ready_final_evidence_manifest(
 ) -> Path:
     artifacts: dict[str, Path] = {}
     artifacts["pi_scenario_report"] = _ready_pi_scenario_report(
-        tmp_path, package_sha256=release_identity["package_sha256"]
+        tmp_path,
+        manifest_sha256=release_identity["manifest_sha256"],
+        package_sha256=release_identity["package_sha256"],
+        registry_digest_value=release_identity["registry_digest"],
+    )
+    pi_scenario_report = __import__("json").loads(
+        artifacts["pi_scenario_report"].read_text(encoding="utf-8")
+    )
+    pi_scenario_report_sha256 = _sha256_path(artifacts["pi_scenario_report"])
+    trace_file_sha256 = cli_module._sha256_bytes(b"test raw Pi trace file")
+    capture_binding_file_sha256 = cli_module._sha256_bytes(
+        b"test expected Pi capture binding file"
     )
     artifacts["sandbox_onboarding_receipt"] = _ready_onboarding_receipt(
         tmp_path, release_identity=release_identity
@@ -608,7 +776,10 @@ def _ready_final_evidence_manifest(
                     "blockers": [],
                     "capacity": {"sandbox_write_capacity_ready": True},
                     "goal_readiness_ready": True,
-                    "pi_scenario": {"scenario_acceptance_ready": True},
+                    "pi_scenario": {
+                        "report_sha256": pi_scenario_report_sha256,
+                        "scenario_acceptance_ready": True,
+                    },
                     "production_promotion_allowed": False,
                     "read_capabilities_readiness": {
                         "read_goal_readiness_ready": True,
@@ -636,27 +807,48 @@ def _ready_final_evidence_manifest(
         encoding="utf-8",
     )
     artifacts["goal_readiness_report"] = goal_readiness_path
-    for name, command in {
-        "pi_scenario_report_check": "evidence.pi-scenario-report-check",
-        "pi_trace_capture_check": "evidence.pi-trace-capture-check",
-    }.items():
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+    pi_evidence_documents = {
+        "pi_trace_capture_check": {
+            "business_succeeded": False,
+            "command": "evidence.pi-trace-capture-check",
+            "data": {
+                "attestation_signed_payload_sha256": pi_scenario_report[
+                    "attestation_signed_payload_sha256"
+                ],
+                "blockers": [],
+                "capture": pi_scenario_report["capture"],
+                "expected_capture_binding_canonical_sha256": (
+                    pi_scenario_report["expected_capture_binding_sha256"]
+                ),
+                "expected_capture_binding_sha256": capture_binding_file_sha256,
+                "production_promotion_allowed": False,
+                "real_odoo_write_performed": False,
+                "registry_digest": release_identity["registry_digest"],
+                "route": route,
+                "trace_capture_ready": True,
+                "trace_document_sha256": pi_scenario_report[
+                    "trace_document_sha256"
+                ],
+                "trace_file_sha256": trace_file_sha256,
+            },
+            "ok": True,
+        },
+    }
+    for name, document in pi_evidence_documents.items():
         path = tmp_path / f"{name}.json"
         path.write_text(
-            __import__("json").dumps(
-                {
-                    "business_succeeded": False,
-                    "command": command,
-                    "data": {
-                        "production_promotion_allowed": False,
-                        "real_odoo_write_performed": False,
-                    },
-                    "ok": True,
-                },
-                sort_keys=True,
-            ),
+            __import__("json").dumps(document, sort_keys=True),
             encoding="utf-8",
         )
         artifacts[name] = path
+    artifacts["pi_scenario_report_check"] = _ready_pi_recomputation_check(
+        tmp_path,
+        artifacts["pi_scenario_report"],
+        release_identity,
+        trace_file_sha256=trace_file_sha256,
+        capture_binding_file_sha256=capture_binding_file_sha256,
+    )
     manifest = {
         "artifact_sha256": {
             name: _sha256_path(path) for name, path in artifacts.items()
@@ -681,9 +873,12 @@ def _ready_final_evidence_manifest(
     return manifest_path
 
 
-def _ready_pi_trace_capture(tmp_path: Path) -> tuple[Path, Path]:
+def _ready_pi_trace_capture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, object]:
     helper = PiScenarioGateTest()
     helper.setUp()
+    evidence_trust = build_test_evidence_trust(helper.registry)
     trace_document = helper._perfect_trace_document()
     trace_path = tmp_path / "pi-traces.json"
     trace_path.write_text(
@@ -705,7 +900,91 @@ def _ready_pi_trace_capture(tmp_path: Path) -> tuple[Path, Path]:
         ),
         encoding="utf-8",
     )
-    return trace_path, key_path
+    binding_path = tmp_path / "pi-expected-capture-binding.json"
+    binding_path.write_text(
+        __import__("json").dumps(
+            helper._expected_capture_binding(),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "trusted-authority.json").write_text(
+        __import__("json").dumps(
+            {"schema_version": "test-only-patched-authority-config.v1"},
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return trace_path, key_path, binding_path, evidence_trust
+
+
+def _ready_pi_scenario_evidence(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path, dict, object]:
+    trace_path, key_path, binding_path, evidence_trust = (
+        _ready_pi_trace_capture(tmp_path)
+    )
+    helper = PiScenarioGateTest()
+    helper.setUp()
+    trace_document = __import__("json").loads(
+        trace_path.read_text(encoding="utf-8")
+    )
+    expected_binding = helper._expected_capture_binding()
+    report = strict_pi_score_documents(
+        helper.corpus,
+        trace_document,
+        helper.registry,
+        {TEST_ATTESTATION_KEY_ID: TEST_ATTESTATION_KEY},
+        expected_package_sha256=TEST_RELEASE_SHA256,
+        expected_manifest_sha256=TEST_MANIFEST_SHA256,
+        expected_registry_digest=TEST_REGISTRY_DIGEST,
+        evidence_trust=evidence_trust,
+        expected_capture_binding=expected_binding,
+    )
+    report_path = tmp_path / "pi-scenario-report.json"
+    report_path.write_text(
+        __import__("json").dumps(report, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {
+        **READY_CURRENT_ROUTE,
+        "route_identity": {
+            **READY_CURRENT_ROUTE["route_identity"],
+            "manifest_sha256": TEST_MANIFEST_SHA256,
+            "package_sha256": TEST_RELEASE_SHA256,
+            "registry_digest": TEST_REGISTRY_DIGEST,
+        },
+    }
+    return (
+        report_path,
+        trace_path,
+        key_path,
+        binding_path,
+        route,
+        evidence_trust,
+    )
+
+
+def _pi_scenario_report_check_args(
+    report_path: Path,
+    trace_path: Path,
+    key_path: Path,
+    binding_path: Path,
+) -> list[str]:
+    return [
+        "evidence",
+        "pi-scenario-report-check",
+        "--pi-scenario-report",
+        str(report_path),
+        "--trace-file",
+        str(trace_path),
+        "--attestation-keys",
+        str(key_path),
+        "--expected-capture-binding",
+        str(binding_path),
+        "--trusted-authority-config",
+        str(binding_path.parent / "trusted-authority.json"),
+    ]
 
 
 def identity(config) -> dict:
@@ -4286,10 +4565,27 @@ def test_evidence_goal_remediation_checklist_maps_retained_readiness_blockers(
             assert schema["description"]
             assert schema["format"]
             assert schema["operator_supplied"] is True
-            assert schema["sensitive"] is False
+            assert isinstance(schema["sensitive"], bool)
             assert placeholder in action["required_placeholders"]
         assert all(isinstance(step, list) for step in action["command_args_template"])
         assert all(step[0] in {"evidence", "tools/pi_scenario_gate.py"} for step in action["command_args_template"])
+    pi_acceptance = next(
+        action
+        for action in data["actions"]
+        if action["action_id"] == "pi_scenario_acceptance"
+    )
+    assert (
+        pi_acceptance["placeholder_schema"][
+            "TRUSTED_TRACE_ATTESTATION_KEYS_JSON"
+        ]["sensitive"]
+        is True
+    )
+    assert (
+        pi_acceptance["placeholder_schema"][
+            "TRUSTED_AUTHORITY_CONFIG_JSON"
+        ]["sensitive"]
+        is True
+    )
     capacity = next(
         action for action in data["actions"] if action["action_id"] == "sandbox_capacity"
     )
@@ -4695,7 +4991,15 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         "version": "0.1.0.dev221",
     }
     pi_report = _ready_pi_scenario_report(
-        tmp_path, package_sha256=expected_identity["package_sha256"]
+        tmp_path,
+        manifest_sha256=expected_identity["manifest_sha256"],
+        package_sha256=expected_identity["package_sha256"],
+        registry_digest_value=expected_identity["registry_digest"],
+    )
+    pi_report_check = _ready_pi_recomputation_check(
+        tmp_path,
+        pi_report,
+        expected_identity,
     )
     onboarding_receipt = _ready_onboarding_receipt(
         tmp_path, release_identity=expected_identity
@@ -4728,6 +5032,8 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
                 "goal-readiness",
                 "--pi-scenario-report",
                 str(pi_report),
+                "--pi-scenario-report-check",
+                str(pi_report_check),
                 "--sandbox-onboarding-receipt",
                 str(onboarding_receipt),
                 "--write-pipeline-report",
@@ -4755,6 +5061,9 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
     assert data["goal_readiness_ready"] is True
     assert data["blockers"] == []
     assert data["pi_scenario"]["scenario_acceptance_ready"] is True
+    assert data["pi_scenario"]["recomputation"][
+        "attestation_verified"
+    ] is True
     assert data["sandbox_onboarding"]["ready"] is True
     assert data["sandbox_provision_authorization"]["authorization_record_ready"] is True
     assert data["sandbox_database"]["sandbox_database_ready"] is True
@@ -5111,7 +5420,12 @@ def test_evidence_goal_readiness_rejects_pi_report_from_other_release(
         "verified": True,
         "version": "0.1.0.dev227",
     }
-    pi_report = _ready_pi_scenario_report(tmp_path, package_sha256="5" * 64)
+    pi_report = _ready_pi_scenario_report(
+        tmp_path,
+        manifest_sha256=expected_identity["manifest_sha256"],
+        package_sha256="5" * 64,
+        registry_digest_value=expected_identity["registry_digest"],
+    )
 
     with patch(
         "odoo_accounting_cli_v3.cli._load_release_identity",
@@ -5146,23 +5460,136 @@ def test_evidence_goal_readiness_rejects_pi_report_from_other_release(
     )
 
 
-def test_evidence_pi_scenario_report_check_accepts_current_release_report(
+def test_pi_scenario_status_rejects_self_reported_zero_trace_success(
     tmp_path: Path,
 ):
-    pi_report = _ready_pi_scenario_report(tmp_path, package_sha256="3" * 64)
+    identity = {
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+    }
+    report_path = _ready_pi_scenario_report(
+        tmp_path,
+        manifest_sha256=identity["manifest_sha256"],
+        package_sha256=identity["package_sha256"],
+        registry_digest_value=identity["registry_digest"],
+    )
+    json_module = __import__("json")
+    report = json_module.loads(report_path.read_text(encoding="utf-8"))
+    report["runtime_evidence"].update(
+        {
+            "expected_trace_count": 0,
+            "read_exchange_count": 0,
+            "verified_trace_count": 0,
+            "write_authority_signature_verified_count": 0,
+            "write_exchange_count": 0,
+        }
+    )
+    report["trace_coverage"].update(
+        {
+            "captured": 0,
+            "expected": 0,
+        }
+    )
+    for gate in report["gates"].values():
+        gate["denominator"] = 0
+        gate["numerator"] = 0
+    report_path.write_text(
+        json_module.dumps(report, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    status = cli_module._pi_scenario_acceptance_report_status(
+        report_path,
+        command="evidence.goal-readiness",
+        expected_release_identity=identity,
+    )
+
+    assert status["scenario_acceptance_ready"] is False
+    assert (
+        "Pi scenario runtime evidence was not independently verified"
+        in status["blockers"]
+    )
+    assert "Pi scenario trace coverage did not pass" in status["blockers"]
+
+
+def test_goal_readiness_rejects_unsigned_self_reported_pi_success(
+    tmp_path: Path,
+):
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "d" * 64,
+        "package_sha256": "4" * 64,
+        "registry_digest": "b" * 64,
+        "release": "release",
+        "verified": True,
+        "version": "0.1.0.dev258",
+    }
+    pi_report = _ready_pi_scenario_report(
+        tmp_path,
+        manifest_sha256=expected_identity["manifest_sha256"],
+        package_sha256=expected_identity["package_sha256"],
+        registry_digest_value=expected_identity["registry_digest"],
+    )
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
-        return_value=READY_CURRENT_ROUTE,
+        return_value={
+            **READY_CURRENT_ROUTE,
+            "current_route_ready": True,
+            "blockers": [],
+        },
+    ), patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
     ):
         result = CliRunner().invoke(
             main,
             [
                 "evidence",
-                "pi-scenario-report-check",
+                "goal-readiness",
                 "--pi-scenario-report",
                 str(pi_report),
             ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["pi_scenario"]["scenario_acceptance_ready"] is False
+    assert data["pi_scenario"]["recomputation"][
+        "attestation_verified"
+    ] is False
+    assert (
+        "trusted Pi scenario recomputation check was not supplied"
+        in data["blockers"]
+    )
+
+
+def test_evidence_pi_scenario_report_check_accepts_current_release_report(
+    tmp_path: Path,
+):
+    pi_report, trace_path, key_path, binding_path, route, evidence_trust = (
+        _ready_pi_scenario_evidence(tmp_path)
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _pi_scenario_report_check_args(
+                pi_report,
+                trace_path,
+                key_path,
+                binding_path,
+            ),
         )
 
     assert result.exit_code == 0, result.output
@@ -5172,26 +5599,242 @@ def test_evidence_pi_scenario_report_check_accepts_current_release_report(
     assert payload["data"]["scenario_acceptance_ready"] is True
     assert payload["data"]["blockers"] == []
     assert payload["data"]["pi_scenario"]["scenario_acceptance_ready"] is True
+    assert payload["data"]["recomputed_report_matches"] is True
+    assert payload["data"]["recomputation_attestation"][
+        "schema_version"
+    ] == cli_module.PI_RECOMPUTATION_ATTESTATION_SCHEMA
+    assert payload["data"]["attestation_keys_path"] == str(
+        key_path.resolve()
+    )
     assert payload["data"]["real_odoo_write_performed"] is False
+
+
+def test_evidence_pi_scenario_report_check_rejects_other_registry(
+    tmp_path: Path,
+):
+    pi_report, trace_path, key_path, binding_path, route, evidence_trust = (
+        _ready_pi_scenario_evidence(tmp_path)
+    )
+    route = {
+        **route,
+        "route_identity": {
+            **route["route_identity"],
+            "registry_digest": "5" * 64,
+        },
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _pi_scenario_report_check_args(
+                pi_report,
+                trace_path,
+                key_path,
+                binding_path,
+            ),
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["scenario_acceptance_ready"] is False
+    assert (
+        "Pi scenario report is not bound to the current capability registry"
+        in data["blockers"]
+    )
+
+
+def test_evidence_pi_scenario_report_check_rejects_legacy_v1_report(
+    tmp_path: Path,
+):
+    pi_report, trace_path, key_path, binding_path, route, evidence_trust = (
+        _ready_pi_scenario_evidence(tmp_path)
+    )
+    report = __import__("json").loads(pi_report.read_text(encoding="utf-8"))
+    report["schema_version"] = "odoo-accounting-cli-v3.pi-gate-report.v1"
+    pi_report.write_text(
+        __import__("json").dumps(report, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _pi_scenario_report_check_args(
+                pi_report,
+                trace_path,
+                key_path,
+                binding_path,
+            ),
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["scenario_acceptance_ready"] is False
+    assert "Pi scenario report has the wrong schema" in data["blockers"]
+
+
+def test_evidence_pi_scenario_report_check_requires_independent_capture_binding(
+    tmp_path: Path,
+):
+    pi_report, trace_path, key_path, binding_path, route, evidence_trust = (
+        _ready_pi_scenario_evidence(tmp_path)
+    )
+    report = __import__("json").loads(pi_report.read_text(encoding="utf-8"))
+    report["capture_binding_verified"] = False
+    report["expected_capture_binding_sha256"] = "f" * 64
+    pi_report.write_text(
+        __import__("json").dumps(report, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _pi_scenario_report_check_args(
+                pi_report,
+                trace_path,
+                key_path,
+                binding_path,
+            ),
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["scenario_acceptance_ready"] is False
+    assert (
+        "Pi scenario capture binding was not independently verified"
+        in data["blockers"]
+    )
+    assert (
+        "Pi scenario expected capture binding digest mismatch"
+        in data["blockers"]
+    )
+
+
+def test_evidence_pi_scenario_report_check_requires_verified_runtime_evidence(
+    tmp_path: Path,
+):
+    pi_report, trace_path, key_path, binding_path, route, evidence_trust = (
+        _ready_pi_scenario_evidence(tmp_path)
+    )
+    report = __import__("json").loads(pi_report.read_text(encoding="utf-8"))
+    report["runtime_evidence"]["verified"] = False
+    report["runtime_evidence"]["verified_trace_count"] = 30
+    report["runtime_evidence_verified"] = False
+    pi_report.write_text(
+        __import__("json").dumps(report, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _pi_scenario_report_check_args(
+                pi_report,
+                trace_path,
+                key_path,
+                binding_path,
+            ),
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["scenario_acceptance_ready"] is False
+    assert (
+        "Pi scenario runtime evidence was not independently verified"
+        in data["blockers"]
+    )
+
+
+def test_evidence_pi_scenario_report_check_requires_approval_gate(
+    tmp_path: Path,
+):
+    pi_report, trace_path, key_path, binding_path, route, evidence_trust = (
+        _ready_pi_scenario_evidence(tmp_path)
+    )
+    report = __import__("json").loads(pi_report.read_text(encoding="utf-8"))
+    del report["gates"]["F04"]
+    pi_report.write_text(
+        __import__("json").dumps(report, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
+    ):
+        result = CliRunner().invoke(
+            main,
+            _pi_scenario_report_check_args(
+                pi_report,
+                trace_path,
+                key_path,
+                binding_path,
+            ),
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["scenario_acceptance_ready"] is False
+    assert "Pi scenario gate F04 did not pass" in data["blockers"]
 
 
 def test_evidence_pi_scenario_report_check_rejects_other_release_report(
     tmp_path: Path,
 ):
-    pi_report = _ready_pi_scenario_report(tmp_path, package_sha256="5" * 64)
+    pi_report, trace_path, key_path, binding_path, route, evidence_trust = (
+        _ready_pi_scenario_evidence(tmp_path)
+    )
+    route = {
+        **route,
+        "route_identity": {
+            **route["route_identity"],
+            "package_sha256": "5" * 64,
+        },
+    }
 
     with patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
-        return_value=READY_CURRENT_ROUTE,
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
     ):
         result = CliRunner().invoke(
             main,
-            [
-                "evidence",
-                "pi-scenario-report-check",
-                "--pi-scenario-report",
-                str(pi_report),
-            ],
+            _pi_scenario_report_check_args(
+                pi_report,
+                trace_path,
+                key_path,
+                binding_path,
+            ),
         )
 
     assert result.exit_code == 0, result.output
@@ -5206,18 +5849,25 @@ def test_evidence_pi_scenario_report_check_rejects_other_release_report(
 def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
     tmp_path: Path,
 ):
-    trace_path, key_path = _ready_pi_trace_capture(tmp_path)
+    trace_path, key_path, binding_path, evidence_trust = (
+        _ready_pi_trace_capture(tmp_path)
+    )
     route = {
         **READY_CURRENT_ROUTE,
         "route_identity": {
             **READY_CURRENT_ROUTE["route_identity"],
+            "manifest_sha256": TEST_MANIFEST_SHA256,
             "package_sha256": TEST_RELEASE_SHA256,
+            "registry_digest": TEST_REGISTRY_DIGEST,
         },
     }
 
     with patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
     ):
         result = CliRunner().invoke(
             main,
@@ -5228,6 +5878,10 @@ def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
                 str(trace_path),
                 "--attestation-keys",
                 str(key_path),
+                "--expected-capture-binding",
+                str(binding_path),
+                "--trusted-authority-config",
+                str(binding_path.parent / "trusted-authority.json"),
             ],
         )
 
@@ -5243,18 +5897,25 @@ def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
 def test_evidence_pi_trace_capture_check_rejects_other_release_capture(
     tmp_path: Path,
 ):
-    trace_path, key_path = _ready_pi_trace_capture(tmp_path)
+    trace_path, key_path, binding_path, evidence_trust = (
+        _ready_pi_trace_capture(tmp_path)
+    )
     route = {
         **READY_CURRENT_ROUTE,
         "route_identity": {
             **READY_CURRENT_ROUTE["route_identity"],
+            "manifest_sha256": TEST_MANIFEST_SHA256,
             "package_sha256": "ab" * 32,
+            "registry_digest": TEST_REGISTRY_DIGEST,
         },
     }
 
     with patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._load_pi_evidence_trust",
+        return_value=evidence_trust,
     ):
         result = CliRunner().invoke(
             main,
@@ -5265,6 +5926,10 @@ def test_evidence_pi_trace_capture_check_rejects_other_release_capture(
                 str(trace_path),
                 "--attestation-keys",
                 str(key_path),
+                "--expected-capture-binding",
+                str(binding_path),
+                "--trusted-authority-config",
+                str(binding_path.parent / "trusted-authority.json"),
             ],
         )
 
@@ -5272,7 +5937,7 @@ def test_evidence_pi_trace_capture_check_rejects_other_release_capture(
     data = __import__("json").loads(result.output)["data"]
     assert data["trace_capture_ready"] is False
     assert data["real_odoo_write_performed"] is False
-    assert data["blockers"] == ["traces.capture release SHA-256 mismatch"]
+    assert data["blockers"] == ["traces.capture package SHA-256 mismatch"]
 
 
 def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
@@ -5316,6 +5981,177 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     assert data["artifact_count"] == 16
     assert data["blockers"] == []
     assert data["real_odoo_write_performed"] is False
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "field_path", "value", "expected_blocker"),
+    [
+        (
+            "pi_scenario_report_check",
+            ("data", "pi_scenario_report_sha256"),
+            "a" * 64,
+            "Pi final evidence raw report SHA-256 mismatch",
+        ),
+        (
+            "pi_scenario_report_check",
+            ("data", "trace_file_sha256"),
+            "a" * 64,
+            "Pi final evidence trace file SHA-256 mismatch",
+        ),
+        (
+            "pi_trace_capture_check",
+            ("data", "trace_document_sha256"),
+            "a" * 64,
+            "Pi final evidence trace document SHA-256 mismatch",
+        ),
+        (
+            "pi_scenario_report_check",
+            ("data", "trace_attestation_signed_payload_sha256"),
+            "a" * 64,
+            "Pi final evidence trace attestation payload SHA-256 mismatch",
+        ),
+        (
+            "pi_trace_capture_check",
+            ("data", "expected_capture_binding_sha256"),
+            "a" * 64,
+            "Pi final evidence capture binding file SHA-256 mismatch",
+        ),
+        (
+            "pi_trace_capture_check",
+            ("data", "expected_capture_binding_canonical_sha256"),
+            "a" * 64,
+            "Pi final evidence capture binding canonical SHA-256 mismatch",
+        ),
+        (
+            "goal_readiness_report",
+            ("data", "pi_scenario", "report_sha256"),
+            "a" * 64,
+            "goal readiness Pi scenario evidence is not bound to the retained report",
+        ),
+    ],
+)
+def test_final_evidence_manifest_rejects_broken_pi_cross_binding(
+    tmp_path: Path,
+    artifact_name: str,
+    field_path: tuple[str, ...],
+    value: object,
+    expected_blocker: str,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev258-test",
+        "verified": True,
+        "version": "0.1.0.dev258",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    manifest_document = __import__("json").loads(
+        manifest.read_text(encoding="utf-8")
+    )
+    artifact_path = tmp_path / manifest_document["artifacts"][artifact_name]
+    artifact_document = __import__("json").loads(
+        artifact_path.read_text(encoding="utf-8")
+    )
+    target = artifact_document
+    for field in field_path[:-1]:
+        target = target[field]
+    target[field_path[-1]] = value
+    artifact_path.write_text(
+        __import__("json").dumps(artifact_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    manifest_document["artifact_sha256"][artifact_name] = _sha256_path(
+        artifact_path
+    )
+    manifest.write_text(
+        __import__("json").dumps(manifest_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert expected_blocker in data["blockers"]
+
+
+def test_final_evidence_manifest_rejects_self_reported_recomputation(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev258-test",
+        "verified": True,
+        "version": "0.1.0.dev258",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    json_module = __import__("json")
+    manifest_document = json_module.loads(
+        manifest.read_text(encoding="utf-8")
+    )
+    artifact_name = "pi_scenario_report_check"
+    check_path = tmp_path / manifest_document["artifacts"][artifact_name]
+    check = json_module.loads(check_path.read_text(encoding="utf-8"))
+    check["data"]["recomputation_attestation"]["signature"] = "f" * 64
+    check_path.write_text(
+        json_module.dumps(check, sort_keys=True),
+        encoding="utf-8",
+    )
+    manifest_document["artifact_sha256"][artifact_name] = _sha256_path(
+        check_path
+    )
+    manifest.write_text(
+        json_module.dumps(manifest_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(),
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = json_module.loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert (
+        "Pi trusted recomputation: Pi recomputation attestation signature mismatch"
+        in data["blockers"]
+    )
 
 
 @pytest.mark.parametrize(

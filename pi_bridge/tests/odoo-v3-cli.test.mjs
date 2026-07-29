@@ -13,6 +13,8 @@ import {
 	addUnknownEffectGuidance,
 	createV3BrokerClient,
 	createV3CliRunner,
+	deriveCapabilityGetFromRegistryRead,
+	preflightV3BrokerSession,
 } from "../extensions/odoo-v3-cli.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -392,6 +394,85 @@ function createStaticBrokerRunner(response) {
 		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
 		transport: async () => response,
 	});
+}
+
+function registryDescriptor(id, capabilityChannel = "staged") {
+	return {
+		access: id.includes(".create.") ? "write" : "read",
+		approval_required: id.includes(".create."),
+		business_description: `Visible capability ${id}`,
+		capability_channel: capabilityChannel,
+		company_scope: "bound_company",
+		contract_digest: "c".repeat(64),
+		domain: "gateway",
+		evidence_level: "contract_tested",
+		id,
+		idempotency_required: id.includes(".create."),
+		input_schema_json: "{\"additionalProperties\":false,\"type\":\"object\"}",
+		odoo_permissions: ["base.group_user"],
+		output_schema_json: "{\"additionalProperties\":false,\"type\":\"object\"}",
+		recovery_method: "not_applicable",
+		risk_level: id.includes(".create.") ? "high" : "low",
+		verification_method: "signed_read_receipt",
+	};
+}
+
+function signedRegistryRead(ids = [
+	"acct.bill.vendor_create.v1",
+	"acct.gl.trial_balance.v1",
+]) {
+	const capabilities = [...ids].sort().map((id) => registryDescriptor(id));
+	return {
+		command: "read",
+		data: {
+			capability_id: "acct.registry.list.v1",
+			release_identity: {
+				manifest_sha256: EXPECTED_RELEASE_DIGEST,
+				registry_digest: EXPECTED_REGISTRY_DIGEST,
+				verified: true,
+			},
+			result: {
+				capabilities,
+				page: {
+					count: capabilities.length,
+					total_count: capabilities.length,
+				},
+				receipt: {
+					capability_channel: "staged",
+					capability_id: "acct.registry.list.v1",
+					company_id: 7,
+					database_name: "odoo_v3_sandbox",
+					database_uuid: "11111111-1111-4111-8111-111111111111",
+					environment: "sandbox",
+					id: "registry-read-receipt-1",
+					observed_at: "2026-07-29T08:01:00Z",
+					odoo_instance_id: "odoo19@sandbox",
+					record_count: capabilities.length,
+					registry_digest: EXPECTED_REGISTRY_DIGEST,
+					release_digest: EXPECTED_RELEASE_DIGEST,
+					request_digest: "d".repeat(64),
+					result_digest: "e".repeat(64),
+					signature: "f".repeat(64),
+					signature_key_id: "read-key-1",
+					signature_purpose: "read_receipt_v2",
+					signature_version: 2,
+					user_id: 42,
+				},
+			},
+			runtime: {},
+		},
+		ok: true,
+	};
+}
+
+function signedRegistryBrokerResponse(envelope = signedRegistryRead()) {
+	return {
+		authorityVerified: true,
+		body: JSON.stringify(envelope),
+		executedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		executedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		statusCode: 200,
+	};
 }
 
 function localBrokerSocketPath(name) {
@@ -944,6 +1025,341 @@ test("capability queries and the explicit test broker read retain fixed argv and
 	assert.deepEqual(read.data.result._test_parsed_request, readRequest);
 });
 
+test("authenticated capability discovery sends no caller-selected company", async () => {
+	const envelope = signedRegistryRead();
+	const calls = [];
+	const run = createV3BrokerClient({
+		brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		transport: async (call) => {
+			calls.push(call);
+			return {
+				authorityVerified: true,
+				body: JSON.stringify(envelope),
+				executedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+				executedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+				statusCode: 200,
+			};
+		},
+	});
+
+	const result = await run("read", {
+		capability_id: "acct.registry.list.v1",
+		parameters: {},
+	});
+
+	assert.deepEqual(result, envelope);
+	assert.equal(calls.length, 1);
+	assert.equal(
+		calls[0].body,
+		'{"capability_id":"acct.registry.list.v1","parameters":{}}',
+	);
+	assert.equal(calls[0].body.includes("company_id"), false);
+	assert.equal(
+		result.data.result.receipt.company_id,
+		7,
+	);
+});
+
+test("broker session preflight binds one exact handle to a fixed company-free registry read", async () => {
+	const calls = [];
+	let spawnCount = 0;
+	const accepted = await preflightV3BrokerSession({
+		brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandle: TEST_BROKER_SESSION_HANDLE,
+		transport: async (call) => {
+			calls.push(call);
+			return signedRegistryBrokerResponse();
+		},
+	});
+	if (accepted) spawnCount += 1;
+
+	assert.equal(accepted, true);
+	assert.equal(spawnCount, 1);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].action, "read");
+	assert.equal(calls[0].path, "/v1/read");
+	assert.equal(calls[0].sessionHandle, TEST_BROKER_SESSION_HANDLE);
+	assert.equal(
+		calls[0].body,
+		'{"capability_id":"acct.registry.list.v1","parameters":{}}',
+	);
+	assert.equal(calls[0].body.includes("company_id"), false);
+});
+
+test("broker session preflight fails closed before spawn", async (t) => {
+	const otherSessionHandle = "other-broker-session-0123456789abcdef";
+	const cases = [
+		{
+			name: "invalid handle",
+			sessionHandle: "short",
+			transport: async () => {
+				throw new Error("invalid handles must not reach transport");
+			},
+		},
+		{
+			name: "unknown session",
+			sessionHandle: otherSessionHandle,
+			transport: async () => ({
+				authorityVerified: false,
+				body: "",
+				statusCode: 404,
+			}),
+		},
+		{
+			name: "broker rejection",
+			sessionHandle: TEST_BROKER_SESSION_HANDLE,
+			transport: async () => ({
+				authorityVerified: false,
+				body: "",
+				statusCode: 403,
+			}),
+		},
+		{
+			name: "wrong executed release identity",
+			sessionHandle: TEST_BROKER_SESSION_HANDLE,
+			transport: async () => ({
+				...signedRegistryBrokerResponse(),
+				executedReleaseDigest: "8".repeat(64),
+			}),
+		},
+		{
+			name: "wrong signed receipt identity",
+			sessionHandle: TEST_BROKER_SESSION_HANDLE,
+			transport: async () => {
+				const envelope = signedRegistryRead();
+				envelope.data.result.receipt.registry_digest = "8".repeat(64);
+				return signedRegistryBrokerResponse(envelope);
+			},
+		},
+		{
+			name: "missing receipt signature",
+			sessionHandle: TEST_BROKER_SESSION_HANDLE,
+			transport: async () => {
+				const envelope = signedRegistryRead();
+				delete envelope.data.result.receipt.signature;
+				return signedRegistryBrokerResponse(envelope);
+			},
+		},
+		{
+			name: "wrong registry route",
+			sessionHandle: TEST_BROKER_SESSION_HANDLE,
+			transport: async () => {
+				const envelope = signedRegistryRead();
+				envelope.data.capability_id = "acct.gl.trial_balance.v1";
+				return signedRegistryBrokerResponse(envelope);
+			},
+		},
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			let spawnCount = 0;
+			const accepted = await preflightV3BrokerSession({
+				brokerSocketPath:
+					"/run/odoo-accounting-cli-v3/test-broker.sock",
+				expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+				expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+				sessionHandle: scenario.sessionHandle,
+				transport: scenario.transport,
+			});
+			if (accepted) spawnCount += 1;
+
+			assert.equal(accepted, false);
+			assert.equal(spawnCount, 0);
+		});
+	}
+
+	await t.test("caller-selected company option", async () => {
+		let transportCount = 0;
+		let spawnCount = 0;
+		const accepted = await preflightV3BrokerSession({
+			brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+			company_id: 7,
+			expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+			expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+			sessionHandle: TEST_BROKER_SESSION_HANDLE,
+			transport: async () => {
+				transportCount += 1;
+				return signedRegistryBrokerResponse();
+			},
+		});
+		if (accepted) spawnCount += 1;
+
+		assert.equal(accepted, false);
+		assert.equal(transportCount, 0);
+		assert.equal(spawnCount, 0);
+	});
+});
+
+test("concurrent broker preflights do not cross session handles", async () => {
+	const sessionHandles = [
+		"broker-session-alpha-0123456789abcdef",
+		"broker-session-bravo-0123456789abcdef",
+	];
+	const calls = [];
+	let releaseBoth;
+	const bothArrived = new Promise((resolve) => {
+		releaseBoth = resolve;
+	});
+	const transport = async (call) => {
+		calls.push(call);
+		if (calls.length === sessionHandles.length) releaseBoth();
+		await bothArrived;
+		return signedRegistryBrokerResponse();
+	};
+	const spawnedHandles = [];
+
+	const accepted = await Promise.all(sessionHandles.map(async (sessionHandle) => {
+		const allowed = await preflightV3BrokerSession({
+			brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+			expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+			expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+			sessionHandle,
+			transport,
+		});
+		if (allowed) spawnedHandles.push(sessionHandle);
+		return allowed;
+	}));
+
+	assert.deepEqual(accepted, [true, true]);
+	assert.equal(calls.length, 2);
+	assert.deepEqual(
+		calls.map((call) => call.sessionHandle).sort(),
+		[...sessionHandles].sort(),
+	);
+	assert.ok(calls.every(
+		(call) => call.body
+			=== '{"capability_id":"acct.registry.list.v1","parameters":{}}',
+	));
+	assert.deepEqual(spawnedHandles.sort(), [...sessionHandles].sort());
+});
+
+test("authenticated capability discovery rejects caller parameters before transport", async (t) => {
+	for (const parameters of [
+		{ company_id: 7 },
+		{ company_id: 8 },
+		{ extra: "caller-controlled" },
+	]) {
+		await t.test(JSON.stringify(parameters), async () => {
+			let calls = 0;
+			const run = createV3BrokerClient({
+				brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+				expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+				expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+				sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+				transport: async () => {
+					calls += 1;
+					throw new Error("must not be called");
+				},
+			});
+
+			const result = await run("read", {
+				capability_id: "acct.registry.list.v1",
+				parameters,
+			});
+
+			assert.equal(result.ok, false);
+			assert.equal(result.error.code, "bridge_invalid_request_json");
+			assert.equal(calls, 0);
+		});
+	}
+});
+
+test("capability get is an unsigned selection retaining the complete signed source", () => {
+	const source = signedRegistryRead();
+	const requestedId = "acct.gl.trial_balance.v1";
+	const selected = deriveCapabilityGetFromRegistryRead(source, requestedId);
+
+	assert.equal(selected.ok, true);
+	assert.equal(selected.command, "capability.get");
+	assert.equal(selected.data.selection.visible, true);
+	assert.equal(selected.data.selection.signed, false);
+	assert.equal(selected.data.selection.requested_capability_id, requestedId);
+	assert.equal(selected.data.selection.source_index, 1);
+	assert.equal(
+		selected.data.selection.source_receipt_id,
+		source.data.result.receipt.id,
+	);
+	assert.equal(
+		selected.data.selection.source_result_digest,
+		source.data.result.receipt.result_digest,
+	);
+	assert.strictEqual(selected.data.signed_registry_read, source);
+	assert.strictEqual(
+		selected.data.capability,
+		source.data.result.capabilities[1],
+	);
+
+	const hidden = deriveCapabilityGetFromRegistryRead(
+		source,
+		"acct.tax.unavailable_write.v1",
+	);
+	assert.equal(hidden.ok, true);
+	assert.deepEqual(hidden.data.capability, null);
+	assert.deepEqual(
+		hidden.data.selection,
+		{
+			requested_capability_id: "acct.tax.unavailable_write.v1",
+			signed: false,
+			source_index: null,
+			source_receipt_id: source.data.result.receipt.id,
+			source_result_digest: source.data.result.receipt.result_digest,
+			visible: false,
+		},
+	);
+	assert.strictEqual(hidden.data.signed_registry_read, source);
+});
+
+test("capability discovery rejects malformed signed registry result structures", async (t) => {
+	const mutations = [
+		["unsorted descriptors", (source) => {
+			source.data.result.capabilities.reverse();
+		}],
+		["duplicate descriptor", (source) => {
+			source.data.result.capabilities[1] = structuredClone(
+				source.data.result.capabilities[0],
+			);
+		}],
+		["page count drift", (source) => {
+			source.data.result.page.total_count += 1;
+		}],
+		["receipt count drift", (source) => {
+			source.data.result.receipt.record_count += 1;
+		}],
+		["channel drift", (source) => {
+			source.data.result.capabilities[0].capability_channel = "enabled";
+		}],
+		["invalid contract schema", (source) => {
+			source.data.result.capabilities[0].input_schema_json = "[]";
+		}],
+	];
+	for (const [name, mutate] of mutations) {
+		await t.test(name, async () => {
+			const envelope = signedRegistryRead();
+			mutate(envelope);
+			const run = createStaticBrokerRunner({
+				authorityVerified: true,
+				body: JSON.stringify(envelope),
+				executedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+				executedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+				statusCode: 200,
+			});
+
+			const result = await run("read", {
+				capability_id: "acct.registry.list.v1",
+				parameters: {},
+			});
+
+			assert.equal(result.ok, false);
+			assert.equal(result.error.code, "bridge_invalid_v3_broker_response");
+		});
+	}
+});
+
 test("multicurrency read retains the complete company, cutoff, currency set, policy, and page", async () => {
 	const runtimeConfigPath = path.join(fixtureDir, "runtime.json");
 	const run = createBoundRunner({
@@ -1458,6 +1874,88 @@ test("authenticated broker reconciliation errors enforce the optional boolean co
 	}
 });
 
+test("recover broker errors bind only a correctly named origin operation id", async (t) => {
+	const action = "operation.recover";
+	const request = requests()[action];
+	const baseError = {
+		code: "broker_recovery_rejected",
+		message: "The trusted V3 broker rejected the request.",
+		odoo_effect: "none",
+		retryable: false,
+	};
+	const acceptedEnvelope = {
+		command: action,
+		error: {
+			...baseError,
+			origin_operation_id: request.origin_operation_id,
+		},
+		ok: false,
+	};
+	const accepted = await createStaticBrokerRunner({
+		authorityVerified: true,
+		body: JSON.stringify(acceptedEnvelope),
+		statusCode: 200,
+	})(action, request);
+	assert.deepEqual(accepted, acceptedEnvelope);
+	const brokerOmittedOrigin = await createStaticBrokerRunner({
+		authorityVerified: true,
+		body: JSON.stringify({
+			command: action,
+			error: baseError,
+			ok: false,
+		}),
+		statusCode: 200,
+	})(action, request);
+	assert.deepEqual(brokerOmittedOrigin, acceptedEnvelope);
+
+	for (const [name, error] of [
+		["wrong origin", {
+			...baseError,
+			origin_operation_id: "op-different-origin",
+		}],
+		["origin mislabeled as recovery operation", {
+			...baseError,
+			operation_id: request.origin_operation_id,
+		}],
+	]) {
+		await t.test(`rejects ${name}`, async () => {
+			const result = await createStaticBrokerRunner({
+				authorityVerified: true,
+				body: JSON.stringify({ command: action, error, ok: false }),
+				statusCode: 200,
+			})(action, request);
+			assert.equal(result.ok, false);
+			assert.equal(result.error.code, "bridge_invalid_v3_broker_response");
+			assert.equal(
+				result.error.origin_operation_id,
+				request.origin_operation_id,
+			);
+			assert.equal(Object.hasOwn(result.error, "operation_id"), false);
+		});
+	}
+
+	await t.test("rejects origin identifiers on non-recover errors", async () => {
+		const statusAction = "operation.status";
+		const statusRequest = requests()[statusAction];
+		const result = await createStaticBrokerRunner({
+			authorityVerified: true,
+			body: JSON.stringify({
+				command: statusAction,
+				error: {
+					...baseError,
+					origin_operation_id: request.origin_operation_id,
+				},
+				ok: false,
+			}),
+			statusCode: 200,
+		})(statusAction, statusRequest);
+		assert.equal(result.ok, false);
+		assert.equal(result.error.code, "bridge_invalid_v3_broker_response");
+		assert.equal(result.error.operation_id, statusRequest.operation_id);
+		assert.equal(Object.hasOwn(result.error, "origin_operation_id"), false);
+	});
+});
+
 test("the exact pre-auth broker reconciliation denial is returned unchanged", async () => {
 	const action = "operation.approve_execute";
 	const request = requests()[action];
@@ -1486,6 +1984,43 @@ test("the exact pre-auth broker reconciliation denial is returned unchanged", as
 	assert.equal(Object.hasOwn(result, "data"), false);
 	assert.equal(Object.hasOwn(result, "executedReleaseDigest"), false);
 	assert.equal(Object.hasOwn(result, "executedRegistryDigest"), false);
+});
+
+test("a pre-auth recover reconciliation denial is bound to its origin", async () => {
+	const action = "operation.recover";
+	const request = requests()[action];
+	const envelope = {
+		command: action,
+		error: {
+			code: "broker_session_reconciliation_required",
+			message: "The trusted V3 broker rejected the request.",
+			odoo_effect: "none",
+			reconciliation_required: true,
+			retryable: false,
+		},
+		ok: false,
+	};
+	const run = createStaticBrokerRunner({
+		authorityVerified: false,
+		body: JSON.stringify(envelope),
+		statusCode: 503,
+	});
+
+	const result = await run(action, request);
+
+	assert.deepEqual(result, {
+		...envelope,
+		error: {
+			...envelope.error,
+			origin_operation_id: request.origin_operation_id,
+		},
+	});
+	assert.deepEqual(addUnknownEffectGuidance(result).bridge_guidance, {
+		must_not_create_new_operation: true,
+		next_action: "operation.diagnostics",
+		origin_operation_id: request.origin_operation_id,
+		reason: "recovery_prepare_delivery_must_be_reconciled",
+	});
 });
 
 test("a possibly delivered approve-execute transport failure forbids replay", async () => {
@@ -1710,6 +2245,42 @@ test("a possibly delivered local-state action requires broker reconciliation", a
 			retryable: false,
 		},
 		ok: false,
+	});
+});
+
+test("a possibly delivered recover binds the origin and forbids replacement", async () => {
+	const action = "operation.recover";
+	const request = requests()[action];
+	const run = createV3BrokerClient({
+		brokerSocketPath: "/run/odoo-accounting-cli-v3/test-broker.sock",
+		expectedReleaseDigest: EXPECTED_RELEASE_DIGEST,
+		expectedRegistryDigest: EXPECTED_REGISTRY_DIGEST,
+		sessionHandleProvider: () => TEST_BROKER_SESSION_HANDLE,
+		transport: async () => {
+			throw new Error("recovery acknowledgement loss");
+		},
+	});
+
+	const result = await run(action, request);
+
+	assert.deepEqual(result, {
+		command: action,
+		error: {
+			code: "bridge_v3_broker_reconciliation_required",
+			message: "The trusted V3 broker request may have been accepted; reconcile it before retrying.",
+			odoo_effect: "none",
+			origin_operation_id: request.origin_operation_id,
+			reconciliation_required: true,
+			retryable: false,
+		},
+		ok: false,
+	});
+	assert.equal(Object.hasOwn(result.error, "operation_id"), false);
+	assert.deepEqual(addUnknownEffectGuidance(result).bridge_guidance, {
+		must_not_create_new_operation: true,
+		next_action: "operation.diagnostics",
+		origin_operation_id: request.origin_operation_id,
+		reason: "recovery_prepare_delivery_must_be_reconciled",
 	});
 });
 

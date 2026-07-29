@@ -1917,6 +1917,122 @@ def test_read_uses_separate_authorizer_and_requires_current_verified_identity(
     assert rejected.executed_release_digest is None
 
 
+def test_registry_read_binds_company_from_authenticated_session(
+    harness: Harness,
+) -> None:
+    authorized_requests: list[dict[str, Any]] = []
+    executed_requests: list[dict[str, Any]] = []
+    original_authorizer = harness.broker._read_authorizer
+    original_executor = harness.broker._read_executor
+
+    def authorize(session_handle: str, request: dict[str, Any]):
+        authorized_requests.append(json.loads(json.dumps(request)))
+        return original_authorizer(session_handle, request)
+
+    def execute(request: dict[str, Any]):
+        executed_requests.append(json.loads(json.dumps(request)))
+        return original_executor(request)
+
+    harness.broker._read_authorizer = authorize
+    harness.broker._read_executor = execute
+
+    result = harness.dispatch(
+        "read",
+        {
+            "capability_id": "acct.registry.list.v1",
+            "parameters": {},
+        },
+        session="company-8-session-0123456789abcdef",
+    )
+
+    assert result.status_code == 200
+    assert result.body["ok"] is True
+    assert authorized_requests == [
+        {
+            "capability_id": "acct.registry.list.v1",
+            "parameters": {"company_id": 8},
+        }
+    ]
+    assert executed_requests[0]["parameters"] == {"company_id": 8}
+    assert executed_requests[0]["context"]["company_id"] == 8
+    assert executed_requests[0]["context"]["allowed_company_ids"] == [8]
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"company_id": 7},
+        {"company_id": 8},
+        {"extra": "caller-controlled"},
+    ],
+)
+def test_registry_read_rejects_every_caller_supplied_parameter(
+    harness: Harness,
+    parameters: dict[str, Any],
+) -> None:
+    result = harness.dispatch(
+        "read",
+        {
+            "capability_id": "acct.registry.list.v1",
+            "parameters": parameters,
+        },
+    )
+
+    assert result.status_code == 200
+    assert result.body["error"]["code"] == "broker_business_request_rejected"
+    assert harness.read_authorizations == 0
+    assert harness.read_executions == 0
+
+
+def test_non_registry_read_parameters_are_not_rewritten(
+    harness: Harness,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    original_authorizer = harness.broker._read_authorizer
+
+    def authorize(session_handle: str, request: dict[str, Any]):
+        captured.append(json.loads(json.dumps(request)))
+        return original_authorizer(session_handle, request)
+
+    harness.broker._read_authorizer = authorize
+    request = {
+        "capability_id": "acct.gl.trial_balance.v1",
+        "parameters": {},
+    }
+
+    result = harness.dispatch("read", request)
+
+    assert result.status_code == 200
+    assert result.body["ok"] is True
+    assert captured == [request]
+
+
+def test_registry_read_rejects_authorized_context_company_drift(
+    harness: Harness,
+) -> None:
+    def drifted_authorizer(
+        _session_handle: str,
+        request: dict[str, Any],
+    ) -> AuthorizedReadAction:
+        return harness.authorize_read(
+            "company-8-session-0123456789abcdef",
+            request,
+        )
+
+    harness.broker._read_authorizer = drifted_authorizer
+    result = harness.dispatch(
+        "read",
+        {
+            "capability_id": "acct.registry.list.v1",
+            "parameters": {},
+        },
+    )
+
+    assert result.status_code == 200
+    assert result.body["error"]["code"] == "broker_read_authority_rejected"
+    assert harness.read_executions == 0
+
+
 def _seed_old_operation(harness: Harness, operation_id: str = "old-operation") -> None:
     requester = harness.sessions["requester-session-0123456789abcdef"]
     harness.operations[operation_id] = Operation.prepare(

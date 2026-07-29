@@ -20,12 +20,19 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     release_binding = (BRIDGE / "release-binding.mjs").read_text(
         encoding="utf-8"
     )
+    final_evidence = (BRIDGE / "final-evidence.mjs").read_text(
+        encoding="utf-8"
+    )
+    tool_policy = (BRIDGE / "tool-policy.mjs").read_text(encoding="utf-8")
+    system_prompt = (BRIDGE / "SYSTEM_PROMPT.md").read_text(encoding="utf-8")
     package = json.loads((BRIDGE / "package.json").read_text(encoding="utf-8"))
 
     for path in (
+        BRIDGE / "SYSTEM_PROMPT.md",
         BRIDGE / "server.mjs",
         BRIDGE / "bootstrap.mjs",
         BRIDGE / "create-runtime-binding.mjs",
+        BRIDGE / "final-evidence.mjs",
         BRIDGE / "extensions" / "odoo-v3-cli.mjs",
         BRIDGE / "extensions" / "odoo-tools.ts",
         BRIDGE / "package-lock.json",
@@ -35,7 +42,9 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
         BRIDGE / "tool-policy.mjs",
         BRIDGE / "tests" / "odoo-v3-cli.test.mjs",
         BRIDGE / "tests" / "bootstrap.test.mjs",
+        BRIDGE / "tests" / "final-evidence.test.mjs",
         BRIDGE / "tests" / "release-binding.test.mjs",
+        BRIDGE / "tests" / "server-final-evidence.test.mjs",
         BRIDGE / "tests" / "tool-policy.test.mjs",
         BRIDGE / "tests" / "trusted-broker.test.mjs",
         BRIDGE / "trusted-session.mjs",
@@ -60,6 +69,15 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     assert "verifyPiBridgeReleaseBinding" in server
     assert "v3ReleaseBinding" in server
     assert "enabledPiToolNames" in server
+    assert "launchPolicyControlledChat" in server
+    assert "preflightV3BrokerSession" in server
+    assert '"hardened_chat_broker_session_rejected"' in tool_policy
+    assert server.index("preflightV3BrokerSession({") < server.index(
+        "}), runPiChat)"
+    )
+    assert tool_policy.index("await preflight(launchRequest)") < tool_policy.index(
+        "return await launch(launchRequest)"
+    )
     assert "PI_BRIDGE_HARDENED_V3_ONLY" in server
     assert "LEGACY_ODOO_ENVIRONMENT_NAMES" in server
     assert "legacyOdooEnvironment(process.env, hardenedV3Only)" in server
@@ -114,11 +132,18 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
         '"runtime_config_path"',
     ):
         assert broker_owned_field in runner
-    assert "runV3BrokerOperation" in extension
+    assert "createFinalEvidenceBrokerClient" in final_evidence
+    assert "createFinalEvidenceBrokerClient" in extension
+    assert "runFinalEvidenceBrokerOperation" in extension
+    assert "runV3BrokerOperation" not in extension
     assert "verifyPiBridgeReleaseBinding" in extension
     assert "if (exposeV3Tools)" in extension
     assert 'callV3Broker("operation.approve_execute", params)' in extension
-    assert 'callV3Query("registry.list", {})' in extension
+    assert "authenticatedV3RegistryRead" in extension
+    assert 'runFinalEvidenceBrokerOperation("read", {' in extension
+    assert 'capability_id: "acct.registry.list.v1"' in extension
+    assert "deriveCapabilityGetFromRegistryRead" in extension
+    assert 'callV3Query("registry.list", {})' not in extension
     for forbidden_schema in (
         "v3ContextSchema",
         "v3ApprovalSchema",
@@ -127,6 +152,9 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
         "approver_user_id: Type",
         "auth_signature: Type",
         "request_id: Type",
+        "principal: Type",
+        "sessionHandleProvider:",
+        "user_id: Type",
     ):
         assert forbidden_schema not in extension
 
@@ -153,11 +181,48 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     ):
         assert boundary in release_binding
     assert "resolveAuthenticatedBrokerSession" in server
-    assert 'stdio: ["ignore", "pipe", "pipe", "pipe"]' in server
+    assert '? ["ignore", "pipe", "pipe", "pipe", "pipe"]' in server
+    assert 'collectFinalEvidenceStream(child.stdio[4])' in server
     assert "child.stdio[3].end" in server
     assert "ODOO_ACCOUNTING_CLI_V3_BROKER_SESSION" not in server
     assert "brokerSessionHandle: payload.session_id" not in server
-    tool_policy = (BRIDGE / "tool-policy.mjs").read_text(encoding="utf-8")
+    assert "systemPrompt: payload.system_prompt" not in server
+    assert "payload.provider || process.env.PI_AGENT_PROVIDER" not in server
+    assert "payload.model || process.env.PI_AGENT_MODEL" not in server
+    assert 'configuredPiProvider = process.env.PI_AGENT_PROVIDER || ""' in server
+    assert 'configuredPiModel = process.env.PI_AGENT_MODEL || ""' in server
+    assert "configuredProvider: configuredPiProvider" in server
+    assert "configuredModel: configuredPiModel" in server
+    assert "hardenedSystemPrompt," in server
+    assert "SYSTEM_PROMPT.md" in server
+    assert '"pi_bridge/SYSTEM_PROMPT.md"' in release_binding
+    for required_prompt_policy in (
+        "acct.registry.list.v1",
+        "odoo_v3_capability_list",
+        "accepts no company input",
+        "signed Odoo read receipt",
+        "unsigned selection",
+        "operation.prepare",
+        "operation.preview",
+        "external user approval",
+        "operation.approve_execute",
+        "operation.result",
+        "do not retry",
+        "Query status or diagnostics for the same operation",
+        "canonical JSON object",
+        "verified_success",
+        "An ordinary verified read uses null",
+    ):
+        assert required_prompt_policy in system_prompt
+    assert system_prompt.index("operation.prepare") < system_prompt.index(
+        "operation.preview"
+    )
+    assert system_prompt.index("operation.preview") < system_prompt.index(
+        "operation.approve_execute"
+    )
+    assert system_prompt.index("operation.approve_execute") < system_prompt.index(
+        "operation.result"
+    )
     assert "AUTHENTICATED_V3_BROKER_TOOL_NAMES" in tool_policy
     assert "literalPiUserPrompt" in tool_policy
     assert "sessionDeletionAllowed" in tool_policy

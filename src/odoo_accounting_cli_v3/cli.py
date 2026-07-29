@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import hmac
 import os
 import re
 import shutil
@@ -23,6 +24,7 @@ from .effect_finalizer import (
     EffectFinalizationError,
     validate_effect_finalization_evidence_shape,
 )
+from .historical_router import HistoricalRouterError, _read_trusted_file
 from .odoo.runner import (
     READ_REJECTION_CODES,
     OdooRunnerError,
@@ -64,6 +66,40 @@ DEFAULT_SANDBOX_WRITE_STATE = Path(
 )
 DEFAULT_SANDBOX_READ_STATE_ROOT = Path("/var/lib/odoo-accounting-cli-v3/sandbox/read")
 DEFAULT_SANDBOX_READ_SECRET_ROOT = Path("/etc/odoo-accounting-cli-v3/secrets/sandbox")
+PI_SCENARIO_REPORT_SCHEMA = "odoo-accounting-cli-v3.pi-gate-report.v3"
+PI_SCENARIO_REQUIRED_GATES = ("F01", "F02", "F03", "F04", "F05")
+PI_RECOMPUTATION_ATTESTATION_SCHEMA = (
+    "odoo-accounting-cli-v3.pi-recomputation-attestation.v1"
+)
+PI_RECOMPUTATION_ATTESTATION_CONTEXT = (
+    b"odoo-accounting-cli-v3.pi-recomputation-attestation.v1\x00"
+)
+PI_RECOMPUTATION_CLAIM_FIELDS = frozenset(
+    {
+        "capture_binding_canonical_sha256",
+        "capture_binding_file_sha256",
+        "expected_trace_count",
+        "manifest_sha256",
+        "package_sha256",
+        "pi_scenario_report_sha256",
+        "registry_digest",
+        "run_id",
+        "scenario_count",
+        "trace_attestation_signed_payload_sha256",
+        "trace_document_sha256",
+        "trace_file_sha256",
+        "verified_trace_count",
+    }
+)
+PI_CAPTURE_BINDING_FIELDS = (
+    "model",
+    "pi_agent_version",
+    "pi_bridge_version",
+    "pi_runtime_sha256",
+    "provider",
+    "system_prompt_sha256",
+    "tool_set_sha256",
+)
 
 
 def _json(value: Any) -> str:
@@ -522,16 +558,150 @@ def _pi_scenario_acceptance_report_status(
     gates = report.get("gates")
     coverage = report.get("trace_coverage")
     capture = report.get("capture")
-    required_gates = ("F01", "F02", "F03", "F05")
-    if report.get("schema_version") != "odoo-accounting-cli-v3.pi-gate-report.v1":
+    attestation = report.get("attestation")
+    runtime_evidence = report.get("runtime_evidence")
+    required_gates = PI_SCENARIO_REQUIRED_GATES
+    if report.get("schema_version") != PI_SCENARIO_REPORT_SCHEMA:
         blockers.append("Pi scenario report has the wrong schema")
     if report.get("acceptance_passed") is not True:
         blockers.append("Pi scenario report did not pass acceptance")
+    runtime_counts_valid = (
+        isinstance(runtime_evidence, dict)
+        and set(runtime_evidence)
+        == {
+            "acl_independently_rechecked",
+            "expected_trace_count",
+            "read_exchange_count",
+            "verified",
+            "verified_trace_count",
+            "write_authority_signature_verified_count",
+            "write_exchange_count",
+        }
+        and runtime_evidence.get("verified") is True
+        and runtime_evidence.get("acl_independently_rechecked") is False
+        and all(
+            type(runtime_evidence.get(field)) is int
+            and runtime_evidence[field] >= 0
+            for field in (
+                "expected_trace_count",
+                "read_exchange_count",
+                "verified_trace_count",
+                "write_authority_signature_verified_count",
+                "write_exchange_count",
+            )
+        )
+        and runtime_evidence.get("verified_trace_count")
+        == runtime_evidence.get("expected_trace_count")
+        and runtime_evidence.get("expected_trace_count") > 0
+        and runtime_evidence.get("read_exchange_count", 0)
+        + runtime_evidence.get("write_exchange_count", 0)
+        == runtime_evidence.get("verified_trace_count")
+        and runtime_evidence.get("write_authority_signature_verified_count")
+        == runtime_evidence.get("write_exchange_count")
+    )
+    if (
+        report.get("runtime_evidence_verified") is not True
+        or not runtime_counts_valid
+    ):
+        blockers.append(
+            "Pi scenario runtime evidence was not independently verified"
+        )
+    if (
+        not isinstance(attestation, dict)
+        or set(attestation)
+        != {"algorithm", "key_id", "signature", "signed_payload_sha256"}
+        or attestation.get("algorithm") != "hmac-sha256"
+        or not isinstance(attestation.get("key_id"), str)
+        or not attestation.get("key_id")
+        or re.fullmatch(r"[0-9a-f]{64}", str(attestation.get("signature")))
+        is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(attestation.get("signed_payload_sha256")),
+        )
+        is None
+        or report.get("attestation_signed_payload_sha256")
+        != attestation.get("signed_payload_sha256")
+    ):
+        blockers.append("Pi scenario trace attestation summary is invalid")
+    if (
+        re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(report.get("trace_document_sha256")),
+        )
+        is None
+    ):
+        blockers.append("Pi scenario trace document digest is invalid")
+    if report.get("registry_digest") != expected_release_identity.get(
+        "registry_digest"
+    ):
+        blockers.append(
+            "Pi scenario report is not bound to the current capability registry"
+        )
     if not isinstance(capture, dict):
         blockers.append("Pi scenario capture summary is invalid")
-    elif capture.get("v3_release_sha256") != expected_release_identity.get("package_sha256"):
-        blockers.append("Pi scenario report is not bound to the current release package")
-    if not isinstance(coverage, dict) or coverage.get("passed") is not True:
+    else:
+        if capture.get("v3_package_sha256") != expected_release_identity.get(
+            "package_sha256"
+        ):
+            blockers.append(
+                "Pi scenario report is not bound to the current release package"
+            )
+        if capture.get("v3_manifest_sha256") != expected_release_identity.get(
+            "manifest_sha256"
+        ):
+            blockers.append(
+                "Pi scenario report is not bound to the current release manifest"
+            )
+        capture_binding = {
+            field: capture.get(field) for field in PI_CAPTURE_BINDING_FIELDS
+        }
+        text_fields = (
+            "model",
+            "pi_agent_version",
+            "pi_bridge_version",
+            "provider",
+        )
+        digest_fields = (
+            "pi_runtime_sha256",
+            "system_prompt_sha256",
+            "tool_set_sha256",
+        )
+        if any(
+            not isinstance(capture_binding[field], str)
+            or not capture_binding[field]
+            for field in text_fields
+        ) or any(
+            not isinstance(capture_binding[field], str)
+            or re.fullmatch(r"[0-9a-f]{64}", capture_binding[field]) is None
+            for field in digest_fields
+        ):
+            blockers.append("Pi scenario capture binding is invalid")
+        if report.get("capture_binding_verified") is not True:
+            blockers.append(
+                "Pi scenario capture binding was not independently verified"
+            )
+        if report.get("expected_capture_binding_sha256") != _sha256_json(
+            capture_binding
+        ):
+            blockers.append("Pi scenario expected capture binding digest mismatch")
+    coverage_valid = (
+        isinstance(coverage, dict)
+        and set(coverage)
+        == {
+            "captured",
+            "expected",
+            "missing_scenario_ids",
+            "passed",
+        }
+        and type(coverage.get("captured")) is int
+        and type(coverage.get("expected")) is int
+        and coverage["captured"] > 0
+        and coverage["captured"] == coverage["expected"]
+        and coverage.get("missing_scenario_ids") == []
+        and coverage.get("passed") is True
+    )
+    if not coverage_valid:
         blockers.append("Pi scenario trace coverage did not pass")
     if not isinstance(gates, dict):
         blockers.append("Pi scenario gate summary is invalid")
@@ -544,7 +714,17 @@ def _pi_scenario_acceptance_report_status(
         }
         for gate_id in required_gates:
             gate = gates.get(gate_id)
-            if not isinstance(gate, dict) or gate.get("passed") is not True:
+            gate_counts_valid = (
+                isinstance(gate, dict)
+                and type(gate.get("numerator")) is int
+                and type(gate.get("denominator")) is int
+                and gate["denominator"] > 0
+                and 0 <= gate["numerator"] <= gate["denominator"]
+            )
+            if (
+                not gate_counts_valid
+                or gate.get("passed") is not True
+            ):
                 blockers.append(f"Pi scenario gate {gate_id} did not pass")
     return {
         "blockers": sorted(set(blockers)),
@@ -553,11 +733,352 @@ def _pi_scenario_acceptance_report_status(
         "scenario_acceptance_ready": not blockers,
         "summary": {
             "acceptance_passed": report.get("acceptance_passed"),
+            "attestation_signed_payload_sha256": report.get(
+                "attestation_signed_payload_sha256"
+            ),
             "capture": capture,
+            "capture_binding_verified": report.get(
+                "capture_binding_verified"
+            ),
             "coverage": coverage,
+            "expected_capture_binding_sha256": report.get(
+                "expected_capture_binding_sha256"
+            ),
             "gates": gate_summary,
+            "registry_digest": report.get("registry_digest"),
             "run_id": report.get("run_id"),
+            "runtime_evidence": runtime_evidence,
+            "runtime_evidence_verified": report.get(
+                "runtime_evidence_verified"
+            ),
+            "trace_document_sha256": report.get("trace_document_sha256"),
         },
+    }
+
+
+def _pi_recomputation_claims(
+    *,
+    report: dict[str, Any],
+    report_sha256: str,
+    trace_file_sha256: str,
+    capture_binding_file_sha256: str,
+    expected_release_identity: dict[str, Any],
+) -> dict[str, Any]:
+    runtime_evidence = report.get("runtime_evidence")
+    coverage = report.get("trace_coverage")
+    if not isinstance(runtime_evidence, dict) or not isinstance(coverage, dict):
+        raise ValueError("Pi recomputation report counts are unavailable")
+    claims = {
+        "capture_binding_canonical_sha256": report.get(
+            "expected_capture_binding_sha256"
+        ),
+        "capture_binding_file_sha256": capture_binding_file_sha256,
+        "expected_trace_count": runtime_evidence.get("expected_trace_count"),
+        "manifest_sha256": expected_release_identity.get("manifest_sha256"),
+        "package_sha256": expected_release_identity.get("package_sha256"),
+        "pi_scenario_report_sha256": report_sha256,
+        "registry_digest": expected_release_identity.get("registry_digest"),
+        "run_id": report.get("run_id"),
+        "scenario_count": coverage.get("expected"),
+        "trace_attestation_signed_payload_sha256": report.get(
+            "attestation_signed_payload_sha256"
+        ),
+        "trace_document_sha256": report.get("trace_document_sha256"),
+        "trace_file_sha256": trace_file_sha256,
+        "verified_trace_count": runtime_evidence.get("verified_trace_count"),
+    }
+    if (
+        set(claims) != set(PI_RECOMPUTATION_CLAIM_FIELDS)
+        or type(claims["expected_trace_count"]) is not int
+        or claims["expected_trace_count"] <= 0
+        or type(claims["verified_trace_count"]) is not int
+        or claims["verified_trace_count"] != claims["expected_trace_count"]
+        or type(claims["scenario_count"]) is not int
+        or claims["scenario_count"] <= 0
+        or not isinstance(claims["run_id"], str)
+        or not claims["run_id"]
+        or any(
+            not isinstance(claims[field], str)
+            or re.fullmatch(r"[0-9a-f]{64}", claims[field]) is None
+            for field in PI_RECOMPUTATION_CLAIM_FIELDS - {
+                "expected_trace_count",
+                "run_id",
+                "scenario_count",
+                "verified_trace_count",
+            }
+        )
+    ):
+        raise ValueError("Pi recomputation claims are invalid")
+    return claims
+
+
+def _create_pi_recomputation_attestation(
+    claims: dict[str, Any],
+    *,
+    key_id: str,
+    secret: bytes,
+) -> dict[str, Any]:
+    if (
+        set(claims) != set(PI_RECOMPUTATION_CLAIM_FIELDS)
+        or not isinstance(key_id, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", key_id)
+        is None
+        or type(secret) is not bytes
+        or len(secret) < 32
+    ):
+        raise ValueError("Pi recomputation attestation inputs are invalid")
+    payload = PI_RECOMPUTATION_ATTESTATION_CONTEXT + _json(claims).encode(
+        "utf-8"
+    )
+    return {
+        "algorithm": "hmac-sha256",
+        "claims": claims,
+        "key_id": key_id,
+        "schema_version": PI_RECOMPUTATION_ATTESTATION_SCHEMA,
+        "signature": hmac.new(secret, payload, hashlib.sha256).hexdigest(),
+    }
+
+
+def _load_root_managed_pi_attestation_keys(
+    gate: Any,
+    path: Path,
+) -> dict[str, bytes]:
+    try:
+        raw, _identity = _read_trusted_file(
+            path,
+            "Pi recomputation attestation keys",
+            maximum=1024 * 1024,
+            require_root_owner=True,
+        )
+
+        def reject_duplicate_keys(
+            pairs: list[tuple[str, Any]],
+        ) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON object key: {key}")
+                result[key] = value
+            return result
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"invalid JSON numeric constant: {value}")
+
+        document = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_constant,
+        )
+        return gate.load_attestation_keys(document)
+    except HistoricalRouterError as exc:
+        raise ValueError(str(exc)) from exc
+    except (TypeError, UnicodeError, ValueError) as exc:
+        raise ValueError(
+            "Pi recomputation attestation keys are invalid"
+        ) from exc
+
+
+def _pi_recomputation_check_status(
+    pi_scenario_report_check: Path | None,
+    *,
+    pi_scenario_status: dict[str, Any],
+    command: str,
+    expected_release_identity: dict[str, Any],
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    if pi_scenario_report_check is None:
+        return {
+            "attestation_verified": False,
+            "blockers": [
+                "trusted Pi scenario recomputation check was not supplied"
+            ],
+            "check_path": None,
+            "check_sha256": None,
+            "recomputation_ready": False,
+        }
+    try:
+        check = _load_retained_json_report(
+            pi_scenario_report_check,
+            command=command,
+            label="Pi scenario recomputation check",
+        )
+        data = check.get("data")
+        if (
+            set(check)
+            != {"business_succeeded", "command", "data", "ok"}
+            or check.get("command") != "evidence.pi-scenario-report-check"
+            or check.get("ok") is not True
+            or check.get("business_succeeded") is not False
+            or not isinstance(data, dict)
+        ):
+            raise ValueError("Pi scenario recomputation check envelope is invalid")
+        if (
+            data.get("blockers") != []
+            or data.get("scenario_acceptance_ready") is not True
+            or data.get("recomputed_report_matches") is not True
+            or data.get("production_promotion_allowed") is not False
+            or data.get("real_odoo_write_performed") is not False
+        ):
+            raise ValueError("Pi scenario recomputation check is not ready")
+        summary = pi_scenario_status.get("summary")
+        if not isinstance(summary, dict):
+            raise ValueError("Pi scenario report summary is unavailable")
+        pi_summary = data.get("pi_scenario")
+        if (
+            not isinstance(pi_summary, dict)
+            or pi_summary.get("scenario_acceptance_ready") is not True
+            or pi_summary.get("report_sha256")
+            != pi_scenario_status.get("report_sha256")
+            or data.get("pi_scenario_report_sha256")
+            != pi_scenario_status.get("report_sha256")
+        ):
+            raise ValueError(
+                "Pi scenario recomputation check is not report-bound"
+            )
+        key_path_value = data.get("attestation_keys_path")
+        if not isinstance(key_path_value, str) or not key_path_value:
+            raise ValueError(
+                "Pi recomputation attestation keys path is unavailable"
+            )
+        gate = _load_pi_scenario_gate()
+        trusted_keys = _load_root_managed_pi_attestation_keys(
+            gate,
+            Path(key_path_value),
+        )
+        attestation = data.get("recomputation_attestation")
+        if (
+            not isinstance(attestation, dict)
+            or set(attestation)
+            != {
+                "algorithm",
+                "claims",
+                "key_id",
+                "schema_version",
+                "signature",
+            }
+            or attestation.get("algorithm") != "hmac-sha256"
+            or attestation.get("schema_version")
+            != PI_RECOMPUTATION_ATTESTATION_SCHEMA
+            or not isinstance(attestation.get("claims"), dict)
+            or set(attestation["claims"])
+            != set(PI_RECOMPUTATION_CLAIM_FIELDS)
+        ):
+            raise ValueError("Pi recomputation attestation is invalid")
+        key_id = attestation.get("key_id")
+        if (
+            not isinstance(key_id, str)
+            or re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}",
+                key_id,
+            )
+            is None
+        ):
+            raise ValueError("Pi recomputation attestation key is invalid")
+        secret = trusted_keys.get(key_id)
+        if type(secret) is not bytes or len(secret) < 32:
+            raise ValueError("Pi recomputation attestation key is untrusted")
+        runtime_evidence = summary.get("runtime_evidence")
+        coverage = summary.get("coverage")
+        if not isinstance(runtime_evidence, dict) or not isinstance(
+            coverage, dict
+        ):
+            raise ValueError("Pi scenario report counts are unavailable")
+        expected_claims = {
+            "capture_binding_canonical_sha256": summary.get(
+                "expected_capture_binding_sha256"
+            ),
+            "capture_binding_file_sha256": data.get(
+                "expected_capture_binding_sha256"
+            ),
+            "expected_trace_count": runtime_evidence.get(
+                "expected_trace_count"
+            ),
+            "manifest_sha256": expected_release_identity.get(
+                "manifest_sha256"
+            ),
+            "package_sha256": expected_release_identity.get(
+                "package_sha256"
+            ),
+            "pi_scenario_report_sha256": pi_scenario_status.get(
+                "report_sha256"
+            ),
+            "registry_digest": expected_release_identity.get(
+                "registry_digest"
+            ),
+            "run_id": summary.get("run_id"),
+            "scenario_count": coverage.get("expected"),
+            "trace_attestation_signed_payload_sha256": summary.get(
+                "attestation_signed_payload_sha256"
+            ),
+            "trace_document_sha256": summary.get(
+                "trace_document_sha256"
+            ),
+            "trace_file_sha256": data.get("trace_file_sha256"),
+            "verified_trace_count": runtime_evidence.get(
+                "verified_trace_count"
+            ),
+        }
+        if attestation["claims"] != expected_claims:
+            raise ValueError(
+                "Pi recomputation attestation claims do not match the report"
+            )
+        _pi_recomputation_claims(
+            report={
+                "attestation_signed_payload_sha256": expected_claims[
+                    "trace_attestation_signed_payload_sha256"
+                ],
+                "expected_capture_binding_sha256": expected_claims[
+                    "capture_binding_canonical_sha256"
+                ],
+                "run_id": expected_claims["run_id"],
+                "runtime_evidence": {
+                    "expected_trace_count": expected_claims[
+                        "expected_trace_count"
+                    ],
+                    "verified_trace_count": expected_claims[
+                        "verified_trace_count"
+                    ],
+                },
+                "trace_coverage": {
+                    "expected": expected_claims["scenario_count"]
+                },
+                "trace_document_sha256": expected_claims[
+                    "trace_document_sha256"
+                ],
+            },
+            report_sha256=expected_claims["pi_scenario_report_sha256"],
+            trace_file_sha256=expected_claims["trace_file_sha256"],
+            capture_binding_file_sha256=expected_claims[
+                "capture_binding_file_sha256"
+            ],
+            expected_release_identity=expected_release_identity,
+        )
+        payload = (
+            PI_RECOMPUTATION_ATTESTATION_CONTEXT
+            + _json(expected_claims).encode("utf-8")
+        )
+        signature = attestation.get("signature")
+        if (
+            not isinstance(signature, str)
+            or re.fullmatch(r"[0-9a-f]{64}", signature) is None
+            or not hmac.compare_digest(
+                signature,
+                hmac.new(secret, payload, hashlib.sha256).hexdigest(),
+            )
+        ):
+            raise ValueError("Pi recomputation attestation signature mismatch")
+    except (CliFailure, OSError, ValueError) as exc:
+        blockers.append(str(exc))
+    return {
+        "attestation_verified": not blockers,
+        "blockers": sorted(set(blockers)),
+        "check_path": str(pi_scenario_report_check),
+        "check_sha256": (
+            _sha256_file(pi_scenario_report_check)
+            if pi_scenario_report_check.is_file()
+            else None
+        ),
+        "recomputation_ready": not blockers,
     }
 
 
@@ -1114,6 +1635,12 @@ GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
         "operator_supplied": True,
         "sensitive": False,
     },
+    "MANIFEST_SHA256": {
+        "description": "Verified release-manifest SHA-256 bound to runtime receipts.",
+        "format": "sha256",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
     "NORMALIZED_PI_TRACE_CAPTURE_JSON": {
         "description": "Retained normalized Pi Agent trace capture JSON for the routed release.",
         "format": "json_file",
@@ -1138,6 +1665,12 @@ GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
         "operator_supplied": True,
         "sensitive": False,
     },
+    "PACKAGE_SHA256": {
+        "description": "Verified canonical release-package SHA-256.",
+        "format": "sha256",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
     "PRODUCTION_DATABASE": {
         "description": "Protected production database name that must not be selected for sandbox writes.",
         "format": "postgres_database_name",
@@ -1147,6 +1680,12 @@ GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
     "REQUIRED_FREE_BYTES": {
         "description": "Minimum free bytes required by the sandbox write capacity gate.",
         "format": "positive_integer",
+        "operator_supplied": True,
+        "sensitive": False,
+    },
+    "REGISTRY_DIGEST": {
+        "description": "Verified ordered capability-registry digest for the routed release.",
+        "format": "sha256",
         "operator_supplied": True,
         "sensitive": False,
     },
@@ -1196,6 +1735,18 @@ GOAL_REMEDIATION_PLACEHOLDER_SCHEMA: dict[str, dict[str, Any]] = {
         "description": "JSON file containing the trusted attestation keys used to verify Pi trace integrity.",
         "format": "json_file",
         "operator_supplied": True,
+        "sensitive": True,
+    },
+    "TRUSTED_AUTHORITY_CONFIG_JSON": {
+        "description": "Root-managed trusted-authority runtime configuration for the exact release.",
+        "format": "json_file",
+        "operator_supplied": True,
+        "sensitive": True,
+    },
+    "TRUSTED_CAPTURE_BINDING_JSON": {
+        "description": "Independent exact Pi/Bridge/provider/model/prompt/tool/runtime binding.",
+        "format": "json_file",
+        "operator_supplied": True,
         "sensitive": False,
     },
     "UTC_TIMESTAMP": {
@@ -1217,9 +1768,38 @@ GOAL_REMEDIATION_ACTIONS = (
         ),
         "operator_command": "evidence pi-trace-capture-check; tools/pi_scenario_gate.py; evidence pi-scenario-report-check",
         "command_args_template": (
-            ("evidence", "pi-trace-capture-check", "--trace-file", "<NORMALIZED_PI_TRACE_CAPTURE_JSON>", "--attestation-keys", "<TRUSTED_TRACE_ATTESTATION_KEYS_JSON>"),
-            ("tools/pi_scenario_gate.py", "--traces", "<NORMALIZED_PI_TRACE_CAPTURE_JSON>", "--out", "<PI_GATE_REPORT_JSON>"),
-            ("evidence", "pi-scenario-report-check", "--pi-scenario-report", "<PI_GATE_REPORT_JSON>"),
+            (
+                "evidence", "pi-trace-capture-check",
+                "--trace-file", "<NORMALIZED_PI_TRACE_CAPTURE_JSON>",
+                "--attestation-keys", "<TRUSTED_TRACE_ATTESTATION_KEYS_JSON>",
+                "--expected-capture-binding", "<TRUSTED_CAPTURE_BINDING_JSON>",
+                "--trusted-authority-config", "<TRUSTED_AUTHORITY_CONFIG_JSON>",
+                "--expected-manifest-sha256", "<MANIFEST_SHA256>",
+                "--expected-package-sha256", "<PACKAGE_SHA256>",
+                "--expected-registry-digest", "<REGISTRY_DIGEST>",
+            ),
+            (
+                "tools/pi_scenario_gate.py",
+                "--traces", "<NORMALIZED_PI_TRACE_CAPTURE_JSON>",
+                "--attestation-keys", "<TRUSTED_TRACE_ATTESTATION_KEYS_JSON>",
+                "--expected-capture-binding", "<TRUSTED_CAPTURE_BINDING_JSON>",
+                "--trusted-authority-config", "<TRUSTED_AUTHORITY_CONFIG_JSON>",
+                "--expected-manifest-sha256", "<MANIFEST_SHA256>",
+                "--expected-package-sha256", "<PACKAGE_SHA256>",
+                "--expected-registry-digest", "<REGISTRY_DIGEST>",
+                "--output", "<PI_GATE_REPORT_JSON>",
+            ),
+            (
+                "evidence", "pi-scenario-report-check",
+                "--pi-scenario-report", "<PI_GATE_REPORT_JSON>",
+                "--trace-file", "<NORMALIZED_PI_TRACE_CAPTURE_JSON>",
+                "--attestation-keys", "<TRUSTED_TRACE_ATTESTATION_KEYS_JSON>",
+                "--expected-capture-binding", "<TRUSTED_CAPTURE_BINDING_JSON>",
+                "--trusted-authority-config", "<TRUSTED_AUTHORITY_CONFIG_JSON>",
+                "--expected-manifest-sha256", "<MANIFEST_SHA256>",
+                "--expected-package-sha256", "<PACKAGE_SHA256>",
+                "--expected-registry-digest", "<REGISTRY_DIGEST>",
+            ),
         ),
         "authorization_required": False,
     },
@@ -1813,7 +2393,20 @@ def _final_evidence_manifest_report(
         blockers.append(
             "final evidence manifest contains unexpected artifact digests"
         )
+
+    def retained_route_matches(route: object) -> bool:
+        if not isinstance(route, dict) or route.get("current_route_ready") is not True:
+            return False
+        identity = route.get("route_identity")
+        if not isinstance(identity, dict):
+            return False
+        return all(
+            expected is None or identity.get(field) == expected
+            for field, expected in expected_release_identity.items()
+        )
+
     artifact_reports: dict[str, Any] = {}
+    artifact_documents: dict[str, dict[str, Any]] = {}
     for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS:
         raw_path = artifacts.get(name)
         artifact_path = _manifest_artifact_path(manifest_path, raw_path)
@@ -1839,9 +2432,78 @@ def _final_evidence_manifest_report(
         if expected_command is not None and isinstance(document, dict):
             if document.get("command") != expected_command:
                 artifact_blockers.append("artifact command does not match expected evidence kind")
+        if isinstance(document, dict):
+            artifact_documents[name] = document
         if name == "pi_scenario_report" and isinstance(document, dict):
-            if document.get("schema_version") != "odoo-accounting-cli-v3.pi-gate-report.v1":
+            if document.get("schema_version") != PI_SCENARIO_REPORT_SCHEMA:
                 artifact_blockers.append("Pi scenario report schema is invalid")
+            retained_status = _pi_scenario_acceptance_report_status(
+                artifact_path,
+                command=command,
+                expected_release_identity=expected_release_identity,
+            )
+            if retained_status["scenario_acceptance_ready"] is not True:
+                artifact_blockers.append("Pi scenario report is not acceptance-ready")
+        if name in {"pi_scenario_report_check", "pi_trace_capture_check"}:
+            if not isinstance(document, dict):
+                artifact_blockers.append("Pi evidence check is invalid")
+            else:
+                data = document.get("data")
+                if (
+                    document.get("ok") is not True
+                    or document.get("business_succeeded") is not False
+                    or not isinstance(data, dict)
+                ):
+                    artifact_blockers.append("Pi evidence check envelope is invalid")
+                else:
+                    if data.get("blockers") != []:
+                        artifact_blockers.append("Pi evidence check retains blockers")
+                    if data.get("production_promotion_allowed") is not False:
+                        artifact_blockers.append(
+                            "Pi evidence check must not authorize production"
+                        )
+                    if data.get("real_odoo_write_performed") is not False:
+                        artifact_blockers.append(
+                            "Pi evidence check must not be a real Odoo write receipt"
+                        )
+                    if not retained_route_matches(data.get("route")):
+                        artifact_blockers.append(
+                            "Pi evidence check route identity is invalid"
+                        )
+                    if name == "pi_trace_capture_check":
+                        if data.get("trace_capture_ready") is not True:
+                            artifact_blockers.append(
+                                "Pi trace capture check is not ready"
+                            )
+                        capture = data.get("capture")
+                        if (
+                            not isinstance(capture, dict)
+                            or capture.get("v3_package_sha256")
+                            != expected_release_identity.get("package_sha256")
+                            or capture.get("v3_manifest_sha256")
+                            != expected_release_identity.get("manifest_sha256")
+                            or data.get("registry_digest")
+                            != expected_release_identity.get("registry_digest")
+                        ):
+                            artifact_blockers.append(
+                                "Pi trace capture identity is invalid"
+                            )
+                    else:
+                        if (
+                            data.get("scenario_acceptance_ready") is not True
+                            or data.get("recomputed_report_matches") is not True
+                        ):
+                            artifact_blockers.append(
+                                "Pi scenario report check is not recomputed and ready"
+                            )
+                        pi_scenario = data.get("pi_scenario")
+                        if (
+                            not isinstance(pi_scenario, dict)
+                            or pi_scenario.get("scenario_acceptance_ready") is not True
+                        ):
+                            artifact_blockers.append(
+                                "Pi scenario report check summary is invalid"
+                            )
         if name == "sandbox_provision_authorization" and isinstance(document, dict):
             if document.get("purpose") != "sandbox_database_provision":
                 artifact_blockers.append("sandbox provision authorization purpose is invalid")
@@ -2074,6 +2736,114 @@ def _final_evidence_manifest_report(
             "path": str(artifact_path) if artifact_path is not None else raw_path,
             "sha256": digest,
         }
+
+    raw_pi_report = artifact_documents.get("pi_scenario_report")
+    trace_check = artifact_documents.get("pi_trace_capture_check")
+    report_check = artifact_documents.get("pi_scenario_report_check")
+    goal_readiness = artifact_documents.get("goal_readiness_report")
+    if all(
+        isinstance(document, dict)
+        for document in (raw_pi_report, trace_check, report_check, goal_readiness)
+    ):
+        trace_data = trace_check.get("data")
+        report_data = report_check.get("data")
+        goal_data = goal_readiness.get("data")
+        raw_report_sha256 = artifact_reports["pi_scenario_report"]["sha256"]
+        if not all(
+            isinstance(data, dict)
+            for data in (trace_data, report_data, goal_data)
+        ):
+            blockers.append("Pi final evidence cross-binding data is invalid")
+        else:
+            cross_bindings = {
+                "raw report SHA-256": (
+                    raw_report_sha256,
+                    report_data.get("pi_scenario_report_sha256"),
+                ),
+                "trace file SHA-256": (
+                    trace_data.get("trace_file_sha256"),
+                    report_data.get("trace_file_sha256"),
+                ),
+                "trace document SHA-256": (
+                    raw_pi_report.get("trace_document_sha256"),
+                    trace_data.get("trace_document_sha256"),
+                    report_data.get("trace_document_sha256"),
+                ),
+                "trace attestation payload SHA-256": (
+                    raw_pi_report.get("attestation_signed_payload_sha256"),
+                    trace_data.get("attestation_signed_payload_sha256"),
+                    report_data.get(
+                        "trace_attestation_signed_payload_sha256"
+                    ),
+                ),
+                "capture binding file SHA-256": (
+                    trace_data.get("expected_capture_binding_sha256"),
+                    report_data.get("expected_capture_binding_sha256"),
+                ),
+                "capture binding canonical SHA-256": (
+                    raw_pi_report.get("expected_capture_binding_sha256"),
+                    trace_data.get(
+                        "expected_capture_binding_canonical_sha256"
+                    ),
+                    report_data.get(
+                        "expected_capture_binding_canonical_sha256"
+                    ),
+                ),
+            }
+            for label, values in cross_bindings.items():
+                if (
+                    any(
+                        not isinstance(value, str)
+                        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                        for value in values
+                    )
+                    or len(set(values)) != 1
+                ):
+                    blockers.append(f"Pi final evidence {label} mismatch")
+            if raw_pi_report.get("capture") != trace_data.get("capture"):
+                blockers.append("Pi final evidence capture identity mismatch")
+            goal_pi = goal_data.get("pi_scenario")
+            if (
+                not isinstance(goal_pi, dict)
+                or goal_pi.get("report_sha256") != raw_report_sha256
+                or goal_pi.get("scenario_acceptance_ready") is not True
+            ):
+                blockers.append(
+                    "goal readiness Pi scenario evidence is not bound to the retained report"
+                )
+    else:
+        blockers.append("Pi final evidence artifacts cannot be cross-bound")
+
+    raw_pi_report_path = _manifest_artifact_path(
+        manifest_path,
+        artifacts.get("pi_scenario_report"),
+    )
+    report_check_path = _manifest_artifact_path(
+        manifest_path,
+        artifacts.get("pi_scenario_report_check"),
+    )
+    if raw_pi_report_path is None or report_check_path is None:
+        blockers.append(
+            "Pi final evidence trusted recomputation artifacts are unavailable"
+        )
+    else:
+        raw_pi_status = _pi_scenario_acceptance_report_status(
+            raw_pi_report_path,
+            command=command,
+            expected_release_identity=expected_release_identity,
+        )
+        recomputation_status = _pi_recomputation_check_status(
+            report_check_path,
+            pi_scenario_status=raw_pi_status,
+            command=command,
+            expected_release_identity=expected_release_identity,
+        )
+        if recomputation_status["recomputation_ready"] is not True:
+            blockers.extend(
+                "Pi trusted recomputation: " + item
+                for item in recomputation_status["blockers"]
+            )
+
     return {
         "artifact_count": len(FINAL_EVIDENCE_REQUIRED_ARTIFACTS),
         "artifacts": artifact_reports,
@@ -2397,6 +3167,22 @@ def _load_pi_scenario_gate() -> Any:
             exit_code=5,
         ) from exc
     return module
+
+
+def _load_pi_evidence_trust(
+    gate: Any,
+    trusted_authority_config: Path,
+    *,
+    expected_release_digest: str,
+    expected_registry_digest: str,
+) -> Any:
+    """Load Pi receipt trust through the exact-release gate boundary."""
+
+    return gate.load_pi_evidence_trust(
+        trusted_authority_config,
+        expected_release_digest=expected_release_digest,
+        expected_registry_digest=expected_registry_digest,
+    )
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -4776,6 +5562,48 @@ def evidence_write_evidence_index(evidence_root: Path) -> None:
     help="Retained tools/pi_scenario_gate.py report for the exact release.",
 )
 @click.option(
+    "--trace-file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Exact normalized Pi trace capture used to produce the report.",
+)
+@click.option(
+    "--attestation-keys",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Host-local trusted HMAC attestation keys for the trace capture.",
+)
+@click.option(
+    "--expected-capture-binding",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Independent exact Pi/Bridge/provider/model/prompt/tool/runtime binding.",
+)
+@click.option(
+    "--trusted-authority-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help=(
+        "Root-managed trusted-authority runtime configuration whose verified "
+        "release route supplies receipt and approval verification keys."
+    ),
+)
+@click.option(
+    "--corpus",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=Path("tests/fixtures/pi_scenarios.v1.json"),
+    show_default=True,
+    help="Frozen Pi scenario corpus used to recompute the report.",
+)
+@click.option(
+    "--registry",
+    "registry_file",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=Path("registry/capabilities.json"),
+    show_default=True,
+    help="Exact-release capability registry used to recompute the report.",
+)
+@click.option(
     "--current-path",
     type=click.Path(path_type=Path),
     default=Path("/opt/odoo-accounting-cli-v3/current"),
@@ -4789,6 +5617,12 @@ def evidence_write_evidence_index(evidence_root: Path) -> None:
 @click.option("--expected-registry-digest", help="Expected capability registry digest.")
 def evidence_pi_scenario_report_check(
     pi_scenario_report: Path,
+    trace_file: Path,
+    attestation_keys: Path,
+    expected_capture_binding: Path,
+    trusted_authority_config: Path,
+    corpus: Path,
+    registry_file: Path,
     current_path: Path,
     expected_release: str | None,
     expected_commit: str | None,
@@ -4814,17 +5648,138 @@ def evidence_pi_scenario_report_check(
         expected_release_identity=route_report["route_identity"],
     )
     blockers: list[str] = []
+    recomputed_report: dict[str, Any] | None = None
+    recomputation_attestation: dict[str, Any] | None = None
+    recomputation_error: str | None = None
+    try:
+        gate = _load_pi_scenario_gate()
+        trace_document = gate.load_json_document(trace_file)
+        corpus_document = gate.load_json_document(corpus)
+        registry_document = gate.load_json_document(registry_file)
+        trusted_keys = gate.load_attestation_keys(
+            gate.load_json_document(attestation_keys)
+        )
+        capture_binding_document = gate.load_json_document(
+            expected_capture_binding
+        )
+        evidence_trust = _load_pi_evidence_trust(
+            gate,
+            trusted_authority_config,
+            expected_release_digest=route_report["route_identity"][
+                "manifest_sha256"
+            ],
+            expected_registry_digest=route_report["route_identity"][
+                "registry_digest"
+            ],
+        )
+        recomputed_report = gate.score_documents(
+            corpus_document,
+            trace_document,
+            registry_document,
+            trusted_keys,
+            expected_package_sha256=route_report["route_identity"][
+                "package_sha256"
+            ],
+            expected_manifest_sha256=route_report["route_identity"][
+                "manifest_sha256"
+            ],
+            expected_registry_digest=route_report["route_identity"][
+                "registry_digest"
+            ],
+            evidence_trust=evidence_trust,
+            expected_capture_binding=capture_binding_document,
+        )
+        retained_report = _load_retained_json_report(
+            pi_scenario_report,
+            command=command,
+            label="Pi scenario acceptance",
+        )
+        if retained_report != recomputed_report:
+            blockers.append(
+                "Pi scenario report does not exactly match recomputed trace evidence"
+            )
+        else:
+            trace_attestation = trace_document.get("attestation")
+            key_id = (
+                trace_attestation.get("key_id")
+                if isinstance(trace_attestation, dict)
+                else None
+            )
+            secret = trusted_keys.get(key_id)
+            if type(secret) is not bytes or len(secret) < 32:
+                raise ValueError(
+                    "Pi trace attestation key cannot attest recomputation"
+                )
+            claims = _pi_recomputation_claims(
+                report=recomputed_report,
+                report_sha256=_sha256_file(pi_scenario_report),
+                trace_file_sha256=_sha256_file(trace_file),
+                capture_binding_file_sha256=_sha256_file(
+                    expected_capture_binding
+                ),
+                expected_release_identity=route_report["route_identity"],
+            )
+            recomputation_attestation = (
+                _create_pi_recomputation_attestation(
+                    claims,
+                    key_id=key_id,
+                    secret=secret,
+                )
+            )
+    except (CliFailure, OSError, ValueError) as exc:
+        recomputation_error = str(exc)
+        blockers.append("Pi scenario report could not be recomputed from trusted trace evidence")
     if not route_report["current_route_ready"]:
         blockers.append("current release route is not ready")
     if not pi_report["scenario_acceptance_ready"]:
         blockers.extend(pi_report["blockers"])
     data = {
         "blockers": sorted(set(blockers)),
+        "attestation_keys_path": str(attestation_keys.resolve()),
+        "corpus_path": str(corpus.resolve()),
+        "expected_capture_binding_path": str(
+            expected_capture_binding.resolve()
+        ),
         "pi_scenario": pi_report,
+        "pi_scenario_report_sha256": _sha256_file(pi_scenario_report),
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
+        "recomputation_error": recomputation_error,
+        "recomputation_attestation": recomputation_attestation,
+        "recomputed_report_matches": recomputed_report is not None
+        and not any(
+            blocker
+            == "Pi scenario report does not exactly match recomputed trace evidence"
+            for blocker in blockers
+        ),
         "route": route_report,
         "scenario_acceptance_ready": not blockers,
+        "trace_attestation_signed_payload_sha256": (
+            recomputed_report.get("attestation_signed_payload_sha256")
+            if recomputed_report is not None
+            else None
+        ),
+        "trace_document_sha256": (
+            recomputed_report.get("trace_document_sha256")
+            if recomputed_report is not None
+            else None
+        ),
+        "trace_file_sha256": (
+            _sha256_file(trace_file) if trace_file.is_file() else None
+        ),
+        "trace_file": str(trace_file.resolve()),
+        "trusted_authority_config_path": str(trusted_authority_config),
+        "registry_path": str(registry_file.resolve()),
+        "expected_capture_binding_sha256": (
+            _sha256_file(expected_capture_binding)
+            if expected_capture_binding.is_file()
+            else None
+        ),
+        "expected_capture_binding_canonical_sha256": (
+            recomputed_report.get("expected_capture_binding_sha256")
+            if recomputed_report is not None
+            else None
+        ),
     }
     _success(command, data, business_succeeded=False)
 
@@ -4841,6 +5796,24 @@ def evidence_pi_scenario_report_check(
     type=click.Path(path_type=Path, dir_okay=False),
     required=True,
     help="Trusted HMAC attestation key JSON for the captured Pi traces.",
+)
+@click.option(
+    "--expected-capture-binding",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help=(
+        "Trusted exact Pi/Bridge/provider/model/prompt/tool/runtime binding "
+        "JSON, supplied independently from the trace capture."
+    ),
+)
+@click.option(
+    "--trusted-authority-config",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help=(
+        "Root-managed trusted-authority runtime configuration whose verified "
+        "release route supplies receipt and approval verification keys."
+    ),
 )
 @click.option(
     "--corpus",
@@ -4872,6 +5845,8 @@ def evidence_pi_scenario_report_check(
 def evidence_pi_trace_capture_check(
     trace_file: Path,
     attestation_keys: Path,
+    expected_capture_binding: Path,
+    trusted_authority_config: Path,
     corpus: Path,
     registry_file: Path,
     current_path: Path,
@@ -4900,42 +5875,79 @@ def evidence_pi_trace_capture_check(
         registry_document = gate.load_json_document(registry_file)
         key_document = gate.load_json_document(attestation_keys)
         trusted_keys = gate.load_attestation_keys(key_document)
-        gate.validate_trace_document(
+        capture_binding_document = gate.load_json_document(
+            expected_capture_binding
+        )
+        evidence_trust = _load_pi_evidence_trust(
+            gate,
+            trusted_authority_config,
+            expected_release_digest=route_report["route_identity"][
+                "manifest_sha256"
+            ],
+            expected_registry_digest=route_report["route_identity"][
+                "registry_digest"
+            ],
+        )
+        trusted_summaries = gate.validate_trace_document(
             trace_document,
             corpus_document,
             registry_document,
             trusted_keys,
-            expected_release_sha256=route_report["route_identity"]["package_sha256"],
+            expected_package_sha256=route_report["route_identity"]["package_sha256"],
+            expected_manifest_sha256=route_report["route_identity"][
+                "manifest_sha256"
+            ],
+            expected_registry_digest=route_report["route_identity"][
+                "registry_digest"
+            ],
+            evidence_trust=evidence_trust,
+            expected_capture_binding=capture_binding_document,
         )
     except (OSError, ValueError) as exc:
         data = {
             "attestation_keys_path": str(attestation_keys),
             "blockers": [str(exc)],
             "corpus_path": str(corpus),
+            "expected_capture_binding_path": str(expected_capture_binding),
             "production_promotion_allowed": False,
             "real_odoo_write_performed": False,
             "registry_path": str(registry_file),
             "route": route_report,
             "trace_capture_ready": False,
             "trace_file": str(trace_file),
+            "trusted_authority_config_path": str(trusted_authority_config),
         }
         _success(command, data, business_succeeded=False)
         return
     traces = trace_document.get("traces", [])
     data = {
         "attestation": trace_document.get("attestation"),
+        "attestation_signed_payload_sha256": trace_document.get(
+            "attestation", {}
+        ).get("signed_payload_sha256"),
         "attestation_keys_path": str(attestation_keys),
         "blockers": [] if route_report["current_route_ready"] else ["current release route is not ready"],
         "capture": trace_document.get("capture"),
         "corpus_path": str(corpus),
+        "expected_capture_binding_path": str(expected_capture_binding),
+        "expected_capture_binding_sha256": _sha256_file(
+            expected_capture_binding
+        ),
+        "expected_capture_binding_canonical_sha256": gate.canonical_sha256(
+            capture_binding_document
+        ),
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
         "registry_path": str(registry_file),
+        "registry_digest": trace_document.get("registry_digest"),
         "route": route_report,
         "trace_capture_ready": route_report["current_route_ready"],
         "trace_count": len(traces) if isinstance(traces, list) else 0,
         "trace_file": str(trace_file),
         "trace_file_sha256": _sha256_file(trace_file),
+        "trace_document_sha256": gate.canonical_sha256(trace_document),
+        "trusted_authority_config_path": str(trusted_authority_config),
+        "trusted_runtime_evidence_count": len(trusted_summaries),
     }
     _success(command, data, business_succeeded=False)
 
@@ -5387,6 +6399,14 @@ def evidence_final_evidence_manifest_check(
     help="Retained tools/pi_scenario_gate.py report for the exact release.",
 )
 @click.option(
+    "--pi-scenario-report-check",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help=(
+        "Retained evidence.pi-scenario-report-check output carrying the "
+        "purpose-specific trusted recomputation attestation."
+    ),
+)
+@click.option(
     "--sandbox-onboarding-receipt",
     type=click.Path(path_type=Path, dir_okay=False),
     help="Retained evidence.sandbox-onboarding-readiness JSON receipt.",
@@ -5474,6 +6494,7 @@ def evidence_final_evidence_manifest_check(
 )
 def evidence_goal_readiness(
     pi_scenario_report: Path | None,
+    pi_scenario_report_check: Path | None,
     sandbox_onboarding_receipt: Path | None,
     write_pipeline_report: Path | None,
     write_evidence_index: Path | None,
@@ -5568,6 +6589,18 @@ def evidence_goal_readiness(
         command=command,
         expected_release_identity=expected_release_identity,
     )
+    pi_recomputation = _pi_recomputation_check_status(
+        pi_scenario_report_check,
+        pi_scenario_status=pi_report,
+        command=command,
+        expected_release_identity=expected_release_identity,
+    )
+    pi_report["recomputation"] = pi_recomputation
+    if not pi_recomputation["recomputation_ready"]:
+        pi_report["blockers"] = sorted(
+            set(pi_report["blockers"] + pi_recomputation["blockers"])
+        )
+        pi_report["scenario_acceptance_ready"] = False
     onboarding_report = _sandbox_onboarding_receipt_report(
         sandbox_onboarding_receipt,
         command=command,

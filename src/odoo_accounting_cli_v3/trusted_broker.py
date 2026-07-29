@@ -52,6 +52,7 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SESSION_HANDLE = re.compile(r"[A-Za-z0-9._~-]{32,512}\Z")
 _MAX_LINUX_ID = 2**32 - 2
 _MAX_LINUX_PID = 2**31 - 1
+_REGISTRY_LIST_CAPABILITY = "acct.registry.list.v1"
 _RECONCILIATION_UNDO_CAPABILITY = "acct.reconciliation.undo.v1"
 _RECONCILIATION_ORIGIN_CAPABILITY = "acct.reconciliation.apply.v1"
 _RECONCILIATION_UNDO_PARAMETER_FIELDS = frozenset(
@@ -660,6 +661,23 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
     else:
         _identifier(request["operation_id"], "operation_id")
     return request
+
+
+def _bind_registry_read_company(
+    request: dict[str, Any],
+    trusted_session: TrustedSession,
+) -> dict[str, Any]:
+    if request["capability_id"] != _REGISTRY_LIST_CAPABILITY:
+        return request
+    if request["parameters"] != {}:
+        raise TrustedBrokerError(
+            "broker_business_request_rejected",
+            status_code=400,
+        )
+    return {
+        "capability_id": _REGISTRY_LIST_CAPABILITY,
+        "parameters": {"company_id": trusted_session.company_id},
+    }
 
 
 def _context_mapping(context: RequestContext) -> dict[str, Any]:
@@ -2562,6 +2580,11 @@ class TrustedBroker:
 
         try:
             request = _business_request(action, payload)
+            if action == "read":
+                request = _bind_registry_read_company(
+                    request,
+                    trusted_session,
+                )
         except TrustedBrokerError as exc:
             result = self._error(safe_action, exc, authority_verified=True)
             return result if action == "read" else audited(result)
