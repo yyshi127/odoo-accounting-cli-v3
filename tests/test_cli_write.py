@@ -193,6 +193,12 @@ def _request(action: str) -> dict[str, Any]:
             "reason": "Reverse the verified origin operation",
             "idempotency_key": "recover-origin-1",
         }
+    if action == "operation.diagnostics":
+        return {
+            "context": context,
+            "company_id": 7,
+            "operation_id": "op-1",
+        }
     return {"context": context, "operation_id": "op-1"}
 
 
@@ -221,6 +227,7 @@ def _invoke(action: str, request: dict[str, Any], *, command: str | None = None)
         "operation.approve_execute",
         "operation.status",
         "operation.result",
+        "operation.diagnostics",
         "operation.recover",
     ],
 )

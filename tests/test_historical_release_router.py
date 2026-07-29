@@ -148,6 +148,12 @@ def _request(action: str, *, operation_id: str = "op-1") -> dict[str, Any]:
             "reason": "Reverse the verified origin operation",
             "idempotency_key": "recover-origin-1",
         }
+    if action == "operation.diagnostics":
+        return {
+            "context": context,
+            "company_id": 7,
+            "operation_id": operation_id,
+        }
     return {"context": context, "operation_id": operation_id}
 
 
@@ -319,8 +325,21 @@ def _response(
     release_digest: str,
     registry_digest: str,
 ) -> dict[str, Any]:
-    data: dict[str, Any] = {"operation_id": operation_id}
-    if action in {"operation.prepare", "operation.status", "operation.recover"}:
+    data: dict[str, Any] = (
+        {
+            "operation": {"operation_id": operation_id},
+            "receipt": {
+                "capability_id": "acct.diagnostics.operation_read.v1",
+                "registry_digest": registry_digest,
+                "release_digest": release_digest,
+            },
+        }
+        if action == "operation.diagnostics"
+        else {"operation_id": operation_id}
+    )
+    if action == "operation.diagnostics":
+        pass
+    elif action in {"operation.prepare", "operation.status", "operation.recover"}:
         data["operation"] = {
             "operation_id": operation_id,
             "registry_digest": registry_digest,
@@ -570,6 +589,7 @@ def test_approve_execute_hands_one_connected_finalizer_fd_to_exact_child(
         "operation.preview",
         "operation.status",
         "operation.result",
+        "operation.diagnostics",
         "operation.recover",
     ],
 )
@@ -1216,6 +1236,7 @@ def test_recover_lost_response_accepts_only_exact_bound_recovery_operation(
         ("operation.preview", "preview"),
         ("operation.status", "status"),
         ("operation.result", "result"),
+        ("operation.diagnostics", "diagnostics"),
         ("operation.approve_execute", "approve-execute"),
     ],
 )

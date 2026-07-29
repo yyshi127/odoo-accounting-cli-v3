@@ -13,6 +13,7 @@ export const V3_TOOL_NAMES = Object.freeze({
 	approveExecute: "odoo_v3_operation_approve_execute",
 	status: "odoo_v3_operation_status",
 	result: "odoo_v3_operation_result",
+	diagnostics: "odoo_v3_operation_diagnostics",
 	recover: "odoo_v3_operation_recover",
 });
 
@@ -22,6 +23,7 @@ export const V3_OPERATION_COMMANDS = Object.freeze({
 	"operation.approve_execute": Object.freeze(["operation", "approve-execute"]),
 	"operation.status": Object.freeze(["operation", "status"]),
 	"operation.result": Object.freeze(["operation", "result"]),
+	"operation.diagnostics": Object.freeze(["operation", "diagnostics"]),
 	"operation.recover": Object.freeze(["operation", "recover"]),
 });
 
@@ -32,6 +34,7 @@ export const V3_BROKER_ACTION_PATHS = Object.freeze({
 	"operation.approve_execute": "/v1/operation/approve-execute",
 	"operation.status": "/v1/operation/status",
 	"operation.result": "/v1/operation/result",
+	"operation.diagnostics": "/v1/operation/diagnostics",
 	"operation.recover": "/v1/operation/recover",
 });
 
@@ -54,6 +57,7 @@ const CAPABILITY_ID = /^acct\.[a-z0-9_]+\.[a-z0-9_]+\.v[1-9][0-9]*$/;
 const UTC_TIMESTAMP = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?Z$/;
 const DATABASE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const POSITIVE_DECIMAL = /^[1-9][0-9]*$/;
+const DIAGNOSTICS_CAPABILITY_ID = "acct.diagnostics.operation_read.v1";
 
 const DATABASE_FINALIZATION_KEYS = Object.freeze([
 	"attestation_digest",
@@ -213,6 +217,124 @@ function validReadData(data, request, expectedReleaseDigest, expectedRegistryDig
 		);
 }
 
+function validDiagnosticsData(data, request, expectedReleaseDigest, expectedRegistryDigest) {
+	const operation = data?.operation;
+	const audit = data?.audit;
+	const verification = data?.verification;
+	const failure = data?.failure;
+	const recovery = data?.recovery;
+	const receipts = data?.receipts;
+	const page = data?.page;
+	return exactKeys(data, [
+		"audit",
+		"failure",
+		"odoo_refs",
+		"operation",
+		"page",
+		"receipt",
+		"receipts",
+		"recovery",
+		"verification",
+	])
+		&& exactKeys(operation, [
+			"allowed_next_states",
+			"business_succeeded",
+			"capability_id",
+			"company_id",
+			"operation_id",
+			"revision",
+			"state",
+			"terminal",
+		])
+		&& operation.operation_id === request?.operation_id
+		&& operation.company_id === request?.company_id
+		&& CAPABILITY_ID.test(operation.capability_id)
+		&& Number.isSafeInteger(operation.revision)
+		&& operation.revision >= 0
+		&& typeof operation.terminal === "boolean"
+		&& typeof operation.business_succeeded === "boolean"
+		&& Array.isArray(operation.allowed_next_states)
+		&& exactKeys(audit, [
+			"chain_verified",
+			"event_count",
+			"event_types",
+			"event_types_offset",
+			"event_types_truncated",
+			"global_head_hash",
+			"last_event_hash",
+			"last_event_id",
+		])
+		&& audit.chain_verified === true
+		&& Number.isSafeInteger(audit.event_count)
+		&& audit.event_count >= 0
+		&& Array.isArray(audit.event_types)
+		&& audit.event_types.length <= 1000
+		&& exactKeys(verification, [
+			"evidence_digest",
+			"method",
+			"passed",
+			"trusted_terminal_result_verified",
+		])
+		&& typeof verification.trusted_terminal_result_verified === "boolean"
+		&& exactKeys(failure, ["evidence_digest", "present", "result_id", "stage"])
+		&& typeof failure.present === "boolean"
+		&& exactKeys(recovery, [
+			"attempt_count",
+			"available",
+			"bound_operation_ids",
+			"completion_evidence_digest",
+			"completion_receipt_body_digest",
+			"completion_receipt_id",
+			"latest_attempt_plan_digest",
+			"lifecycle_status",
+			"plan_digest",
+			"plan_status",
+			"recovery_capability_id",
+			"requires_approval",
+		])
+		&& typeof recovery.available === "boolean"
+		&& Number.isSafeInteger(recovery.attempt_count)
+		&& recovery.attempt_count >= 0
+		&& Array.isArray(recovery.bound_operation_ids)
+		&& (
+			operation.state === "recovered"
+				? recovery.lifecycle_status === "recovered_verified"
+					&& SHA256.test(recovery.completion_evidence_digest)
+					&& SHA256.test(recovery.completion_receipt_body_digest)
+					&& boundedString(recovery.completion_receipt_id, 128)
+				: recovery.lifecycle_status !== "recovered_verified"
+					&& recovery.completion_evidence_digest === null
+					&& recovery.completion_receipt_body_digest === null
+					&& recovery.completion_receipt_id === null
+		)
+		&& Array.isArray(data.odoo_refs)
+		&& exactKeys(receipts, [
+			"current_candidate_count",
+			"database_finalization_digest",
+			"difference_digest",
+			"durable_final_receipt_body_digest",
+			"durable_final_receipt_id",
+			"unique_final_receipt_verified",
+			"write_audit_head",
+			"write_audit_receipt_id",
+			"write_audit_result_digest",
+		])
+		&& typeof receipts.unique_final_receipt_verified === "boolean"
+		&& Number.isSafeInteger(receipts.current_candidate_count)
+		&& receipts.current_candidate_count >= 0
+		&& exactKeys(page, ["count", "total_count"])
+		&& page.count === 1
+		&& page.total_count === 1
+		&& validReadReceipt(
+			data.receipt,
+			{ capability_id: DIAGNOSTICS_CAPABILITY_ID },
+			expectedReleaseDigest,
+			expectedRegistryDigest,
+		)
+		&& data.receipt.company_id === request?.company_id
+		&& data.receipt.record_count === 1;
+}
+
 function validWriteAuditReceipt(
 	receipt,
 	verification,
@@ -315,7 +437,7 @@ function validVerifiedWriteSuccess(
 		&& isObject(data)
 		&& nonEmptyString(data.operation_id)
 		&& data.operation_id === request?.operation_id
-		&& ["completed", "recovered"].includes(data.operation_state)
+		&& data.operation_state === "completed"
 		&& isObject(verification)
 		&& nonEmptyString(verification.method)
 		&& verification.passed === true
@@ -458,6 +580,11 @@ function validBrokerBusinessRequest(action, request) {
 		return exactKeys(request, ["operation_id"])
 			&& boundedString(request.operation_id, 128);
 	}
+	if (action === "operation.diagnostics") {
+		return exactKeys(request, ["company_id", "operation_id"])
+			&& positiveIntegerValue(request.company_id)
+			&& boundedString(request.operation_id, 128);
+	}
 	if (action === "operation.recover") {
 		return exactKeys(request, [
 			"idempotency_key",
@@ -593,6 +720,17 @@ function parseCliEnvelope(
 		if (
 			cliCommand === "read"
 			&& !validReadData(
+				payload.data,
+				request,
+				expectedReleaseDigest,
+				expectedRegistryDigest,
+			)
+		) {
+			return null;
+		}
+		if (
+			cliCommand === "operation.diagnostics"
+			&& !validDiagnosticsData(
 				payload.data,
 				request,
 				expectedReleaseDigest,
@@ -1121,7 +1259,7 @@ export function createV3BrokerClient(options = {}) {
 			});
 		} catch (error) {
 			if (
-				action === "read"
+				["read", "operation.diagnostics"].includes(action)
 				|| (error instanceof BrokerTransportError && error.notDelivered)
 			) {
 				return bridgeFailure(action, request, {

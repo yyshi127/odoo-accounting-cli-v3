@@ -531,6 +531,18 @@ state, the two-result chain, a fresh approval, and the distinct recovery
 operation binding are all required. Historical version-1 bindings remain
 readable for frozen-route audit but are rejected by the current executor.
 
+The local implementation registers 16 state-dependent recovery contracts for
+the 12 non-terminal business-write capabilities. The two remaining write
+capabilities, `acct.move.draft_cancel.v1` and `acct.recovery.execute.v1`, are
+terminal and deliberately register no further recovery. Every contract is
+restricted to `test` and `sandbox`, has a public-ORM action and an independent
+fresh-read oracle, and rejects production execution. Payment and reconciliation
+results that already contain a prior partial or full reconciliation graph are
+forced to `manual_escalation`; the local implementation does not claim that it
+can reconstruct an arbitrary pre-existing reconciliation graph. These controls
+have local Fake ORM and control-plane tests only. They do not change the empty
+staged/enabled environment lists and are not real Odoo recovery evidence.
+
 The role-separated HMAC files and SQLite controls protect protocol boundaries
 against ordinary misconfiguration and out-of-protocol application writes; they
 are not a hardware-backed trust boundary and do not defend against arbitrary

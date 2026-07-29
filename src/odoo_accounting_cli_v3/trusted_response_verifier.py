@@ -24,6 +24,7 @@ from .gateway import (
 )
 from .odoo.bootstrap import request_context_from_mapping
 from .operations import (
+    ALLOWED_TRANSITIONS,
     APPROVAL_PURPOSE,
     APPROVAL_SIGNATURE_VERSION,
     Approval,
@@ -56,6 +57,8 @@ _NONTERMINAL_ACTIONS = frozenset(
         "operation.recover",
     }
 )
+_DIAGNOSTIC_ACTIONS = frozenset({"operation.diagnostics"})
+_DIAGNOSTICS_CAPABILITY_ID = "acct.diagnostics.operation_read.v1"
 
 _READ_REQUEST_FIELDS = {"capability_id", "context", "parameters"}
 _WRITE_REQUEST_FIELDS = {
@@ -75,6 +78,7 @@ _WRITE_REQUEST_FIELDS = {
     },
     "operation.status": {"context", "operation_id"},
     "operation.result": {"context", "operation_id"},
+    "operation.diagnostics": {"company_id", "context", "operation_id"},
     "operation.recover": {
         "context",
         "expected_origin_revision",
@@ -136,6 +140,80 @@ _RECOVERY_EXTRA_FIELDS = {
     "origin_operation_id",
     "origin_operation_revision",
     "recovery_plan_digest",
+}
+_DIAGNOSTIC_BODY_FIELDS = {
+    "audit",
+    "failure",
+    "odoo_refs",
+    "operation",
+    "page",
+    "receipts",
+    "recovery",
+    "verification",
+}
+_DIAGNOSTIC_OPERATION_FIELDS = {
+    "allowed_next_states",
+    "business_succeeded",
+    "capability_id",
+    "company_id",
+    "operation_id",
+    "revision",
+    "state",
+    "terminal",
+}
+_DIAGNOSTIC_AUDIT_FIELDS = {
+    "chain_verified",
+    "event_count",
+    "event_types",
+    "event_types_offset",
+    "event_types_truncated",
+    "global_head_hash",
+    "last_event_hash",
+    "last_event_id",
+}
+_DIAGNOSTIC_VERIFICATION_FIELDS = {
+    "evidence_digest",
+    "method",
+    "passed",
+    "trusted_terminal_result_verified",
+}
+_DIAGNOSTIC_FAILURE_FIELDS = {
+    "evidence_digest",
+    "present",
+    "result_id",
+    "stage",
+}
+_DIAGNOSTIC_RECOVERY_FIELDS = {
+    "attempt_count",
+    "available",
+    "bound_operation_ids",
+    "completion_evidence_digest",
+    "completion_receipt_body_digest",
+    "completion_receipt_id",
+    "latest_attempt_plan_digest",
+    "lifecycle_status",
+    "plan_digest",
+    "plan_status",
+    "recovery_capability_id",
+    "requires_approval",
+}
+_DIAGNOSTIC_RECEIPT_FIELDS = {
+    "current_candidate_count",
+    "database_finalization_digest",
+    "difference_digest",
+    "durable_final_receipt_body_digest",
+    "durable_final_receipt_id",
+    "unique_final_receipt_verified",
+    "write_audit_head",
+    "write_audit_receipt_id",
+    "write_audit_result_digest",
+}
+_DIAGNOSTIC_ODOO_REF_FIELDS = {
+    "company_id",
+    "model",
+    "record_fingerprint",
+    "record_id",
+    "record_state",
 }
 
 
@@ -286,11 +364,17 @@ def _next_action(operation: Operation) -> str:
         State.VERIFYING,
     }:
         return "operation.approve_execute"
+    if operation.state == State.RECOVERED:
+        return "operation.diagnostics"
     return "operation.result"
 
 
 def _terminal(operation: Operation) -> bool:
     return operation.state in {State.COMPLETED, State.FAILED, State.RECOVERED}
+
+
+def _result_available(operation: Operation) -> bool:
+    return operation.state in {State.COMPLETED, State.FAILED}
 
 
 def _already_consumed_read_receipt(
@@ -331,6 +415,8 @@ class _BoundResponseVerifier:
             now = _aware_clock(self._clock)
             if action == "read":
                 self._verify_read(response, request, now)
+            elif action in _DIAGNOSTIC_ACTIONS:
+                self._verify_diagnostics(action, response, request, now)
             elif action in _TERMINAL_ACTIONS:
                 self._verify_terminal_write(action, response, request, now)
             elif action in _NONTERMINAL_ACTIONS:
@@ -445,6 +531,272 @@ class _BoundResponseVerifier:
             secret=self._config.read_receipt_secret,
         )
 
+    def _verify_diagnostics(
+        self,
+        action: str,
+        response: Mapping[str, Any],
+        request: Mapping[str, Any],
+        now: datetime,
+    ) -> None:
+        _exact_mapping(request, _WRITE_REQUEST_FIELDS[action])
+        context, _unsigned = _context(action, request)
+        operation = self._operation(request["operation_id"])
+        if (
+            type(request["company_id"]) is not int
+            or request["company_id"] <= 0
+            or request["company_id"] != context.company_id
+            or not _operation_context_matches(operation, context, self._config)
+        ):
+            raise _ResponseRejected("diagnostic request")
+
+        envelope = _exact_mapping(response, {"command", "data", "ok"})
+        if envelope["command"] != action or envelope["ok"] is not True:
+            raise _ResponseRejected("diagnostic envelope")
+        data = _exact_mapping(
+            envelope["data"], _DIAGNOSTIC_BODY_FIELDS | {"receipt"}
+        )
+        body = {field_name: data[field_name] for field_name in _DIAGNOSTIC_BODY_FIELDS}
+
+        operation_view = _exact_mapping(
+            body["operation"], _DIAGNOSTIC_OPERATION_FIELDS
+        )
+        terminal = _terminal(operation)
+        expected_next_states = sorted(
+            state.value for state in ALLOWED_TRANSITIONS[operation.state]
+        )
+        if (
+            operation_view["operation_id"] != operation.operation_id
+            or operation_view["capability_id"] != operation.capability_id
+            or operation_view["company_id"] != operation.company_id
+            or operation_view["state"] != operation.state.value
+            or operation_view["revision"] != operation.revision
+            or operation_view["terminal"] is not terminal
+            or operation_view["allowed_next_states"] != expected_next_states
+            or type(operation_view["business_succeeded"]) is not bool
+        ):
+            raise _ResponseRejected("diagnostic operation")
+
+        audit = _exact_mapping(body["audit"], _DIAGNOSTIC_AUDIT_FIELDS)
+        event_types = audit["event_types"]
+        if (
+            audit["chain_verified"] is not True
+            or type(audit["event_count"]) is not int
+            or audit["event_count"] < 0
+            or not isinstance(event_types, list)
+            or len(event_types) > 1000
+            or any(type(item) is not str or not item for item in event_types)
+            or type(audit["event_types_offset"]) is not int
+            or audit["event_types_offset"] < 0
+            or audit["event_types_offset"] + len(event_types)
+            != audit["event_count"]
+            or audit["event_types_truncated"]
+            is not (audit["event_count"] > 1000)
+        ):
+            raise _ResponseRejected("diagnostic audit")
+        if audit["event_count"] == 0:
+            if any(
+                audit[field_name] is not None
+                for field_name in (
+                    "last_event_id",
+                    "last_event_hash",
+                )
+            ) or (
+                audit["global_head_hash"] is not None
+                and not _digest(audit["global_head_hash"])
+            ):
+                raise _ResponseRejected("diagnostic audit digest")
+        else:
+            _text(audit["last_event_id"])
+            if (
+                not _digest(audit["last_event_hash"])
+                or not _digest(audit["global_head_hash"])
+            ):
+                raise _ResponseRejected("diagnostic audit digest")
+
+        verification = _exact_mapping(
+            body["verification"], _DIAGNOSTIC_VERIFICATION_FIELDS
+        )
+        terminal_verified = verification["trusted_terminal_result_verified"]
+        if type(terminal_verified) is not bool:
+            raise _ResponseRejected("diagnostic verification")
+        if terminal_verified:
+            if (
+                operation.state not in {State.COMPLETED, State.FAILED}
+                or type(verification["passed"]) is not bool
+                or not _digest(verification["evidence_digest"])
+            ):
+                raise _ResponseRejected("diagnostic verification")
+            _text(verification["method"])
+        elif any(
+            verification[field_name] is not None
+            for field_name in ("passed", "method", "evidence_digest")
+        ):
+            raise _ResponseRejected("diagnostic verification")
+        expected_succeeded = bool(
+            operation.state == State.COMPLETED
+            and terminal_verified
+            and verification["passed"] is True
+        )
+        if operation_view["business_succeeded"] is not expected_succeeded:
+            raise _ResponseRejected("diagnostic business result")
+
+        failure = _exact_mapping(body["failure"], _DIAGNOSTIC_FAILURE_FIELDS)
+        if failure["present"] is not (operation.state == State.FAILED):
+            raise _ResponseRejected("diagnostic failure")
+        if failure["present"]:
+            if failure["stage"] not in {
+                "execute",
+                "verify",
+                "recover",
+                "unknown",
+            } or not _digest(failure["evidence_digest"]):
+                raise _ResponseRejected("diagnostic failure")
+            _text(failure["result_id"])
+        elif any(
+            failure[field_name] is not None
+            for field_name in ("stage", "result_id", "evidence_digest")
+        ):
+            raise _ResponseRejected("diagnostic failure")
+
+        recovery = _exact_mapping(
+            body["recovery"], _DIAGNOSTIC_RECOVERY_FIELDS
+        )
+        if (
+            recovery["lifecycle_status"]
+            not in {
+                "in_progress",
+                "recovered_verified",
+                "prepared_separately",
+                "not_started",
+            }
+            or type(recovery["available"]) is not bool
+            or type(recovery["attempt_count"]) is not int
+            or recovery["attempt_count"] < 0
+            or not isinstance(recovery["bound_operation_ids"], list)
+            or recovery["bound_operation_ids"]
+            != sorted(set(recovery["bound_operation_ids"]))
+        ):
+            raise _ResponseRejected("diagnostic recovery")
+        if (
+            recovery["lifecycle_status"] == "recovered_verified"
+        ) is not (operation.state == State.RECOVERED):
+            raise _ResponseRejected("diagnostic recovered state")
+        completion_fields = (
+            "completion_evidence_digest",
+            "completion_receipt_body_digest",
+            "completion_receipt_id",
+        )
+        if operation.state == State.RECOVERED:
+            if (
+                not _digest(recovery["completion_evidence_digest"])
+                or not _digest(
+                    recovery["completion_receipt_body_digest"]
+                )
+            ):
+                raise _ResponseRejected(
+                    "diagnostic recovery completion digest"
+                )
+            _identifier(recovery["completion_receipt_id"])
+        elif any(
+            recovery[field_name] is not None
+            for field_name in completion_fields
+        ):
+            raise _ResponseRejected("diagnostic recovery completion")
+        for bound_operation_id in recovery["bound_operation_ids"]:
+            _identifier(bound_operation_id)
+        for field_name in ("plan_digest", "latest_attempt_plan_digest"):
+            value = recovery[field_name]
+            if value is not None and not _digest(value):
+                raise _ResponseRejected("diagnostic recovery digest")
+        for field_name in ("plan_status", "recovery_capability_id"):
+            value = recovery[field_name]
+            if value is not None:
+                _text(value)
+        if (
+            recovery["requires_approval"] is not None
+            and type(recovery["requires_approval"]) is not bool
+        ):
+            raise _ResponseRejected("diagnostic recovery approval")
+
+        refs = body["odoo_refs"]
+        if not isinstance(refs, list) or len(refs) > 1000:
+            raise _ResponseRejected("diagnostic Odoo references")
+        for raw_ref in refs:
+            ref = _exact_mapping(raw_ref, _DIAGNOSTIC_ODOO_REF_FIELDS)
+            if (
+                type(ref["record_id"]) is not int
+                or ref["record_id"] <= 0
+                or ref["company_id"] != operation.company_id
+                or not _digest(ref["record_fingerprint"])
+            ):
+                raise _ResponseRejected("diagnostic Odoo reference")
+            _text(ref["model"])
+            _text(ref["record_state"])
+
+        receipts = _exact_mapping(
+            body["receipts"], _DIAGNOSTIC_RECEIPT_FIELDS
+        )
+        if (
+            type(receipts["unique_final_receipt_verified"]) is not bool
+            or receipts["unique_final_receipt_verified"] is not terminal_verified
+            or type(receipts["current_candidate_count"]) is not int
+            or receipts["current_candidate_count"] < 0
+        ):
+            raise _ResponseRejected("diagnostic receipts")
+        receipt_optional_fields = _DIAGNOSTIC_RECEIPT_FIELDS - {
+            "unique_final_receipt_verified",
+            "current_candidate_count",
+        }
+        if terminal_verified:
+            if receipts["current_candidate_count"] != 1:
+                raise _ResponseRejected("diagnostic receipts")
+            for field_name in receipt_optional_fields:
+                value = receipts[field_name]
+                if field_name in {
+                    "durable_final_receipt_id",
+                    "write_audit_receipt_id",
+                }:
+                    _text(value)
+                elif (
+                    field_name == "database_finalization_digest"
+                    and value is None
+                ):
+                    continue
+                elif not _digest(value):
+                    raise _ResponseRejected("diagnostic receipt digest")
+        elif any(receipts[field_name] is not None for field_name in receipt_optional_fields):
+            raise _ResponseRejected("diagnostic receipts")
+
+        page = _exact_mapping(body["page"], {"count", "total_count"})
+        if page["count"] != 1 or page["total_count"] != 1:
+            raise _ResponseRejected("diagnostic page")
+
+        verify_read_receipt(
+            data["receipt"],
+            capability_id=_DIAGNOSTICS_CAPABILITY_ID,
+            parameters={
+                "company_id": request["company_id"],
+                "operation_id": request["operation_id"],
+            },
+            result_body=body,
+            auth_token_id=context.auth_token_id,
+            principal=context.principal,
+            odoo_instance_id=context.odoo_instance_id,
+            database_name=context.database_name,
+            database_uuid=context.database_uuid,
+            company_id=context.company_id,
+            user_id=context.user_id,
+            registry_digest=self._config.registry_digest,
+            release_digest=self._config.release_digest,
+            environment=context.environment,
+            capability_channel=self._config.capability_channel,
+            expected_record_count=1,
+            now=now,
+            consume_receipt=_already_consumed_read_receipt,
+            expected_key_id=self._config.read_receipt_key_id,
+            secret=self._config.read_receipt_secret,
+        )
+
     def _request_operation(
         self,
         action: str,
@@ -493,7 +845,7 @@ class _BoundResponseVerifier:
         _context_value, _unsigned, operation = self._request_operation(
             action, request
         )
-        if not _terminal(operation) or any(
+        if not _result_available(operation) or any(
             value is None
             for value in (
                 operation.approval_signature,
@@ -531,7 +883,7 @@ class _BoundResponseVerifier:
         ):
             raise _ResponseRejected("terminal result")
         succeeded = (
-            operation.state in {State.COMPLETED, State.RECOVERED}
+            operation.state == State.COMPLETED
             and isinstance(data["verification"], Mapping)
             and data["verification"].get("passed") is True
         )
@@ -585,7 +937,7 @@ class _BoundResponseVerifier:
             or data["capability_id"] != operation.capability_id
             or data["operation_revision"] != operation.revision
             or data["operation_digest"] != operation.digest
-            or data["result_available"] is not _terminal(operation)
+            or data["result_available"] is not _result_available(operation)
             or data["next_action"] != expected_next_action
         ):
             raise _ResponseRejected("operation response")

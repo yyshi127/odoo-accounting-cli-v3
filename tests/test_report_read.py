@@ -13,6 +13,7 @@ from odoo_accounting_cli_v3.contracts import ContractError, validate_value
 from odoo_accounting_cli_v3.domain.report_read import (
     CurrencyInfo,
     NativeReportColumn,
+    NativeReportDefinitionBinding,
     NativeReportFilters,
     NativeReportLine,
     NativeReportPeriod,
@@ -158,6 +159,25 @@ def native_snapshot(**overrides):
         "resolved_report_name": "Balance Sheet (Country)",
         "report_family": "financial",
         "report_kind": "balance_sheet",
+        "definition_binding": NativeReportDefinitionBinding(
+            schema_version=1,
+            definition_sha256="1" * 64,
+            baseline_catalog_sha256="2" * 64,
+            baseline_entry_sha256="3" * 64,
+            source_candidate_sha256="4" * 64,
+            approval_set_sha256="5" * 64,
+            allowed_signers_sha256="6" * 64,
+            revocations_sha256="7" * 64,
+            oracle_contract_sha256="8" * 64,
+            trust_envelope_sha256="9" * 64,
+            binding_sha256="a" * 64,
+            approvals_verified=True,
+            revocations_checked=True,
+            artifact_digests_verified=True,
+            pre_matches_approved=True,
+            post_matches_approved=True,
+            same_transaction_snapshot_definition_equal=True,
+        ),
         "currency_id": 6,
         "period_key": MAIN_PERIOD_KEY,
         "date_mode": "range",
@@ -224,6 +244,36 @@ class FakeBackend:
 
 
 class ReportReadTests(unittest.TestCase):
+    def test_definition_binding_must_be_fully_verified(self):
+        binding = native_snapshot().definition_binding
+        cases = (
+            (
+                replace(binding, schema_version=2),
+                "binding schema is unsupported",
+            ),
+            (
+                replace(binding, pre_matches_approved=False),
+                "was not verified",
+            ),
+            (
+                replace(binding, approvals_verified=False),
+                "was not verified",
+            ),
+            (
+                replace(binding, definition_sha256="A" * 64),
+                "lowercase SHA-256",
+            ),
+        )
+        for candidate, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ReportReadError, message):
+                    read_financial_report(
+                        FakeBackend(
+                            native_snapshot(definition_binding=candidate)
+                        ),
+                        financial_parameters(),
+                    )
+
     def test_invalid_identity_dates_comparison_and_pagination_fail_closed(self):
         invalid_cases = (
             ({"company_id": True}, "company_id"),

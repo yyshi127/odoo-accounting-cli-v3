@@ -18,6 +18,15 @@ from .module_graph import (
     TrustedModuleGraph,
     conditional_required_fields,
 )
+from .recovery_actions import (
+    RECOVERY_ACTION_METHODS,
+    RecoveryActionError,
+    execute_recovery_action,
+)
+from .recovery_verifier import (
+    RecoveryVerificationError,
+    verify_recovery_action,
+)
 from ..draft_invoice_recovery import (
     DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
     DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
@@ -30,6 +39,15 @@ from ..draft_invoice_recovery import (
     vendor_bill_document_binding,
 )
 from ..domain.write_semantics import WriteSemanticError, validate_write_semantics
+from ..recovery_contracts import (
+    EXECUTABLE_RECOVERY_METHODS,
+    RECOVERY_ACTION_CONTRACTS,
+)
+from ..recovery_guard import (
+    RecoveryPlanExecutionGuard,
+    RecoveryPlanExecutionGuardError,
+    validate_recovery_plan_execution,
+)
 from ..write_receipts import (
     WriteReceiptError,
     create_record_snapshot,
@@ -73,14 +91,43 @@ _CAPABILITIES = frozenset(
 )
 
 # This dormant implementation is reachable only through a receipt-derived V2
-# plan in a registry-staged sandbox.  Production remains fail-closed even if a
-# plan is replayed there; promotion still requires the real module-graph oracle.
+# plan in test or a registry-staged sandbox.  Production remains fail-closed
+# even if a plan is replayed there; promotion still requires real Odoo evidence.
 _RECOVERY_ACTIONS = frozenset(
-    {
-        DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
-        DRAFT_VENDOR_BILL_RECOVERY_METHOD,
-    }
+    EXECUTABLE_RECOVERY_METHODS
 )
+_MANUAL_RECOVERY_METHODS = {
+    "cancel_and_unreconcile_payment_v1": "manual_review_payment_recovery",
+    "cancel_asset_and_reverse_schedule_v1": (
+        "manual_review_asset_cancellation_or_disposal"
+    ),
+    "cancel_draft_period_adjustment_v1": "manual_review_period_adjustment",
+    "cancel_draft_refund_v1": "manual_review_refund_recovery",
+    DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD: (
+        "manual_review_customer_invoice_recovery"
+    ),
+    DRAFT_VENDOR_BILL_RECOVERY_METHOD: "manual_review_vendor_bill_recovery",
+    "cancel_scheduled_and_reverse_accrual_origin_v1": (
+        "manual_review_accrual_schedule"
+    ),
+    "post_compensating_bank_statement_v1": "manual_review_bank_import_recovery",
+    "reverse_deferred_source_and_schedule_v1": (
+        "manual_review_reverse_deferred_schedule"
+    ),
+    "reverse_depreciation_and_restore_schedule_v1": (
+        "manual_review_reverse_depreciation_and_restore_asset_schedule"
+    ),
+    "reverse_posted_customer_invoice_v1": (
+        "manual_review_customer_invoice_recovery"
+    ),
+    "reverse_posted_period_adjustment_v1": "manual_review_period_adjustment",
+    "reverse_posted_refund_v1": "manual_review_refund_recovery",
+    "reverse_posted_vendor_bill_v1": "manual_review_vendor_bill_recovery",
+    "reverse_the_reversal_v1": "manual_review_move_reversal",
+    "undo_reconciliation_and_reverse_writeoff_v1": (
+        "manual_review_reconciliation_recovery"
+    ),
+}
 
 _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "account.move": (
@@ -577,6 +624,32 @@ class OdooWriteHandlers:
             )
         return record
 
+    def record_is_absent(
+        self,
+        model_name: str,
+        record_id: int,
+        company: Any,
+    ) -> bool:
+        if (
+            not isinstance(model_name, str)
+            or not model_name.startswith("account.")
+            or isinstance(record_id, bool)
+            or not isinstance(record_id, int)
+            or record_id <= 0
+        ):
+            raise OdooWriteHandlerError(
+                "recovery absence identity is invalid"
+            )
+        model = self.bound_model(model_name, company)
+        model.check_access_rights("read")
+        record = model.browse(record_id).exists()
+        if not record:
+            return True
+        self.require_singleton(record, model_name, record_id)
+        record.check_access_rights("read")
+        record.check_access_rule("read")
+        return False
+
     @staticmethod
     def assert_company(record: Any, company: Any, *, model_name: str, shared: bool) -> None:
         company_id = _record_id(company)
@@ -743,6 +816,162 @@ class OdooWriteHandlers:
         ]
         return sorted(result, key=lambda item: (item["model"], item["record_id"]))
 
+    @staticmethod
+    def tombstone_snapshot(
+        model_name: str, record_id: int, company: Any
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(model_name, str)
+            or not model_name.startswith("account.")
+            or isinstance(record_id, bool)
+            or not isinstance(record_id, int)
+            or record_id <= 0
+            or _record_id(company) is None
+        ):
+            raise OdooWriteHandlerError("recovery tombstone identity is invalid")
+        values: dict[str, Any] = {}
+        return {
+            "model": model_name,
+            "record_id": record_id,
+            "company_id": _record_id(company),
+            "exists": False,
+            "state": "absent",
+            "values": values,
+            "values_digest": _digest(values),
+        }
+
+    @staticmethod
+    def _recovery_guard_outcome(
+        method: str, model_name: str, record: Any
+    ) -> str:
+        if method in {
+            "post_compensating_bank_statement_v1",
+            "reverse_deferred_source_and_schedule_v1",
+            "reverse_posted_customer_invoice_v1",
+            "reverse_posted_refund_v1",
+            "reverse_posted_vendor_bill_v1",
+        }:
+            return "survive_exact"
+        if (
+            method == "reverse_the_reversal_v1"
+            and model_name == "account.move"
+        ):
+            return "survive_exact"
+        if (
+            method
+            in {
+                "cancel_and_unreconcile_payment_v1",
+                "undo_reconciliation_and_reverse_writeoff_v1",
+            }
+            and model_name
+            in {"account.partial.reconcile", "account.full.reconcile"}
+        ):
+            return "absent"
+        if method == "cancel_asset_and_reverse_schedule_v1":
+            if model_name == "account.move" and str(
+                getattr(record, "state", "")
+            ) == "draft":
+                return "absent"
+            if model_name == "account.move.line" and str(
+                getattr(record, "parent_state", "")
+            ) == "draft":
+                return "absent"
+        return "survive_allowed_delta"
+
+    def available_recovery(
+        self,
+        capability_id: str,
+        method: str,
+        records: list[tuple[str, Any]],
+        *,
+        action_keys: set[tuple[str, int]],
+        guard_outcomes: Mapping[tuple[str, int], str] | None = None,
+    ) -> dict[str, Any]:
+        contract = RECOVERY_ACTION_CONTRACTS.get(method)
+        if (
+            contract is None
+            or contract.origin_capability_id != capability_id
+            or not action_keys
+        ):
+            raise OdooWriteHandlerError(
+                "write recovery action contract is invalid"
+            )
+        normalized = self.unique_records(records)
+        by_key = {
+            (model_name, _record_id(record)): record
+            for model_name, record in normalized
+        }
+        if None in {record_id for _model_name, record_id in by_key}:
+            raise OdooWriteHandlerError(
+                "write recovery graph contains an unidentified record"
+            )
+        if not action_keys.issubset(by_key):
+            raise OdooWriteHandlerError(
+                "write recovery action is absent from the result graph"
+            )
+        if any(
+            model_name not in contract.action_models
+            for model_name, _record_id_value in action_keys
+        ):
+            raise OdooWriteHandlerError(
+                "write recovery action model is outside its contract"
+            )
+        guard_keys = set(by_key) - action_keys
+        guard_outcomes = guard_outcomes or {}
+        if not set(guard_outcomes).issubset(guard_keys):
+            raise OdooWriteHandlerError(
+                "write recovery outcome override is outside the guard graph"
+            )
+        manual_method = _MANUAL_RECOVERY_METHODS[method]
+        if (
+            self.context.environment not in contract.allowed_environments
+            or not guard_keys
+        ):
+            return _recovery(
+                "manual_escalation",
+                manual_method,
+                [
+                    {"model": model_name, "record_id": record_id}
+                    for model_name, record_id in sorted(action_keys)
+                ],
+            )
+        if any(
+            model_name not in contract.guard_models
+            for model_name, _record_id_value in guard_keys
+        ):
+            raise OdooWriteHandlerError(
+                "write recovery guard graph is outside its contract"
+            )
+        guard_entries = []
+        for model_name, record_id in sorted(guard_keys):
+            outcome = guard_outcomes.get(
+                (model_name, record_id),
+                self._recovery_guard_outcome(
+                    method, model_name, by_key[(model_name, record_id)]
+                ),
+            )
+            if outcome not in contract.allowed_guard_outcomes:
+                raise OdooWriteHandlerError(
+                    "write recovery guard outcome is outside its contract"
+                )
+            guard_entries.append(
+                {
+                    "model": model_name,
+                    "record_id": record_id,
+                    "expected_outcome": outcome,
+                }
+            )
+        return _recovery(
+            "available",
+            method,
+            [
+                {"model": model_name, "record_id": record_id}
+                for model_name, record_id in sorted(action_keys)
+            ],
+            guards=guard_entries,
+            oracle_id=contract.oracle_id,
+        )
+
     def assert_approved_record_delta(
         self,
         model_name: str,
@@ -844,9 +1073,75 @@ class OdooWriteHandlers:
             )
         company = self.company(parameters["company_id"])
         method = getattr(self, self.dispatch_name(capability_id, "execute"))
-        records, recovery = method(parameters, company, checked)
+        result = method(parameters, company, checked)
+        if (
+            isinstance(result, tuple)
+            and len(result) == 2
+        ):
+            records, recovery = result
+            tombstone_keys: set[tuple[str, int]] = set()
+            raw_tombstone_keys: tuple[Any, ...] = ()
+        elif (
+            capability_id == "acct.recovery.execute.v1"
+            and isinstance(result, tuple)
+            and len(result) == 3
+        ):
+            records, recovery, raw_tombstone_keys = result
+            try:
+                raw_tombstones = list(raw_tombstone_keys)
+            except TypeError as exc:
+                raise OdooWriteHandlerError(
+                    "recovery tombstone graph is invalid"
+                ) from exc
+            if any(
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0].startswith("account.")
+                or isinstance(item[1], bool)
+                or not isinstance(item[1], int)
+                or item[1] <= 0
+                for item in raw_tombstones
+            ):
+                raise OdooWriteHandlerError(
+                    "recovery tombstone graph is invalid"
+                )
+            tombstone_keys = set(raw_tombstones)
+            if len(tombstone_keys) != len(raw_tombstones):
+                raise OdooWriteHandlerError(
+                    "recovery tombstone graph contains a duplicate"
+                )
+        else:
+            raise OdooWriteHandlerError(
+                "write handler returned an invalid execution tuple"
+            )
         normalized_records = [(model, record) for model, record in records]
-        after = self.snapshots(normalized_records, company)
+        record_keys = {
+            (model_name, _record_id(record))
+            for model_name, record in normalized_records
+        }
+        before_keys = {
+            (item.get("model"), item.get("record_id"))
+            for item in checked.get("before", [])
+            if isinstance(item, Mapping)
+        }
+        if (
+            record_keys & tombstone_keys
+            or not tombstone_keys.issubset(before_keys)
+        ):
+            raise OdooWriteHandlerError(
+                "recovery tombstone graph is not bound to precheck evidence"
+            )
+        after = [
+            *self.snapshots(normalized_records, company),
+            *(
+                self.tombstone_snapshot(model_name, record_id, company)
+                for model_name, record_id in sorted(tombstone_keys)
+            ),
+        ]
+        after = sorted(
+            after, key=lambda item: (item["model"], item["record_id"])
+        )
         return {
             "capability_id": capability_id,
             "company_id": parameters["company_id"],
@@ -890,15 +1185,66 @@ class OdooWriteHandlers:
             "acct.move.draft_cancel.v1",
             "acct.recovery.execute.v1",
         }:
-            checks = method(
+            verification_result = method(
                 parameters,
                 company,
                 records,
                 self.trusted_before_values(execution, company),
             )
         else:
-            checks = method(parameters, company, records)
-        after = self.snapshots(records, company)
+            verification_result = method(parameters, company, records)
+        if (
+            capability_id == "acct.recovery.execute.v1"
+            and isinstance(verification_result, tuple)
+            and len(verification_result) == 2
+        ):
+            checks, raw_tombstone_keys = verification_result
+            try:
+                raw_tombstones = list(raw_tombstone_keys)
+            except TypeError as exc:
+                raise OdooWriteHandlerError(
+                    "recovery verification tombstone graph is invalid"
+                ) from exc
+            if any(
+                not isinstance(item, tuple)
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or not item[0].startswith("account.")
+                or isinstance(item[1], bool)
+                or not isinstance(item[1], int)
+                or item[1] <= 0
+                for item in raw_tombstones
+            ):
+                raise OdooWriteHandlerError(
+                    "recovery verification tombstone graph is invalid"
+                )
+            tombstone_keys = set(raw_tombstones)
+            if len(tombstone_keys) != len(raw_tombstones):
+                raise OdooWriteHandlerError(
+                    "recovery verification tombstone graph contains a duplicate"
+                )
+        else:
+            checks = verification_result
+            tombstone_keys = set()
+        committed_tombstone_keys = {
+            (item.get("model"), item.get("record_id"))
+            for item in execution.get("after", [])
+            if isinstance(item, Mapping) and item.get("exists") is False
+        }
+        if tombstone_keys != committed_tombstone_keys:
+            raise OdooWriteHandlerError(
+                "recovery verification tombstones differ from execution"
+            )
+        after = [
+            *self.snapshots(records, company),
+            *(
+                self.tombstone_snapshot(model_name, record_id, company)
+                for model_name, record_id in sorted(tombstone_keys)
+            ),
+        ]
+        after = sorted(
+            after, key=lambda item: (item["model"], item["record_id"])
+        )
         return {
             "passed": True,
             "method": "odoo_public_orm_readback_v1",
@@ -1642,7 +1988,7 @@ class OdooWriteHandlers:
         records = self.move_records(move, company)
         if (
             p["posting_mode"] == "draft"
-            and self.context.environment == "sandbox"
+            and self.context.environment in {"test", "sandbox"}
         ):
             lines = [
                 record
@@ -1656,33 +2002,28 @@ class OdooWriteHandlers:
                 expected_state="draft",
                 vendor=vendor,
             )
-            recovery = _recovery(
-                "available",
-                (
-                    DRAFT_VENDOR_BILL_RECOVERY_METHOD
-                    if vendor
-                    else DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
-                ),
-                [{"model": "account.move", "record_id": move.id}],
-                guards=[
-                    {"model": model_name, "record_id": record.id}
-                    for model_name, record in records
-                    if model_name == "account.move.line"
-                ],
-                oracle_id=(
-                    DRAFT_VENDOR_BILL_RECOVERY_ORACLE
-                    if vendor
-                    else DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
-                ),
+        if p["posting_mode"] == "draft":
+            recovery_method = (
+                DRAFT_VENDOR_BILL_RECOVERY_METHOD
+                if vendor
+                else DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
             )
         else:
-            recovery = _recovery(
-                "manual_escalation",
-                "manual_review_vendor_bill_recovery"
+            recovery_method = (
+                "reverse_posted_vendor_bill_v1"
                 if vendor
-                else "manual_review_customer_invoice_recovery",
-                [{"model": "account.move", "record_id": move.id}],
+                else "reverse_posted_customer_invoice_v1"
             )
+        recovery = self.available_recovery(
+            (
+                "acct.bill.vendor_create.v1"
+                if vendor
+                else "acct.invoice.customer_create.v1"
+            ),
+            recovery_method,
+            records,
+            action_keys={("account.move", move.id)},
+        )
         return records, recovery
 
     def execute_customer_invoice(self, p: dict[str, Any], company: Any, checked: dict[str, Any]):
@@ -2157,10 +2498,19 @@ class OdooWriteHandlers:
         records = self.unique_records(
             [*self.move_records(origin, company), *self.move_records(refund, company)]
         )
-        return records, _recovery(
-            "manual_escalation",
-            "manual_review_refund_recovery",
-            [{"model": "account.move", "record_id": refund.id}],
+        return records, self.available_recovery(
+            "acct.refund.create.v1",
+            (
+                "cancel_draft_refund_v1"
+                if p["posting_mode"] == "draft"
+                else "reverse_posted_refund_v1"
+            ),
+            records,
+            action_keys={("account.move", refund.id)},
+            guard_outcomes={
+                (model_name, record.id): "survive_exact"
+                for model_name, record in self.move_records(origin, company)
+            },
         )
 
     def assert_refund_origin_approval(
@@ -2865,14 +3215,34 @@ class OdooWriteHandlers:
             + [("account.partial.reconcile", partial) for partial in partials]
             + [("account.full.reconcile", full) for full in fulls]
         )
-        return result_records, _recovery(
-            "manual_escalation",
-            "manual_review_payment_recovery",
-            [
-                {"model": model_name, "record_id": record.id}
-                for model_name, record in result_records
-            ],
-        )
+        prior_partial_ids = {
+            partial_id
+            for item in completed_binding["target_line_before"]
+            for partial_id in (
+                item["matched_debit_ids"] + item["matched_credit_ids"]
+            )
+        }
+        prior_full_ids = {
+            item["full_reconcile_id"]
+            for item in completed_binding["target_line_before"]
+            if item["full_reconcile_id"] is not None
+        }
+        if prior_partial_ids or prior_full_ids:
+            recovery = _recovery(
+                "manual_escalation",
+                _MANUAL_RECOVERY_METHODS[
+                    "cancel_and_unreconcile_payment_v1"
+                ],
+                [{"model": "account.payment", "record_id": payment.id}],
+            )
+        else:
+            recovery = self.available_recovery(
+                "acct.payment.register.v1",
+                "cancel_and_unreconcile_payment_v1",
+                result_records,
+                action_keys={("account.payment", payment.id)},
+            )
+        return result_records, recovery
 
     def verify_payment(self, p, company, records, before):
         payment = self.only_record(records, "account.payment")
@@ -3388,9 +3758,11 @@ class OdooWriteHandlers:
             move = self.record("account.move", move_id, company)
             records.extend(self.move_records(move, company))
         records = self.unique_records(records)
-        return records, _recovery(
-            "manual_escalation", "manual_review_bank_import_recovery",
-            [{"model": model_name, "record_id": record.id} for model_name, record in records],
+        return records, self.available_recovery(
+            "acct.bank.statement_import.v1",
+            "post_compensating_bank_statement_v1",
+            records,
+            action_keys={("account.bank.statement", statement.id)},
         )
 
     def verify_bank(self, p, company, records):
@@ -3981,13 +4353,62 @@ class OdooWriteHandlers:
         for move in related_moves:
             records.extend(self.move_records(move, company))
         records = self.unique_records(records)
-        return records, _recovery(
-            "manual_escalation", "manual_review_reconciliation_recovery",
-            [
-                {"model": model_name, "record_id": record.id}
-                for model_name, record in records
-            ],
-        )
+        prior_partial_ids: set[int] = set()
+        prior_full_ids: set[int] = set()
+        for item in before:
+            if (
+                not isinstance(item, Mapping)
+                or item.get("model") != "account.move.line"
+                or not isinstance(item.get("values"), Mapping)
+            ):
+                continue
+            values_before = item["values"]
+            prior_partial_ids.update(
+                _ids(values_before.get("matched_debit_ids", []))
+            )
+            prior_partial_ids.update(
+                _ids(values_before.get("matched_credit_ids", []))
+            )
+            full_id = classic_read_many2one_id(
+                values_before.get("full_reconcile_id")
+            )
+            if full_id is not None:
+                prior_full_ids.add(full_id)
+        action_keys = {
+            (model_name, record.id)
+            for model_name, record in records
+            if (
+                model_name == "account.partial.reconcile"
+                and record.id not in prior_partial_ids
+            )
+            or (
+                model_name == "account.full.reconcile"
+                and record.id not in prior_full_ids
+            )
+            or (
+                model_name == "account.move"
+                and record.id in related_move_ids
+            )
+        }
+        if prior_partial_ids or prior_full_ids:
+            recovery = _recovery(
+                "manual_escalation",
+                _MANUAL_RECOVERY_METHODS[
+                    "undo_reconciliation_and_reverse_writeoff_v1"
+                ],
+                [
+                    {"model": model_name, "record_id": record_id}
+                    for model_name, record_id in sorted(action_keys)
+                ],
+            )
+        else:
+            recovery = self.available_recovery(
+                "acct.reconciliation.apply.v1",
+                "undo_reconciliation_and_reverse_writeoff_v1",
+                records,
+                action_keys=action_keys,
+            )
+        return records, recovery
 
     def verify_reconciliation(self, p, company, records, before):
         keyed: dict[tuple[str, int], Any] = {}
@@ -4529,12 +4950,24 @@ class OdooWriteHandlers:
             *self.move_records(source_move, company),
             *self.asset_schedule_records(asset, company),
         ])
-        return records, _recovery(
-            "manual_escalation", "manual_review_asset_cancellation_or_disposal",
-            [
-                {"model": model_name, "record_id": record.id}
+        return records, self.available_recovery(
+            "acct.asset.create.v1",
+            "cancel_asset_and_reverse_schedule_v1",
+            records,
+            action_keys={("account.asset", asset.id)},
+            guard_outcomes={
+                (model_name, record.id): "survive_exact"
                 for model_name, record in records
-            ],
+                if (
+                    model_name == "account.move"
+                    and record.id == source_move.id
+                )
+                or (
+                    model_name == "account.move.line"
+                    and _record_id(getattr(record, "move_id", None))
+                    == source_move.id
+                )
+            },
         )
 
     def verify_asset(self, p, company, records, trusted_before=None):
@@ -4760,13 +5193,24 @@ class OdooWriteHandlers:
             ("account.asset", asset),
             *self.asset_schedule_records(asset, company),
         ])
-        return records, _recovery(
-            "manual_escalation",
-            "manual_review_reverse_depreciation_and_restore_asset_schedule",
-            [
-                {"model": model_name, "record_id": record.id}
+        return records, self.available_recovery(
+            "acct.depreciation.post.v1",
+            "reverse_depreciation_and_restore_schedule_v1",
+            records,
+            action_keys={("account.move", move.id)},
+            guard_outcomes={
+                (model_name, record.id): "survive_exact"
                 for model_name, record in records
-            ],
+                if (
+                    model_name == "account.move"
+                    and record.id != move.id
+                )
+                or (
+                    model_name == "account.move.line"
+                    and _record_id(getattr(record, "move_id", None))
+                    != move.id
+                )
+            },
         )
 
     def verify_depreciation(self, p, company, records, trusted_before=None):
@@ -5059,11 +5503,6 @@ class OdooWriteHandlers:
         self.require_created(move, "account.move", company)
         if p["posting_mode"] == "post":
             move.action_post()
-        recovery = _recovery(
-            "manual_escalation",
-            "manual_review_accrual_schedule" if accrual else "manual_review_period_adjustment",
-            [{"model": "account.move", "record_id": move.id}],
-        )
         records = self.move_records(move, company)
         if accrual and p["posting_mode"] == "post":
             wizard = self.create_model(
@@ -5076,7 +5515,6 @@ class OdooWriteHandlers:
             scheduled = self.record_from_action(
                 "account.move", wizard.reverse_moves(is_modify=False), company
             )
-            records.extend(self.move_records(scheduled, company))
             scheduled.write(
                 {
                     "odoo_cli_v3_document_binding": self.document_binding(
@@ -5087,14 +5525,30 @@ class OdooWriteHandlers:
                     ),
                 }
             )
-            recovery = _recovery(
-                "manual_escalation", "manual_review_accrual_schedule",
-                [
-                    {"model": "account.move", "record_id": move.id},
-                    {"model": "account.move", "record_id": scheduled.id},
-                ],
-                scheduled_reversal_date=p["reversal_date"],
-            )
+            records.extend(self.move_records(scheduled, company))
+        records = self.unique_records(records)
+        recovery = self.available_recovery(
+            (
+                "acct.accrual.create.v1"
+                if accrual
+                else "acct.period.adjustment_create.v1"
+            ),
+            (
+                "cancel_scheduled_and_reverse_accrual_origin_v1"
+                if accrual
+                else (
+                    "cancel_draft_period_adjustment_v1"
+                    if p["posting_mode"] == "draft"
+                    else "reverse_posted_period_adjustment_v1"
+                )
+            ),
+            records,
+            action_keys={
+                (model_name, record.id)
+                for model_name, record in records
+                if model_name == "account.move"
+            },
+        )
         return records, recovery
 
     def execute_accrual(self, p, company, checked):
@@ -5392,9 +5846,11 @@ class OdooWriteHandlers:
         for deferred in move.deferred_move_ids:
             records.extend(self.move_records(deferred, company))
         records = self.unique_records(records)
-        return records, _recovery(
-            "manual_escalation", "manual_review_reverse_deferred_schedule",
-            [{"model": model, "record_id": record.id} for model, record in records],
+        return records, self.available_recovery(
+            "acct.deferred.create.v1",
+            "reverse_deferred_source_and_schedule_v1",
+            records,
+            action_keys={("account.move", move.id)},
         )
 
     def verify_deferred(self, p, company, records, trusted_before=None):
@@ -5762,12 +6218,12 @@ class OdooWriteHandlers:
         if reversal.state != "posted":
             raise OdooWriteHandlerError("reversal did not reach posted state")
         records = [*self.move_records(origin, company), *self.move_records(reversal, company)]
-        return self.unique_records(records), _recovery(
-            "manual_escalation", "manual_review_move_reversal",
-            [
-                {"model": "account.move", "record_id": origin.id},
-                {"model": "account.move", "record_id": reversal.id},
-            ],
+        records = self.unique_records(records)
+        return records, self.available_recovery(
+            "acct.move.reverse.v1",
+            "reverse_the_reversal_v1",
+            records,
+            action_keys={("account.move", reversal.id)},
         )
 
     def verify_reversal(self, p, company, records, trusted_before=None):
@@ -6262,7 +6718,10 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "recovery method is not allowlisted for this environment"
             )
-        if self.context.environment != "sandbox":
+        if (
+            self.context.environment
+            not in RECOVERY_ACTION_CONTRACTS[plan["method"]].allowed_environments
+        ):
             raise OdooWriteHandlerError(
                 "recovery method is not allowlisted for this environment"
             )
@@ -6436,6 +6895,246 @@ class OdooWriteHandlers:
                 "recovery origin installed-module graph differs from the current graph"
             )
 
+    @staticmethod
+    def _approved_recovery_record_references(
+        plan: Mapping[str, Any],
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        result: dict[tuple[str, int], dict[str, Any]] = {}
+        for role, field in (
+            ("action", "action_targets"),
+            ("guard", "guard_records"),
+        ):
+            records = plan.get(field)
+            if not isinstance(records, list):
+                raise OdooWriteHandlerError(
+                    "trusted recovery plan record graph is invalid"
+                )
+            for raw in records:
+                if not isinstance(raw, Mapping):
+                    raise OdooWriteHandlerError(
+                        "trusted recovery plan record graph is invalid"
+                    )
+                reference = dict(raw)
+                key = (reference.get("model"), reference.get("record_id"))
+                if key in result:
+                    raise OdooWriteHandlerError(
+                        "trusted recovery plan record graph contains a duplicate"
+                    )
+                result[key] = {**reference, "role": role}
+        return result
+
+    def _current_recovery_record_references(
+        self,
+        plan: Mapping[str, Any],
+        company: Any,
+        *,
+        known_records: list[tuple[str, Any]] | None = None,
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        known_by_key = {
+            (model_name, _record_id(record)): record
+            for model_name, record in (known_records or [])
+        }
+        result: dict[tuple[str, int], dict[str, Any]] = {}
+        for role, field in (
+            ("action", "action_targets"),
+            ("guard", "guard_records"),
+        ):
+            for approved in plan[field]:
+                key = (approved["model"], approved["record_id"])
+                if key in result:
+                    raise OdooWriteHandlerError(
+                        "current recovery record graph contains a duplicate"
+                    )
+                record = known_by_key.get(key)
+                if record is None:
+                    record = self.record(
+                        approved["model"],
+                        approved["record_id"],
+                        company,
+                        write=(
+                            role == "action"
+                            or approved.get("expected_outcome")
+                            != "survive_exact"
+                        ),
+                    )
+                reference = self.recovery_reference(
+                    approved["model"],
+                    record,
+                    company,
+                    required_fields=frozenset(),
+                )
+                result[key] = {
+                    **reference,
+                    "role": role,
+                    **(
+                        {"expected_outcome": approved["expected_outcome"]}
+                        if role == "guard"
+                        else {}
+                    ),
+                }
+        if set(known_by_key) - set(result):
+            raise OdooWriteHandlerError(
+                "current recovery record graph contains an unexpected record"
+            )
+        return result
+
+    def _recovery_records_by_role(
+        self,
+        plan: Mapping[str, Any],
+        company: Any,
+    ) -> tuple[
+        list[tuple[str, Any]],
+        list[tuple[str, Any]],
+        list[tuple[str, Any]],
+    ]:
+        actions: list[tuple[str, Any]] = []
+        guards: list[tuple[str, Any]] = []
+        for role, field in (
+            ("action", "action_targets"),
+            ("guard", "guard_records"),
+        ):
+            for approved in plan[field]:
+                record = self.record(
+                    approved["model"],
+                    approved["record_id"],
+                    company,
+                    write=(
+                        role == "action"
+                        or approved.get("expected_outcome")
+                        != "survive_exact"
+                    ),
+                )
+                target = actions if role == "action" else guards
+                target.append((approved["model"], record))
+        records = self.unique_records([*actions, *guards])
+        if len(records) != len(actions) + len(guards):
+            raise OdooWriteHandlerError(
+                "recovery action and guard record graph overlaps"
+            )
+        tombstones = self._expected_recovery_tombstones(plan)
+        for model_name, record in records:
+            if (model_name, _record_id(record)) not in tombstones:
+                continue
+            record.check_access_rights("unlink")
+            record.check_access_rule("unlink")
+        return actions, guards, records
+
+    @staticmethod
+    def _recovery_guard_outcomes_from_plan(
+        plan: Mapping[str, Any],
+    ) -> dict[tuple[str, int], str]:
+        return {
+            (guard["model"], guard["record_id"]): guard["expected_outcome"]
+            for guard in plan["guard_records"]
+        }
+
+    @classmethod
+    def _expected_recovery_tombstones(
+        cls,
+        plan: Mapping[str, Any],
+    ) -> frozenset[tuple[str, int]]:
+        method = plan["method"]
+        tombstones = {
+            identity
+            for identity, outcome in cls._recovery_guard_outcomes_from_plan(
+                plan
+            ).items()
+            if outcome == "absent"
+        }
+        if method == "undo_reconciliation_and_reverse_writeoff_v1":
+            tombstones.update(
+                (target["model"], target["record_id"])
+                for target in plan["action_targets"]
+                if target["model"]
+                in {"account.partial.reconcile", "account.full.reconcile"}
+            )
+        return frozenset(tombstones)
+
+    def _precheck_recovery_create_acl(
+        self,
+        plan: Mapping[str, Any],
+        company: Any,
+    ) -> None:
+        method = plan["method"]
+        if method == "post_compensating_bank_statement_v1":
+            self.create_model("account.bank.statement", company)
+            self.create_model("account.bank.statement.line", company)
+            return
+        if (
+            method
+            in {
+                "reverse_deferred_source_and_schedule_v1",
+                "reverse_depreciation_and_restore_schedule_v1",
+                "reverse_posted_customer_invoice_v1",
+                "reverse_posted_period_adjustment_v1",
+                "reverse_posted_refund_v1",
+                "reverse_posted_vendor_bill_v1",
+                "reverse_the_reversal_v1",
+            }
+            or (
+                method
+                in {
+                    "cancel_scheduled_and_reverse_accrual_origin_v1",
+                    "undo_reconciliation_and_reverse_writeoff_v1",
+                }
+                and any(
+                    target["model"] == "account.move"
+                    for target in plan["action_targets"]
+                )
+            )
+        ):
+            self.create_model("account.move.reversal", company)
+
+    def _validate_recovery_execution_guard(
+        self,
+        p: Mapping[str, Any],
+        plan: Mapping[str, Any],
+        company: Any,
+        current_record_references: Mapping[
+            tuple[str, int], Mapping[str, Any]
+        ],
+    ) -> RecoveryPlanExecutionGuard:
+        contract = RECOVERY_ACTION_CONTRACTS.get(plan.get("method"))
+        if contract is None:
+            raise OdooWriteHandlerError(
+                "recovery method is not allowlisted for this environment"
+            )
+        try:
+            return validate_recovery_plan_execution(
+                plan,
+                origin_capability_id=contract.origin_capability_id,
+                origin_operation_id=p["origin_operation_id"],
+                expected_plan_digest=p["expected_recovery_plan_digest"],
+                environment=self.context.environment,
+                company_id=_record_id(company),
+                module_graph_digest=self.context.module_graph.digest,
+                current_record_references=current_record_references,
+            )
+        except RecoveryPlanExecutionGuardError as exc:
+            if self.context.environment == "production":
+                raise OdooWriteHandlerError(
+                    "recovery method is not allowlisted for this environment"
+                ) from exc
+            message = str(exc)
+            if "parameters digest" in message:
+                raise OdooWriteHandlerError(
+                    "recovery origin installed-module graph differs from the current graph"
+                ) from exc
+            if plan.get("method") in {
+                DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+                DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+            } and "guard outcome" in message:
+                raise OdooWriteHandlerError(
+                    "recovery plan does not contain the exact invoice action/guard graph"
+                ) from exc
+            if "does not match an executable origin contract" in message:
+                raise OdooWriteHandlerError(
+                    "recovery method is not allowlisted for this environment"
+                ) from exc
+            raise OdooWriteHandlerError(
+                f"recovery plan execution guard rejected the plan: {exc}"
+            ) from exc
+
     def precheck_recovery(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
         plan = self.context.trusted_recovery_plan
         if not isinstance(plan, Mapping):
@@ -6450,13 +7149,29 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError("recovery plan origin differs")
         if plan["plan_digest"] != p["expected_recovery_plan_digest"]:
             raise OdooWriteHandlerError("recovery plan digest differs")
-        move, _lines, records, vendor = self._draft_document_recovery_graph(
-            plan, company
+        self._validate_recovery_execution_guard(
+            p,
+            plan,
+            company,
+            self._approved_recovery_record_references(plan),
         )
-        return {
-            "checks": [
+        if plan["method"] in {
+            DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+            DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+        }:
+            move, _lines, records, vendor = self._draft_document_recovery_graph(
+                plan, company
+            )
+            current_references = self._current_recovery_record_references(
+                plan, company, known_records=records
+            )
+            self._validate_recovery_execution_guard(
+                p, plan, company, current_references
+            )
+            checks = [
                 "receipt_derived_available_v2_plan",
-                "sandbox_only_recovery",
+                "nonproduction_test_or_sandbox_recovery",
+                "strict_recovery_plan_execution_guard",
                 (
                     "single_v3_draft_vendor_bill"
                     if vendor
@@ -6467,28 +7182,134 @@ class OdooWriteHandlers:
                 "complete_line_guard_graph",
                 "action_and_guard_fingerprints_match",
                 "write_acl",
-            ],
-            "before": self.snapshots(records, company),
-            "dependencies": self.snapshots(
+            ]
+            dependencies = self.snapshots(
                 [("account.journal", move.journal_id)], company
-            ),
+            )
+        else:
+            if plan["method"] not in RECOVERY_ACTION_METHODS:
+                raise OdooWriteHandlerError(
+                    "recovery method has no implemented ORM action"
+                )
+            _actions, _guards, records = self._recovery_records_by_role(
+                plan, company
+            )
+            current_references = self._current_recovery_record_references(
+                plan, company, known_records=records
+            )
+            self._validate_recovery_execution_guard(
+                p, plan, company, current_references
+            )
+            self._precheck_recovery_create_acl(plan, company)
+            checks = [
+                "receipt_derived_available_v2_plan",
+                "nonproduction_test_or_sandbox_recovery",
+                "strict_recovery_plan_execution_guard",
+                "complete_action_and_guard_graph",
+                "action_and_guard_fingerprints_match",
+                "write_and_unlink_acl_for_mutated_graph",
+                "required_create_acl",
+                "public_orm_recovery_action_registered",
+            ]
+            dependencies = []
+        return {
+            "checks": checks,
+            "before": self.snapshots(records, company),
+            "dependencies": dependencies,
         }
 
     def execute_recovery(self, p, company, checked):
         plan = self.context.trusted_recovery_plan
         if not isinstance(plan, Mapping):
             raise OdooWriteHandlerError("trusted recovery plan is unavailable")
-        move, lines, records, vendor = self._draft_document_recovery_graph(
+        if plan["method"] in {
+            DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+            DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+        }:
+            move, lines, records, vendor = self._draft_document_recovery_graph(
+                plan, company
+            )
+            return self._execute_pristine_draft_cancel(
+                move,
+                lines,
+                records,
+                company,
+                checked,
+                vendor=vendor,
+                completion_method="recovery_completed",
+            )
+        if plan["method"] not in RECOVERY_ACTION_METHODS:
+            raise OdooWriteHandlerError(
+                "recovery method has no implemented ORM action"
+            )
+        actions, guards, planned_records = self._recovery_records_by_role(
             plan, company
         )
-        return self._execute_pristine_draft_cancel(
-            move,
-            lines,
-            records,
-            company,
-            checked,
-            vendor=vendor,
-            completion_method="recovery_completed",
+        current_references = self._current_recovery_record_references(
+            plan, company, known_records=planned_records
+        )
+        self._validate_recovery_execution_guard(
+            p, plan, company, current_references
+        )
+        planned_keys = {
+            (model_name, _record_id(record))
+            for model_name, record in planned_records
+        }
+        raw_before = checked.get("before")
+        before_keys = [
+            (item.get("model"), item.get("record_id"))
+            for item in raw_before
+            if isinstance(item, Mapping)
+        ] if isinstance(raw_before, list) else []
+        if (
+            len(before_keys) != len(set(before_keys))
+            or set(before_keys) != planned_keys
+        ):
+            raise OdooWriteHandlerError(
+                "approved recovery before graph differs from the plan"
+            )
+        try:
+            result = execute_recovery_action(
+                self,
+                plan["method"],
+                company=company,
+                action_records=actions,
+                guard_records=guards,
+                guard_outcomes=self._recovery_guard_outcomes_from_plan(plan),
+                recovery_date=p["recovery_date"],
+                reason=p["reason"],
+            )
+        except RecoveryActionError as exc:
+            raise OdooWriteHandlerError(
+                f"recovery ORM action failed closed: {exc}"
+            ) from exc
+        result_records = list(result.records)
+        result_keys = [
+            (model_name, _record_id(record))
+            for model_name, record in result_records
+        ]
+        expected_tombstones = self._expected_recovery_tombstones(plan)
+        contract = RECOVERY_ACTION_CONTRACTS[plan["method"]]
+        if (
+            not result.checks
+            or len(result.checks) != len(set(result.checks))
+            or len(result_keys) != len(set(result_keys))
+            or any(record_id is None for _model_name, record_id in result_keys)
+            or result.tombstones != expected_tombstones
+            or planned_keys - expected_tombstones - set(result_keys)
+            or set(result_keys) & expected_tombstones
+            or any(
+                model_name not in contract.result_models
+                for model_name, _record_id_value in result_keys
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "recovery ORM result graph differs from its exact contract"
+            )
+        return (
+            result_records,
+            _recovery("not_applicable", "recovery_completed", []),
+            result.tombstones,
         )
 
     def _assert_recovery_exact_delta(
@@ -6588,52 +7409,84 @@ class OdooWriteHandlers:
 
     def verify_recovery(self, p, company, records, before):
         plan = self.context.trusted_recovery_plan
-        if not isinstance(plan, Mapping):
+        if not isinstance(plan, dict):
             raise OdooWriteHandlerError("trusted recovery plan is unavailable")
         self._assert_draft_recovery_module_graph_binding(plan, company)
-        actions = plan["action_targets"]
-        guards = plan["guard_records"]
-        keyed = {(model_name, record.id): record for model_name, record in records}
-        expected_keys = {
-            (actions[0]["model"], actions[0]["record_id"]),
-            *((guard["model"], guard["record_id"]) for guard in guards),
-        }
-        if set(keyed) != expected_keys or set(before) != expected_keys:
-            raise OdooWriteHandlerError(
-                "recovery read-back graph differs from the approved guard graph"
+        expected_tombstones = self._expected_recovery_tombstones(plan)
+        try:
+            fresh_checks = list(
+                verify_recovery_action(
+                    self,
+                    plan["method"],
+                    plan=plan,
+                    company=company,
+                    records=records,
+                    before_values=before,
+                    tombstone_keys=expected_tombstones,
+                    recovery_date=p["recovery_date"],
+                    reason=p["reason"],
+                )
             )
-        move = keyed[("account.move", actions[0]["record_id"])]
-        lines = [
-            keyed[("account.move.line", guard["record_id"])]
-            for guard in guards
-        ]
-        contract = (plan["method"], plan["oracle_id"])
-        vendor = contract == (
-            DRAFT_VENDOR_BILL_RECOVERY_METHOD,
-            DRAFT_VENDOR_BILL_RECOVERY_ORACLE,
-        )
-        if not vendor and contract != (
+        except RecoveryVerificationError as exc:
+            raise OdooWriteHandlerError(
+                f"fresh recovery verification failed closed: {exc}"
+            ) from exc
+
+        specialized_checks: list[str] = []
+        if plan["method"] in {
             DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
-            DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
-        ):
-            raise OdooWriteHandlerError(
-                "recovery method is not allowlisted for this environment"
+            DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+        }:
+            actions = plan["action_targets"]
+            guards = plan["guard_records"]
+            keyed = {
+                (model_name, record.id): record
+                for model_name, record in records
+            }
+            expected_keys = {
+                (actions[0]["model"], actions[0]["record_id"]),
+                *((guard["model"], guard["record_id"]) for guard in guards),
+            }
+            if set(keyed) != expected_keys or set(before) != expected_keys:
+                raise OdooWriteHandlerError(
+                    "recovery read-back graph differs from the approved guard graph"
+                )
+            move = keyed[("account.move", actions[0]["record_id"])]
+            lines = [
+                keyed[("account.move.line", guard["record_id"])]
+                for guard in guards
+            ]
+            contract = (plan["method"], plan["oracle_id"])
+            vendor = contract == (
+                DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+                DRAFT_VENDOR_BILL_RECOVERY_ORACLE,
             )
-        self._assert_recovery_exact_delta(
-            move, lines, company, before, vendor=vendor
-        )
-        return [
-            (
-                "draft_vendor_bill_cancelled_exactly"
-                if vendor
-                else "draft_customer_invoice_cancelled_exactly"
-            ),
-            "never_posted_evidence_preserved",
-            "document_and_business_bindings_preserved",
-            "payment_reconciliation_and_external_links_absent",
-            "line_guard_graph_matched_approved_allowed_delta",
-            "no_delete_or_button_cancel_path_used",
-        ]
+            if not vendor and contract != (
+                DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+                DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
+            ):
+                raise OdooWriteHandlerError(
+                    "recovery method is not allowlisted for this environment"
+                )
+            self._assert_recovery_exact_delta(
+                move, lines, company, before, vendor=vendor
+            )
+            specialized_checks = [
+                (
+                    "draft_vendor_bill_cancelled_exactly"
+                    if vendor
+                    else "draft_customer_invoice_cancelled_exactly"
+                ),
+                "never_posted_evidence_preserved",
+                "document_and_business_bindings_preserved",
+                "payment_reconciliation_and_external_links_absent",
+                "line_guard_graph_matched_approved_allowed_delta",
+                "no_delete_or_button_cancel_path_used",
+            ]
+        checks = sorted({*fresh_checks, *specialized_checks})
+        if not expected_tombstones:
+            return checks
+        return checks, expected_tombstones
 
     def require_created(self, record: Any, model_name: str, company: Any) -> None:
         identifier = _record_id(record)

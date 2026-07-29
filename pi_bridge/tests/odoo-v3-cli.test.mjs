@@ -171,8 +171,110 @@ if (command === "registry.list") {
     },
     runtime: {},
   };
+} else if (command === "operation.diagnostics") {
+  data = {
+    operation: {
+      operation_id: request.operation_id,
+      capability_id: "acct.bill.vendor_create.v1",
+      company_id: request.company_id,
+      state: "prepared",
+      revision: 0,
+      terminal: false,
+      business_succeeded: false,
+      allowed_next_states: ["failed", "prechecked"],
+    },
+    audit: {
+      chain_verified: true,
+      event_count: 0,
+      event_types: [],
+      event_types_offset: 0,
+      event_types_truncated: false,
+      last_event_id: null,
+      last_event_hash: null,
+      global_head_hash: null,
+    },
+    verification: {
+      trusted_terminal_result_verified: false,
+      passed: null,
+      method: null,
+      evidence_digest: null,
+    },
+    failure: { present: false, stage: null, result_id: null, evidence_digest: null },
+    recovery: {
+      lifecycle_status: "not_started",
+      available: false,
+      plan_status: null,
+      plan_digest: null,
+      recovery_capability_id: null,
+      requires_approval: null,
+      attempt_count: 0,
+      latest_attempt_plan_digest: null,
+      bound_operation_ids: [],
+      completion_evidence_digest: null,
+      completion_receipt_body_digest: null,
+      completion_receipt_id: null,
+    },
+    odoo_refs: [],
+    receipts: {
+      unique_final_receipt_verified: false,
+      current_candidate_count: 0,
+      durable_final_receipt_id: null,
+      durable_final_receipt_body_digest: null,
+      write_audit_receipt_id: null,
+      write_audit_result_digest: null,
+      write_audit_head: null,
+      difference_digest: null,
+      database_finalization_digest: null,
+    },
+    page: { count: 1, total_count: 1 },
+    receipt: {
+      id: "diagnostics-receipt-1",
+      odoo_instance_id: "odoo19@sandbox",
+      database_name: "odoo_v3_sandbox",
+      database_uuid: "11111111-1111-4111-8111-111111111111",
+      company_id: request.company_id,
+      environment: "sandbox",
+      user_id: 42,
+      capability_id: "acct.diagnostics.operation_read.v1",
+      capability_channel: "staged",
+      request_digest: "a".repeat(64),
+      result_digest: "b".repeat(64),
+      registry_digest: "a".repeat(64),
+      release_digest: "7".repeat(64),
+      record_count: 1,
+      observed_at: "2026-07-15T08:01:00Z",
+      signature_version: 2,
+      signature_purpose: "read_receipt_v2",
+      signature_key_id: "read-key-1",
+      signature: "e".repeat(64),
+    },
+  };
 } else if (["operation.approve_execute", "operation.result"].includes(command)) {
   data = evidence;
+}
+if (mutation.startsWith("__test_diagnostics_recovered")) {
+  data.operation.state = "recovered";
+  data.operation.revision = 12;
+  data.operation.terminal = true;
+  data.operation.business_succeeded = false;
+  data.operation.allowed_next_states = [];
+  data.recovery.lifecycle_status = "recovered_verified";
+  data.recovery.attempt_count = 1;
+  data.recovery.latest_attempt_plan_digest = "c".repeat(64);
+  data.recovery.bound_operation_ids = [
+    "op-prior-failed-recovery",
+    "op-successful-recovery",
+  ];
+  data.recovery.completion_evidence_digest = "d".repeat(64);
+  data.recovery.completion_receipt_body_digest = "e".repeat(64);
+  data.recovery.completion_receipt_id = "final-recovered-origin";
+  data.receipts.current_candidate_count = 1;
+}
+if (mutation === "__test_diagnostics_recovered_missing_digest") {
+  delete data.recovery.completion_evidence_digest;
+}
+if (mutation === "__test_diagnostics_recovered_tampered_receipt") {
+  data.recovery.completion_receipt_body_digest = "not-a-digest";
 }
 if (mutation === "__test_bad_signature") delete data.audit_receipt.signature;
 if (mutation === "__test_failed_verification") data.verification.passed = false;
@@ -615,6 +717,7 @@ function requests() {
 		"operation.approve_execute": { operation_id: "op-1" },
 		"operation.status": { operation_id: "op-1" },
 		"operation.result": { operation_id: "op-1" },
+		"operation.diagnostics": { company_id: 7, operation_id: "op-1" },
 		"operation.recover": {
 			origin_operation_id: "op-origin",
 			recovery_date: "2026-07-16",
@@ -705,10 +808,17 @@ test("the explicit test broker transport preserves all six business requests and
 			const request = requests()[action];
 			const result = await run(action, request);
 			assert.equal(result.ok, true);
-			assert.deepEqual(result.data.argv, commandArgs);
-			assert.deepEqual(result.data.parsed_request, request);
-			assert.equal(result.data.raw_stdin, JSON.stringify(request));
-			assert.equal(result.data.argv.includes("--request-json"), false);
+			if (action === "operation.diagnostics") {
+				assert.deepEqual(commandArgs, ["operation", "diagnostics"]);
+				assert.equal(result.data.operation.operation_id, request.operation_id);
+				assert.equal(result.data.operation.company_id, request.company_id);
+				assert.equal(result.data.receipt.company_id, request.company_id);
+			} else {
+				assert.deepEqual(result.data.argv, commandArgs);
+				assert.deepEqual(result.data.parsed_request, request);
+				assert.equal(result.data.raw_stdin, JSON.stringify(request));
+				assert.equal(result.data.argv.includes("--request-json"), false);
+			}
 		});
 	}
 });
@@ -983,6 +1093,55 @@ test("recovered write success requires the exact two-anchor database binding", a
 				assert.equal(result.ok, false);
 				assert.equal(result.error.code, "bridge_invalid_v3_broker_response");
 			}
+		});
+	}
+});
+
+test("recovered diagnostics requires exact completion evidence and receipt identifiers", async (t) => {
+	const validRun = createBoundRunner({
+		cliPath: process.execPath,
+		prefixArgs: [trustedFixture, "__test_diagnostics_recovered"],
+		timeoutMs: 5000,
+	});
+	const request = requests()["operation.diagnostics"];
+	const result = await validRun("operation.diagnostics", request);
+	assert.equal(result.ok, true);
+	assert.equal(result.data.operation.state, "recovered");
+	assert.equal(result.data.operation.business_succeeded, false);
+	assert.equal(result.data.recovery.lifecycle_status, "recovered_verified");
+	assert.deepEqual(result.data.recovery.bound_operation_ids, [
+		"op-prior-failed-recovery",
+		"op-successful-recovery",
+	]);
+	assert.equal(
+		result.data.recovery.completion_evidence_digest,
+		"d".repeat(64),
+	);
+	assert.equal(
+		result.data.recovery.completion_receipt_body_digest,
+		"e".repeat(64),
+	);
+	assert.equal(
+		result.data.recovery.completion_receipt_id,
+		"final-recovered-origin",
+	);
+
+	for (const mutation of [
+		"__test_diagnostics_recovered_missing_digest",
+		"__test_diagnostics_recovered_tampered_receipt",
+	]) {
+		await t.test(mutation, async () => {
+			const run = createBoundRunner({
+				cliPath: process.execPath,
+				prefixArgs: [trustedFixture, mutation],
+				timeoutMs: 5000,
+			});
+			const rejected = await run("operation.diagnostics", request);
+			assert.equal(rejected.ok, false);
+			assert.equal(
+				rejected.error.code,
+				"bridge_invalid_v3_broker_response",
+			);
 		});
 	}
 });
@@ -1542,6 +1701,7 @@ test("the extension retains legacy registration while hardened policy grants onl
 		"odoo_v3_operation_approve_execute",
 		"odoo_v3_operation_status",
 		"odoo_v3_operation_result",
+		"odoo_v3_operation_diagnostics",
 		"odoo_v3_operation_recover",
 	]);
 	const extension = await readFile(path.join(root, "extensions", "odoo-tools.ts"), "utf8");
@@ -1570,6 +1730,7 @@ test("the extension retains legacy registration while hardened policy grants onl
 		"v3ApproveExecuteTool",
 		"v3StatusTool",
 		"v3ResultTool",
+		"v3DiagnosticsTool",
 		"v3RecoverTool",
 	]) {
 		assert.match(extension, new RegExp(`pi\\.registerTool\\(${registration}\\)`));

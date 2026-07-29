@@ -4,7 +4,7 @@ This module intentionally knows nothing about the broker's session resolver,
 approval authority, historical release router, or receipt verifier.  A trusted
 dispatcher is injected and must perform those checks.  The transport only:
 
-* accepts the seven fixed POST routes over one filesystem UDS;
+* accepts the fixed POST routes over one filesystem UDS;
 * obtains route/protocol and authority bindings from five fixed HTTP headers;
 * admits one configured client UID using Linux ``SO_PEERCRED``; and
 * adds the broker-authority response header only when the dispatcher confirms
@@ -60,6 +60,7 @@ BROKER_ACTION_PATHS: Final[dict[str, str]] = {
     "/v1/operation/approve-execute": "operation.approve_execute",
     "/v1/operation/status": "operation.status",
     "/v1/operation/result": "operation.result",
+    "/v1/operation/diagnostics": "operation.diagnostics",
     "/v1/operation/recover": "operation.recover",
 }
 

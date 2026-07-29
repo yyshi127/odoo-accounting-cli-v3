@@ -7142,6 +7142,18 @@ def operation_result(request_json: str | None) -> None:
     )
 
 
+@operation_group.command("diagnostics")
+@_request_option
+def operation_diagnostics(request_json: str | None) -> None:
+    """Return a receipt-backed diagnostic projection without changing state."""
+
+    _execute_write_command(
+        command="operation.diagnostics",
+        action="operation.diagnostics",
+        request_json=request_json,
+    )
+
+
 @operation_group.command("verify")
 @_request_option
 def operation_verify(request_json: str | None) -> None:

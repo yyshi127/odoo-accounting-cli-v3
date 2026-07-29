@@ -45,6 +45,10 @@ from ..operations import (
     sign_verification_result,
 )
 from ..registry import Capability, registry_digest
+from ..recovery_contracts import (
+    RecoveryContractError,
+    select_recovery_action_contract,
+)
 from ..write_protocol import (
     approved_write_authentication_parameters,
     approval_from_mapping,
@@ -142,6 +146,19 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 ODOO_MODEL = re.compile(r"[a-z][a-z0-9_.]{1,127}")
 MAX_AUDIT_RECORDS = 900
 MAX_SNAPSHOT_VALUES_JSON_CHARS = 65_536
+EXISTING_HANDLER_SNAPSHOT_FIELDS = frozenset(
+    {
+        "model",
+        "record_id",
+        "company_id",
+        "state",
+        "values",
+        "values_digest",
+    }
+)
+TOMBSTONE_HANDLER_SNAPSHOT_FIELDS = frozenset(
+    {*EXISTING_HANDLER_SNAPSHOT_FIELDS, "exists"}
+)
 METADATA_SCOPE_MODULE = (
     "odoo.addons.odoo_accounting_cli_v3_control.models.execution_scope"
 )
@@ -661,29 +678,32 @@ def _stored_phase(
     return result, evidence
 
 
-def _raw_snapshot(value: Any, company_id: int) -> tuple[dict[str, Any], dict[str, Any]]:
-    if not isinstance(value, Mapping) or set(value) != {
-        "model",
-        "record_id",
-        "company_id",
-        "state",
-        "values",
-        "values_digest",
-    }:
+def _raw_snapshot(
+    value: Any, company_id: int
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if not isinstance(value, Mapping):
         raise OdooWriteBootstrapError("handler snapshot must be an object")
+    fields = set(value)
+    is_existing = fields == EXISTING_HANDLER_SNAPSHOT_FIELDS
+    is_tombstone = fields == TOMBSTONE_HANDLER_SNAPSHOT_FIELDS
+    if not is_existing and not is_tombstone:
+        raise OdooWriteBootstrapError("handler snapshot fields are invalid")
     model = value.get("model")
     record_id = value.get("record_id")
-    state = value.get("record_state", value.get("state", "unknown"))
-    values = value.get("values", {})
+    raw_company_id = value.get("company_id")
+    state = value.get("state")
+    values = value.get("values")
     if (
         not isinstance(model, str)
-        or not model
-        or isinstance(record_id, bool)
-        or not isinstance(record_id, int)
+        or re.fullmatch(r"[a-z][a-z0-9_.]{0,127}", model) is None
+        or type(record_id) is not int
         or record_id <= 0
-        or value.get("company_id") != company_id
+        or type(raw_company_id) is not int
+        or raw_company_id != company_id
         or not isinstance(state, str)
-        or not state
+        or not state.strip()
+        or len(state) > 128
+        or any(ord(character) < 32 or ord(character) == 127 for character in state)
         or not isinstance(values, dict)
         or not isinstance(value.get("values_digest"), str)
         or not hmac.compare_digest(value["values_digest"], _digest(values))
@@ -693,13 +713,22 @@ def _raw_snapshot(value: Any, company_id: int) -> tuple[dict[str, Any], dict[str
         raise OdooWriteBootstrapError(
             "handler snapshot exceeds the auditable values limit"
         )
+    if is_tombstone and (
+        value.get("exists") is not False
+        or state != "absent"
+        or values != {}
+        or not hmac.compare_digest(value["values_digest"], _digest({}))
+    ):
+        raise OdooWriteBootstrapError("handler tombstone binding is invalid")
     snapshot = create_record_snapshot(
         model=model,
         record_id=record_id,
-        exists=True,
+        exists=is_existing,
         record_state=state,
         values=values,
     )
+    if is_tombstone:
+        return snapshot, None
     reference = {
         "model": model,
         "record_id": record_id,
@@ -724,21 +753,37 @@ def _difference(
         )
     before_pairs = [_raw_snapshot(item, company_id) for item in before_values]
     after_pairs = [_raw_snapshot(item, company_id) for item in after_values]
+    if any(snapshot["exists"] is False for snapshot, _reference in before_pairs):
+        raise OdooWriteBootstrapError(
+            "handler before snapshots cannot contain a tombstone"
+        )
     before_keys = [
-        (item["model"], item["record_id"]) for item in before_values
+        (snapshot["model"], snapshot["record_id"])
+        for snapshot, _reference in before_pairs
     ]
     after_keys = [
-        (item["model"], item["record_id"]) for item in after_values
+        (snapshot["model"], snapshot["record_id"])
+        for snapshot, _reference in after_pairs
     ]
     if len(before_keys) != len(set(before_keys)) or len(after_keys) != len(
         set(after_keys)
     ):
         raise OdooWriteBootstrapError("handler snapshots contain a duplicate record")
+    new_tombstones = {
+        (snapshot["model"], snapshot["record_id"])
+        for snapshot, _reference in after_pairs
+        if snapshot["exists"] is False
+    } - set(before_keys)
+    if new_tombstones:
+        raise OdooWriteBootstrapError(
+            "handler after snapshots introduced a tombstone without "
+            "a prechecked record"
+        )
     omitted_after = set(before_keys) - set(after_keys)
     if omitted_after:
         raise OdooWriteBootstrapError(
             "handler after snapshots omitted a prechecked record; "
-            "an explicit company-bound tombstone protocol is required"
+            "an existing snapshot or explicit tombstone is required"
         )
     keyed_before = {
         (item["model"], item["record_id"]): item for item in before_values
@@ -752,14 +797,17 @@ def _difference(
             record_state="absent",
             values={},
         )
-        for item in after_values
-        if (item["model"], item["record_id"]) not in keyed_before
+        for (item, (snapshot, _reference)) in zip(after_values, after_pairs)
+        if snapshot["exists"] is True
+        and (item["model"], item["record_id"]) not in keyed_before
     )
     after = [item[0] for item in after_pairs]
-    references = [item[1] for item in after_pairs]
+    references = [
+        reference for _snapshot, reference in after_pairs if reference is not None
+    ]
     changed: set[str] = set()
-    for item in after_values:
-        key = (item["model"], item["record_id"])
+    for item, (snapshot, _reference) in zip(after_values, after_pairs):
+        key = (snapshot["model"], snapshot["record_id"])
         previous = keyed_before.get(key)
         current_values = item.get("values", {})
         previous_values = previous.get("values", {}) if previous else {}
@@ -770,7 +818,11 @@ def _difference(
                 item["model"], field, previous_values, current_values
             )
         )
-        if previous is None or previous.get("state") != item.get("state"):
+        if (
+            snapshot["exists"] is False
+            or previous is None
+            or previous.get("state") != item.get("state")
+        ):
             changed.add("record_state")
     return (
         create_difference(before=before, after=after, changed_fields=sorted(changed)),
@@ -1279,52 +1331,86 @@ def _execution_evidence(
             raise OdooWriteBootstrapError(
                 "available recovery requires a trusted installed-module graph"
             )
-        if operation.capability_id == "acct.invoice.customer_create.v1":
-            expected_method = DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
-            expected_oracle = DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE
-            document_label = "customer invoice"
-        elif operation.capability_id == "acct.bill.vendor_create.v1":
-            expected_method = DRAFT_VENDOR_BILL_RECOVERY_METHOD
-            expected_oracle = DRAFT_VENDOR_BILL_RECOVERY_ORACLE
-            document_label = "vendor bill"
-        else:
-            expected_method = None
-            expected_oracle = None
-            document_label = "document"
+        oracle_id = recovery.get("oracle_id")
+        try:
+            contract = select_recovery_action_contract(
+                operation.capability_id, method, oracle_id
+            )
+        except RecoveryContractError as exc:
+            raise OdooWriteBootstrapError(
+                "available recovery action contract is invalid"
+            ) from exc
         if (
             set(recovery) != {
                 "status", "method", "targets", "guards", "oracle_id"
             }
-            or expected_method is None
-            or operation.environment != "sandbox"
-            or operation.parameters.get("posting_mode") != "draft"
-            or method != expected_method
-            or recovery.get("oracle_id") != expected_oracle
+            or operation.environment not in contract.allowed_environments
+            or contract.production_promotion_allowed
         ):
             raise OdooWriteBootstrapError(
-                "available recovery is restricted to a sandbox draft "
-                + document_label
+                "available recovery is not allowed in this environment"
             )
         guards = recovery.get("guards")
         if (
-            len(target_records) != 1
-            or target_records[0]["model"] != "account.move"
-            or len(targets) != 1
-            or not isinstance(targets[0], Mapping)
-            or set(targets[0]) != {"model", "record_id"}
+            not target_records
+            or len(target_records) != len(targets)
             or not isinstance(guards, list)
             or not guards
         ):
             raise OdooWriteBootstrapError(
-                "available recovery requires one action and a complete line graph"
+                "available recovery requires an action and guard graph"
+            )
+        action_identities: list[tuple[str, int]] = []
+        for target, reference in zip(targets, target_records):
+            if (
+                not isinstance(target, Mapping)
+                or set(target) != {"model", "record_id"}
+                or target.get("model") not in contract.action_models
+            ):
+                raise OdooWriteBootstrapError(
+                    "available recovery action identity is invalid"
+                )
+            identity = (reference["model"], reference["record_id"])
+            if identity != (target["model"], target["record_id"]):
+                raise OdooWriteBootstrapError(
+                    "available recovery action identity is invalid"
+                )
+            action_identities.append(identity)
+        if len(action_identities) != len(set(action_identities)):
+            raise OdooWriteBootstrapError(
+                "available recovery action graph contains a duplicate"
             )
         guard_records: list[dict[str, Any]] = []
         guard_identities: list[tuple[str, int]] = []
+        guard_outcomes: list[str] = []
         for guard in guards:
+            legacy_draft_guard = (
+                method
+                in {
+                    DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+                    DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+                }
+                and isinstance(guard, Mapping)
+                and set(guard) == {"model", "record_id"}
+            )
+            expected_outcome = (
+                "survive_allowed_delta"
+                if legacy_draft_guard
+                else (
+                    guard.get("expected_outcome")
+                    if isinstance(guard, Mapping)
+                    else None
+                )
+            )
             if (
                 not isinstance(guard, Mapping)
-                or set(guard) != {"model", "record_id"}
-                or guard.get("model") != "account.move.line"
+                or (
+                    not legacy_draft_guard
+                    and set(guard)
+                    != {"model", "record_id", "expected_outcome"}
+                )
+                or guard.get("model") not in contract.guard_models
+                or expected_outcome not in contract.allowed_guard_outcomes
             ):
                 raise OdooWriteBootstrapError(
                     "available recovery guard identity is invalid"
@@ -1336,35 +1422,67 @@ def _execution_evidence(
                     "available recovery guard was not read back"
                 )
             guard_identities.append(identity)
+            guard_outcomes.append(expected_outcome)
             guard_records.append(
-                {**reference, "expected_outcome": "survive_allowed_delta"}
+                {
+                    **reference,
+                    "expected_outcome": expected_outcome,
+                }
             )
         if len(guard_identities) != len(set(guard_identities)):
             raise OdooWriteBootstrapError(
                 "available recovery guard graph contains a duplicate"
             )
-        action_identity = (
-            target_records[0]["model"], target_records[0]["record_id"]
-        )
-        expected_graph = {action_identity, *guard_identities}
+        if set(action_identities) & set(guard_identities):
+            raise OdooWriteBootstrapError(
+                "available recovery graph roles overlap"
+            )
+        expected_graph = {*action_identities, *guard_identities}
         if set(by_key) != expected_graph:
             raise OdooWriteBootstrapError(
-                "available recovery guards do not cover the complete line graph"
+                "available recovery roles do not cover the complete result graph"
+            )
+        if any(
+            model_name not in contract.result_models
+            for model_name, _record_id_value in expected_graph
+        ):
+            raise OdooWriteBootstrapError(
+                "available recovery result model is outside its contract"
             )
         raw_by_key = {
             (item["model"], item["record_id"]): item
             for item in raw_after
-            if isinstance(item, Mapping)
+            if isinstance(item, Mapping) and item.get("exists", True) is not False
         }
-        raw_action = raw_by_key.get(action_identity)
-        _assert_available_draft_document_snapshot(
-            operation,
-            module_graph=module_graph,
-            raw_action=raw_action,
-            raw_by_key=raw_by_key,
-            action_identity=action_identity,
-            guard_identities=guard_identities,
-        )
+        if method in {
+            DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
+            DRAFT_VENDOR_BILL_RECOVERY_METHOD,
+        }:
+            if (
+                len(action_identities) != 1
+                or operation.parameters.get("posting_mode") != "draft"
+                or any(
+                    model_name != "account.move.line"
+                    for model_name, _record_id_value in guard_identities
+                )
+                or any(
+                    outcome != "survive_allowed_delta"
+                    for outcome in guard_outcomes
+                )
+            ):
+                raise OdooWriteBootstrapError(
+                    "available draft document recovery graph is invalid"
+                )
+            action_identity = action_identities[0]
+            _assert_available_draft_document_snapshot(
+                operation,
+                module_graph=module_graph,
+                raw_action=raw_by_key.get(action_identity),
+                raw_by_key=raw_by_key,
+                action_identity=action_identity,
+                guard_identities=guard_identities,
+            )
+        ordered_action_identities = sorted(action_identities)
         ordered_guard_identities = sorted(guard_identities)
         recovery_parameters = {
             "company_id": operation.company_id,
@@ -1372,13 +1490,14 @@ def _execution_evidence(
             "module_graph_digest": module_graph.digest,
             "method": method,
             "action_targets": [
-                {"model": action_identity[0], "record_id": action_identity[1]}
+                {"model": model_name, "record_id": record_id}
+                for model_name, record_id in ordered_action_identities
             ],
             "guard_records": [
                 {"model": model_name, "record_id": record_id}
                 for model_name, record_id in ordered_guard_identities
             ],
-            "oracle_id": expected_oracle,
+            "oracle_id": oracle_id,
         }
         plan = create_recovery_plan_v2(
             origin_operation_id=operation.operation_id,
@@ -1388,7 +1507,7 @@ def _execution_evidence(
             requires_approval=True,
             action_targets=target_records,
             guard_records=guard_records,
-            oracle_id=expected_oracle,
+            oracle_id=oracle_id,
             parameters=recovery_parameters,
         )
         return {
@@ -1519,14 +1638,101 @@ def _verification_evidence(
             raise OdooWriteBootstrapError(
                 "write verification snapshot digest is invalid"
             )
+        if len(raw_after) > MAX_AUDIT_RECORDS:
+            raise OdooWriteBootstrapError(
+                "write verification snapshot graph exceeds the auditable record limit"
+            )
         fresh_pairs = [_raw_snapshot(item, operation.company_id) for item in raw_after]
         fresh_snapshots = [item[0] for item in fresh_pairs]
-        fresh_records = [item[1] for item in fresh_pairs]
+        fresh_identities = [
+            (snapshot["model"], snapshot["record_id"])
+            for snapshot, _reference in fresh_pairs
+        ]
+        if len(fresh_identities) != len(set(fresh_identities)):
+            raise OdooWriteBootstrapError(
+                "write verification snapshots contain a duplicate record"
+            )
+        fresh_records = [
+            reference
+            for _snapshot, reference in fresh_pairs
+            if reference is not None
+        ]
         if canonical_json(fresh_records) != canonical_json(
             execution_evidence["odoo_records"]
         ):
             raise OdooWriteBootstrapError(
                 "fresh Odoo readback differs from committed execution records"
+            )
+        committed_difference = execution_evidence.get("difference")
+        committed_after = (
+            committed_difference.get("after")
+            if isinstance(committed_difference, Mapping)
+            else None
+        )
+        if not isinstance(committed_after, list):
+            raise OdooWriteBootstrapError(
+                "committed execution difference is invalid"
+            )
+        committed_tombstone_items: list[Mapping[str, Any]] = []
+        for snapshot in committed_after:
+            if not isinstance(snapshot, Mapping) or snapshot.get("exists") is not False:
+                continue
+            if (
+                set(snapshot)
+                != {
+                    "model",
+                    "record_id",
+                    "exists",
+                    "record_state",
+                    "values_json",
+                    "values_digest",
+                }
+                or not isinstance(snapshot.get("model"), str)
+                or re.fullmatch(
+                    r"[a-z][a-z0-9_.]{0,127}", snapshot["model"]
+                )
+                is None
+                or type(snapshot.get("record_id")) is not int
+                or snapshot["record_id"] <= 0
+                or snapshot.get("record_state") != "absent"
+                or snapshot.get("values_json") != "{}"
+                or snapshot.get("values_digest") != _digest({})
+            ):
+                raise OdooWriteBootstrapError(
+                    "fresh Odoo readback tombstones differ from committed "
+                    "execution difference"
+                )
+            committed_tombstone_items.append(snapshot)
+        committed_tombstone_identities = [
+            (snapshot["model"], snapshot["record_id"])
+            for snapshot in committed_tombstone_items
+        ]
+        if len(committed_tombstone_identities) != len(
+            set(committed_tombstone_identities)
+        ):
+            raise OdooWriteBootstrapError(
+                "fresh Odoo readback tombstones differ from committed "
+                "execution difference"
+            )
+        committed_tombstones = {
+            identity: snapshot
+            for identity, snapshot in zip(
+                committed_tombstone_identities, committed_tombstone_items
+            )
+        }
+        fresh_tombstones = {
+            (snapshot["model"], snapshot["record_id"]): snapshot
+            for snapshot, _reference in fresh_pairs
+            if snapshot["exists"] is False
+        }
+        if set(committed_tombstones) != set(fresh_tombstones) or any(
+            _digest(committed_tombstones[identity])
+            != _digest(fresh_tombstones[identity])
+            for identity in committed_tombstones
+        ):
+            raise OdooWriteBootstrapError(
+                "fresh Odoo readback tombstones differ from committed "
+                "execution difference"
             )
     else:
         passed = False

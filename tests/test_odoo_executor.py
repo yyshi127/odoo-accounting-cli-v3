@@ -21,6 +21,7 @@ from odoo_accounting_cli_v3.domain.multicurrency_balance import (
 from odoo_accounting_cli_v3.domain.report_read import (
     CurrencyInfo as ReportCurrencyInfo,
     NativeReportColumn,
+    NativeReportDefinitionBinding,
     NativeReportFilters,
     NativeReportLine,
     NativeReportPeriod,
@@ -36,6 +37,28 @@ from odoo_accounting_cli_v3.registry import validate_registry
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
 NOW = datetime(2026, 7, 13, 7, 0, tzinfo=timezone.utc)
 RECEIPT_KEY_ID = "test-receipt-2026-07"
+
+
+def report_definition_binding():
+    return NativeReportDefinitionBinding(
+        schema_version=1,
+        definition_sha256="1" * 64,
+        baseline_catalog_sha256="2" * 64,
+        baseline_entry_sha256="3" * 64,
+        source_candidate_sha256="4" * 64,
+        approval_set_sha256="5" * 64,
+        allowed_signers_sha256="6" * 64,
+        revocations_sha256="7" * 64,
+        oracle_contract_sha256="8" * 64,
+        trust_envelope_sha256="9" * 64,
+        binding_sha256="a" * 64,
+        approvals_verified=True,
+        revocations_checked=True,
+        artifact_digests_verified=True,
+        pre_matches_approved=True,
+        post_matches_approved=True,
+        same_transaction_snapshot_definition_equal=True,
+    )
 
 
 class Cursor:
@@ -455,6 +478,7 @@ class ReportBackend:
             resolved_report_name=report_name,
             report_family=family,
             report_kind=report_kind,
+            definition_binding=report_definition_binding(),
             currency_id=kwargs["currency_id"],
             period_key=main_period_key,
             date_mode="range",
@@ -540,6 +564,7 @@ class OdooReadExecutorTest(unittest.TestCase):
             odoo_instance_id="odoo19@tokyo2",
             database_name="odoo_test",
             database_uuid="11111111-1111-4111-8111-111111111111",
+            release_digest="d" * 64,
             environment="test",
             capability_channel="staged",
             receipt_secret=b"test-only-receipt-secret-32-byte",

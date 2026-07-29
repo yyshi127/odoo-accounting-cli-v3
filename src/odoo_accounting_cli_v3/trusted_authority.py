@@ -837,6 +837,9 @@ class TrustedAuthority:
     def _validate_business_company(
         session: TrustedSession, request: dict[str, Any]
     ) -> None:
+        company_id = request.get("company_id")
+        if company_id is not None and company_id != session.company_id:
+            raise AuthorityError("request does not match trusted bound company")
         parameters = request.get("parameters")
         if not isinstance(parameters, dict):
             return
@@ -919,6 +922,7 @@ class TrustedAuthority:
             "operation.preview",
             "operation.status",
             "operation.result",
+            "operation.diagnostics",
         }:
             operation = self._operation(operation_id)
             self._require_requester(trusted, operation)

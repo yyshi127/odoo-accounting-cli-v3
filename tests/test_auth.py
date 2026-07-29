@@ -269,6 +269,7 @@ class AuthenticationTest(unittest.TestCase):
                 "operation.approve_execute",
                 "operation.status",
                 "operation.result",
+                "operation.diagnostics",
                 "operation.recover",
             },
         )

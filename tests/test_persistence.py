@@ -67,6 +67,7 @@ from odoo_accounting_cli_v3.persistence import (
     _operation_record_hash,
     _recovery_operation_binding_event_id,
     _recovery_operation_binding_payload,
+    _recovery_plan_binding_digest,
 )
 from odoo_accounting_cli_v3.receipts import create_read_receipt
 from odoo_accounting_cli_v3.write_receipts import (
@@ -1960,6 +1961,51 @@ class SQLitePersistenceTest(unittest.TestCase):
                     accepted.approval_record,
                 )
                 self.assertEqual(self.store.audit_events(), events_before)
+
+    def test_versioned_recovery_plan_digest_never_downgrades_to_legacy(self) -> None:
+        plan = recovery_plan_v2("op-versioned-plan")
+        self.assertEqual(
+            _recovery_plan_binding_digest(
+                plan,
+                canonical_digest=content_digest(plan),
+            ),
+            plan["plan_digest"],
+        )
+
+        invalid_plans = []
+        changed_method = dict(plan)
+        changed_method["method"] = "tampered_method"
+        invalid_plans.append(("method", changed_method))
+        changed_digest = dict(plan)
+        changed_digest["plan_digest"] = "a" * 64
+        invalid_plans.append(("plan_digest", changed_digest))
+        missing_field = dict(plan)
+        del missing_field["method"]
+        invalid_plans.append(("missing_field", missing_field))
+        wrong_version = dict(plan)
+        wrong_version["plan_version"] = 99
+        invalid_plans.append(("wrong_version", wrong_version))
+
+        for label, invalid in invalid_plans:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(
+                    PersistenceIntegrityError,
+                    "versioned recovery plan is invalid",
+                ):
+                    _recovery_plan_binding_digest(
+                        invalid,
+                        canonical_digest=content_digest(invalid),
+                    )
+
+        legacy = {"action": "reverse", "record_id": 501}
+        legacy_digest = content_digest(legacy)
+        self.assertEqual(
+            _recovery_plan_binding_digest(
+                legacy,
+                canonical_digest=legacy_digest,
+            ),
+            legacy_digest,
+        )
 
     def test_result_verification_and_recovery_lifecycle_is_atomic_and_restart_safe(self) -> None:
         started = persist_executing(self.store, "durable-lifecycle")

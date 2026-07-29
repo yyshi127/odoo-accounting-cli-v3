@@ -118,6 +118,10 @@ def test_prepare_preserves_every_business_parameter_exactly():
         ("operation.status", {"operation_id": "op-write-api"}),
         ("operation.result", {"operation_id": "op-write-api"}),
         (
+            "operation.diagnostics",
+            {"company_id": 7, "operation_id": "op-write-api"},
+        ),
+        (
             "operation.recover",
             {
                 "origin_operation_id": "op-write-api",
@@ -195,3 +199,16 @@ def test_recovery_revision_date_and_reason_are_strict():
             parse_write_api_request(
                 "operation.recover", {**base, field: value}
             )
+
+
+@pytest.mark.parametrize("company_id", [True, 0, -1, 8])
+def test_diagnostics_requires_the_exact_authenticated_company(company_id):
+    with pytest.raises(WriteApiError, match="company_id"):
+        parse_write_api_request(
+            "operation.diagnostics",
+            {
+                "context": context_mapping(),
+                "company_id": company_id,
+                "operation_id": "op-write-api",
+            },
+        )

@@ -61,6 +61,7 @@ _ACTION_COMMANDS = {
     "operation.approve_execute": "approve-execute",
     "operation.status": "status",
     "operation.result": "result",
+    "operation.diagnostics": "diagnostics",
     "operation.recover": "recover",
 }
 _TERMINAL_RESULT_ACTIONS = frozenset(
@@ -1233,7 +1234,12 @@ class HistoricalReleaseRouter:
         ):
             raise HistoricalRouterError("historical child response fields are invalid")
         data = response["data"]
-        returned_operation_id = data.get("operation_id")
+        returned_operation_id = (
+            data.get("operation", {}).get("operation_id")
+            if action == "operation.diagnostics"
+            and isinstance(data.get("operation"), dict)
+            else data.get("operation_id")
+        )
         if (
             not isinstance(returned_operation_id, str)
             or not returned_operation_id.strip()
@@ -1254,7 +1260,9 @@ class HistoricalReleaseRouter:
             raise HistoricalRouterError(
                 "historical child response origin binding is invalid"
             )
-        if action in {
+        if action == "operation.diagnostics":
+            identity = data.get("receipt")
+        elif action in {
             "operation.prepare",
             "operation.status",
             "operation.recover",
@@ -1268,7 +1276,15 @@ class HistoricalReleaseRouter:
             not isinstance(identity, dict)
             or identity.get("release_digest") != route.release_digest
             or identity.get("registry_digest") != route.registry_digest
-            or identity.get("operation_id") != returned_operation_id
+            or (
+                action != "operation.diagnostics"
+                and identity.get("operation_id") != returned_operation_id
+            )
+            or (
+                action == "operation.diagnostics"
+                and identity.get("capability_id")
+                != "acct.diagnostics.operation_read.v1"
+            )
         ):
             raise HistoricalRouterError(
                 "historical child response identity does not match its route"
@@ -1284,7 +1300,13 @@ class HistoricalReleaseRouter:
         expected_recovery_plan_digest: str | None,
     ) -> None:
         payload = parsed.payload
-        returned_operation_id = response["data"]["operation_id"]
+        response_data = response["data"]
+        returned_operation_id = (
+            response_data.get("operation", {}).get("operation_id")
+            if parsed.action == "operation.diagnostics"
+            and isinstance(response_data.get("operation"), dict)
+            else response_data["operation_id"]
+        )
         if parsed.action == "operation.recover":
             origin = self._operation(payload["origin_operation_id"])
             plan = self._validated_origin_recovery_plan(origin)

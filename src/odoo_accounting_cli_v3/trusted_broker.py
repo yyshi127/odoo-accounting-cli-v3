@@ -60,6 +60,7 @@ _BUSINESS_FIELDS: dict[str, frozenset[str]] = {
     "operation.approve_execute": frozenset({"operation_id"}),
     "operation.status": frozenset({"operation_id"}),
     "operation.result": frozenset({"operation_id"}),
+    "operation.diagnostics": frozenset({"company_id", "operation_id"}),
     "operation.recover": frozenset(
         {"origin_operation_id", "recovery_date", "reason", "idempotency_key"}
     ),
@@ -461,6 +462,17 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
             _identifier(
                 request["parameters"].get("idempotency_key"),
                 "idempotency_key",
+            )
+    elif action == "operation.diagnostics":
+        _identifier(request["operation_id"], "operation_id")
+        company_id = request["company_id"]
+        if (
+            isinstance(company_id, bool)
+            or not isinstance(company_id, int)
+            or company_id <= 0
+        ):
+            raise TrustedBrokerError(
+                "broker_business_request_rejected", status_code=400
             )
     elif action == "operation.recover":
         _identifier(request["origin_operation_id"], "origin_operation_id")
@@ -1336,7 +1348,12 @@ class TrustedBroker:
                     "broker_executor_response_rejected", status_code=502
                 )
         else:
-            returned_operation_id = data.get("operation_id")
+            returned_operation_id = (
+                data.get("operation", {}).get("operation_id")
+                if action == "operation.diagnostics"
+                and isinstance(data.get("operation"), dict)
+                else data.get("operation_id")
+            )
             if (
                 not isinstance(returned_operation_id, str)
                 or _IDENTIFIER.fullmatch(returned_operation_id) is None
@@ -1358,7 +1375,9 @@ class TrustedBroker:
                 raise TrustedBrokerError(
                     "broker_executor_response_rejected", status_code=502
                 )
-            if action in {"operation.prepare", "operation.status", "operation.recover"}:
+            if action == "operation.diagnostics":
+                identity = data.get("receipt")
+            elif action in {"operation.prepare", "operation.status", "operation.recover"}:
                 identity = data.get("operation")
             elif action == "operation.preview":
                 identity = data.get("precheck_identity")
@@ -1366,7 +1385,15 @@ class TrustedBroker:
                 identity = data.get("audit_receipt")
             if (
                 not isinstance(identity, dict)
-                or identity.get("operation_id") != returned_operation_id
+                or (
+                    action != "operation.diagnostics"
+                    and identity.get("operation_id") != returned_operation_id
+                )
+                or (
+                    action == "operation.diagnostics"
+                    and identity.get("capability_id")
+                    != "acct.diagnostics.operation_read.v1"
+                )
             ):
                 raise TrustedBrokerError(
                     "broker_executor_response_rejected", status_code=502

@@ -1288,7 +1288,7 @@ def test_bootstrap_rejects_crossed_customer_vendor_recovery_contract(
     raw["recovery"]["oracle_id"] = oracle_id
 
     with pytest.raises(
-        OdooWriteBootstrapError, match="sandbox draft vendor bill"
+        OdooWriteBootstrapError, match="action contract is invalid"
     ):
         _execution_evidence(operation, raw)
 
@@ -1296,8 +1296,8 @@ def test_bootstrap_rejects_crossed_customer_vendor_recovery_contract(
 @pytest.mark.parametrize(
     ("parameters_override", "guard_record_ids", "match"),
     [
-        ({"posting_mode": "post"}, (502, 503), "sandbox draft customer invoice"),
-        ({"posting_mode": "draft"}, (502,), "complete line graph"),
+        ({"posting_mode": "post"}, (502, 503), "draft document recovery graph"),
+        ({"posting_mode": "draft"}, (502,), "complete result graph"),
     ],
 )
 def test_available_recovery_descriptor_rejects_posted_or_incomplete_invoice_graph(

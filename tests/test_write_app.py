@@ -32,7 +32,9 @@ from odoo_accounting_cli_v3.operations import (
 )
 from odoo_accounting_cli_v3.odoo.module_graph import build_trusted_module_graph
 from odoo_accounting_cli_v3.persistence import SQLitePersistence
+from odoo_accounting_cli_v3.contracts import validate_value
 from odoo_accounting_cli_v3.registry import registry_digest, validate_registry
+from odoo_accounting_cli_v3.receipts import read_request_digest
 from odoo_accounting_cli_v3.write_api import parse_write_api_request
 from odoo_accounting_cli_v3.write_app import WriteApplicationError
 from odoo_accounting_cli_v3.write_protocol import (
@@ -58,6 +60,8 @@ EXECUTION_SECRET = b"write-app-execution-secret-material-1"
 VERIFICATION_SECRET = b"write-app-verification-secret-material"
 RECOVERY_SECRET = b"write-app-recovery-secret-material-001"
 RECEIPT_SECRET = b"write-app-receipt-secret-material-0001"
+READ_AUTH_SECRET = b"write-app-read-auth-secret-material-001"
+READ_RECEIPT_SECRET = b"write-app-read-receipt-secret-material"
 SECOND_RECEIPT_SECRET = b"write-app-second-receipt-secret-material"
 EFFECT_SECRET = b"write-app-effect-finalizer-secret-material"
 FINALIZER_IDENTITY = EffectFinalizationIdentity(
@@ -663,6 +667,8 @@ class Harness:
             environment="sandbox",
             capability_channel="staged",
             release_root=ROOT,
+            receipt_state_path=(tmp_path / "read-receipts.sqlite3").resolve(),
+            receipt_key_id="read-receipt-v2",
         )
         role = lambda key_id, issuer=None: SimpleNamespace(  # noqa: E731
             key_id=key_id, issuer=issuer
@@ -701,6 +707,11 @@ class Harness:
         )
         monkeypatch.setattr(
             write_app, "load_write_runtime_secrets", lambda _config: self.secrets
+        )
+        monkeypatch.setattr(
+            write_app,
+            "load_runtime_secrets",
+            lambda _config: (READ_AUTH_SECRET, READ_RECEIPT_SECRET),
         )
         monkeypatch.setattr(
             write_app, "_load_verified_release_identity", lambda _config: self.identity
@@ -838,6 +849,92 @@ class Harness:
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     return Harness(tmp_path, monkeypatch)
+
+
+def test_diagnostics_is_receipt_backed_and_does_not_change_operation_state(
+    harness: Harness,
+) -> None:
+    prepared = harness.call(
+        "operation.prepare",
+        {
+            "operation_id": "op-diagnostics",
+            "request_id": "req-diagnostics",
+            "capability_id": CAPABILITY_ID,
+            "parameters": _parameters("diagnostics-idempotency"),
+        },
+    )
+    before = harness.store().get_operation(prepared["operation_id"])
+    odoo_call_counts = (
+        len(harness.odoo.executor_requests),
+        len(harness.odoo.approver_requests),
+        len(harness.odoo.precheck_requests),
+        len(harness.odoo.approved_requests),
+    )
+    request = {
+        "company_id": 7,
+        "operation_id": prepared["operation_id"],
+    }
+
+    first = harness.call("operation.diagnostics", request)
+    second = harness.call("operation.diagnostics", request)
+
+    capability = next(
+        item
+        for item in harness.capabilities
+        if item.id == "acct.diagnostics.operation_read.v1"
+    )
+    validate_value(first, capability.data["output_schema"])
+    validate_value(second, capability.data["output_schema"])
+    assert first["operation"] == second["operation"]
+    assert first["operation"]["operation_id"] == prepared["operation_id"]
+    assert first["operation"]["company_id"] == 7
+    assert first["operation"]["state"] == "prepared"
+    assert first["operation"]["business_succeeded"] is False
+    assert first["page"] == {"count": 1, "total_count": 1}
+    assert first["receipt"]["id"] != second["receipt"]["id"]
+    assert first["receipt"]["capability_id"] == (
+        "acct.diagnostics.operation_read.v1"
+    )
+    assert first["receipt"]["request_digest"] == read_request_digest(
+        capability_id="acct.diagnostics.operation_read.v1",
+        parameters=request,
+        auth_token_id="write-app-token-2",
+        principal="pi:sandbox-user-42",
+        odoo_instance_id=harness.config.base_runtime.instance_id,
+        database_name=harness.config.base_runtime.database_name,
+        database_uuid=harness.config.base_runtime.database_uuid,
+        company_id=7,
+        user_id=42,
+        registry_digest=harness.registry_digest,
+        release_digest=RELEASE_DIGEST,
+        environment="sandbox",
+        capability_channel="staged",
+    )
+    after = harness.store().get_operation(prepared["operation_id"])
+    assert after == before
+    assert (
+        len(harness.odoo.executor_requests),
+        len(harness.odoo.approver_requests),
+        len(harness.odoo.precheck_requests),
+        len(harness.odoo.approved_requests),
+    ) == odoo_call_counts
+    receipt_store = SQLitePersistence(
+        harness.config.base_runtime.receipt_state_path,
+        receipt_key_id=harness.config.base_runtime.receipt_key_id,
+        receipt_secret=READ_RECEIPT_SECRET,
+    )
+    read_events = [
+        event
+        for event in receipt_store.audit_events()
+        if event.event_type == "read.verified"
+    ]
+    assert len(read_events) == 2
+    assert {
+        event.payload["receipt"]["request_digest"] for event in read_events
+    } == {
+        first["receipt"]["request_digest"],
+        second["receipt"]["request_digest"],
+    }
 
 
 def _install_trusted_runtime_handoff(
@@ -1494,9 +1591,85 @@ def test_recovery_operation_executes_with_trusted_plan_and_returns_verified_rece
     assert harness.odoo.approved_requests[-1]["trusted_recovery_plan"] == result[
         "recovery_plan"
     ]
-    assert harness.call(
+    recovered_origin = harness.call(
         "operation.status", {"operation_id": prepared["operation_id"]}
-    )["operation_state"] == "failed"
+    )
+    assert recovered_origin["operation_state"] == "recovered"
+    assert recovered_origin["result_available"] is False
+    assert recovered_origin["next_action"] == "operation.diagnostics"
+    assert recovered_origin["operation_revision"] == (
+        origin_status["operation_revision"] + 2
+    )
+
+    store = harness.store()
+    binding = store.get_recovery_operation_binding(recovery["operation_id"])
+    assert binding.origin_operation_id == prepared["operation_id"]
+    assert binding.origin_operation_revision == origin_status[
+        "operation_revision"
+    ]
+    assert binding.origin_terminal_state == "failed"
+    assert binding.recovery_operation_id == recovery["operation_id"]
+    assert binding.plan_digest == result["recovery_plan"]["plan_digest"]
+
+    origin_results = store.get_trusted_result_records(
+        prepared["operation_id"]
+    )
+    assert [record.kind for record in origin_results] == [
+        "execution",
+        "verification",
+        "recovery",
+    ]
+    completion_record = origin_results[-1]
+    completion = completion_record.evidence
+    assert completion_record.succeeded is True
+    assert completion_record.prior_evidence_digest == binding.plan_digest
+    assert completion_record.evidence_digest == hashlib.sha256(
+        canonical_json(completion)
+    ).hexdigest()
+    assert completion["origin_operation"] == {
+        "operation_id": prepared["operation_id"],
+        "request_id": prepared["operation"]["request_id"],
+        "capability_id": CUSTOMER_INVOICE_CAPABILITY_ID,
+        "operation_digest": binding.origin_operation_digest,
+        "operation_revision": origin_status["operation_revision"],
+        "company_id": 7,
+        "state": "failed",
+    }
+    assert completion["recovery_operation"]["operation_id"] == recovery[
+        "operation_id"
+    ]
+    assert completion["recovery_operation"]["state"] == "completed"
+    assert completion["recovery_plan_digest"] == binding.plan_digest
+
+    recovered_receipts = [
+        receipt
+        for receipt in store.get_final_write_receipts(
+            prepared["operation_id"]
+        )
+        if receipt.terminal_state == "recovered"
+    ]
+    assert len(recovered_receipts) == 1
+    assert recovered_receipts[0].body["receipt_details"] == {
+        "operation_id": prepared["operation_id"],
+        "operation_state": "recovered",
+        "recovery_completion": completion,
+        "recovery_completion_digest": completion_record.evidence_digest,
+    }
+    diagnostics = harness.call(
+        "operation.diagnostics",
+        {"company_id": 7, "operation_id": prepared["operation_id"]},
+    )
+    assert diagnostics["operation"]["business_succeeded"] is False
+    assert diagnostics["recovery"]["lifecycle_status"] == "recovered_verified"
+    assert diagnostics["recovery"]["completion_evidence_digest"] == (
+        completion_record.evidence_digest
+    )
+    assert diagnostics["recovery"]["completion_receipt_id"] == (
+        recovered_receipts[0].receipt_id
+    )
+    assert diagnostics["recovery"]["completion_receipt_body_digest"] == (
+        recovered_receipts[0].body_digest
+    )
 
 
 def test_v2_parameter_tamper_and_cross_action_replay_are_rejected(harness: Harness):

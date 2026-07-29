@@ -445,6 +445,19 @@ class FakeHistoricalExecutor:
                 },
                 "ok": True,
             }
+        if action == "operation.diagnostics":
+            return {
+                "command": action,
+                "data": {
+                    "operation": {"operation_id": operation_id},
+                    "receipt": {
+                        "capability_id": "acct.diagnostics.operation_read.v1",
+                        "release_digest": release,
+                        "registry_digest": registry,
+                    },
+                },
+                "ok": True,
+            }
         if action == "operation.recover":
             recovery_parameters = {
                 "company_id": operation.company_id,
@@ -805,6 +818,7 @@ def harness() -> Harness:
         "operation.approve_execute",
         "operation.status",
         "operation.result",
+        "operation.diagnostics",
         "operation.recover",
     ],
 )
@@ -890,6 +904,36 @@ def test_write_forwards_the_exact_outer_deadline_to_historical_execution(
 
     assert result.body["ok"] is True
     assert harness.executor.deadlines[-1] == deadline
+
+
+def test_diagnostics_preserves_company_and_operation_and_rejects_cross_company(
+    harness: Harness,
+) -> None:
+    operation_id = harness.prepare()
+    before = harness.operations[operation_id]
+
+    result = harness.dispatch(
+        "operation.diagnostics",
+        {"company_id": 7, "operation_id": operation_id},
+    )
+
+    assert result.status_code == 200
+    assert result.body["data"]["operation"]["operation_id"] == operation_id
+    action, forwarded = harness.executor.calls[-1]
+    assert action == "operation.diagnostics"
+    assert {
+        key: value for key, value in forwarded.items() if key != "context"
+    } == {"company_id": 7, "operation_id": operation_id}
+    assert harness.operations[operation_id] == before
+
+    calls = len(harness.executor.calls)
+    rejected = harness.dispatch(
+        "operation.diagnostics",
+        {"company_id": 8, "operation_id": operation_id},
+    )
+    assert rejected.status_code == 200
+    assert rejected.body["error"]["code"] == "broker_authority_rejected"
+    assert len(harness.executor.calls) == calls
 
 
 @pytest.mark.parametrize(

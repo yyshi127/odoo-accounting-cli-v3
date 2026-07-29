@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 
 from ..domain.report_read import (
     MAX_LINE_COLUMNS,
@@ -14,6 +14,7 @@ from ..domain.report_read import (
     MAX_REPORT_LINES,
     CurrencyInfo,
     NativeReportColumn,
+    NativeReportDefinitionBinding,
     NativeReportFilters,
     NativeReportLine,
     NativeReportPeriod,
@@ -83,6 +84,30 @@ _REQUIRED_READ_MODELS = (
 )
 _MAX_OPTIONS_BYTES = 1_048_576
 _MAX_TEXT_LENGTH = 4_096
+
+
+class ReportDefinitionGuard(Protocol):
+    def verify_pre(
+        self,
+        *,
+        company: Any,
+        report_family: str,
+        report_kind: str,
+        root_xmlid: str,
+        root_report_id: int,
+    ) -> Any: ...
+
+    def verify_post(
+        self,
+        observation: Any,
+        *,
+        company: Any,
+        report_family: str,
+        report_kind: str,
+        root_xmlid: str,
+        root_report_id: int,
+        resolved_report_id: int,
+    ) -> NativeReportDefinitionBinding: ...
 
 
 def _record_id(value: Any) -> int | None:
@@ -201,7 +226,10 @@ class OdooReportReadBackend:
         *,
         user_id: int,
         allowed_company_ids: frozenset[int],
+        database_uuid: str,
+        release_digest: str | None = None,
         allowed_root_xmlids_by_family: Mapping[str, frozenset[str]] | None = None,
+        definition_guard: ReportDefinitionGuard | None = None,
     ) -> None:
         self._env = env
         self._user_id = user_id
@@ -211,6 +239,15 @@ class OdooReportReadBackend:
             family: frozenset(xmlids)
             for family, xmlids in source.items()
         }
+        if definition_guard is None:
+            from .report_definition_guard import OdooReportDefinitionGuard
+
+            definition_guard = OdooReportDefinitionGuard(
+                env,
+                database_uuid=database_uuid,
+                release_digest=release_digest,
+            )
+        self._definition_guard = definition_guard
 
     def _bound(self, model_name: str, company: Any) -> Any:
         return self._env[model_name].with_context(
@@ -1016,6 +1053,14 @@ class OdooReportReadBackend:
         requested_definition_line_ids = self._report_definition_line_ids(
             requested
         )
+        root_xmlid = _REPORT_KIND_XMLIDS[(report_family, report_kind)]
+        definition_observation = self._definition_guard.verify_pre(
+            company=company,
+            report_family=report_family,
+            report_kind=report_kind,
+            root_xmlid=root_xmlid,
+            root_report_id=allowed_root_id,
+        )
         if (
             comparison_mode is not None
             and getattr(requested, "filter_period_comparison", False) is not True
@@ -1188,6 +1233,15 @@ class OdooReportReadBackend:
         if report_family == "tax":
             warnings.append("odoo:tax_source_move_line_count_unavailable")
 
+        definition_binding = self._definition_guard.verify_post(
+            definition_observation,
+            company=company,
+            report_family=report_family,
+            report_kind=report_kind,
+            root_xmlid=root_xmlid,
+            root_report_id=allowed_root_id,
+            resolved_report_id=resolved_id,
+        )
         return NativeReportSnapshot(
             company_id=company_id,
             requested_report_id=allowed_root_id,
@@ -1204,6 +1258,7 @@ class OdooReportReadBackend:
             ),
             report_family=report_family,
             report_kind=report_kind,
+            definition_binding=definition_binding,
             currency_id=company_currency_id,
             period_key=main_period.safe_key,
             date_mode=main_period.mode,

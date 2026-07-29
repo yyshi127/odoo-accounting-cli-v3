@@ -111,6 +111,27 @@ class NativeReportFilters:
 
 
 @dataclass(frozen=True)
+class NativeReportDefinitionBinding:
+    schema_version: int
+    definition_sha256: str
+    baseline_catalog_sha256: str
+    baseline_entry_sha256: str
+    source_candidate_sha256: str
+    approval_set_sha256: str
+    allowed_signers_sha256: str
+    revocations_sha256: str
+    oracle_contract_sha256: str
+    trust_envelope_sha256: str
+    binding_sha256: str
+    approvals_verified: bool
+    revocations_checked: bool
+    artifact_digests_verified: bool
+    pre_matches_approved: bool
+    post_matches_approved: bool
+    same_transaction_snapshot_definition_equal: bool
+
+
+@dataclass(frozen=True)
 class NativeReportSnapshot:
     company_id: int
     requested_report_id: int
@@ -119,6 +140,7 @@ class NativeReportSnapshot:
     resolved_report_name: str
     report_family: str
     report_kind: str
+    definition_binding: NativeReportDefinitionBinding
     currency_id: int
     period_key: str
     date_mode: str
@@ -525,6 +547,88 @@ def _normalize_filters(filters: Any) -> dict[str, Any]:
     }
 
 
+def _sha256_text(value: Any, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ReportReadError(f"{field} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _normalize_definition_binding(value: Any) -> dict[str, Any]:
+    if not isinstance(value, NativeReportDefinitionBinding):
+        raise ReportReadError("native report definition binding is invalid")
+    if value.schema_version != 1:
+        raise ReportReadError(
+            "native report definition binding schema is unsupported"
+        )
+    checks = (
+        value.approvals_verified,
+        value.revocations_checked,
+        value.artifact_digests_verified,
+        value.pre_matches_approved,
+        value.post_matches_approved,
+        value.same_transaction_snapshot_definition_equal,
+    )
+    if any(type(check) is not bool or check is not True for check in checks):
+        raise ReportReadError(
+            "native report definition was not verified before and after execution"
+        )
+    return {
+        "schema_version": value.schema_version,
+        "definition_sha256": _sha256_text(
+            value.definition_sha256,
+            "native report definition digest",
+        ),
+        "baseline_catalog_sha256": _sha256_text(
+            value.baseline_catalog_sha256,
+            "native report baseline catalog digest",
+        ),
+        "baseline_entry_sha256": _sha256_text(
+            value.baseline_entry_sha256,
+            "native report baseline entry digest",
+        ),
+        "source_candidate_sha256": _sha256_text(
+            value.source_candidate_sha256,
+            "native report source candidate digest",
+        ),
+        "approval_set_sha256": _sha256_text(
+            value.approval_set_sha256,
+            "native report approval set digest",
+        ),
+        "allowed_signers_sha256": _sha256_text(
+            value.allowed_signers_sha256,
+            "native report allowed signers digest",
+        ),
+        "revocations_sha256": _sha256_text(
+            value.revocations_sha256,
+            "native report revocations digest",
+        ),
+        "oracle_contract_sha256": _sha256_text(
+            value.oracle_contract_sha256,
+            "native report oracle contract digest",
+        ),
+        "trust_envelope_sha256": _sha256_text(
+            value.trust_envelope_sha256,
+            "native report trust envelope digest",
+        ),
+        "binding_sha256": _sha256_text(
+            value.binding_sha256,
+            "native report baseline binding digest",
+        ),
+        "approvals_verified": value.approvals_verified,
+        "revocations_checked": value.revocations_checked,
+        "artifact_digests_verified": value.artifact_digests_verified,
+        "pre_matches_approved": value.pre_matches_approved,
+        "post_matches_approved": value.post_matches_approved,
+        "same_transaction_snapshot_definition_equal": (
+            value.same_transaction_snapshot_definition_equal
+        ),
+    }
+
+
 def _validate_snapshot(
     snapshot: Any,
     *,
@@ -555,6 +659,7 @@ def _validate_snapshot(
         raise ReportReadError("native report family does not match the entry point")
     if snapshot.report_kind != report_kind:
         raise ReportReadError("native report kind does not match the request")
+    _normalize_definition_binding(snapshot.definition_binding)
     if snapshot.currency_id != company_currency_id:
         raise ReportReadError("native report currency differs from company currency")
     main_period_key = _safe_period_key(
@@ -965,6 +1070,9 @@ def _read_report(
                 "name": snapshot.resolved_report_name,
             },
         },
+        "definition_binding": _normalize_definition_binding(
+            snapshot.definition_binding
+        ),
         "period": {
             "requested": {
                 "mode": "range",

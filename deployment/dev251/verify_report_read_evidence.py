@@ -87,6 +87,9 @@ DECLARED_READ_GAP_IDS = frozenset(
         "acct.multicompany.consolidated_read.v1",
     }
 )
+CONTRACT_TESTED_UNROUTED_READ_GAP_IDS = frozenset(
+    {"acct.diagnostics.operation_read.v1"}
+)
 ADMISSIBLE_READ_CAPABILITY_IDS = (
     REGISTERED_READ_CAPABILITY_IDS - DECLARED_READ_GAP_IDS
 )
@@ -2380,6 +2383,10 @@ def _validate_readiness(
         capability = report.get("capability")
         checks = report.get("checks")
         expected_admissible = capability_id in ADMISSIBLE_READ_CAPABILITY_IDS
+        expected_contract_tested = (
+            expected_admissible
+            or capability_id in CONTRACT_TESTED_UNROUTED_READ_GAP_IDS
+        )
         if (
             set(report) != READINESS_REPORT_FIELDS
             or type(capability) is not dict
@@ -2395,7 +2402,7 @@ def _validate_readiness(
             or capability.get("enabled_environments") != []
             or capability.get("id") != capability_id
             or capability.get("evidence_level")
-            != ("contract_tested" if expected_admissible else "declared")
+            != ("contract_tested" if expected_contract_tested else "declared")
             or capability.get("staged_environments")
             != (["test"] if expected_admissible else [])
             or type(checks) is not dict

@@ -25,6 +25,7 @@ WRITE_ACTIONS = frozenset(
         "operation.approve_execute",
         "operation.status",
         "operation.result",
+        "operation.diagnostics",
         "operation.recover",
     }
 )
@@ -38,6 +39,9 @@ _FIELDS = {
     ),
     "operation.status": frozenset({"context", "operation_id"}),
     "operation.result": frozenset({"context", "operation_id"}),
+    "operation.diagnostics": frozenset(
+        {"context", "company_id", "operation_id"}
+    ),
     "operation.recover": frozenset(
         {
             "context",
@@ -146,6 +150,17 @@ def parse_write_api_request(action: str, value: Any) -> WriteApiRequest:
             raise WriteApiError("recovery reason is invalid")
     else:
         _identifier(detached["operation_id"], "operation_id")
+        if action == "operation.diagnostics":
+            company_id = detached["company_id"]
+            if (
+                isinstance(company_id, bool)
+                or not isinstance(company_id, int)
+                or company_id <= 0
+                or company_id != context.company_id
+            ):
+                raise WriteApiError(
+                    "company_id does not match the authenticated context"
+                )
 
     return WriteApiRequest(
         action=action,

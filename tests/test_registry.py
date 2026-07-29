@@ -336,6 +336,7 @@ class RegistryTest(unittest.TestCase):
                 item["output_schema"]["required"],
                 [
                     "report",
+                    "definition_binding",
                     "period",
                     "effective_filters",
                     "currency",
@@ -354,6 +355,47 @@ class RegistryTest(unittest.TestCase):
                 kinds,
             )
             self.assertIn("kind", output["report"]["required"])
+            definition_binding = output["definition_binding"]
+            definition_digests = {
+                "definition_sha256",
+                "baseline_catalog_sha256",
+                "baseline_entry_sha256",
+                "source_candidate_sha256",
+                "approval_set_sha256",
+                "allowed_signers_sha256",
+                "revocations_sha256",
+                "oracle_contract_sha256",
+                "trust_envelope_sha256",
+                "binding_sha256",
+            }
+            definition_checks = {
+                "approvals_verified",
+                "revocations_checked",
+                "artifact_digests_verified",
+                "pre_matches_approved",
+                "post_matches_approved",
+                "same_transaction_snapshot_definition_equal",
+            }
+            self.assertEqual(definition_binding["type"], "object")
+            self.assertIs(definition_binding["additionalProperties"], False)
+            self.assertEqual(
+                set(definition_binding["required"]),
+                {"schema_version"} | definition_digests | definition_checks,
+            )
+            self.assertEqual(
+                definition_binding["properties"]["schema_version"]["enum"],
+                [1],
+            )
+            for field in definition_digests:
+                self.assertEqual(
+                    definition_binding["properties"][field]["pattern"],
+                    "^[0-9a-f]{64}$",
+                )
+            for field in definition_checks:
+                self.assertEqual(
+                    definition_binding["properties"][field]["enum"],
+                    [True],
+                )
             self.assertEqual(
                 output["period"]["properties"]["resolved"]["properties"]["mode"]["enum"],
                 ["range", "single"],

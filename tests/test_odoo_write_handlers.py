@@ -1158,9 +1158,17 @@ def test_sandbox_draft_customer_invoice_emits_only_the_exact_line_guard_descript
         "status": "available",
         "method": "cancel_pristine_v3_draft_customer_invoice_v1",
         "targets": [{"model": "account.move", "record_id": 101}],
-        "guards": [
-            {"model": "account.move.line", "record_id": 102},
-            {"model": "account.move.line", "record_id": 103},
+            "guards": [
+                {
+                    "model": "account.move.line",
+                    "record_id": 102,
+                    "expected_outcome": "survive_allowed_delta",
+                },
+                {
+                    "model": "account.move.line",
+                    "record_id": 103,
+                    "expected_outcome": "survive_allowed_delta",
+                },
         ],
         "oracle_id": "cancel_pristine_v3_draft_customer_invoice_exact_v1",
     }
@@ -1214,9 +1222,17 @@ def test_sandbox_draft_vendor_bill_emits_only_the_exact_line_guard_descriptor():
         "status": "available",
         "method": "cancel_pristine_v3_draft_vendor_bill_v1",
         "targets": [{"model": "account.move", "record_id": 101}],
-        "guards": [
-            {"model": "account.move.line", "record_id": 102},
-            {"model": "account.move.line", "record_id": 103},
+            "guards": [
+                {
+                    "model": "account.move.line",
+                    "record_id": 102,
+                    "expected_outcome": "survive_allowed_delta",
+                },
+                {
+                    "model": "account.move.line",
+                    "record_id": 103,
+                    "expected_outcome": "survive_allowed_delta",
+                },
         ],
         "oracle_id": "cancel_pristine_v3_draft_vendor_bill_exact_v1",
     }
@@ -1869,7 +1885,8 @@ def test_refund_uses_public_reversal_wizard_and_replaces_partial_lines():
         "odoo_cli_v3_line_reference"
     ] == "refund-line-1"
     assert refund.action_post_calls == 1
-    assert _["status"] == "manual_escalation"
+    assert _["status"] == "available"
+    assert _["method"] == "reverse_posted_refund_v1"
 
 
 def test_refund_draft_fails_closed_if_public_wizard_already_posted_it():
@@ -2267,6 +2284,96 @@ def test_payment_uses_public_register_action_and_deterministic_res_id():
     assert model.contexts[0][1] == {"active_model": "account.move", "active_ids": [11]}
 
 
+def test_payment_with_prior_reconcile_binding_escalates_recovery():
+    full = Record(550)
+    target_line = Record(
+        111,
+        company_id=Record(7),
+        matched_debit_ids=[],
+        matched_credit_ids=[Record(501)],
+        full_reconcile_id=full,
+    )
+    target = Record(11, company_id=Record(7), line_ids=[target_line])
+    payment_line = Record(
+        311,
+        company_id=Record(7),
+        matched_debit_ids=[Record(501)],
+        matched_credit_ids=[],
+        full_reconcile_id=full,
+    )
+    payment_move = Record(
+        310, company_id=Record(7), line_ids=[payment_line]
+    )
+    partial = Record(
+        501,
+        company_id=Record(7),
+        exchange_move_id=None,
+        full_reconcile_id=full,
+    )
+    payment = Record(
+        301, company_id=Record(7), move_id=payment_move
+    )
+
+    class Wizard(Record):
+        partner_id = Record(10)
+        currency_id = Record(1)
+        journal_id = Record(2)
+        payment_method_line_id = Record(3)
+        partner_type = "customer"
+        payment_type = "inbound"
+
+        def action_create_payments(self):
+            return {"res_id": 301}
+
+    handler = Harness(
+        models={
+            "account.payment.register": Model(
+                factory=lambda values: Wizard(1)
+            )
+        },
+        records={
+            ("account.payment", 301): payment,
+            ("account.move", 11): target,
+            ("account.move", 310): payment_move,
+            ("account.move.line", 111): target_line,
+            ("account.move.line", 311): payment_line,
+            ("account.partial.reconcile", 501): partial,
+            ("account.full.reconcile", 550): full,
+        },
+    )
+    parameters = {
+        "target_move_ids": [11],
+        "payment_date": "2026-07-10",
+        "amount": "50",
+        "currency_id": 1,
+        "journal_id": 2,
+        "payment_method_line_id": 3,
+        "memo": "PAY-1",
+        "partner_id": 10,
+        "partner_type": "customer",
+        "direction": "inbound",
+    }
+    binding = payment_binding()
+    binding["target_line_before"][0].update(
+        {
+            "full_reconcile_id": 901,
+            "matched_credit_ids": [900],
+        }
+    )
+
+    _records, recovery = handler.execute_payment(
+        parameters,
+        handler.test_company,
+        {"payment_binding": binding},
+    )
+
+    assert recovery == {
+        "status": "manual_escalation",
+        "method": "manual_review_payment_recovery",
+        "targets": [{"model": "account.payment", "record_id": 301}],
+    }
+
+
 def test_payment_persists_exact_binding_and_returns_full_reconciliation_graph():
     full = Record(550, partial_reconcile_ids=[], reconciled_line_ids=[])
     target_line = Record(
@@ -2412,17 +2519,22 @@ def test_payment_persists_exact_binding_and_returns_full_reconciliation_graph():
         ("account.partial.reconcile", 501),
         ("account.full.reconcile", 550),
     }
-    assert recovery["status"] == "manual_escalation"
-    assert recovery["method"] == "manual_review_payment_recovery"
+    assert recovery["status"] == "available"
+    assert recovery["method"] == "cancel_and_unreconcile_payment_v1"
     assert {(target["model"], target["record_id"]) for target in recovery["targets"]} == {
         ("account.payment", 301),
-        ("account.move", 11),
-        ("account.move", 310),
-        ("account.move.line", 111),
-        ("account.move.line", 311),
-        ("account.move.line", 312),
-        ("account.partial.reconcile", 501),
-        ("account.full.reconcile", 550),
+    }
+    assert {
+        (guard["model"], guard["record_id"], guard["expected_outcome"])
+        for guard in recovery["guards"]
+    } == {
+        ("account.move", 11, "survive_allowed_delta"),
+        ("account.move", 310, "survive_allowed_delta"),
+        ("account.move.line", 111, "survive_allowed_delta"),
+        ("account.move.line", 311, "survive_allowed_delta"),
+        ("account.move.line", 312, "survive_allowed_delta"),
+        ("account.partial.reconcile", 501, "absent"),
+        ("account.full.reconcile", 550, "absent"),
     }
     target.snapshot_values = {
         "state": "posted",
@@ -2643,8 +2755,12 @@ def test_bank_import_creates_complete_statement_and_full_posted_move_graph():
     assert "statement_balances_match" in handler.verify_bank(
         p, handler.test_company, records
     )
-    assert recovery["status"] == "manual_escalation"
-    assert recovery["method"] == "manual_review_bank_import_recovery"
+    assert recovery["status"] == "available"
+    assert recovery["method"] == "post_compensating_bank_statement_v1"
+    assert all(
+        guard["expected_outcome"] == "survive_exact"
+        for guard in recovery["guards"]
+    )
 
 
 def test_bank_readback_rejects_changed_statement_provenance():
@@ -3002,8 +3118,125 @@ def test_reconciliation_uses_public_wizard_reconcile():
     untouched_line.snapshot_values["balance"] = "-99"
     with pytest.raises(OdooWriteHandlerError, match="allowlist"):
         handler.verify_reconciliation(p, handler.test_company, records, before)
-    assert recovery["status"] == "manual_escalation"
-    assert recovery["method"] == "manual_review_reconciliation_recovery"
+    assert recovery["status"] == "available"
+    assert recovery["method"] == (
+        "undo_reconciliation_and_reverse_writeoff_v1"
+    )
+
+
+def test_reconciliation_with_prior_reconcile_graph_escalates_recovery():
+    comp = company()
+    currency = Record(1, rounding="0.01")
+    account = Record(22)
+    move1 = Record(801, state="posted", company_id=comp, line_ids=[])
+    move2 = Record(802, state="posted", company_id=comp, line_ids=[])
+    line1 = Record(
+        501,
+        company_id=comp,
+        move_id=move1,
+        account_id=account,
+        partner_id=None,
+        currency_id=currency,
+        amount_residual=40,
+        amount_residual_currency=40,
+        reconciled=False,
+        full_reconcile_id=None,
+        matched_debit_ids=[],
+        matched_credit_ids=[Record(701)],
+    )
+    line2 = Record(
+        502,
+        company_id=comp,
+        move_id=move2,
+        account_id=account,
+        partner_id=None,
+        currency_id=currency,
+        amount_residual=0,
+        amount_residual_currency=0,
+        reconciled=True,
+        full_reconcile_id=None,
+        matched_debit_ids=[Record(701)],
+        matched_credit_ids=[],
+    )
+    partial = Record(
+        701,
+        company_id=comp,
+        debit_move_id=line1,
+        credit_move_id=line2,
+        amount=60,
+        debit_amount_currency=60,
+        credit_amount_currency=60,
+        company_currency_id=currency,
+        debit_currency_id=currency,
+        credit_currency_id=currency,
+        full_reconcile_id=None,
+        exchange_move_id=None,
+    )
+    move1.line_ids = [line1]
+    move2.line_ids = [line2]
+
+    class Result:
+        ids = [501, 502]
+
+    class Wizard(Record):
+        def reconcile(self):
+            return Result()
+
+    handler = Harness(
+        models={
+            "account.reconcile.wizard": Model(
+                factory=lambda values: Wizard(1)
+            )
+        },
+        records={
+            ("account.move", 801): move1,
+            ("account.move", 802): move2,
+            ("account.move.line", 501): line1,
+            ("account.move.line", 502): line2,
+            ("account.partial.reconcile", 701): partial,
+        },
+    )
+    handler.test_company = comp
+    parameters = {
+        "company_id": 7,
+        "line_ids": [501, 502],
+        "reconciliation_date": "2026-07-10",
+        "account_id": 22,
+        "partner_id": None,
+        "currency_id": 1,
+        "amount": "60",
+        "tolerance_amount": "0",
+        "mode": "partial",
+        "writeoff_account_id": None,
+        "writeoff_journal_id": None,
+        "writeoff_label": None,
+    }
+    before = [
+        {"model": "account.move", "record_id": 801},
+        {"model": "account.move", "record_id": 802},
+        {
+            "model": "account.move.line",
+            "record_id": 501,
+            "values": {
+                "matched_debit_ids": [],
+                "matched_credit_ids": [900],
+                "full_reconcile_id": 901,
+            },
+        },
+        {"model": "account.move.line", "record_id": 502},
+    ]
+
+    _records, recovery = handler.execute_reconciliation(
+        parameters, handler.test_company, {"before": before}
+    )
+
+    assert recovery == {
+        "status": "manual_escalation",
+        "method": "manual_review_reconciliation_recovery",
+        "targets": [
+            {"model": "account.partial.reconcile", "record_id": 701}
+        ],
+    }
 
 
 def test_full_reconciliation_returns_and_verifies_full_reconcile_identity():
@@ -3637,7 +3870,8 @@ def test_asset_uses_public_create_and_validate_and_does_not_write_state_or_curre
         ("account.move.line", 603),
         ("account.move.line", 604),
     ]
-    assert recovery["status"] == "manual_escalation"
+    assert recovery["status"] == "available"
+    assert recovery["method"] == "cancel_asset_and_reverse_schedule_v1"
 
 
 def test_asset_precheck_binds_full_source_model_accounts_and_allows_cancelled_prior_asset():
@@ -3803,7 +4037,10 @@ def test_depreciation_posts_only_the_explicit_depreciation_move():
         ("account.move.line", 703), ("account.move.line", 704),
     ]
     assert move.action_post_calls == 1
-    assert recovery["status"] == "manual_escalation"
+    assert recovery["status"] == "available"
+    assert recovery["method"] == (
+        "reverse_depreciation_and_restore_schedule_v1"
+    )
 
 
 def depreciation_precheck_fixture():
@@ -4431,8 +4668,8 @@ def test_deferred_writes_only_dates_then_posts_source_and_returns_generated_move
         ("account.move.line", 904), ("account.move", 903),
         ("account.move.line", 905), ("account.move.line", 906),
     ]
-    assert recovery["status"] == "manual_escalation"
-    assert recovery["method"] == "manual_review_reverse_deferred_schedule"
+    assert recovery["status"] == "available"
+    assert recovery["method"] == "reverse_deferred_source_and_schedule_v1"
 
 
 def test_deferred_precheck_binds_full_invoice_config_and_account_types():
@@ -4681,8 +4918,8 @@ def test_reversal_uses_public_reverse_moves_and_readable_action_receipt():
             ),
         }
     ]
-    assert recovery["status"] == "manual_escalation"
-    assert recovery["method"] == "manual_review_move_reversal"
+    assert recovery["status"] == "available"
+    assert recovery["method"] == "reverse_the_reversal_v1"
 
 
 def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_graph():
@@ -6829,8 +7066,22 @@ def test_customer_and_vendor_recovery_method_oracle_pairs_cannot_be_crossed(
 
 def test_every_advertised_available_recovery_method_has_an_execute_allowlist_branch():
     assert _RECOVERY_ACTIONS == {
+        "cancel_and_unreconcile_payment_v1",
+        "cancel_asset_and_reverse_schedule_v1",
+        "cancel_draft_period_adjustment_v1",
+        "cancel_draft_refund_v1",
         "cancel_pristine_v3_draft_customer_invoice_v1",
         "cancel_pristine_v3_draft_vendor_bill_v1",
+        "cancel_scheduled_and_reverse_accrual_origin_v1",
+        "post_compensating_bank_statement_v1",
+        "reverse_deferred_source_and_schedule_v1",
+        "reverse_depreciation_and_restore_schedule_v1",
+        "reverse_posted_customer_invoice_v1",
+        "reverse_posted_period_adjustment_v1",
+        "reverse_posted_refund_v1",
+        "reverse_posted_vendor_bill_v1",
+        "reverse_the_reversal_v1",
+        "undo_reconciliation_and_reverse_writeoff_v1",
     }
 
 

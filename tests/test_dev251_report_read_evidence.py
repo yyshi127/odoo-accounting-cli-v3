@@ -64,6 +64,9 @@ DECLARED_READ_GAPS = (
     "acct.diagnostics.operation_read.v1",
     "acct.multicompany.consolidated_read.v1",
 )
+CONTRACT_TESTED_UNROUTED_READ_GAPS = (
+    "acct.diagnostics.operation_read.v1",
+)
 ADMISSIBLE_READ_IDS = tuple(
     capability_id
     for capability_id in REGISTERED_READ_IDS
@@ -142,11 +145,12 @@ def _readiness_capability_report(capability_id: str) -> dict[str, Any]:
     blockers: list[str] = []
     if not admissible:
         missing_checks = {
-            "contract_evidence_present",
             "read_receipt_v2_contract",
             "test_execution_routed",
             "trusted_handler_supported",
         }
+        if capability_id not in CONTRACT_TESTED_UNROUTED_READ_GAPS:
+            missing_checks.add("contract_evidence_present")
         if capability_id == "acct.multicompany.consolidated_read.v1":
             missing_checks.add("page_total_count_contract")
         for check in missing_checks:
@@ -157,7 +161,12 @@ def _readiness_capability_report(capability_id: str) -> dict[str, Any]:
         "capability": {
             "access": "read",
             "enabled_environments": [],
-            "evidence_level": "contract_tested" if admissible else "declared",
+            "evidence_level": (
+                "contract_tested"
+                if admissible
+                or capability_id in CONTRACT_TESTED_UNROUTED_READ_GAPS
+                else "declared"
+            ),
             "id": capability_id,
             "staged_environments": ["test"] if admissible else [],
         },

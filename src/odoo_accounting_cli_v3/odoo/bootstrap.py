@@ -239,6 +239,7 @@ def _execute_read_from_hardened_odoo_shell(
         odoo_instance_id=odoo_instance_id,
         database_name=actual_database_name,
         database_uuid=actual_database_uuid,
+        release_digest=release_digest,
         environment=environment,
         capability_channel=capability_channel,
         receipt_secret=receipt_secret,

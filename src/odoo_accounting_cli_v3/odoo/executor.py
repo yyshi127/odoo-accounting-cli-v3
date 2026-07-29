@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import uuid
 from datetime import datetime, timezone
@@ -196,6 +197,7 @@ class OdooReadExecutor:
         odoo_instance_id: str,
         database_name: str,
         database_uuid: str,
+        release_digest: str,
         environment: str,
         capability_channel: str,
         receipt_secret: bytes,
@@ -227,6 +229,7 @@ class OdooReadExecutor:
         if (
             not odoo_instance_id
             or not database_name
+            or not _valid_sha_binding(release_digest)
             or not receipt_secret
             or not isinstance(receipt_key_id, str)
             or not receipt_key_id.strip()
@@ -244,6 +247,7 @@ class OdooReadExecutor:
         self._odoo_instance_id = odoo_instance_id
         self._database_name = database_name
         self._database_uuid = str(uuid.UUID(database_uuid))
+        self._release_digest = release_digest
         self._environment = environment
         self._capability_channel = capability_channel
         self._receipt_secret = receipt_secret
@@ -281,6 +285,8 @@ class OdooReadExecutor:
                 bound_env,
                 user_id=user_id,
                 allowed_company_ids=allowed,
+                database_uuid=self._database_uuid,
+                release_digest=self._release_digest,
                 allowed_root_xmlids_by_family={
                     "financial": _FINANCIAL_REPORT_ROOT_XMLIDS,
                     "tax": _TAX_REPORT_ROOT_XMLIDS,
@@ -629,6 +635,8 @@ class OdooReadExecutor:
         release_digest: str,
     ) -> dict[str, Any]:
         self._assert_runtime_binding(context)
+        if not hmac.compare_digest(release_digest, self._release_digest):
+            raise OdooExecutionError("Odoo executor release binding mismatch")
         registered = self._capability_map.get(capability.id)
         if registered is None or registered.data != capability.data:
             raise OdooExecutionError("read capability is not in the trusted registry")
@@ -669,6 +677,8 @@ class OdooReadExecutor:
         release_digest: str,
     ) -> None:
         self._assert_runtime_binding(context)
+        if not hmac.compare_digest(release_digest, self._release_digest):
+            raise OdooExecutionError("Odoo executor release binding mismatch")
         body = {key: value for key, value in result.items() if key != "receipt"}
         verify_read_receipt(
             result.get("receipt"),

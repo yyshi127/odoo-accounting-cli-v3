@@ -26,6 +26,7 @@ from odoo_accounting_cli_v3.gateway import (
     RequestContext,
 )
 from odoo_accounting_cli_v3.operations import (
+    ALLOWED_TRANSITIONS,
     Operation,
     State,
     canonical_json,
@@ -465,10 +466,145 @@ def operation_response(operation: Operation, *, next_action: str) -> dict:
         "operation_revision": operation.revision,
         "operation_digest": operation.digest,
         "operation": operation_to_mapping(operation),
-        "result_available": operation.state
-        in {State.COMPLETED, State.FAILED, State.RECOVERED},
+        "result_available": operation.state in {State.COMPLETED, State.FAILED},
         "next_action": next_action,
     }
+
+
+def diagnostics_exchange(
+    operation: Operation,
+    *,
+    route: ReleaseReceiptVerificationConfig | None = None,
+) -> tuple[dict, dict]:
+    route = route or config()
+    unsigned = {
+        "company_id": operation.company_id,
+        "operation_id": operation.operation_id,
+    }
+    request = {
+        "context": context_mapping("operation.diagnostics", unsigned),
+        **unsigned,
+    }
+    body = {
+        "operation": {
+            "operation_id": operation.operation_id,
+            "capability_id": operation.capability_id,
+            "company_id": operation.company_id,
+            "state": operation.state.value,
+            "revision": operation.revision,
+            "terminal": False,
+            "business_succeeded": False,
+            "allowed_next_states": sorted(
+                state.value for state in ALLOWED_TRANSITIONS[operation.state]
+            ),
+        },
+        "audit": {
+            "chain_verified": True,
+            "event_count": 0,
+            "event_types": [],
+            "event_types_offset": 0,
+            "event_types_truncated": False,
+            "last_event_id": None,
+            "last_event_hash": None,
+            "global_head_hash": None,
+        },
+        "verification": {
+            "trusted_terminal_result_verified": False,
+            "passed": None,
+            "method": None,
+            "evidence_digest": None,
+        },
+        "failure": {
+            "present": False,
+            "stage": None,
+            "result_id": None,
+            "evidence_digest": None,
+        },
+        "recovery": {
+            "lifecycle_status": "not_started",
+            "available": False,
+            "plan_status": None,
+            "plan_digest": None,
+            "recovery_capability_id": None,
+            "requires_approval": None,
+            "attempt_count": 0,
+            "latest_attempt_plan_digest": None,
+            "bound_operation_ids": [],
+            "completion_evidence_digest": None,
+            "completion_receipt_body_digest": None,
+            "completion_receipt_id": None,
+        },
+        "odoo_refs": [],
+        "receipts": {
+            "unique_final_receipt_verified": False,
+            "current_candidate_count": 0,
+            "durable_final_receipt_id": None,
+            "durable_final_receipt_body_digest": None,
+            "write_audit_receipt_id": None,
+            "write_audit_result_digest": None,
+            "write_audit_head": None,
+            "difference_digest": None,
+            "database_finalization_digest": None,
+        },
+        "page": {"count": 1, "total_count": 1},
+    }
+    receipt = create_read_receipt(
+        receipt_id="diagnostics-receipt-1",
+        capability_id="acct.diagnostics.operation_read.v1",
+        parameters=unsigned,
+        result_body=body,
+        auth_token_id=request["context"]["auth_token_id"],
+        principal=request["context"]["principal"],
+        odoo_instance_id=request["context"]["odoo_instance_id"],
+        database_name=request["context"]["database_name"],
+        database_uuid=request["context"]["database_uuid"],
+        company_id=request["context"]["company_id"],
+        user_id=request["context"]["user_id"],
+        registry_digest=route.registry_digest,
+        release_digest=route.release_digest,
+        environment=request["context"]["environment"],
+        capability_channel=route.capability_channel,
+        record_count=1,
+        observed_at=NOW - timedelta(seconds=1),
+        key_id=route.read_receipt_key_id,
+        secret=route.read_receipt_secret,
+    )
+    return request, {
+        "command": "operation.diagnostics",
+        "data": {**body, "receipt": receipt},
+        "ok": True,
+    }
+
+
+def test_diagnostics_response_binds_request_operation_company_and_read_receipt():
+    route = config()
+    operation = prepared_operation("op-diagnostics")
+    request, response = diagnostics_exchange(operation, route=route)
+    verify = verifier(route, {operation.operation_id: operation})
+
+    assert verify("operation.diagnostics", response, request) is True
+
+    for mutation in ("operation", "company", "body", "signature", "extra"):
+        changed_request = copy.deepcopy(request)
+        changed_response = copy.deepcopy(response)
+        if mutation == "operation":
+            changed_response["data"]["operation"]["operation_id"] = "other-op"
+        elif mutation == "company":
+            changed_request["company_id"] = 8
+        elif mutation == "body":
+            changed_response["data"]["operation"]["business_succeeded"] = True
+        elif mutation == "signature":
+            changed_response["data"]["receipt"]["signature"] = "0" * 64
+        else:
+            changed_response["data"]["unexpected"] = True
+        assert (
+            verify(
+                "operation.diagnostics",
+                changed_response,
+                changed_request,
+            )
+            is False
+        )
 
 
 def test_read_response_requires_real_hmac_and_complete_runtime_binding():
@@ -687,6 +823,40 @@ def test_known_nonterminal_actions_require_exact_route_context_and_operation():
     operations[prepared.operation_id] = wrong_route_operation
     assert verify("operation.status", status_response, status_request) is False
     assert verify("operation.unknown", status_response, status_request) is False
+
+
+def test_recovered_status_routes_to_diagnostics_and_rejects_a_result_claim():
+    route = config()
+    completed, approval = terminal_operation("op-recovered-status")
+    recovered = replace(completed, state=State.RECOVERED)
+    recovered.assert_integrity()
+    verify = verifier(route, {recovered.operation_id: recovered})
+    unsigned = {"operation_id": recovered.operation_id}
+    request = {
+        "context": context_mapping("operation.status", unsigned),
+        **unsigned,
+    }
+    response = {
+        "command": "operation.status",
+        "data": operation_response(
+            recovered,
+            next_action="operation.diagnostics",
+        ),
+        "ok": True,
+    }
+
+    assert response["data"]["result_available"] is False
+    assert verify("operation.status", response, request) is True
+
+    result_request, result_response = terminal_exchange(
+        recovered,
+        approval,
+        action="operation.result",
+        route=route,
+    )
+    assert (
+        verify("operation.result", result_response, result_request) is False
+    )
 
 
 def test_prepare_lost_response_accepts_only_the_original_idempotent_operation():

@@ -25,6 +25,8 @@ TRUSTED_READ_HANDLER_MODULES = frozenset(
         "odoo_accounting_cli_v3.odoo.ap_open_items",
         "odoo_accounting_cli_v3.odoo.ar_open_items",
         "odoo_accounting_cli_v3.odoo.multicurrency_balance",
+        "odoo_accounting_cli_v3.odoo.report_definition_guard",
+        "odoo_accounting_cli_v3.odoo.report_definition_observer",
         "odoo_accounting_cli_v3.odoo.report_read",
         "odoo_accounting_cli_v3.odoo.trial_balance",
         "odoo_accounting_cli_v3.domain.ap_open_items",
@@ -32,6 +34,9 @@ TRUSTED_READ_HANDLER_MODULES = frozenset(
         "odoo_accounting_cli_v3.domain.multicurrency_balance",
         "odoo_accounting_cli_v3.domain.report_read",
         "odoo_accounting_cli_v3.domain.trial_balance",
+        "odoo_accounting_cli_v3.report_definition_baseline",
+        "odoo_accounting_cli_v3.report_definition_projection",
+        "odoo_accounting_cli_v3.report_definition_trust",
     }
 )
 READ_TRANSACTION_MODULE = "odoo_accounting_cli_v3.odoo.read_transaction"
@@ -54,11 +59,16 @@ REVIEWED_READ_IMPORT_CLOSURE = frozenset(
         "odoo_accounting_cli_v3.odoo.bootstrap",
         "odoo_accounting_cli_v3.odoo.executor",
         "odoo_accounting_cli_v3.odoo.multicurrency_balance",
+        "odoo_accounting_cli_v3.odoo.report_definition_guard",
+        "odoo_accounting_cli_v3.odoo.report_definition_observer",
         "odoo_accounting_cli_v3.odoo.report_read",
         "odoo_accounting_cli_v3.odoo.read_transaction",
         "odoo_accounting_cli_v3.odoo.trial_balance",
         "odoo_accounting_cli_v3.operations",
         "odoo_accounting_cli_v3.receipts",
+        "odoo_accounting_cli_v3.report_definition_baseline",
+        "odoo_accounting_cli_v3.report_definition_projection",
+        "odoo_accounting_cli_v3.report_definition_trust",
         "odoo_accounting_cli_v3.registry",
     }
 )
@@ -68,6 +78,7 @@ REVIEWED_EXTERNAL_IMPORTS = frozenset(
         ("collections.abc", "Callable"),
         ("collections.abc", "Sequence"),
         ("dataclasses", "dataclass"),
+        ("dataclasses", "field"),
         ("dataclasses", "replace"),
         ("datetime", "date"),
         ("datetime", "datetime"),
@@ -93,15 +104,16 @@ REVIEWED_EXTERNAL_IMPORTS = frozenset(
         ("typing", "Iterable"),
         ("typing", "Mapping"),
         ("typing", "Protocol"),
+        ("typing", "Sequence"),
         ("typing", "TypeVar"),
         ("uuid", None),
     }
 )
 REVIEWED_EXTERNAL_IMPORT_BINDINGS_SHA256 = (
-    "852e5c10b235a5ca2266edc4af5d75d46da44230db146630ea87356cbf82fd3d"
+    "5d091992525864a547881fdc51866b241241eb07fbd9ba96d2d835767a387cbc"
 )
 REVIEWED_EXPLICIT_IMPORT_BINDINGS_SHA256 = (
-    "445bd55f2cc6ba6b356ccc778a70077d25ab3acc912960b768545666ec6b28d2"
+    "2c771c74ca2ba9aa041097a1245ba8430f2e342fadbbf2db20b9f550d5893abe"
 )
 REVIEWED_READ_DISPATCH = {
     "acct.registry.list.v1": "_read_registry",
@@ -118,10 +130,10 @@ READ_TRANSACTION_SOURCE_SHA256 = (
     "c34c536c0bf335cced59546aac4c5873c83acd90d34cf77757fc379e6667e016"
 )
 READ_BOOTSTRAP_SOURCE_SHA256 = (
-    "6ac313f7406873448a83c07b405610d6e91e0d973e7e45eb8083bad1f02b40be"
+    "e089b7c0d7607d65ee49cf40c527dbc2ae28b5f025e9b36fe716c0f4b4909ec7"
 )
 READ_EXECUTOR_SOURCE_SHA256 = (
-    "858e8def181475c44532bc4ecd01379b649ea6f6294412285ce9d2f93e4f8cb9"
+    "d13798cfb497338e4b963df2a6ef9ca3b920729fb8a6cfc55ae570ded9206258"
 )
 REVIEWED_INITIALIZER_ATTRIBUTES = {
     ("odoo_accounting_cli_v3.gateway", "CapabilityGateway"): frozenset(
@@ -150,6 +162,7 @@ REVIEWED_INITIALIZER_ATTRIBUTES = {
             "_odoo_instance_id",
             "_database_name",
             "_database_uuid",
+            "_release_digest",
             "_environment",
             "_capability_channel",
             "_receipt_secret",
@@ -177,6 +190,7 @@ REVIEWED_INITIALIZER_ATTRIBUTES = {
             "_user_id",
             "_allowed_company_ids",
             "_allowed_root_xmlids_by_family",
+            "_definition_guard",
         }
     ),
     (
@@ -229,6 +243,66 @@ REVIEWED_SUBSCRIPT_MUTATIONS = frozenset(
             "row",
         ),
         (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_build_module_graph",
+            "modules_by_id",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_validate_technical_state",
+            "bindings",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_rows_by_id",
+            "result",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_report_xmlid_map",
+            "by_id",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_report_xmlid_map",
+            "by_xmlid",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_read_report_closure",
+            "result",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_related_values",
+            "countries",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_related_values",
+            "handlers",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            "_line_keys",
+            "parent_by_id",
+        ),
+        (
+            "odoo_accounting_cli_v3.report_definition_baseline",
+            "_reject_duplicate_keys",
+            "result",
+        ),
+        (
+            "odoo_accounting_cli_v3.report_definition_projection",
+            "_report_definitions",
+            "by_key",
+        ),
+        (
+            "odoo_accounting_cli_v3.report_definition_trust",
+            "_reject_duplicate_keys",
+            "result",
+        ),
+        (
             "odoo_accounting_cli_v3.operations",
             "_operation_state_digest",
             "state",
@@ -273,6 +347,46 @@ REVIEWED_SOURCE_VIOLATIONS = frozenset(
             "attribute:__class__",
         ),
         ("odoo_accounting_cli_v3.odoo.trial_balance", 13, "attribute:__class__"),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            260,
+            "call:replace",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            1025,
+            "attribute:update",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            1037,
+            "attribute:update",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            1059,
+            "attribute:update",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.report_definition_observer",
+            1369,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.report_definition_baseline",
+            230,
+            "call:replace",
+        ),
+        (
+            "odoo_accounting_cli_v3.report_definition_projection",
+            873,
+            "attribute:update",
+        ),
+        (
+            "odoo_accounting_cli_v3.report_definition_trust",
+            281,
+            "call:replace",
+        ),
     }
 )
 CRITICAL_IMMUTABLE_BINDINGS = {
@@ -999,11 +1113,11 @@ def test_read_entrypoint_has_exact_reviewed_transitive_import_closure():
     }
     assert observed == set(REVIEWED_READ_IMPORT_CLOSURE)
     assert external_imports == set(REVIEWED_EXTERNAL_IMPORTS)
-    assert len(external_import_bindings) == 150
+    assert len(external_import_bindings) == 211
     assert _import_binding_digest(external_import_bindings) == (
         REVIEWED_EXTERNAL_IMPORT_BINDINGS_SHA256
     )
-    assert len(explicit_import_bindings) == 227
+    assert len(explicit_import_bindings) == 318
     assert _import_binding_digest(explicit_import_bindings) == (
         REVIEWED_EXPLICIT_IMPORT_BINDINGS_SHA256
     )

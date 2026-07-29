@@ -17,12 +17,6 @@ from typing import Any, Callable, Iterable
 
 from .auth import authentication_request_digest
 from .contracts import validate_value
-from .draft_invoice_recovery import (
-    DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
-    DRAFT_CUSTOMER_INVOICE_RECOVERY_ORACLE,
-    DRAFT_VENDOR_BILL_RECOVERY_METHOD,
-    DRAFT_VENDOR_BILL_RECOVERY_ORACLE,
-)
 from .gateway import (
     WRITE_AUTH_SIGNATURE_PURPOSE,
     WRITE_AUTH_SIGNATURE_VERSION,
@@ -47,15 +41,33 @@ from .operations import (
     begin_execution as validate_begin_execution,
     canonical_json,
     complete_operation as validate_complete_operation,
+    complete_recovery as validate_complete_recovery,
     record_execution_result as validate_execution_result,
+    sign_recovery_result,
 )
 from .odoo.module_graph import (
     OdooModuleGraphError,
     validate_module_graph_evidence,
 )
-from .persistence import OperationNotFound, SQLitePersistence
+from .persistence import (
+    ConcurrentUpdate as PersistenceConcurrentUpdate,
+    OperationNotFound,
+    SQLitePersistence,
+)
 from .registry import Capability, registry_digest
+from .recovery_contracts import (
+    RecoveryContractError,
+    select_recovery_action_contract,
+)
+from .recovery_evidence import (
+    OriginRecoveryCompletionError,
+    OriginRecoveryCompletionEvidence,
+    create_origin_recovery_completion_evidence,
+    origin_recovery_completion_evidence_digest,
+    validate_origin_recovery_completion_evidence,
+)
 from .write_receipts import (
+    WriteReceiptError,
     create_write_audit_receipt,
     index_recovery_guard_graph,
     validate_record_snapshot,
@@ -517,6 +529,94 @@ class DurableWriteService:
         operation.assert_integrity()
         return operation
 
+    def operation_diagnostics(
+        self,
+        context: RequestContext,
+        *,
+        company_id: int,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        """Read a non-secret diagnostic projection from the trusted write store."""
+
+        from .operation_diagnostics import OperationDiagnosticsReader
+
+        return OperationDiagnosticsReader(
+            store=self._store,
+            status_reader=self.status,
+            terminal_result_reader=self.result,
+            recovered_completion_reader=(
+                self._verified_recovered_origin_completion
+            ),
+        ).read(
+            context,
+            company_id=company_id,
+            operation_id=operation_id,
+        )
+
+    def _verified_recovered_origin_completion(
+        self,
+        context: RequestContext,
+        origin: Operation,
+        recovery_operation_id: str,
+    ) -> dict[str, Any]:
+        """Reverify the signed completion graph for one recovered origin."""
+
+        current = self.status(context, origin.operation_id)
+        if current != origin or origin.state != State.RECOVERED:
+            raise WriteServiceError(
+                "diagnostic origin is not the current recovered operation"
+            )
+        recovery_operation = self._store.get_operation(
+            recovery_operation_id
+        )
+        self._assert_context_binding(context, recovery_operation)
+        expected = self._rebuild_origin_recovery_completion_evidence(
+            recovery_operation=recovery_operation,
+        )
+        binding = self._store.get_recovery_operation_binding(
+            recovery_operation.operation_id
+        )
+        if binding.origin_operation_id != origin.operation_id:
+            raise WriteServiceError(
+                "recovered origin binding differs from its recovery operation"
+            )
+        plan = self._bound_origin_recovery_plan(origin, binding)
+        resolution_receipt = self._store.get_final_write_receipt(
+            expected.recovery_final_receipt.receipt_id
+        )
+        self._validate_recovered_origin(
+            origin=origin,
+            binding=binding,
+            plan=plan,
+            expected=expected,
+            resolution_receipt=resolution_receipt,
+        )
+        receipts = [
+            receipt
+            for receipt in self._store.get_final_write_receipts(
+                origin.operation_id
+            )
+            if receipt.operation_revision == origin.revision
+            and receipt.terminal_state == State.RECOVERED.value
+        ]
+        if len(receipts) != 1:
+            raise WriteServiceError(
+                "recovered origin has no unique final receipt"
+            )
+        completion_receipt = receipts[0]
+        return {
+            "completion_evidence_digest": (
+                origin_recovery_completion_evidence_digest(expected)
+            ),
+            "completion_receipt_body_digest": (
+                completion_receipt.body_digest
+            ),
+            "completion_receipt_id": completion_receipt.receipt_id,
+            "origin_operation_id": origin.operation_id,
+            "recovery_operation_id": recovery_operation.operation_id,
+            "recovery_plan_digest": plan["plan_digest"],
+        }
+
     def prepare(
         self,
         context: RequestContext,
@@ -712,31 +812,118 @@ class DurableWriteService:
                     )
                 keyed[key] = snapshot
             snapshots[phase] = keyed
-        for snapshot in (*difference["before"], *difference["after"]):
-            key = (snapshot["model"], snapshot["record_id"])
-            if snapshot["model"] not in allowed_models:
-                raise WriteServiceError(
-                    "difference snapshot model is not allowed for the capability"
+        if set(snapshots["before"]) - set(snapshots["after"]):
+            raise WriteServiceError(
+                "difference after snapshots omit a prechecked record"
+            )
+
+        values_by_phase = {
+            phase: {
+                key: json.loads(snapshot["values_json"])
+                for key, snapshot in snapshots[phase].items()
+            }
+            for phase in ("before", "after")
+        }
+
+        def company_bound(
+            key: tuple[str, int],
+            values: dict[str, Any],
+            phase_values: dict[tuple[str, int], dict[str, Any]],
+        ) -> bool:
+            if key[0] != "account.full.reconcile":
+                return values.get("company_id") == operation.company_id
+            line_ids = values.get("reconciled_line_ids")
+            if (
+                not isinstance(line_ids, list)
+                or not line_ids
+                or any(
+                    isinstance(line_id, bool)
+                    or not isinstance(line_id, int)
+                    or line_id <= 0
+                    for line_id in line_ids
                 )
-            values = json.loads(snapshot["values_json"])
-            if "company_id" in values and values["company_id"] != operation.company_id:
-                raise WriteServiceError(
-                    "difference snapshot company does not match the operation"
-                )
-            if "company_id" not in values and key not in record_keys:
-                raise WriteServiceError(
-                    "difference snapshot has no verifiable operation company binding"
-                )
-            if snapshot["exists"] is False and (
-                snapshot["record_state"] != "absent" or values
+                or len(line_ids) != len(set(line_ids))
             ):
-                raise WriteServiceError(
-                    "an absent difference snapshot must have absent state and empty values"
+                return False
+            return all(
+                phase_values.get(("account.move.line", line_id), {}).get(
+                    "company_id"
                 )
-            if snapshot["exists"] is True and snapshot["record_state"] == "absent":
-                raise WriteServiceError(
-                    "an existing difference snapshot cannot have absent state"
-                )
+                == operation.company_id
+                for line_id in line_ids
+            )
+
+        for phase in ("before", "after"):
+            phase_values = values_by_phase[phase]
+            for snapshot in difference[phase]:
+                key = (snapshot["model"], snapshot["record_id"])
+                if snapshot["model"] not in allowed_models:
+                    raise WriteServiceError(
+                        "difference snapshot model is not allowed for the capability"
+                    )
+                values = json.loads(snapshot["values_json"])
+                if (
+                    "company_id" in values
+                    and values["company_id"] != operation.company_id
+                ):
+                    raise WriteServiceError(
+                        "difference snapshot company does not match the operation"
+                    )
+                if snapshot["exists"] is False and (
+                    snapshot["record_state"] != "absent" or values
+                ):
+                    raise WriteServiceError(
+                        "an absent difference snapshot must have absent state and empty values"
+                    )
+                if snapshot["exists"] is False:
+                    if phase == "before":
+                        created = snapshots["after"].get(key)
+                        created_values = (
+                            json.loads(created["values_json"])
+                            if created is not None
+                            else {}
+                        )
+                        if (
+                            created is None
+                            or created["exists"] is not True
+                            or not company_bound(
+                                key,
+                                created_values,
+                                values_by_phase["after"],
+                            )
+                        ):
+                            raise WriteServiceError(
+                                "difference before snapshots may describe an "
+                                "absent record only when the company-bound "
+                                "record is created"
+                            )
+                    else:
+                        prior = snapshots["before"].get(key)
+                        prior_values = values_by_phase["before"].get(key, {})
+                        if (
+                            prior is None
+                            or prior["exists"] is not True
+                            or not company_bound(
+                                key,
+                                prior_values,
+                                values_by_phase["before"],
+                            )
+                        ):
+                            raise WriteServiceError(
+                                "difference tombstone has no company-bound "
+                                "before snapshot"
+                            )
+                elif not company_bound(key, values, phase_values):
+                    raise WriteServiceError(
+                        "difference snapshot has no verifiable operation company binding"
+                    )
+                if (
+                    snapshot["exists"] is True
+                    and snapshot["record_state"] == "absent"
+                ):
+                    raise WriteServiceError(
+                        "an existing difference snapshot cannot have absent state"
+                    )
         for key, record in records_by_key.items():
             if key not in snapshots["before"]:
                 raise WriteServiceError(
@@ -838,17 +1025,91 @@ class DurableWriteService:
             or plan["parameters_digest"] != _digest(evidence["recovery_parameters"])
         ):
             raise WriteServiceError("recovery plan is not bound to the execution evidence")
-        if plan.get("status") == "available" and plan.get("method") in {
-            DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
-            DRAFT_VENDOR_BILL_RECOVERY_METHOD,
-        } and (
-            trusted_module_graph is None
-            or evidence["recovery_parameters"].get("module_graph_digest")
-            != trusted_module_graph.digest
-        ):
-            raise WriteServiceError(
-                "available draft recovery is not bound to the installed-module graph"
+        if plan.get("status") == "available":
+            try:
+                validate_executable_recovery_plan(plan)
+                contract = select_recovery_action_contract(
+                    capability.id, plan["method"], plan["oracle_id"]
+                )
+            except (WriteReceiptError, RecoveryContractError) as exc:
+                raise WriteServiceError(
+                    "available recovery action contract is invalid"
+                ) from exc
+            recovery_parameters = evidence["recovery_parameters"]
+            action_identities = sorted(
+                (
+                    {
+                        "model": target["model"],
+                        "record_id": target["record_id"],
+                    }
+                    for target in plan["action_targets"]
+                ),
+                key=lambda item: (item["model"], item["record_id"]),
             )
+            guard_identities = sorted(
+                (
+                    {
+                        "model": target["model"],
+                        "record_id": target["record_id"],
+                    }
+                    for target in plan["guard_records"]
+                ),
+                key=lambda item: (item["model"], item["record_id"]),
+            )
+            if (
+                trusted_module_graph is None
+                or operation.environment not in contract.allowed_environments
+                or contract.production_promotion_allowed
+                or set(recovery_parameters)
+                != {
+                    "company_id",
+                    "origin_operation_id",
+                    "module_graph_digest",
+                    "method",
+                    "action_targets",
+                    "guard_records",
+                    "oracle_id",
+                }
+                or recovery_parameters["company_id"] != operation.company_id
+                or recovery_parameters["origin_operation_id"]
+                != operation.operation_id
+                or recovery_parameters["module_graph_digest"]
+                != trusted_module_graph.digest
+                or recovery_parameters["method"] != contract.method
+                or recovery_parameters["oracle_id"] != contract.oracle_id
+                or recovery_parameters["action_targets"]
+                != action_identities
+                or recovery_parameters["guard_records"] != guard_identities
+                or any(
+                    target["model"] not in contract.action_models
+                    for target in plan["action_targets"]
+                )
+                or any(
+                    target["model"] not in contract.guard_models
+                    or target["expected_outcome"]
+                    not in contract.allowed_guard_outcomes
+                    for target in plan["guard_records"]
+                )
+                or any(
+                    model_name not in contract.result_models
+                    for model_name, _record_id_value in record_keys
+                )
+                or record_keys
+                != {
+                    *(
+                        (target["model"], target["record_id"])
+                        for target in plan["action_targets"]
+                    ),
+                    *(
+                        (target["model"], target["record_id"])
+                        for target in plan["guard_records"]
+                    ),
+                }
+            ):
+                raise WriteServiceError(
+                    "available recovery is not bound to its exact "
+                    "company, environment, module graph, or record contract"
+                )
         plan_targets = (
             [*plan["action_targets"], *plan["guard_records"]]
             if plan.get("plan_version") == 2
@@ -1252,23 +1513,48 @@ class DurableWriteService:
         *,
         binding: Any | None = None,
     ) -> tuple[BackendEvidence, BackendEvidence]:
-        if origin.state != State.FAILED:
-            raise WriteServiceError(
-                "incident recovery requires a failed origin operation"
+        if binding is None:
+            if origin.state != State.FAILED:
+                raise WriteServiceError(
+                    "incident recovery requires a failed origin operation"
+                )
+            incident = origin
+            expected_recovery_results = 0
+        else:
+            expected_revision = {
+                State.FAILED: binding.origin_operation_revision,
+                State.RECOVERING: binding.origin_operation_revision + 1,
+                State.RECOVERED: binding.origin_operation_revision + 2,
+            }.get(origin.state)
+            if expected_revision is None or origin.revision != expected_revision:
+                raise WriteServiceError(
+                    "incident recovery origin lifecycle differs from its binding"
+                )
+            incident = replace(
+                origin,
+                state=State.FAILED,
+                revision=binding.origin_operation_revision,
+            )
+            incident.assert_integrity()
+            expected_recovery_results = (
+                1 if origin.state == State.RECOVERED else 0
             )
         records = self._store.get_trusted_result_records(origin.operation_id)
         executions = [record for record in records if record.kind == "execution"]
         verifications = [
             record for record in records if record.kind == "verification"
         ]
+        recoveries = [record for record in records if record.kind == "recovery"]
         if (
-            len(records) != 2
+            len(records) != 2 + expected_recovery_results
             or len(executions) != 1
             or len(verifications) != 1
+            or len(recoveries) != expected_recovery_results
             or executions[0].succeeded is not True
             or verifications[0].succeeded is not False
-            or origin.execution_result_digest != executions[0].evidence_digest
-            or origin.verification_result_digest
+            or incident.execution_result_digest
+            != executions[0].evidence_digest
+            or incident.verification_result_digest
             != verifications[0].evidence_digest
             or verifications[0].prior_evidence_digest
             != executions[0].evidence_digest
@@ -1293,19 +1579,19 @@ class DurableWriteService:
         execution = self._stored_backend_evidence(executions[0])
         verification = self._stored_backend_evidence(verifications[0])
         self._verify_terminal_trusted_results(
-            operation=origin,
+            operation=incident,
             execution=execution,
             verification=verification,
         )
         try:
-            capability = self._capabilities[origin.capability_id]
+            capability = self._capabilities[incident.capability_id]
         except KeyError as exc:
             raise WriteServiceError(
                 "incident recovery origin capability is unavailable"
             ) from exc
-        self._validate_execution_evidence(execution, origin, capability)
+        self._validate_execution_evidence(execution, incident, capability)
         self._validate_verification_evidence(
-            verification, origin, capability, execution
+            verification, incident, capability, execution
         )
         return execution, verification
 
@@ -1596,7 +1882,7 @@ class DurableWriteService:
             result_body=result_details,
             pinned_channel=pinned_channel,
         )
-        return self._result_output(
+        output = self._result_output(
             operation=operation,
             capability=capability,
             capability_channel=pinned_channel,
@@ -1607,6 +1893,14 @@ class DurableWriteService:
             database_finalization=database_finalization,
             terminal_audit_event=terminal_event,
         )
+        if (
+            operation.state == State.COMPLETED
+            and operation.capability_id == "acct.recovery.execute.v1"
+        ):
+            self._complete_incident_origin_recovery(
+                recovery_operation=operation,
+            )
+        return output
 
     def _validated_origin_recovery_plan(
         self,
@@ -1725,6 +2019,11 @@ class DurableWriteService:
         plan_digest: Any,
         binding: Any,
     ) -> None:
+        expected_origin_revision = {
+            State.FAILED: binding.origin_operation_revision,
+            State.RECOVERING: binding.origin_operation_revision + 1,
+            State.RECOVERED: binding.origin_operation_revision + 2,
+        }.get(origin.state)
         if (
             operation.operation_id == origin.operation_id
             or binding.recovery_operation_id != operation.operation_id
@@ -1733,8 +2032,8 @@ class DurableWriteService:
             or binding.origin_operation_id != origin.operation_id
             or binding.origin_request_id != origin.request_id
             or binding.origin_operation_digest != origin.digest
-            or binding.origin_operation_revision != origin.revision
-            or binding.origin_terminal_state != origin.state.value
+            or expected_origin_revision is None
+            or origin.revision != expected_origin_revision
             or binding.audit_event.payload.get("binding_version") != 2
             or not isinstance(plan_digest, str)
             or not hmac.compare_digest(binding.plan_digest, plan_digest)
@@ -1752,6 +2051,542 @@ class DurableWriteService:
             raise WriteServiceError(
                 "recovery operation binding differs from durable origin evidence"
             )
+
+    def _bound_origin_recovery_plan(
+        self,
+        origin: Operation,
+        binding: Any,
+    ) -> dict[str, Any]:
+        try:
+            receipt = self._store.get_final_write_receipt(
+                binding.origin_final_receipt_id
+            )
+        except Exception as exc:
+            raise WriteServiceError(
+                "incident origin final receipt is unavailable"
+            ) from exc
+        details = receipt.body.get("receipt_details")
+        plan = (
+            details.get("recovery_plan")
+            if isinstance(details, dict)
+            else None
+        )
+        try:
+            validate_executable_recovery_plan(plan)
+        except WriteReceiptError as exc:
+            raise WriteServiceError(
+                "incident origin recovery plan is invalid"
+            ) from exc
+        if (
+            receipt.operation_id != origin.operation_id
+            or receipt.operation_digest != origin.digest
+            or receipt.operation_revision
+            != binding.origin_operation_revision
+            or receipt.terminal_state != State.FAILED.value
+            or receipt.body_digest
+            != binding.origin_final_receipt_body_digest
+            or plan["origin_operation_id"] != origin.operation_id
+            or plan["recovery_capability_id"]
+            != "acct.recovery.execute.v1"
+            or not hmac.compare_digest(
+                plan["plan_digest"],
+                binding.plan_digest,
+            )
+        ):
+            raise WriteServiceError(
+                "incident origin receipt differs from its recovery binding"
+            )
+        return json.loads(canonical_json(plan))
+
+    def _recovery_resolution_sources(
+        self,
+        recovery_operation: Operation,
+    ) -> tuple[
+        Operation,
+        Any,
+        dict[str, Any],
+        BackendEvidence,
+        BackendEvidence,
+        Any,
+        Any,
+        dict[str, Any],
+    ]:
+        if (
+            recovery_operation.state != State.COMPLETED
+            or recovery_operation.capability_id
+            != "acct.recovery.execute.v1"
+        ):
+            raise WriteServiceError(
+                "origin completion requires a completed recovery operation"
+            )
+        recovery_operation.assert_integrity()
+        try:
+            binding = self._store.get_recovery_operation_binding(
+                recovery_operation.operation_id
+            )
+            origin = self._store.get_operation(
+                binding.origin_operation_id
+            )
+        except Exception as exc:
+            raise WriteServiceError(
+                "completed recovery has no durable origin binding"
+            ) from exc
+        plan = self._bound_origin_recovery_plan(origin, binding)
+        self._assert_recovery_operation_binding(
+            recovery_operation,
+            origin,
+            plan["plan_digest"],
+            binding,
+        )
+
+        records = self._store.get_trusted_result_records(
+            recovery_operation.operation_id
+        )
+        executions = [
+            record for record in records if record.kind == "execution"
+        ]
+        verifications = [
+            record for record in records if record.kind == "verification"
+        ]
+        if (
+            len(records) != 2
+            or len(executions) != 1
+            or len(verifications) != 1
+        ):
+            raise WriteServiceError(
+                "recovery operation trusted results are incomplete"
+            )
+        execution = self._stored_backend_evidence(executions[0])
+        verification = self._stored_backend_evidence(verifications[0])
+        self._verify_terminal_trusted_results(
+            operation=recovery_operation,
+            execution=execution,
+            verification=verification,
+        )
+        try:
+            capability = self._capabilities[recovery_operation.capability_id]
+        except KeyError as exc:
+            raise WriteServiceError(
+                "recovery operation capability is unavailable"
+            ) from exc
+        self._validate_execution_evidence(
+            execution,
+            recovery_operation,
+            capability,
+        )
+        self._validate_verification_evidence(
+            verification,
+            recovery_operation,
+            capability,
+            execution,
+        )
+
+        final_receipts = [
+            receipt
+            for receipt in self._store.get_final_write_receipts(
+                recovery_operation.operation_id
+            )
+            if receipt.operation_revision == recovery_operation.revision
+            and receipt.terminal_state == State.COMPLETED.value
+        ]
+        if len(final_receipts) != 1:
+            raise WriteServiceError(
+                "recovery operation has no unique final receipt"
+            )
+        final_receipt = final_receipts[0]
+        if (
+            final_receipt.result_id != verifications[0].result_id
+            or final_receipt.evidence_digest
+            != verification.result.evidence_digest
+        ):
+            raise WriteServiceError(
+                "recovery operation final receipt differs from verification"
+            )
+        events = {
+            event.event_id: event for event in self._store.audit_events()
+        }
+        try:
+            terminal_event = events[verifications[0].audit_event_id]
+        except KeyError as exc:
+            raise WriteServiceError(
+                "recovery operation terminal audit event is missing"
+            ) from exc
+        if (
+            terminal_event.operation_id != recovery_operation.operation_id
+            or final_receipt.audit_event_id != terminal_event.event_id
+            or final_receipt.body.get("audit_event_hash")
+            != terminal_event.event_hash
+        ):
+            raise WriteServiceError(
+                "recovery operation terminal audit binding is invalid"
+            )
+        details = final_receipt.body.get("receipt_details")
+        database_finalization = self._validated_database_finalization(
+            recovery_operation,
+            (
+                details.get("database_finalization")
+                if isinstance(details, dict)
+                else None
+            ),
+            execution=execution,
+            verification=verification,
+        )
+        result_body = self._receipt_details(
+            operation=recovery_operation,
+            execution=execution,
+            verification=verification,
+            database_finalization=database_finalization,
+        )
+        self._receipt_channel(
+            final_receipt,
+            result_body=result_body,
+            pinned_channel=self._pinned_capability_channel(
+                recovery_operation
+            ),
+        )
+        return (
+            origin,
+            binding,
+            plan,
+            execution,
+            verification,
+            final_receipt,
+            terminal_event,
+            database_finalization,
+        )
+
+    def _rebuild_origin_recovery_completion_evidence(
+        self,
+        *,
+        recovery_operation: Operation,
+    ) -> OriginRecoveryCompletionEvidence:
+        (
+            origin,
+            binding,
+            plan,
+            execution,
+            verification,
+            final_receipt,
+            terminal_event,
+            database_finalization,
+        ) = self._recovery_resolution_sources(recovery_operation)
+        failed_origin = replace(
+            origin,
+            state=State.FAILED,
+            revision=binding.origin_operation_revision,
+        )
+        failed_origin.assert_integrity()
+        if not hmac.compare_digest(
+            plan["plan_digest"],
+            recovery_operation.parameters[
+                "expected_recovery_plan_digest"
+            ],
+        ):
+            raise WriteServiceError(
+                "recovery operation plan differs from its origin"
+            )
+        try:
+            return create_origin_recovery_completion_evidence(
+                origin_operation=failed_origin,
+                recovery_operation=recovery_operation,
+                recovery_plan_digest=plan["plan_digest"],
+                recovery_execution_result=execution.result,
+                recovery_execution_evidence=execution.evidence,
+                recovery_verification_result=verification.result,
+                recovery_verification_evidence=verification.evidence,
+                recovery_final_receipt_id=final_receipt.receipt_id,
+                recovery_final_receipt_body=final_receipt.body,
+                recovery_final_receipt_body_digest=final_receipt.body_digest,
+                terminal_audit_event_id=terminal_event.event_id,
+                terminal_audit_event_hash=terminal_event.event_hash,
+                database_finalization=database_finalization,
+            )
+        except OriginRecoveryCompletionError as exc:
+            raise WriteServiceError(
+                "recovery completion evidence is invalid"
+            ) from exc
+
+    @staticmethod
+    def _origin_recovery_receipt_details(
+        operation: Operation,
+        evidence: OriginRecoveryCompletionEvidence,
+    ) -> dict[str, Any]:
+        if (
+            operation.state != State.RECOVERED
+            or operation.operation_id
+            != evidence.origin_operation.operation_id
+            or operation.revision
+            != evidence.origin_operation.operation_revision + 2
+        ):
+            raise WriteServiceError(
+                "origin recovery receipt operation binding is invalid"
+            )
+        evidence_digest = (
+            origin_recovery_completion_evidence_digest(evidence)
+        )
+        return {
+            "operation_id": operation.operation_id,
+            "operation_state": State.RECOVERED.value,
+            "recovery_completion": evidence.to_dict(),
+            "recovery_completion_digest": evidence_digest,
+        }
+
+    def _validate_recovered_origin(
+        self,
+        *,
+        origin: Operation,
+        binding: Any,
+        plan: dict[str, Any],
+        expected: OriginRecoveryCompletionEvidence,
+        resolution_receipt: Any,
+    ) -> None:
+        if (
+            origin.state != State.RECOVERED
+            or origin.revision != binding.origin_operation_revision + 2
+        ):
+            raise WriteServiceError(
+                "origin operation is not durably recovered"
+            )
+        recovery_records = self._store.get_recovery_records(
+            origin.operation_id
+        )
+        if (
+            len(recovery_records) != 1
+            or recovery_records[0].operation_revision
+            != binding.origin_operation_revision
+            or recovery_records[0].from_state != State.FAILED.value
+            or not hmac.compare_digest(
+                recovery_records[0].plan_digest,
+                plan["plan_digest"],
+            )
+            or canonical_json(recovery_records[0].plan)
+            != canonical_json(plan)
+            or recovery_records[0].initiated_at
+            < resolution_receipt.recorded_at
+        ):
+            raise WriteServiceError(
+                "origin recovery transition record is invalid"
+            )
+        results = self._store.get_trusted_result_records(
+            origin.operation_id
+        )
+        recovery_results = [
+            record for record in results if record.kind == "recovery"
+        ]
+        if len(results) != 3 or len(recovery_results) != 1:
+            raise WriteServiceError(
+                "origin recovery trusted result is not unique"
+            )
+        record = recovery_results[0]
+        try:
+            evidence = validate_origin_recovery_completion_evidence(
+                record.evidence,
+                expected=expected,
+            )
+        except OriginRecoveryCompletionError as exc:
+            raise WriteServiceError(
+                "origin recovery completion evidence is invalid"
+            ) from exc
+        evidence_digest = (
+            origin_recovery_completion_evidence_digest(evidence)
+        )
+        if (
+            not hmac.compare_digest(record.evidence_digest, evidence_digest)
+            or not hmac.compare_digest(
+                record.prior_evidence_digest or "",
+                plan["plan_digest"],
+            )
+            or record.succeeded is not True
+        ):
+            raise WriteServiceError(
+                "origin recovery trusted result binding is invalid"
+            )
+        trusted = self._stored_backend_evidence(record).result
+        recovering = replace(
+            origin,
+            state=State.RECOVERING,
+            revision=origin.revision - 1,
+        )
+        recovering.assert_integrity()
+        try:
+            reconstructed = validate_complete_recovery(
+                recovering,
+                trusted,
+                recovery_plan_digest=plan["plan_digest"],
+                now=self._now(),
+                secret=self._security.verification_secret,
+                expected_key_id=self._security.verification_key_id,
+                allowed_issuers=self._security.verification_issuers,
+                expected_revision=recovering.revision,
+            )
+        except Exception as exc:
+            raise WriteServiceError(
+                "origin recovery trusted result signature is invalid"
+            ) from exc
+        if reconstructed != origin:
+            raise WriteServiceError(
+                "origin recovery trusted result changed terminal state"
+            )
+
+        receipts = [
+            receipt
+            for receipt in self._store.get_final_write_receipts(
+                origin.operation_id
+            )
+            if receipt.operation_revision == origin.revision
+            and receipt.terminal_state == State.RECOVERED.value
+        ]
+        if len(receipts) != 1:
+            raise WriteServiceError(
+                "recovered origin has no unique final receipt"
+            )
+        receipt = receipts[0]
+        expected_details = self._origin_recovery_receipt_details(
+            origin,
+            evidence,
+        )
+        if (
+            receipt.result_id != record.result_id
+            or receipt.evidence_digest != evidence_digest
+            or receipt.audit_event_id != record.audit_event_id
+            or receipt.recorded_at < recovery_records[0].initiated_at
+            or canonical_json(receipt.body.get("evidence"))
+            != canonical_json(evidence.to_dict())
+            or canonical_json(receipt.body.get("receipt_details"))
+            != canonical_json(expected_details)
+        ):
+            raise WriteServiceError(
+                "recovered origin final receipt is invalid"
+            )
+
+    def _complete_incident_origin_recovery(
+        self,
+        *,
+        recovery_operation: Operation,
+    ) -> Operation:
+        expected = self._rebuild_origin_recovery_completion_evidence(
+            recovery_operation=recovery_operation,
+        )
+        binding = self._store.get_recovery_operation_binding(
+            recovery_operation.operation_id
+        )
+        origin = self._store.get_operation(binding.origin_operation_id)
+        plan = self._bound_origin_recovery_plan(origin, binding)
+        resolution_receipt = self._store.get_final_write_receipt(
+            expected.recovery_final_receipt.receipt_id
+        )
+        evidence_digest = (
+            origin_recovery_completion_evidence_digest(expected)
+        )
+
+        for _attempt in range(3):
+            origin = self._store.get_operation(binding.origin_operation_id)
+            self._assert_recovery_operation_binding(
+                recovery_operation,
+                origin,
+                plan["plan_digest"],
+                binding,
+            )
+            if origin.state == State.RECOVERED:
+                self._validate_recovered_origin(
+                    origin=origin,
+                    binding=binding,
+                    plan=plan,
+                    expected=expected,
+                    resolution_receipt=resolution_receipt,
+                )
+                return origin
+            if origin.state == State.FAILED:
+                occurred_at = self._now()
+                if occurred_at < resolution_receipt.recorded_at:
+                    raise WriteServiceError(
+                        "origin recovery transition predates its resolution receipt"
+                    )
+                try:
+                    origin = self._store.begin_recovery(
+                        operation_id=origin.operation_id,
+                        recovery_plan=plan,
+                        recovery_plan_digest=plan["plan_digest"],
+                        actor_principal=origin.principal,
+                        actor_user_id=origin.user_id,
+                        actor_company_id=origin.company_id,
+                        occurred_at=occurred_at,
+                        expected_revision=origin.revision,
+                    ).operation
+                except PersistenceConcurrentUpdate:
+                    continue
+            if origin.state != State.RECOVERING:
+                raise WriteServiceError(
+                    "origin recovery lifecycle is invalid"
+                )
+            records = self._store.get_recovery_records(
+                origin.operation_id
+            )
+            if (
+                len(records) != 1
+                or records[0].initiated_at
+                < resolution_receipt.recorded_at
+                or not hmac.compare_digest(
+                    records[0].plan_digest,
+                    plan["plan_digest"],
+                )
+                or canonical_json(records[0].plan)
+                != canonical_json(plan)
+            ):
+                raise WriteServiceError(
+                    "origin recovering state has no exact durable plan"
+                )
+            verification_records = [
+                record
+                for record in self._store.get_trusted_result_records(
+                    recovery_operation.operation_id
+                )
+                if record.kind == "verification"
+            ]
+            if len(verification_records) != 1:
+                raise WriteServiceError(
+                    "recovery resolution verifier is not unique"
+                )
+            completed_at = self._now()
+            result = sign_recovery_result(
+                operation=origin,
+                recovery_plan_digest=plan["plan_digest"],
+                issuer=verification_records[0].issuer,
+                key_id=self._security.verification_key_id,
+                succeeded=True,
+                evidence_digest=evidence_digest,
+                issued_at=completed_at,
+                secret=self._security.verification_secret,
+            )
+            try:
+                acceptance = self._store.complete_recovery(
+                    result,
+                    evidence=expected.to_dict(),
+                    now=completed_at,
+                    secret=self._security.verification_secret,
+                    expected_key_id=self._security.verification_key_id,
+                    allowed_issuers=self._security.verification_issuers,
+                    expected_revision=origin.revision,
+                    receipt_factory=lambda terminal: (
+                        self._origin_recovery_receipt_details(
+                            terminal,
+                            expected,
+                        )
+                    ),
+                )
+            except PersistenceConcurrentUpdate:
+                continue
+            self._validate_recovered_origin(
+                origin=acceptance.operation,
+                binding=binding,
+                plan=plan,
+                expected=expected,
+                resolution_receipt=resolution_receipt,
+            )
+            return acceptance.operation
+        raise WriteServiceError(
+            "origin recovery completion lost a concurrent update race"
+        )
 
     def trusted_recovery_plan(
         self,
@@ -2276,7 +3111,7 @@ class DurableWriteService:
                 database_finalization=database_finalization,
             ),
         )
-        return self._terminal_output(
+        output = self._terminal_output(
             operation=final_acceptance.operation,
             capability=capability,
             capability_channel=capability_channel,
@@ -2287,3 +3122,12 @@ class DurableWriteService:
             final_receipt=final_acceptance.final_receipt,
             terminal_audit_event=final_acceptance.audit_event,
         )
+        if (
+            final_acceptance.operation.state == State.COMPLETED
+            and final_acceptance.operation.capability_id
+            == "acct.recovery.execute.v1"
+        ):
+            self._complete_incident_origin_recovery(
+                recovery_operation=final_acceptance.operation,
+            )
+        return output

@@ -1120,6 +1120,17 @@ database filter, disabled scheduled jobs, non-superuser executor, separately
 authorized approver, and isolated write state. Do not reuse a production clone
 whose UUID, filestore, cron workers, or live connections are shared.
 
+The local recovery implementation covers the 12 non-terminal business writes
+with 16 state-dependent contracts; draft versus posted invoice, bill, refund,
+and period-adjustment results intentionally select different actions. The
+draft-cancel and recovery-execute capabilities are terminal. A local passing
+test must prove the exact action/guard graph, pre-action fingerprints,
+ACL/company binding, tombstone absence, action-specific financial oracle, and
+that every allowed-delta guard was consumed by a field allowlist. This is only
+the prerequisite for a sandbox drill. It is not permission to stage a write,
+and it is not a substitute for retained create/duplicate/failure/verify/recover
+receipts from a real Odoo 19 sandbox.
+
 `acct.move.draft_cancel.v1` is one of those closed capabilities: its registry
 `enabled_environments` is empty and these deployment instructions do not stage
 it. Its `expected_document_binding` and `expected_business_binding` must come

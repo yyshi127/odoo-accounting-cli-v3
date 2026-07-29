@@ -1814,6 +1814,28 @@ def _canonical_object_digest(value: Any, field: str) -> tuple[str, str]:
     return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _recovery_plan_binding_digest(
+    value: dict[str, Any],
+    *,
+    canonical_digest: str,
+) -> str:
+    """Use a valid versioned digest; retain only unversioned opaque support."""
+
+    if "plan_version" in value:
+        try:
+            validate_recovery_plan(value)
+        except WriteReceiptError as exc:
+            raise PersistenceIntegrityError(
+                "versioned recovery plan is invalid"
+            ) from exc
+        return value["plan_digest"]
+    try:
+        validate_recovery_plan(value)
+    except WriteReceiptError:
+        return canonical_digest
+    return value["plan_digest"]
+
+
 def _utc_text(value: Any, field: str) -> str:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise PersistenceError(f"{field} must be a timezone-aware datetime")
@@ -4844,8 +4866,11 @@ class SQLitePersistence:
         connection: sqlite3.Connection,
         origin: Operation,
         origin_receipt: StoredFinalWriteReceipt,
+        *,
+        allow_recovery_lifecycle: bool = False,
+        expected_plan_digest: str | None = None,
     ) -> None:
-        """Require the two durable result anchors that define an incident."""
+        """Require the incident anchors and, when requested, its exact lifecycle."""
 
         rows = tuple(
             connection.execute(
@@ -4864,10 +4889,79 @@ class SQLitePersistence:
         verifications = tuple(
             record for record in records if record.kind == "verification"
         )
+        recoveries = tuple(
+            record for record in records if record.kind == "recovery"
+        )
+        recovery_rows = tuple(
+            connection.execute(
+                "SELECT recovery_id FROM recovery_records "
+                "WHERE operation_id = ? ORDER BY operation_revision",
+                (origin.operation_id,),
+            )
+        )
+        recovery_records = tuple(
+            cls._load_recovery_record(connection, row["recovery_id"])
+            for row in recovery_rows
+        )
+        failed_revision = origin_receipt.operation_revision
+        if allow_recovery_lifecycle:
+            expected_state_revision = {
+                State.FAILED: failed_revision,
+                State.RECOVERING: failed_revision + 1,
+                State.RECOVERED: failed_revision + 2,
+            }
+            lifecycle_valid = (
+                origin.state in expected_state_revision
+                and origin.revision == expected_state_revision.get(origin.state)
+                and (
+                    (
+                        origin.state == State.FAILED
+                        and not recovery_records
+                        and not recoveries
+                    )
+                    or (
+                        origin.state == State.RECOVERING
+                        and len(recovery_records) == 1
+                        and not recoveries
+                    )
+                    or (
+                        origin.state == State.RECOVERED
+                        and len(recovery_records) == 1
+                        and len(recoveries) == 1
+                        and recoveries[0].succeeded is True
+                        and recoveries[0].operation_revision
+                        == failed_revision + 1
+                    )
+                )
+            )
+            if recovery_records:
+                lifecycle_valid = lifecycle_valid and (
+                    recovery_records[0].operation_revision == failed_revision
+                    and recovery_records[0].from_state == State.FAILED.value
+                    and expected_plan_digest is not None
+                    and hmac.compare_digest(
+                        recovery_records[0].plan_digest,
+                        expected_plan_digest,
+                    )
+                    and (
+                        not recoveries
+                        or hmac.compare_digest(
+                            recoveries[0].prior_evidence_digest or "",
+                            expected_plan_digest,
+                        )
+                    )
+                )
+        else:
+            lifecycle_valid = (
+                origin.state == State.FAILED
+                and origin.revision == failed_revision
+                and not recovery_records
+                and not recoveries
+            )
         if (
-            origin.state != State.FAILED
+            not lifecycle_valid
             or origin_receipt.terminal_state != State.FAILED.value
-            or len(records) != 2
+            or len(records) != 2 + len(recoveries)
             or len(executions) != 1
             or len(verifications) != 1
             or executions[0].succeeded is not True
@@ -5037,7 +5131,11 @@ class SQLitePersistence:
             )
             if payload["binding_version"] == _RECOVERY_BINDING_VERSION:
                 cls._validate_incident_recovery_origin(
-                    connection, origin, origin_receipt
+                    connection,
+                    origin,
+                    origin_receipt,
+                    allow_recovery_lifecycle=True,
+                    expected_plan_digest=plan_digest,
                 )
             if event.occurred_at < origin_receipt.recorded_at:
                 raise PersistenceIntegrityError(
@@ -5216,6 +5314,13 @@ class SQLitePersistence:
             raise PersistenceIntegrityError(
                 "stored recovery plan is invalid"
             ) from exc
+        canonical_plan_digest = hashlib.sha256(
+            record.plan_json.encode("utf-8")
+        ).hexdigest()
+        expected_plan_digest = _recovery_plan_binding_digest(
+            recovery_plan,
+            canonical_digest=canonical_plan_digest,
+        )
         if (
             payload != canonical_payload
             or _SHA256.fullmatch(record.operation_digest) is None
@@ -5223,8 +5328,10 @@ class SQLitePersistence:
             or _SHA256.fullmatch(record.plan_digest) is None
             or type(recovery_plan) is not dict
             or canonical_json(recovery_plan).decode("utf-8") != record.plan_json
-            or hashlib.sha256(record.plan_json.encode("utf-8")).hexdigest()
-            != record.plan_digest
+            or not hmac.compare_digest(
+                expected_plan_digest,
+                record.plan_digest,
+            )
             or type(record.operation_revision) is not int
             or record.operation_revision < 0
             or type(record.actor_user_id) is not int
@@ -6417,8 +6524,12 @@ class SQLitePersistence:
     ) -> RecoveryAcceptance:
         operation_id = _required_text(operation_id, "operation_id")
         _required_digest(recovery_plan_digest, "recovery_plan_digest")
-        plan_json, plan_digest = _canonical_object_digest(
+        plan_json, canonical_plan_digest = _canonical_object_digest(
             recovery_plan, "recovery_plan"
+        )
+        plan_digest = _recovery_plan_binding_digest(
+            recovery_plan,
+            canonical_digest=canonical_plan_digest,
         )
         if not hmac.compare_digest(plan_digest, recovery_plan_digest):
             raise PersistenceIntegrityError(

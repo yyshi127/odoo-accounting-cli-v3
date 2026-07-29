@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from .auth import (
     sign_request_context,
     verify_write_action_context,
 )
+from .contracts import ContractError, validate_value
 from .effect_finalizer import EffectFinalizationError
 from .effect_finalizer_runtime import EffectFinalizerClientRuntime
 from .effect_finalizer_uds import (
@@ -29,6 +31,7 @@ from .effect_finalizer_uds import (
 from .gateway import RequestContext
 from .operations import Operation, State, canonical_json
 from .persistence import SQLitePersistence
+from .receipts import create_read_receipt
 from .registry import Capability, load_registry, registry_digest
 from .write_api import WriteApiRequest
 from .write_protocol import (
@@ -55,6 +58,7 @@ from .odoo.write_runner import (
     run_odoo_authorize_executor,
     run_odoo_write_precheck,
 )
+from .odoo.runner import load_runtime_secrets
 
 
 WRITE_RUNTIME_CONFIG_PATH = Path(
@@ -109,6 +113,7 @@ _MUTATING_ACTIONS = frozenset(
         "operation.recover",
     }
 )
+_DIAGNOSTICS_CAPABILITY_ID = "acct.diagnostics.operation_read.v1"
 
 
 class WriteApplicationError(ValueError):
@@ -534,8 +539,7 @@ def _operation_response(
         "operation_revision": operation.revision,
         "operation_digest": operation.digest,
         "operation": operation_to_mapping(operation),
-        "result_available": operation.state
-        in {State.COMPLETED, State.FAILED, State.RECOVERED},
+        "result_available": operation.state in {State.COMPLETED, State.FAILED},
     }
     if next_action is not None:
         result["next_action"] = next_action
@@ -552,6 +556,8 @@ def _next_action(operation: Operation) -> str:
         State.VERIFYING,
     }:
         return "operation.approve_execute"
+    if operation.state == State.RECOVERED:
+        return "operation.diagnostics"
     return "operation.result"
 
 
@@ -1044,6 +1050,96 @@ def execute_write_action(
             )
         if action == "operation.result":
             return service.result(parsed.context, payload["operation_id"])
+        if action == "operation.diagnostics":
+            capability = next(
+                (
+                    item
+                    for item in capabilities
+                    if item.id == _DIAGNOSTICS_CAPABILITY_ID
+                ),
+                None,
+            )
+            if capability is None or capability.data.get("access") != "read":
+                raise WriteApplicationError(
+                    code="operation_diagnostics_registry_rejected",
+                    message="The diagnostics capability is not registered as a read.",
+                    odoo_effect="none",
+                    operation_id=payload["operation_id"],
+                    exit_code=5,
+                )
+            result_body = {
+                **service.operation_diagnostics(
+                    parsed.context,
+                    company_id=payload["company_id"],
+                    operation_id=payload["operation_id"],
+                ),
+                "page": {"count": 1, "total_count": 1},
+            }
+            observed_at = _utcnow()
+            _unused_auth_secret, read_receipt_secret = load_runtime_secrets(
+                config.base_runtime
+            )
+            parameters = {
+                "company_id": payload["company_id"],
+                "operation_id": payload["operation_id"],
+            }
+            receipt = create_read_receipt(
+                receipt_id=str(uuid.uuid4()),
+                capability_id=_DIAGNOSTICS_CAPABILITY_ID,
+                parameters=parameters,
+                result_body=result_body,
+                auth_token_id=parsed.context.auth_token_id,
+                principal=parsed.context.principal,
+                odoo_instance_id=parsed.context.odoo_instance_id,
+                database_name=parsed.context.database_name,
+                database_uuid=parsed.context.database_uuid,
+                company_id=parsed.context.company_id,
+                user_id=parsed.context.user_id,
+                registry_digest=observed_registry_digest,
+                release_digest=release_digest,
+                environment=parsed.context.environment,
+                capability_channel=availability_channel,
+                record_count=1,
+                observed_at=observed_at,
+                key_id=config.base_runtime.receipt_key_id,
+                secret=read_receipt_secret,
+            )
+            result = {**result_body, "receipt": receipt}
+            try:
+                validate_value(result, capability.data["output_schema"])
+            except ContractError as exc:
+                raise WriteApplicationError(
+                    code="operation_diagnostics_output_rejected",
+                    message="The trusted diagnostics result violates its registered schema.",
+                    odoo_effect="none",
+                    operation_id=payload["operation_id"],
+                    exit_code=5,
+                ) from exc
+            receipt_store = SQLitePersistence(
+                config.base_runtime.receipt_state_path,
+                receipt_key_id=config.base_runtime.receipt_key_id,
+                receipt_secret=read_receipt_secret,
+            )
+            receipt_store.record_verified_read(
+                receipt=receipt,
+                capability_id=_DIAGNOSTICS_CAPABILITY_ID,
+                parameters=parameters,
+                result_body=result_body,
+                auth_token_id=parsed.context.auth_token_id,
+                principal=parsed.context.principal,
+                odoo_instance_id=parsed.context.odoo_instance_id,
+                database_name=parsed.context.database_name,
+                database_uuid=parsed.context.database_uuid,
+                company_id=parsed.context.company_id,
+                user_id=parsed.context.user_id,
+                registry_digest=observed_registry_digest,
+                release_digest=release_digest,
+                environment=parsed.context.environment,
+                capability_channel=availability_channel,
+                expected_record_count=1,
+                now=observed_at,
+            )
+            return result
         if action == "operation.recover":
             prepared_recovery = service.prepare_recovery(
                 parsed.context,

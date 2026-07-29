@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import odoo_accounting_cli_v3.write_service as write_service_module
 from odoo_accounting_cli_v3.auth import (
     authentication_request_digest,
     sign_write_action_context,
@@ -30,9 +31,13 @@ from odoo_accounting_cli_v3.operations import (
     record_execution_result,
     sign_approval,
     sign_execution_result,
+    sign_recovery_result,
     sign_verification_result,
 )
 from odoo_accounting_cli_v3.odoo.module_graph import build_trusted_module_graph
+from odoo_accounting_cli_v3.operation_diagnostics import (
+    OperationDiagnosticsError,
+)
 from odoo_accounting_cli_v3.persistence import (
     IdempotencyConflict,
     ReplayRejected,
@@ -40,6 +45,7 @@ from odoo_accounting_cli_v3.persistence import (
 )
 from odoo_accounting_cli_v3.registry import validate_registry
 from odoo_accounting_cli_v3.write_receipts import (
+    WriteReceiptError,
     create_difference,
     create_record_snapshot,
     create_recovery_plan,
@@ -290,16 +296,22 @@ def _execution_evidence(
         if draft_vendor_bill
         else capability_id
     )
-    recovery_method = (
-        "cancel_pristine_v3_draft_vendor_bill_v1"
-        if draft_vendor_bill
-        else "cancel_pristine_v3_draft_customer_invoice_v1"
-    )
-    recovery_oracle = (
-        "cancel_pristine_v3_draft_vendor_bill_exact_v1"
-        if draft_vendor_bill
-        else "cancel_pristine_v3_draft_customer_invoice_exact_v1"
-    )
+    if draft_vendor_bill:
+        recovery_method = "cancel_pristine_v3_draft_vendor_bill_v1"
+        recovery_oracle = (
+            "cancel_pristine_v3_draft_vendor_bill_exact_v1"
+        )
+    elif draft_customer_invoice:
+        recovery_method = "cancel_pristine_v3_draft_customer_invoice_v1"
+        recovery_oracle = (
+            "cancel_pristine_v3_draft_customer_invoice_exact_v1"
+        )
+    elif document_capability_id == "acct.bill.vendor_create.v1":
+        recovery_method = "reverse_posted_vendor_bill_v1"
+        recovery_oracle = "reverse_posted_vendor_bill_exact_v1"
+    else:
+        recovery_method = "reverse_posted_customer_invoice_v1"
+        recovery_oracle = "reverse_posted_customer_invoice_exact_v1"
     before = create_record_snapshot(
         model="account.move",
         record_id=501,
@@ -355,46 +367,56 @@ def _execution_evidence(
             else "manual_review"
         ),
     }
-    recovery_parameters = (
-        {
-            "move_id": 501,
-            "module_graph_digest": TEST_MODULE_GRAPH.digest,
-            "action_targets": [{"model": "account.move", "record_id": 501}],
-            "guard_records": [
-                {"model": "account.move.line", "record_id": 502}
-            ],
-            "oracle_id": (
-                recovery_oracle
-                if draft_document
-                else "cancel_draft_move_exact_v1"
+    if succeeded and capability_id == "acct.recovery.execute.v1":
+        recovery_parameters = {"origin_operation_id": operation_id}
+        recovery = create_recovery_plan_v2(
+            origin_operation_id=operation_id,
+            recovery_capability_id="acct.recovery.execute.v1",
+            status="not_applicable",
+            method="not_applicable_recovery_execution_is_terminal_v1",
+            requires_approval=False,
+            action_targets=[],
+            guard_records=[],
+            oracle_id="not_applicable",
+            parameters=recovery_parameters,
+        )
+    else:
+        recovery_parameters = (
+            {
+                "company_id": 7,
+                "origin_operation_id": operation_id,
+                "module_graph_digest": TEST_MODULE_GRAPH.digest,
+                "method": recovery_method,
+                "action_targets": [
+                    {"model": "account.move", "record_id": 501}
+                ],
+                "guard_records": [
+                    {"model": "account.move.line", "record_id": 502}
+                ],
+                "oracle_id": recovery_oracle,
+            }
+            if succeeded
+            else {"operation_id": operation_id}
+        )
+        recovery = create_recovery_plan_v2(
+            origin_operation_id=operation_id,
+            recovery_capability_id="acct.recovery.execute.v1",
+            status="available" if succeeded else "manual_escalation",
+            method=(
+                recovery_method
+                if succeeded
+                else "inspect_ambiguous_execution"
             ),
-        }
-        if succeeded
-        else {"operation_id": operation_id}
-    )
-    recovery = create_recovery_plan_v2(
-        origin_operation_id=operation_id,
-        recovery_capability_id="acct.recovery.execute.v1",
-        status="available" if succeeded else "manual_escalation",
-        method=(
-            recovery_method
-            if succeeded and draft_document
-            else "cancel_draft_move"
-            if succeeded
-            else "inspect_ambiguous_execution"
-        ),
-        requires_approval=True,
-        action_targets=[target] if succeeded else [],
-        guard_records=[guard] if succeeded else [],
-        oracle_id=(
-            recovery_oracle
-            if succeeded and draft_document
-            else "cancel_draft_move_exact_v1"
-            if succeeded
-            else "manual_escalation"
-        ),
-        parameters=recovery_parameters,
-    )
+            requires_approval=True,
+            action_targets=[target] if succeeded else [],
+            guard_records=[guard] if succeeded else [],
+            oracle_id=(
+                recovery_oracle
+                if succeeded
+                else "manual_escalation"
+            ),
+            parameters=recovery_parameters,
+        )
     return {
         "operation_id": operation_id,
         "capability_id": document_capability_id,
@@ -1150,6 +1172,414 @@ def test_approve_execute_verifies_and_returns_schema_valid_signed_receipt(servic
         durable.body["receipt_details"]["database_finalization"]
     )
     assert gateway.result(_context(), awaiting.operation_id) == output
+
+
+def test_operation_diagnostics_reads_prepared_state_without_claiming_success(service):
+    gateway, _backend, _store = service
+    parameters = _invoice_parameters("diagnostics-prepared")
+    operation = gateway.prepare(
+        _context(
+            parameters=parameters,
+            token_id="token-diagnostics-prepared",
+        ),
+        operation_id="op-diagnostics-prepared",
+        request_id="request-diagnostics-prepared",
+        capability_id="acct.invoice.customer_create.v1",
+        parameters=parameters,
+    )
+
+    output = gateway.operation_diagnostics(
+        _context(parameters=parameters),
+        company_id=7,
+        operation_id=operation.operation_id,
+    )
+
+    assert set(output) == {
+        "operation",
+        "audit",
+        "verification",
+        "failure",
+        "recovery",
+        "odoo_refs",
+        "receipts",
+    }
+    assert output["operation"] == {
+        "operation_id": operation.operation_id,
+        "capability_id": operation.capability_id,
+        "company_id": 7,
+        "state": "prepared",
+        "revision": 0,
+        "terminal": False,
+        "business_succeeded": False,
+        "allowed_next_states": ["failed", "prechecked"],
+    }
+    assert output["audit"]["chain_verified"] is True
+    assert output["audit"]["event_types"] == []
+    assert output["audit"]["event_types_offset"] == 0
+    assert output["audit"]["event_types_truncated"] is False
+    assert output["verification"]["trusted_terminal_result_verified"] is False
+    assert output["verification"]["passed"] is None
+    assert output["failure"]["present"] is False
+    assert output["recovery"]["available"] is False
+    assert output["odoo_refs"] == []
+    assert output["receipts"]["unique_final_receipt_verified"] is False
+    assert output["receipts"]["current_candidate_count"] == 0
+    serialized = json.dumps(output, sort_keys=True)
+    assert '"parameters"' not in serialized
+    assert '"principal"' not in serialized
+    assert '"idempotency_key"' not in serialized
+
+
+def test_operation_diagnostics_reverifies_completed_result_and_receipts(service):
+    gateway, _backend, _store = service
+    awaiting = _prepare_and_preview(gateway)
+    gateway.approve_execute(
+        _context(token_id="token-diagnostics-completed"),
+        _approval(awaiting, "approval-diagnostics-completed"),
+        reconciliation_only=False,
+    )
+
+    output = gateway.operation_diagnostics(
+        _context(),
+        company_id=7,
+        operation_id=awaiting.operation_id,
+    )
+
+    assert output["operation"]["state"] == "completed"
+    assert output["operation"]["terminal"] is True
+    assert output["operation"]["business_succeeded"] is True
+    assert output["audit"]["chain_verified"] is True
+    assert output["audit"]["event_types"] == [
+        "operation.prechecked",
+        "operation.awaiting_approval",
+        "operation.approved",
+        "operation.executing",
+        "operation.verifying",
+        "operation.completed",
+    ]
+    assert output["verification"]["trusted_terminal_result_verified"] is True
+    assert output["verification"]["passed"] is True
+    assert output["receipts"]["unique_final_receipt_verified"] is True
+    assert output["receipts"]["current_candidate_count"] == 1
+    assert output["receipts"]["durable_final_receipt_id"]
+    assert output["receipts"]["write_audit_receipt_id"]
+    assert output["receipts"]["database_finalization_digest"]
+    assert {record["model"] for record in output["odoo_refs"]} == {
+        "account.move",
+        "account.move.line",
+    }
+    assert all(record["company_id"] == 7 for record in output["odoo_refs"])
+    assert output["failure"] == {
+        "present": False,
+        "stage": None,
+        "result_id": None,
+        "evidence_digest": None,
+    }
+    assert output["recovery"]["available"] is True
+    assert output["recovery"]["requires_approval"] is True
+
+
+def test_operation_diagnostics_marks_audit_event_type_truncation(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, _backend, store = service
+    parameters = _invoice_parameters("diagnostics-audit-truncation")
+    operation = gateway.prepare(
+        _context(
+            parameters=parameters,
+            token_id="token-diagnostics-audit-truncation",
+        ),
+        operation_id="op-diagnostics-audit-truncation",
+        request_id="request-diagnostics-audit-truncation",
+        capability_id="acct.invoice.customer_create.v1",
+        parameters=parameters,
+    )
+    event = store.append_audit_event(
+        event_id="diagnostic:operation-truncation:0",
+        event_type="diagnostic.operation_observation",
+        operation_id=operation.operation_id,
+        occurred_at=NOW,
+        payload={"index": 0},
+    )
+    synthetic_events = tuple(
+        replace(
+            event,
+            sequence=index + 1,
+            event_id=f"diagnostic:operation-truncation:{index}",
+            event_hash=f"{index + 1:064x}",
+        )
+        for index in range(1001)
+    )
+    monkeypatch.setattr(store, "audit_events", lambda: synthetic_events)
+
+    output = gateway.operation_diagnostics(
+        _context(parameters=parameters),
+        company_id=7,
+        operation_id=operation.operation_id,
+    )
+
+    assert output["audit"]["event_count"] == 1001
+    assert len(output["audit"]["event_types"]) == 1000
+    assert output["audit"]["event_types_offset"] == 1
+    assert output["audit"]["event_types_truncated"] is True
+
+
+def test_operation_diagnostics_classifies_verified_failure_without_success(service):
+    gateway, backend, _store = service
+    backend.verification_passes = False
+    awaiting = _prepare_and_preview(gateway)
+    gateway.approve_execute(
+        _context(token_id="token-diagnostics-failed"),
+        _approval(awaiting, "approval-diagnostics-failed"),
+        reconciliation_only=False,
+    )
+
+    output = gateway.operation_diagnostics(
+        _context(),
+        company_id=7,
+        operation_id=awaiting.operation_id,
+    )
+
+    assert output["operation"]["state"] == "failed"
+    assert output["operation"]["business_succeeded"] is False
+    assert output["verification"]["trusted_terminal_result_verified"] is True
+    assert output["verification"]["passed"] is False
+    assert output["failure"]["present"] is True
+    assert output["failure"]["stage"] == "verify"
+    assert output["failure"]["result_id"]
+    assert output["failure"]["evidence_digest"]
+    assert output["receipts"]["unique_final_receipt_verified"] is True
+    assert output["receipts"]["database_finalization_digest"] is None
+    assert output["odoo_refs"]
+    assert output["recovery"]["available"] is True
+
+
+def test_operation_diagnostics_fails_closed_on_result_signature_drift(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, _backend, store = service
+    awaiting = _prepare_and_preview(gateway)
+    gateway.approve_execute(
+        _context(token_id="token-diagnostics-tamper"),
+        _approval(awaiting, "approval-diagnostics-tamper"),
+        reconciliation_only=False,
+    )
+    records = store.get_trusted_result_records(awaiting.operation_id)
+    forged = tuple(
+        replace(record, signature="f" * 64)
+        if record.kind == "execution"
+        else record
+        for record in records
+    )
+    monkeypatch.setattr(
+        store,
+        "get_trusted_result_records",
+        lambda _operation_id: forged,
+    )
+
+    with pytest.raises(WriteServiceError, match="signature"):
+        gateway.operation_diagnostics(
+            _context(),
+            company_id=7,
+            operation_id=awaiting.operation_id,
+        )
+
+
+def test_operation_diagnostics_fails_closed_on_final_receipt_body_drift(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, _backend, store = service
+    awaiting = _prepare_and_preview(gateway)
+    gateway.approve_execute(
+        _context(token_id="token-diagnostics-receipt-body"),
+        _approval(awaiting, "approval-diagnostics-receipt-body"),
+        reconciliation_only=False,
+    )
+    receipt = store.get_final_write_receipts(awaiting.operation_id)[0]
+    forged_body = receipt.body
+    forged_body["receipt_details"]["operation_state"] = "failed"
+    forged = replace(
+        receipt,
+        body_json=canonical_json(forged_body).decode("utf-8"),
+    )
+    monkeypatch.setattr(
+        store,
+        "get_final_write_receipts",
+        lambda _operation_id: (forged,),
+    )
+
+    with pytest.raises(WriteServiceError, match="durable final receipt"):
+        gateway.operation_diagnostics(
+            _context(),
+            company_id=7,
+            operation_id=awaiting.operation_id,
+        )
+
+
+def test_operation_diagnostics_fails_closed_on_write_receipt_signature_drift(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, _backend, _store = service
+    awaiting = _prepare_and_preview(gateway)
+    gateway.approve_execute(
+        _context(token_id="token-diagnostics-receipt-signature"),
+        _approval(awaiting, "approval-diagnostics-receipt-signature"),
+        reconciliation_only=False,
+    )
+    create_receipt = write_service_module.create_write_audit_receipt
+
+    def forged_receipt(*args, **kwargs):
+        receipt = create_receipt(*args, **kwargs)
+        return {**receipt, "signature": "f" * 64}
+
+    monkeypatch.setattr(
+        write_service_module,
+        "create_write_audit_receipt",
+        forged_receipt,
+    )
+
+    with pytest.raises(WriteReceiptError, match="signature mismatch"):
+        gateway.operation_diagnostics(
+            _context(),
+            company_id=7,
+            operation_id=awaiting.operation_id,
+        )
+
+
+def test_operation_diagnostics_does_not_trust_unverifiable_legacy_recovered_state(
+    service,
+):
+    gateway, _backend, store = service
+    awaiting = _prepare_and_preview(gateway)
+    completed_result = gateway.approve_execute(
+        _context(token_id="token-diagnostics-recovered-origin"),
+        _approval(awaiting, "approval-diagnostics-recovered-origin"),
+        reconciliation_only=False,
+    )
+    completed = store.get_operation(awaiting.operation_id)
+    plan = completed_result["recovery_plan"]
+    recovery_record_digest = plan["plan_digest"]
+    recovering = store.begin_recovery(
+        operation_id=completed.operation_id,
+        recovery_plan=plan,
+        recovery_plan_digest=recovery_record_digest,
+        actor_principal=completed.principal,
+        actor_user_id=completed.user_id,
+        actor_company_id=completed.company_id,
+        occurred_at=NOW,
+        expected_revision=completed.revision,
+    ).operation
+    evidence = {"state": "legacy_recovery_claim"}
+    recovery_secret = b"legacy-recovery-secret-material-32-bytes"
+    recovery_result = sign_recovery_result(
+        operation=recovering,
+        recovery_plan_digest=recovery_record_digest,
+        issuer="legacy-recovery-verifier",
+        key_id="legacy-recovery-v1",
+        succeeded=True,
+        evidence_digest=hashlib.sha256(canonical_json(evidence)).hexdigest(),
+        issued_at=NOW,
+        secret=recovery_secret,
+    )
+    recovered = store.complete_recovery(
+        recovery_result,
+        evidence=evidence,
+        now=NOW,
+        secret=recovery_secret,
+        expected_key_id="legacy-recovery-v1",
+        allowed_issuers=frozenset({"legacy-recovery-verifier"}),
+        expected_revision=recovering.revision,
+        receipt_factory=lambda operation: {
+            "operation_id": operation.operation_id,
+            "operation_state": operation.state.value,
+        },
+    ).operation
+
+    with pytest.raises(
+        OperationDiagnosticsError,
+        match="unbound recovery operation",
+    ):
+        gateway.operation_diagnostics(
+            _context(),
+            company_id=7,
+            operation_id=recovered.operation_id,
+        )
+
+
+def test_operation_diagnostics_rejects_recovery_binding_drift(
+    service, monkeypatch: pytest.MonkeyPatch
+):
+    gateway, backend, store = service
+    origin = _failed_verification_origin(gateway, backend)
+    request = _incident_recovery_request(origin, suffix="diagnostics-binding")
+    context = _install_incident_recovery_auth(gateway, origin, request)
+    recovery = gateway.prepare_recovery(
+        context("token-diagnostics-binding-prepare"), **request
+    )["operation"]
+    binding = store.get_recovery_operation_binding(recovery.operation_id)
+    monkeypatch.setattr(
+        store,
+        "get_recovery_operation_binding",
+        lambda _operation_id: replace(
+            binding,
+            origin_operation_id="op-foreign-origin",
+        ),
+    )
+
+    with pytest.raises(OperationDiagnosticsError, match="origin binding"):
+        gateway.operation_diagnostics(
+            context("token-diagnostics-binding-read"),
+            company_id=origin.company_id,
+            operation_id=origin.operation_id,
+        )
+
+
+def test_operation_diagnostics_rejects_operation_identity_binding_drift(service):
+    gateway, _backend, _store = service
+    awaiting = _prepare_and_preview(gateway)
+
+    with pytest.raises(OperationDiagnosticsError, match="company"):
+        gateway.operation_diagnostics(
+            _context(),
+            company_id=8,
+            operation_id=awaiting.operation_id,
+        )
+    own_context = _context()
+    foreign_contexts = (
+        replace(own_context, user_id=own_context.user_id + 1),
+        replace(own_context, principal="pi:foreign-principal"),
+        replace(
+            own_context,
+            company_id=8,
+            allowed_company_ids=frozenset({8}),
+        ),
+    )
+    for foreign_context in foreign_contexts:
+        with pytest.raises(WriteServiceError, match="outside the bound"):
+            gateway.operation_diagnostics(
+                foreign_context,
+                company_id=foreign_context.company_id,
+                operation_id=awaiting.operation_id,
+            )
+
+    foreign_parameters = _invoice_parameters("diagnostics-foreign-operation")
+    foreign_operation = gateway.prepare(
+        _context(
+            user_id=43,
+            parameters=foreign_parameters,
+            token_id="token-diagnostics-foreign-operation",
+        ),
+        operation_id="op-diagnostics-foreign-operation",
+        request_id="request-diagnostics-foreign-operation",
+        capability_id="acct.invoice.customer_create.v1",
+        parameters=foreign_parameters,
+    )
+    with pytest.raises(WriteServiceError, match="outside the bound"):
+        gateway.operation_diagnostics(
+            own_context,
+            company_id=own_context.company_id,
+            operation_id=foreign_operation.operation_id,
+        )
 
 
 def test_success_order_is_hmac_validation_then_database_finalizer_then_sqlite_completion(
@@ -2201,7 +2631,7 @@ def test_incident_recovery_requires_failed_verification_and_finalizes_two_anchor
     )
 
     assert output["operation_state"] == "completed"
-    assert store.get_operation(origin.operation_id).state == State.FAILED
+    assert store.get_operation(origin.operation_id).state == State.RECOVERED
     assert store.get_operation(recovery.operation_id).state == State.COMPLETED
     intent = gateway._test_effect_finalizer.calls[-1]
     origin_execution = gateway._stored_backend_evidence(
@@ -2538,7 +2968,10 @@ def test_signed_execution_requires_absent_or_existing_before_for_each_result_rec
         )
         evidence["difference"] = create_difference(
             before=[unrelated],
-            after=copy.deepcopy(evidence["difference"]["after"]),
+            after=[
+                copy.deepcopy(unrelated),
+                *copy.deepcopy(evidence["difference"]["after"]),
+            ],
             changed_fields=["amount_total", "company_id", "state"],
         )
         digest = hashlib.sha256(canonical_json(evidence)).hexdigest()

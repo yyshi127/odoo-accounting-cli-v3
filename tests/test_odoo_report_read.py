@@ -8,7 +8,10 @@ from datetime import date
 from types import SimpleNamespace
 from unittest import mock
 
-from odoo_accounting_cli_v3.domain.report_read import ReportReadError
+from odoo_accounting_cli_v3.domain.report_read import (
+    NativeReportDefinitionBinding,
+    ReportReadError,
+)
 from odoo_accounting_cli_v3.odoo.report_read import OdooReportReadBackend
 
 
@@ -25,6 +28,39 @@ REQUIRED_READ_MODELS = (
     "account.tax.repartition.line",
     "res.currency",
 )
+
+
+class DefinitionGuard:
+    def __init__(self):
+        self.calls = []
+
+    def verify_pre(self, **values):
+        self.calls.append(("pre", copy.deepcopy(values)))
+        return {"definition_sha256": "1" * 64}
+
+    def verify_post(self, observation, **values):
+        self.calls.append(
+            ("post", copy.deepcopy(observation), copy.deepcopy(values))
+        )
+        return NativeReportDefinitionBinding(
+            schema_version=1,
+            definition_sha256=observation["definition_sha256"],
+            baseline_catalog_sha256="2" * 64,
+            baseline_entry_sha256="3" * 64,
+            source_candidate_sha256="4" * 64,
+            approval_set_sha256="5" * 64,
+            allowed_signers_sha256="6" * 64,
+            revocations_sha256="7" * 64,
+            oracle_contract_sha256="8" * 64,
+            trust_envelope_sha256="9" * 64,
+            binding_sha256="a" * 64,
+            approvals_verified=True,
+            revocations_checked=True,
+            artifact_digests_verified=True,
+            pre_matches_approved=True,
+            post_matches_approved=True,
+            same_transaction_snapshot_definition_equal=True,
+        )
 
 
 class Missing:
@@ -689,16 +725,78 @@ class OdooReportReadBackendTest(unittest.TestCase):
         family,
         xmlid,
         allowed_company_ids=frozenset({7}),
+        definition_guard=None,
     ):
         environment.refs[xmlid] = environment.requested
         return OdooReportReadBackend(
             environment,
             user_id=42,
             allowed_company_ids=allowed_company_ids,
+            database_uuid="11111111-1111-4111-8111-111111111111",
             allowed_root_xmlids_by_family={
                 family: frozenset({xmlid}),
             },
+            definition_guard=definition_guard or DefinitionGuard(),
         )
+
+    def test_definition_baseline_rejection_happens_before_native_report_api(self):
+        class RejectPre(DefinitionGuard):
+            def verify_pre(self, **values):
+                super().verify_pre(**values)
+                raise ReportReadError("approved report definition baseline is unavailable")
+
+        options, information = tax_payload()
+        environment = Environment(options=options, information=information)
+        backend = self.backend(
+            environment,
+            family="tax",
+            xmlid="account.generic_tax_report",
+            definition_guard=RejectPre(),
+        )
+
+        with self.assertRaisesRegex(ReportReadError, "baseline is unavailable"):
+            fetch_tax_report(backend)
+        self.assertIsNone(environment.requested.previous_options)
+        self.assertEqual(environment.requested.readonly_calls, 0)
+
+    def test_default_definition_guard_fails_closed_without_approved_baseline(self):
+        options, information = tax_payload()
+        environment = Environment(options=options, information=information)
+        environment.refs["account.generic_tax_report"] = environment.requested
+        backend = OdooReportReadBackend(
+            environment,
+            user_id=42,
+            allowed_company_ids=frozenset({7}),
+            database_uuid="11111111-1111-4111-8111-111111111111",
+            release_digest="d" * 64,
+            allowed_root_xmlids_by_family={
+                "tax": frozenset({"account.generic_tax_report"}),
+            },
+        )
+
+        with self.assertRaisesRegex(ReportReadError, "baseline is unavailable"):
+            fetch_tax_report(backend)
+        self.assertIsNone(environment.requested.previous_options)
+        self.assertEqual(environment.requested.readonly_calls, 0)
+
+    def test_definition_post_drift_discards_native_report_result(self):
+        class RejectPost(DefinitionGuard):
+            def verify_post(self, observation, **values):
+                super().verify_post(observation, **values)
+                raise ReportReadError("report definition changed during execution")
+
+        options, information = tax_payload()
+        environment = Environment(options=options, information=information)
+        backend = self.backend(
+            environment,
+            family="tax",
+            xmlid="account.generic_tax_report",
+            definition_guard=RejectPost(),
+        )
+
+        with self.assertRaisesRegex(ReportReadError, "changed during execution"):
+            fetch_tax_report(backend)
+        self.assertEqual(environment.requested.readonly_calls, 1)
 
     def test_tax_report_uses_only_bound_readonly_native_api(self):
         options, information = tax_payload()
@@ -943,6 +1041,8 @@ class OdooReportReadBackendTest(unittest.TestCase):
             environment,
             user_id=42,
             allowed_company_ids=frozenset({7}),
+            database_uuid="11111111-1111-4111-8111-111111111111",
+            definition_guard=DefinitionGuard(),
         )
 
         with self.assertRaisesRegex(
@@ -1207,9 +1307,11 @@ class OdooReportReadBackendTest(unittest.TestCase):
             environment,
             user_id=42,
             allowed_company_ids=frozenset({7}),
+            database_uuid="11111111-1111-4111-8111-111111111111",
             allowed_root_xmlids_by_family={
                 "tax": frozenset({"account.generic_tax_report"}),
             },
+            definition_guard=DefinitionGuard(),
         )
         with self.assertRaisesRegex(ReportReadError, "root is invalid"):
             fetch_tax_report(backend)
@@ -1277,6 +1379,7 @@ class OdooReportReadBackendTest(unittest.TestCase):
             environment,
             user_id=42,
             allowed_company_ids=frozenset({7}),
+            database_uuid="11111111-1111-4111-8111-111111111111",
             allowed_root_xmlids_by_family={
                 "financial": frozenset(
                     {
@@ -1285,6 +1388,7 @@ class OdooReportReadBackendTest(unittest.TestCase):
                     }
                 )
             },
+            definition_guard=DefinitionGuard(),
         )
 
         with self.assertRaises(ReportReadError):
@@ -1313,12 +1417,14 @@ class OdooReportReadBackendTest(unittest.TestCase):
             environment,
             user_id=42,
             allowed_company_ids=frozenset({7}),
+            database_uuid="11111111-1111-4111-8111-111111111111",
             allowed_root_xmlids_by_family={
                 "tax": frozenset({"account.generic_tax_report"}),
                 "financial": frozenset(
                     {"account_reports.balance_sheet"}
                 ),
             },
+            definition_guard=DefinitionGuard(),
         )
 
         with self.assertRaisesRegex(ReportReadError, "roots collide"):

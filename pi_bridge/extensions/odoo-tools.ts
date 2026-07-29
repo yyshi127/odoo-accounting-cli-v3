@@ -274,10 +274,24 @@ const v3ResultTool = defineTool({
 	name: V3_TOOL_NAMES.result,
 	label: "Get Odoo V3 Verified Result",
 	description:
-		"Return the terminal V3 result and verification/audit receipt. Do not report accounting success unless the CLI reports a completed or recovered operation with passed verification.",
+		"Return a completed or failed V3 write result and its verification/audit receipt. A recovered origin has no ordinary write result: query operation status and diagnostics, and never reinterpret the origin as business success.",
 	parameters: v3OperationReferenceSchema,
 	async execute(_toolCallId, params) {
 		return await callV3Broker("operation.result", params);
+	},
+});
+
+const v3DiagnosticsTool = defineTool({
+	name: V3_TOOL_NAMES.diagnostics,
+	label: "Diagnose Odoo V3 Operation",
+	description:
+		"Read a receipt-backed diagnostic projection for one durable operation without changing its state or entering the Odoo read child.",
+	parameters: Type.Object({
+		company_id: Type.Integer({ minimum: 1 }),
+		operation_id: Type.String({ minLength: 1, maxLength: 128 }),
+	}, { additionalProperties: false }),
+	async execute(_toolCallId, params) {
+		return await callV3Broker("operation.diagnostics", params);
 	},
 });
 
@@ -315,6 +329,7 @@ export default function (pi: ExtensionAPI) {
 		pi.registerTool(v3ApproveExecuteTool);
 		pi.registerTool(v3StatusTool);
 		pi.registerTool(v3ResultTool);
+		pi.registerTool(v3DiagnosticsTool);
 		pi.registerTool(v3RecoverTool);
 	}
 }
