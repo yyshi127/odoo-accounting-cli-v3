@@ -546,8 +546,10 @@ class OdooRunnerTest(unittest.TestCase):
         ).hexdigest()
         self.auth_secret_path = root / "auth.secret"
         self.receipt_secret_path = root / "receipt.secret"
+        self.gcov_state_path = root / "gcov"
         self.auth_secret_path.write_bytes(AUTH_SECRET)
         self.receipt_secret_path.write_bytes(RECEIPT_SECRET)
+        self.gcov_state_path.mkdir(mode=0o700)
 
         def read_test_secret(path, label):
             value = path.read_bytes()
@@ -585,6 +587,7 @@ class OdooRunnerTest(unittest.TestCase):
             canonical_package_sha256=self.canonical_package_sha256,
             auth_state_path=root / "auth.state",
             receipt_state_path=root / "receipt.state",
+            gcov_state_path=self.gcov_state_path,
             auth_key_id=AUTH_KEY_ID,
             receipt_key_id=RECEIPT_KEY_ID,
             auth_secret_path=self.auth_secret_path,
@@ -714,10 +717,10 @@ class OdooRunnerTest(unittest.TestCase):
         expected_environment = {
             **FIXED_CHILD_ENVIRONMENT,
             "GCOV_ERROR_FILE": str(
-                self.config.auth_state_path.parent.parent / "gcov" / "gcov-error.log"
+                self.config.gcov_state_path / "gcov-error.log"
             ),
             "GCOV_EXIT_AT_ERROR": "0",
-            "GCOV_PREFIX": str(self.config.auth_state_path.parent.parent / "gcov"),
+            "GCOV_PREFIX": str(self.config.gcov_state_path),
             "GCOV_PREFIX_STRIP": "0",
         }
         self.assertEqual(options["env"], expected_environment)

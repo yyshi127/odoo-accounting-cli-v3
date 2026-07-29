@@ -603,6 +603,15 @@ At the current local development checkpoint:
   exact-release staged-test receipts plus rollback-boundary and unchanged
   PostgreSQL witness evidence, but their output explicitly leaves accounting
   correctness and production promotion false.
+- The immutable target candidate
+  `0.1.0.dev251-f6f54e86edfa` was correctly stopped before its read boundary,
+  witnesses, or report calls: the initial collector incorrectly required
+  global static readiness even though the fixed read inventory is 10
+  registered, 8 admissible, and exactly 2 declared-only gaps. That release is
+  retained for audit and cannot be promoted or rebuilt. Dev252 corrects only
+  this precondition by independently binding the exact 10/8/2 inventory and
+  all per-capability safety fields in both collector and verifier; it does not
+  make either report production-ready.
 
 The 2026-07-22 Dev29 pre-release worktree validation executed 4,289 tests:
 4,017 passed, 272 platform/external-environment cases skipped, and none failed

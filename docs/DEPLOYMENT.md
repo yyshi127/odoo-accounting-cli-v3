@@ -861,6 +861,21 @@ is available and that production promotion is forbidden. It cannot replace the
 Dev29 sealed dependency closure, an approved report-definition baseline, or
 independent tax and accounting standard-answer evidence.
 
+The `deployment/dev251` name is the immutable v1 evidence-protocol namespace,
+not the executing release version. The exact
+`0.1.0.dev251-f6f54e86edfa` target candidate is retained but is not promotable:
+its collector rejected before the read boundary, witness, or report calls
+because it incorrectly required global static readiness while the registered
+inventory intentionally remains 10 reads, 8 admissible implementations, and
+the two declared-only operation-diagnostics and multi-company-consolidation
+gaps. Do not rebuild or patch that release. The fix is published only under a
+new dev252-or-later version and must independently require the exact inventory,
+the exact two gaps, all nine static checks for each of the eight admissible
+reads, test-only staging, empty enabled environments, and the bound release
+identity before any Odoo query. The immutable target observation and failed
+attempt boundary are recorded in
+`docs/TARGET_HOST_DEV251_REPORT_READINESS_2026-07-29.md`.
+
 Exit code `3` from the Dev251 collector means the no-replace rename completed
 but parent-directory durability could not be confirmed. The frozen final
 directory is retained with `status=publication_outcome_unknown`,

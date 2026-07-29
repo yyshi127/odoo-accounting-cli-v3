@@ -48,10 +48,48 @@ PACKAGE_PAYLOAD = b"dev251 canonical package fixture\n"
 ODOO_PYTHON_PAYLOAD = b"dev251 pinned odoo python fixture\n"
 ODOO_BIN_PAYLOAD = b"dev251 pinned odoo bin fixture\n"
 ODOO_CONFIG_PAYLOAD = b"[options]\ndb_name = odoo_test\n"
+REGISTERED_READ_IDS = (
+    "acct.ap.open_items.v1",
+    "acct.ar.open_items.v1",
+    "acct.diagnostics.operation_read.v1",
+    "acct.gl.trial_balance.v1",
+    "acct.move.draft_cancel_eligibility.v1",
+    "acct.multicompany.consolidated_read.v1",
+    "acct.multicurrency.balance_read.v1",
+    "acct.registry.list.v1",
+    "acct.report.financial_read.v1",
+    "acct.tax.report_read.v1",
+)
+DECLARED_READ_GAPS = (
+    "acct.diagnostics.operation_read.v1",
+    "acct.multicompany.consolidated_read.v1",
+)
+ADMISSIBLE_READ_IDS = tuple(
+    capability_id
+    for capability_id in REGISTERED_READ_IDS
+    if capability_id not in DECLARED_READ_GAPS
+)
+READINESS_CHECK_IDS = (
+    "contract_evidence_present",
+    "page_total_count_contract",
+    "read_policy_closed",
+    "read_receipt_v2_contract",
+    "strict_input_schema",
+    "strict_output_schema",
+    "test_execution_routed",
+    "trusted_handler_supported",
+    "verification_method_present",
+)
+REQUIRED_GOAL_EVIDENCE_KINDS = (
+    "accounting_oracle",
+    "live_odoo",
+    "pi_e2e",
+    "release_identity",
+    "security_negative",
+)
 REGISTRY_DOCUMENT = {
     "capabilities": [
-        {"id": "acct.report.financial_read.v1"},
-        {"id": "acct.tax.report_read.v1"},
+        {"id": capability_id} for capability_id in REGISTERED_READ_IDS
     ],
     "schema_version": 1,
 }
@@ -96,6 +134,92 @@ IDENTITY = {
     "verified": True,
     "version": VERSION,
 }
+
+
+def _readiness_capability_report(capability_id: str) -> dict[str, Any]:
+    admissible = capability_id in ADMISSIBLE_READ_IDS
+    checks = {check: True for check in READINESS_CHECK_IDS}
+    blockers: list[str] = []
+    if not admissible:
+        missing_checks = {
+            "contract_evidence_present",
+            "read_receipt_v2_contract",
+            "test_execution_routed",
+            "trusted_handler_supported",
+        }
+        if capability_id == "acct.multicompany.consolidated_read.v1":
+            missing_checks.add("page_total_count_contract")
+        for check in missing_checks:
+            checks[check] = False
+        blockers = sorted(check.replace("_", " ") for check in missing_checks)
+    return {
+        "blockers": blockers,
+        "capability": {
+            "access": "read",
+            "enabled_environments": [],
+            "evidence_level": "contract_tested" if admissible else "declared",
+            "id": capability_id,
+            "staged_environments": ["test"] if admissible else [],
+        },
+        "checks": checks,
+        "external_read_evidence_verified": False,
+        "goal_evidence_blockers": [
+            "trusted external read evidence has not been independently verified"
+        ],
+        "goal_evidence_ready": False,
+        "missing_goal_evidence_kinds": list(REQUIRED_GOAL_EVIDENCE_KINDS),
+        "production_promotion_allowed": False,
+        "read_completion_ready": False,
+        "real_odoo_write_performed": False,
+        "registry_claimed_receipt_count": 0,
+        "registry_claimed_receipt_kinds": [],
+        "registry_receipts_authoritative_for_goal": False,
+        "trusted_handler_kind": "odoo" if admissible else None,
+        "trusted_read_admissible": admissible,
+    }
+
+
+def _readiness_document() -> dict[str, Any]:
+    return {
+        "business_succeeded": False,
+        "command": "evidence.read-capabilities-readiness",
+        "data": {
+            "admissible_count": len(ADMISSIBLE_READ_IDS),
+            "admissible_ids": list(ADMISSIBLE_READ_IDS),
+            "blockers": [
+                "not every registered read capability is statically "
+                "admissible for trusted execution",
+                "trusted external read evidence is not independently verified "
+                "for every registered read capability",
+            ],
+            "capabilities": [
+                _readiness_capability_report(capability_id)
+                for capability_id in REGISTERED_READ_IDS
+            ],
+            "completion_ready_count": 0,
+            "completion_ready_ids": [],
+            "external_read_evidence_verifier_ready": False,
+            "goal_evidence_ready_count": 0,
+            "goal_evidence_ready_ids": [],
+            "goal_evidence_unready_capability_ids": list(REGISTERED_READ_IDS),
+            "missing_required_read_capability_ids": [],
+            "production_promotion_allowed": False,
+            "read_goal_readiness_ready": False,
+            "read_static_readiness_ready": False,
+            "real_odoo_write_performed": False,
+            "registered_read_capability_ids": list(REGISTERED_READ_IDS),
+            "release_identity": IDENTITY,
+            "required_goal_evidence_kinds": list(
+                REQUIRED_GOAL_EVIDENCE_KINDS
+            ),
+            "required_read_capability_ids": list(REGISTERED_READ_IDS),
+            "total_read_capabilities": len(REGISTERED_READ_IDS),
+            "unready_capability_ids": list(DECLARED_READ_GAPS),
+        },
+        "ok": True,
+    }
+
+
 RELEASE_MANIFEST_PAYLOAD = collector.canonical_json(
     {
         **UNSIGNED_RELEASE_MANIFEST,
@@ -498,11 +622,14 @@ class FakeExecutor:
         *,
         fail_case: str | None = None,
         drift_witness: bool = False,
+        readiness_document: dict[str, Any] | None = None,
     ) -> None:
         self.runtime = runtime
         self.fail_case = fail_case
         self.drift_witness = drift_witness
+        self.readiness_document = readiness_document or _readiness_document()
         self.calls = 0
+        self.boundary_calls = 0
         self.read_calls = 0
         self.witness_calls = 0
 
@@ -522,26 +649,9 @@ class FakeExecutor:
                 {"command": "release.identity", "data": IDENTITY, "ok": True}
             )
         if command[1:] == ["evidence", "read-capabilities-readiness"]:
-            return _json_result(
-                {
-                    "business_succeeded": False,
-                    "command": "evidence.read-capabilities-readiness",
-                    "data": {
-                        "external_read_evidence_verifier_ready": False,
-                        "production_promotion_allowed": False,
-                        "read_goal_readiness_ready": False,
-                        "read_static_readiness_ready": True,
-                        "real_odoo_write_performed": False,
-                        "registered_read_capability_ids": [
-                            "acct.report.financial_read.v1",
-                            "acct.tax.report_read.v1",
-                        ],
-                        "release_identity": IDENTITY,
-                    },
-                    "ok": True,
-                }
-            )
+            return _json_result(deepcopy(self.readiness_document))
         if len(command) > 2 and command[1:3] == ["evidence", "read-boundary"]:
+            self.boundary_calls += 1
             return _json_result(_boundary(self.runtime))
         if "witness" in command:
             self.witness_calls += 1
@@ -723,6 +833,45 @@ def test_dev251_plan_is_fixed_and_disclaims_accounting_oracle() -> None:
         )
 
 
+def test_current_cli_readiness_output_matches_both_independent_contracts() -> None:
+    from odoo_accounting_cli_v3.cli import (
+        _load_read_capability_implementation,
+        _read_capabilities_readiness_report,
+    )
+    from odoo_accounting_cli_v3.registry import load_registry, registry_digest
+
+    capabilities = load_registry(ROOT / "registry" / "capabilities.json")
+    identity = {
+        **IDENTITY,
+        "registry_digest": registry_digest(capabilities),
+    }
+    data = _read_capabilities_readiness_report(
+        capabilities,
+        trusted_read_handlers=_load_read_capability_implementation(
+            "evidence.read-capabilities-readiness"
+        ),
+    )
+    data["release_identity"] = identity
+    document = {
+        "business_succeeded": False,
+        "command": "evidence.read-capabilities-readiness",
+        "data": data,
+        "ok": True,
+    }
+
+    collector._validate_targeted_readiness(
+        document,
+        expected_identity=identity,
+    )
+    verifier._validate_readiness(
+        document,
+        release_identity=identity,
+    )
+    assert data["admissible_count"] == 8
+    assert data["total_read_capabilities"] == 10
+    assert data["unready_capability_ids"] == list(DECLARED_READ_GAPS)
+
+
 def test_runtime_validation_rejects_non_string_paths_without_type_leaks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -811,6 +960,116 @@ def test_collects_verifies_and_atomically_publishes_frozen_bundle(
     assert checked["all_checks_passed"] is True
     assert checked["accounting_correctness_verified"] is False
     assert checked["production_promotion_allowed"] is False
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "identity_drift",
+        "malformed_gap_blocker",
+        "non_boolean_check",
+        "production_enabled",
+        "report_order",
+        "target_check_failed",
+        "unexpected_data_field",
+        "unexpected_gap",
+    ),
+)
+def test_collector_and_independent_verifier_reject_unsafe_readiness_before_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    readiness = _readiness_document()
+    data = readiness["data"]
+    reports = {
+        report["capability"]["id"]: report for report in data["capabilities"]
+    }
+    target = reports["acct.tax.report_read.v1"]
+    if mutation == "identity_drift":
+        data["release_identity"] = {
+            **IDENTITY,
+            "registry_digest": "f" * 64,
+        }
+    elif mutation == "malformed_gap_blocker":
+        reports["acct.diagnostics.operation_read.v1"]["blockers"] = [None]
+    elif mutation == "non_boolean_check":
+        target["checks"]["strict_output_schema"] = 1
+    elif mutation == "production_enabled":
+        target["capability"]["enabled_environments"] = ["production"]
+    elif mutation == "report_order":
+        data["capabilities"][0], data["capabilities"][1] = (
+            data["capabilities"][1],
+            data["capabilities"][0],
+        )
+    elif mutation == "target_check_failed":
+        target["checks"]["strict_output_schema"] = False
+    elif mutation == "unexpected_data_field":
+        data["future_unreviewed_field"] = False
+    elif mutation == "unexpected_gap":
+        data["unready_capability_ids"].append("acct.tax.report_read.v1")
+    else:  # pragma: no cover - parametrization is fixed above
+        raise AssertionError(f"unknown readiness mutation: {mutation}")
+
+    with pytest.raises(
+        collector.CollectionError,
+        match="read readiness probe has unsafe semantics",
+    ):
+        collector._validate_targeted_readiness(
+            readiness,
+            expected_identity=IDENTITY,
+        )
+    with pytest.raises(
+        verifier.EvidenceVerificationError,
+        match="read readiness evidence is invalid",
+    ):
+        verifier._validate_readiness(
+            readiness,
+            release_identity=IDENTITY,
+        )
+
+    run_parent, evidence_parent, runtime = _workspace(tmp_path, monkeypatch)
+    executor = FakeExecutor(runtime, readiness_document=readiness)
+    plan, payload = _plan()
+    with pytest.raises(
+        collector.CollectionError,
+        match="read readiness probe has unsafe semantics",
+    ):
+        collector.collect_evidence(
+            plan=plan,
+            plan_payload=payload,
+            evidence_name=f"unsafe-readiness-{mutation}",
+            expected_identity=collector.ExpectedIdentity(
+                release=RELEASE,
+                version=VERSION,
+                commit=COMMIT,
+                manifest_sha256=IDENTITY["manifest_sha256"],
+                package_sha256=IDENTITY["package_sha256"],
+                registry_digest=IDENTITY["registry_digest"],
+            ),
+            runtime=runtime,
+            runtime_config_path=tmp_path / "runtime.json",
+            auth_secret=AUTH_SECRET,
+            receipt_secret=RECEIPT_SECRET,
+            auth_api=auth,
+            executor=executor,
+            release_root=runtime.release_root,
+            verifier_path=VERIFIER_PATH,
+            run_parent=run_parent,
+            evidence_parent=evidence_parent,
+            now_factory=lambda: datetime(
+                2026, 7, 29, 1, 0, tzinfo=timezone.utc
+            ),
+            token_factory=iter(("a", "b", "c", "d")).__next__,
+            enforce_root=False,
+        )
+    assert executor.calls == 2
+    assert executor.boundary_calls == 0
+    assert executor.witness_calls == 0
+    assert executor.read_calls == 0
+    assert not (
+        evidence_parent / f"unsafe-readiness-{mutation}"
+    ).exists()
 
 
 @pytest.mark.parametrize(

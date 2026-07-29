@@ -1,4 +1,4 @@
-# Dev251 native-report read evidence
+# Dev251 native-report read evidence protocol
 
 This directory adds a supplemental exact-release evidence gate for four
 test-staged native Odoo reports:
@@ -7,6 +7,16 @@ test-staged native Odoo reports:
 - balance sheet with one previous-period comparison;
 - profit and loss with one previous-year comparison;
 - cash flow without a comparison.
+
+`dev251` is the immutable protocol namespace and trusted release-member path,
+not a requirement that the executing software version also be dev251. The
+original `0.1.0.dev251-f6f54e86edfa` candidate exposed a fail-closed readiness
+contract defect before any report query: it required all ten registered reads
+to be statically admissible even though operation diagnostics and multi-company
+consolidation are explicitly retained as the only two declared gaps. That
+candidate must not be promoted or rebuilt. Version dev252 and later may execute
+this protocol only when the exact 10-registered/8-admissible/2-declared-gap
+targeted readiness contract passes.
 
 It does not replace the Dev29 dependency-closure gate or its PostgreSQL
 witness. It does not provide an independent accounting standard answer, enable
@@ -40,7 +50,8 @@ package, trusted-artifact sidecar, installed manifest, and registry. Do not
 copy expected values from a candidate evidence bundle.
 
 ```sh
-RELEASE='0.1.0.dev251-<commit12>'
+VERSION='<independently-verified-version>'
+RELEASE="$VERSION-<commit12>"
 ROOT="/opt/odoo-accounting-cli-v3/releases/$RELEASE"
 RUNTIME="/etc/odoo-accounting-cli-v3/candidates/runtime-test-$RELEASE.json"
 EVIDENCE_NAME="dev251-report-read-<unique-id>"
@@ -50,7 +61,7 @@ sudo /usr/bin/python3.12 -I -S \
   --evidence-name "$EVIDENCE_NAME" \
   --runtime-config "$RUNTIME" \
   --expected-release "$RELEASE" \
-  --expected-version '0.1.0.dev251' \
+  --expected-version "$VERSION" \
   --expected-commit '<40-lowercase-hex>' \
   --expected-manifest-sha256 '<64-lowercase-hex>' \
   --expected-package-sha256 '<64-lowercase-hex>' \
@@ -83,7 +94,7 @@ sudo /usr/bin/python3.12 -I -S \
   --evidence-name "$EVIDENCE_NAME" \
   --runtime-config "$RUNTIME" \
   --expected-release "$RELEASE" \
-  --expected-version '0.1.0.dev251' \
+  --expected-version "$VERSION" \
   --expected-commit '<40-lowercase-hex>' \
   --expected-manifest-sha256 '<64-lowercase-hex>' \
   --expected-package-sha256 '<64-lowercase-hex>' \
@@ -104,7 +115,7 @@ sudo /usr/bin/python3.12 -I -S \
   --evidence-dir "$EVIDENCE" \
   --runtime-config "$RUNTIME" \
   --expected-release "$RELEASE" \
-  --expected-version '0.1.0.dev251' \
+  --expected-version "$VERSION" \
   --expected-commit '<40-lowercase-hex>' \
   --expected-manifest-sha256 '<64-lowercase-hex>' \
   --expected-package-sha256 '<64-lowercase-hex>' \

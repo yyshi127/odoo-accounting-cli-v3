@@ -65,6 +65,7 @@ DEPLOYMENT_REFERENCED_RELEASE_MEMBERS = frozenset(
         "docs/TARGET_HOST_DEV18_SQL_PROBE_2026-07-17.md",
         "docs/TARGET_HOST_FINALIZER_RUNTIME_AUDIT_2026-07-19.md",
         "docs/TARGET_HOST_DEV29_CLOSURE_BASELINE_2026-07-20.md",
+        "docs/TARGET_HOST_DEV251_REPORT_READINESS_2026-07-29.md",
         "tools/build_release.py",
         "tools/check_source_boundary.py",
         "tools/verify_release.py",
@@ -256,6 +257,7 @@ DEV251_REPORT_READ_EVIDENCE_RELEASE_MEMBERS = frozenset(
         "deployment/dev251/report_read_plan.json",
         "deployment/dev251/verify_report_read_evidence.py",
         "docs/DEPLOYMENT.md",
+        "docs/TARGET_HOST_DEV251_REPORT_READINESS_2026-07-29.md",
         "tests/test_dev251_report_read_evidence.py",
     }
 )

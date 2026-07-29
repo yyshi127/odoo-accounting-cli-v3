@@ -84,6 +84,107 @@ REPORT_CASES = {
         "cash_flow",
     ),
 }
+REGISTERED_READ_CAPABILITY_IDS = frozenset(
+    {
+        "acct.ap.open_items.v1",
+        "acct.ar.open_items.v1",
+        "acct.diagnostics.operation_read.v1",
+        "acct.gl.trial_balance.v1",
+        "acct.move.draft_cancel_eligibility.v1",
+        "acct.multicompany.consolidated_read.v1",
+        "acct.multicurrency.balance_read.v1",
+        "acct.registry.list.v1",
+        "acct.report.financial_read.v1",
+        "acct.tax.report_read.v1",
+    }
+)
+DECLARED_READ_GAP_IDS = frozenset(
+    {
+        "acct.diagnostics.operation_read.v1",
+        "acct.multicompany.consolidated_read.v1",
+    }
+)
+ADMISSIBLE_READ_CAPABILITY_IDS = (
+    REGISTERED_READ_CAPABILITY_IDS - DECLARED_READ_GAP_IDS
+)
+REPORT_READ_CAPABILITY_IDS = frozenset(
+    {
+        "acct.report.financial_read.v1",
+        "acct.tax.report_read.v1",
+    }
+)
+READINESS_CHECK_IDS = frozenset(
+    {
+        "contract_evidence_present",
+        "page_total_count_contract",
+        "read_policy_closed",
+        "read_receipt_v2_contract",
+        "strict_input_schema",
+        "strict_output_schema",
+        "test_execution_routed",
+        "trusted_handler_supported",
+        "verification_method_present",
+    }
+)
+READINESS_DATA_FIELDS = frozenset(
+    {
+        "admissible_count",
+        "admissible_ids",
+        "blockers",
+        "capabilities",
+        "completion_ready_count",
+        "completion_ready_ids",
+        "external_read_evidence_verifier_ready",
+        "goal_evidence_ready_count",
+        "goal_evidence_ready_ids",
+        "goal_evidence_unready_capability_ids",
+        "missing_required_read_capability_ids",
+        "production_promotion_allowed",
+        "read_goal_readiness_ready",
+        "read_static_readiness_ready",
+        "real_odoo_write_performed",
+        "registered_read_capability_ids",
+        "release_identity",
+        "required_goal_evidence_kinds",
+        "required_read_capability_ids",
+        "total_read_capabilities",
+        "unready_capability_ids",
+    }
+)
+READINESS_REPORT_FIELDS = frozenset(
+    {
+        "blockers",
+        "capability",
+        "checks",
+        "external_read_evidence_verified",
+        "goal_evidence_blockers",
+        "goal_evidence_ready",
+        "missing_goal_evidence_kinds",
+        "production_promotion_allowed",
+        "read_completion_ready",
+        "real_odoo_write_performed",
+        "registry_claimed_receipt_count",
+        "registry_claimed_receipt_kinds",
+        "registry_receipts_authoritative_for_goal",
+        "trusted_handler_kind",
+        "trusted_read_admissible",
+    }
+)
+REQUIRED_GOAL_EVIDENCE_KINDS = frozenset(
+    {
+        "accounting_oracle",
+        "live_odoo",
+        "pi_e2e",
+        "release_identity",
+        "security_negative",
+    }
+)
+READINESS_BLOCKERS = [
+    "not every registered read capability is statically admissible for "
+    "trusted execution",
+    "trusted external read evidence is not independently verified for every "
+    "registered read capability",
+]
 FIXED_TARGET = {
     "allowed_company_ids": [1],
     "capability_channel": "staged",
@@ -596,6 +697,146 @@ def _command_document(
     return value
 
 
+def _validate_targeted_readiness(
+    value: Mapping[str, Any],
+    *,
+    expected_identity: Mapping[str, Any],
+) -> None:
+    data = value.get("data") if type(value) is dict else None
+    registered = sorted(REGISTERED_READ_CAPABILITY_IDS)
+    admissible = sorted(ADMISSIBLE_READ_CAPABILITY_IDS)
+    declared_gaps = sorted(DECLARED_READ_GAP_IDS)
+    required_evidence = sorted(REQUIRED_GOAL_EVIDENCE_KINDS)
+    if (
+        set(value) != {"business_succeeded", "command", "data", "ok"}
+        or value.get("business_succeeded") is not False
+        or value.get("command") != "evidence.read-capabilities-readiness"
+        or value.get("ok") is not True
+        or type(data) is not dict
+        or set(data) != READINESS_DATA_FIELDS
+        or data.get("release_identity") != expected_identity
+        or data.get("read_static_readiness_ready") is not False
+        or data.get("read_goal_readiness_ready") is not False
+        or data.get("external_read_evidence_verifier_ready") is not False
+        or data.get("production_promotion_allowed") is not False
+        or data.get("real_odoo_write_performed") is not False
+        or data.get("registered_read_capability_ids") != registered
+        or data.get("required_read_capability_ids") != registered
+        or data.get("missing_required_read_capability_ids") != []
+        or data.get("total_read_capabilities") != len(registered)
+        or data.get("admissible_ids") != admissible
+        or data.get("admissible_count") != len(admissible)
+        or data.get("unready_capability_ids") != declared_gaps
+        or data.get("goal_evidence_ready_ids") != []
+        or data.get("goal_evidence_ready_count") != 0
+        or data.get("goal_evidence_unready_capability_ids") != registered
+        or data.get("completion_ready_ids") != []
+        or data.get("completion_ready_count") != 0
+        or data.get("required_goal_evidence_kinds") != required_evidence
+        or data.get("blockers") != READINESS_BLOCKERS
+    ):
+        raise CollectionError("read readiness probe has unsafe semantics")
+    reports = data.get("capabilities")
+    if type(reports) is not list or len(reports) != len(registered):
+        raise CollectionError("read readiness probe has unsafe semantics")
+    if [
+        report.get("capability", {}).get("id")
+        if type(report) is dict
+        and type(report.get("capability")) is dict
+        else None
+        for report in reports
+    ] != registered:
+        raise CollectionError("read readiness probe has unsafe semantics")
+    reports_by_id: dict[str, Mapping[str, Any]] = {}
+    for report in reports:
+        capability = report.get("capability") if type(report) is dict else None
+        capability_id = (
+            capability.get("id") if type(capability) is dict else None
+        )
+        if (
+            type(capability_id) is not str
+            or capability_id not in REGISTERED_READ_CAPABILITY_IDS
+            or capability_id in reports_by_id
+        ):
+            raise CollectionError("read readiness probe has unsafe semantics")
+        reports_by_id[capability_id] = report
+    if set(reports_by_id) != REGISTERED_READ_CAPABILITY_IDS:
+        raise CollectionError("read readiness probe has unsafe semantics")
+    for capability_id, report in reports_by_id.items():
+        capability = report.get("capability")
+        checks = report.get("checks")
+        expected_admissible = capability_id in ADMISSIBLE_READ_CAPABILITY_IDS
+        if (
+            set(report) != READINESS_REPORT_FIELDS
+            or type(capability) is not dict
+            or set(capability)
+            != {
+                "access",
+                "enabled_environments",
+                "evidence_level",
+                "id",
+                "staged_environments",
+            }
+            or capability.get("access") != "read"
+            or capability.get("enabled_environments") != []
+            or capability.get("id") != capability_id
+            or capability.get("evidence_level")
+            != ("contract_tested" if expected_admissible else "declared")
+            or capability.get("staged_environments")
+            != (["test"] if expected_admissible else [])
+            or type(checks) is not dict
+            or set(checks) != READINESS_CHECK_IDS
+            or any(type(result) is not bool for result in checks.values())
+            or report.get("external_read_evidence_verified") is not False
+            or report.get("goal_evidence_blockers")
+            != [
+                "trusted external read evidence has not been independently "
+                "verified"
+            ]
+            or report.get("goal_evidence_ready") is not False
+            or report.get("missing_goal_evidence_kinds") != required_evidence
+            or report.get("production_promotion_allowed") is not False
+            or report.get("real_odoo_write_performed") is not False
+            or report.get("read_completion_ready") is not False
+            or report.get("registry_claimed_receipt_count") != 0
+            or report.get("registry_claimed_receipt_kinds") != []
+            or report.get("registry_receipts_authoritative_for_goal")
+            is not False
+        ):
+            raise CollectionError("read readiness probe has unsafe semantics")
+        if expected_admissible:
+            if (
+                report.get("blockers") != []
+                or set(check for check, result in checks.items() if result)
+                != READINESS_CHECK_IDS
+                or report.get("trusted_handler_kind") != "odoo"
+                or report.get("trusted_read_admissible") is not True
+            ):
+                raise CollectionError(
+                    "read readiness probe has unsafe semantics"
+                )
+        elif (
+            type(report.get("blockers")) is not list
+            or not report["blockers"]
+            or any(
+                type(blocker) is not str for blocker in report["blockers"]
+            )
+            or len(report["blockers"]) != len(set(report["blockers"]))
+            or all(checks.values())
+            or sorted(report["blockers"])
+            != sorted(
+                check.replace("_", " ")
+                for check, result in checks.items()
+                if result is False
+            )
+            or report.get("trusted_handler_kind") is not None
+            or report.get("trusted_read_admissible") is not False
+        ):
+            raise CollectionError("read readiness probe has unsafe semantics")
+    if not REPORT_READ_CAPABILITY_IDS.issubset(reports_by_id):
+        raise CollectionError("read readiness probe has unsafe semantics")
+
+
 def _witness_document(result: CommandResult, *, label: str) -> dict[str, Any]:
     if result.returncode != 0 or result.stderr:
         raise CollectionError(f"{label} witness failed")
@@ -947,14 +1188,10 @@ def collect_evidence(
             label="read capabilities readiness",
             allow_business_field=True,
         )
-        readiness_data = readiness_document["data"]
-        if (
-            readiness_document.get("business_succeeded") is not False
-            or readiness_data.get("read_static_readiness_ready") is not True
-            or readiness_data.get("read_goal_readiness_ready") is not False
-            or readiness_data.get("production_promotion_allowed") is not False
-        ):
-            raise CollectionError("read readiness probe has unsafe semantics")
+        _validate_targeted_readiness(
+            readiness_document,
+            expected_identity=expected_identity.as_dict(),
+        )
         _write_json(
             run_dir / "read-capabilities-readiness.json",
             readiness_document,
