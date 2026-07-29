@@ -36,11 +36,15 @@ PHASE_B_WRITE_IDS = (
 PAYMENT_CANCEL_WRITE_IDS = (
     "acct.payment.cancel.v1",
 )
+RECONCILIATION_UNDO_WRITE_IDS = (
+    "acct.reconciliation.undo.v1",
+)
 WRITE_IDS = (
     *BASELINE_WRITE_IDS[:13],
     *PHASE_B_WRITE_IDS,
     *PAYMENT_CANCEL_WRITE_IDS,
     BASELINE_WRITE_IDS[13],
+    *RECONCILIATION_UNDO_WRITE_IDS,
 )
 
 EXPECTED_INPUT_FIELDS = {
@@ -82,6 +86,12 @@ EXPECTED_INPUT_FIELDS = {
         "reconciliation_date", "currency_id", "mode", "amount",
         "tolerance_amount", "writeoff_account_id", "writeoff_journal_id",
         "writeoff_label", "idempotency_key",
+    },
+    "acct.reconciliation.undo.v1": {
+        "company_id", "origin_operation_id", "expected_origin_revision",
+        "expected_origin_final_receipt_body_digest",
+        "expected_recovery_plan_digest", "recovery_date", "reason",
+        "idempotency_key",
     },
     "acct.asset.create.v1": {
         "company_id", "source_move_line_id", "asset_model_id", "asset_name",
@@ -383,6 +393,16 @@ VALID_INPUTS = {
         "expected_recovery_plan_digest": SHA256, "recovery_date": "2026-07-15",
         "reason": "Execute approved compensation", "idempotency_key": "recovery-1",
     },
+    "acct.reconciliation.undo.v1": {
+        "company_id": 7,
+        "origin_operation_id": "op-reconciliation-apply-1",
+        "expected_origin_revision": 6,
+        "expected_origin_final_receipt_body_digest": "b" * 64,
+        "expected_recovery_plan_digest": "c" * 64,
+        "recovery_date": "2026-07-16",
+        "reason": "Undo the complete verified reconciliation graph",
+        "idempotency_key": "undo-reconciliation-op-1",
+    },
     "acct.journal.entry_create.v1": {
         "company_id": 7, "journal_id": 8, "posting_date": "2026-07-31",
         "currency_id": 12, "reference": "Manual reclassification 2026-07",
@@ -537,6 +557,11 @@ def test_exact_write_capability_set_and_safety_gates_remain_closed():
         for capability_id in WRITE_IDS
         if capability_id in PAYMENT_CANCEL_WRITE_IDS
     ) == PAYMENT_CANCEL_WRITE_IDS
+    assert tuple(
+        capability_id
+        for capability_id in WRITE_IDS
+        if capability_id in RECONCILIATION_UNDO_WRITE_IDS
+    ) == RECONCILIATION_UNDO_WRITE_IDS
     for item in writes.values():
         assert item["evidence"] == {"level": "declared", "receipts": []}
         assert item.get("staged_environments", []) == []
@@ -822,6 +847,86 @@ def test_payment_cancel_contract_is_exact_terminal_and_disabled():
         invalid[field] = value
         with pytest.raises(ContractError):
             validate_value(invalid, schema)
+
+
+def test_reconciliation_undo_contract_is_receipt_bound_and_disabled():
+    writes = _writes()
+    capability = writes["acct.reconciliation.undo.v1"]
+    schema = capability["input_schema"]
+    properties = schema["properties"]
+
+    assert capability["risk_level"] == "critical"
+    assert capability["odoo_permissions"] == ["account.group_account_manager"]
+    assert capability["company_scope"] == "explicit_single_company"
+    assert capability["approval"] == {
+        "required": True, "policy": "reconciliation_undo", "ttl_seconds": 600,
+    }
+    assert capability["idempotency"] == {
+        "required": True, "scope": "company_origin_operation",
+    }
+    description = capability["business_description"]
+    for phrase in (
+        "completed, verified, and database-finalized",
+        "acct.reconciliation.apply.v1",
+        "retained V3 release",
+        "already contained this receipt-bound facade",
+        "reject legacy",
+    ):
+        assert phrase in description
+    assert capability["verification"] == {
+        "method": (
+            "read_back_receipt_bound_complete_reconciliation_graph_undo_"
+            "and_writeoff_reversal_v1"
+        ),
+    }
+    assert capability["recovery"] == {
+        "method": (
+            "manual_escalation_if_receipt_bound_reconciliation_undo_fails"
+        ),
+    }
+    assert capability["evidence"] == {"level": "declared", "receipts": []}
+    assert capability.get("staged_environments", []) == []
+    assert capability["enabled_environments"] == []
+    assert set(properties) == EXPECTED_INPUT_FIELDS[
+        "acct.reconciliation.undo.v1"
+    ]
+    assert set(schema["required"]) == set(properties)
+    assert schema["additionalProperties"] is False
+    assert properties["company_id"] == {"type": "integer", "minimum": 1}
+    assert properties["expected_origin_revision"] == {
+        "type": "integer", "minimum": 1, "maximum": 2147483647,
+    }
+    for name in (
+        "expected_origin_final_receipt_body_digest",
+        "expected_recovery_plan_digest",
+    ):
+        assert properties[name] == {
+            "type": "string", "minLength": 64, "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$",
+        }
+    assert capability["output_schema"] == writes[
+        BASELINE_WRITE_IDS[0]
+    ]["output_schema"]
+
+    for field, value in (
+        ("origin_operation_id", ""),
+        ("expected_origin_revision", 0),
+        ("expected_origin_revision", -1),
+        ("expected_origin_revision", True),
+        ("expected_origin_final_receipt_body_digest", "A" * 64),
+        ("expected_recovery_plan_digest", "c" * 63),
+        ("recovery_date", "20260716"),
+        ("reason", " "),
+    ):
+        invalid = copy.deepcopy(VALID_INPUTS["acct.reconciliation.undo.v1"])
+        invalid[field] = value
+        with pytest.raises(ContractError):
+            validate_value(invalid, schema)
+
+    injected = copy.deepcopy(VALID_INPUTS["acct.reconciliation.undo.v1"])
+    injected["line_ids"] = [301, 302]
+    with pytest.raises(ContractError):
+        validate_value(injected, schema)
 
 
 def test_write_inputs_have_exact_complete_fields_and_no_placeholders():

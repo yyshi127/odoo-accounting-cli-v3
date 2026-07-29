@@ -171,7 +171,15 @@ EXCLUSIVE_BEFORE_LOCK_CAPABILITIES = frozenset(
         "acct.move.post.v1",
         "acct.payment.cancel.v1",
         "acct.recovery.execute.v1",
+        "acct.reconciliation.undo.v1",
     }
+)
+TRUSTED_PLAN_CAPABILITIES = frozenset(
+    {"acct.recovery.execute.v1", "acct.reconciliation.undo.v1"}
+)
+RECONCILIATION_UNDO_METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
+RECONCILIATION_UNDO_ORACLE = (
+    "undo_reconciliation_and_reverse_writeoff_exact_v1"
 )
 ANCHOR_RESULT_FIELDS = frozenset(
     {
@@ -290,7 +298,7 @@ def _resource_lock_digests(
             [parameters.get("journal_id"), parameters.get("vendor_reference")],
         )
 
-    if capability_id == "acct.recovery.execute.v1" and trusted_recovery_plan:
+    if capability_id in TRUSTED_PLAN_CAPABILITIES and trusted_recovery_plan:
         try:
             graph = index_recovery_guard_graph(
                 trusted_recovery_plan, expected_company_id=company_id
@@ -498,8 +506,8 @@ def _trusted_recovery_plan(
 ) -> dict[str, Any] | None:
     """Accept only the receipt-derived plan bound by the signed recovery operation."""
 
-    is_recovery = operation.capability_id == "acct.recovery.execute.v1"
-    if not is_recovery:
+    uses_trusted_plan = operation.capability_id in TRUSTED_PLAN_CAPABILITIES
+    if not uses_trusted_plan:
         if value is not None:
             raise OdooWriteBootstrapError(
                 "trusted recovery plan must be null for non-recovery writes"
@@ -525,6 +533,14 @@ def _trusted_recovery_plan(
     ):
         raise OdooWriteBootstrapError(
             "trusted recovery plan origin, digest, or company binding mismatch"
+        )
+    if operation.capability_id == "acct.reconciliation.undo.v1" and (
+        plan["plan_version"] != 2
+        or plan["method"] != RECONCILIATION_UNDO_METHOD
+        or plan["oracle_id"] != RECONCILIATION_UNDO_ORACLE
+    ):
+        raise OdooWriteBootstrapError(
+            "trusted recovery plan is not an exact reconciliation undo plan"
         )
     try:
         index_recovery_guard_graph(
@@ -1971,8 +1987,8 @@ def _handler_from_factory(
             trusted_recovery_plan,
             module_graph,
         )
-    # Existing non-recovery test/runtime factories have a three-argument
-    # contract.  Only a recovery factory receives the additional trusted plan;
+    # Existing normal-write test/runtime factories have a three-argument
+    # contract.  Only a trusted-plan factory receives the additional plan;
     # arity is selected from validated request content, never by swallowing a
     # TypeError raised inside the factory.
     if trusted_recovery_plan is None:

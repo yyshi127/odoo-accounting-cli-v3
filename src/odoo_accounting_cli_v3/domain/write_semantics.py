@@ -716,6 +716,53 @@ def _validate_recovery(parameters: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _validate_reconciliation_undo(parameters: dict[str, Any]) -> dict[str, Any]:
+    origin_operation_id = _non_empty_text(
+        _field(parameters, "origin_operation_id"), "origin_operation_id"
+    )
+    if re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", origin_operation_id
+    ) is None:
+        raise WriteSemanticError("origin_operation_id is invalid")
+    origin_revision = _field(parameters, "expected_origin_revision")
+    if (
+        isinstance(origin_revision, bool)
+        or not isinstance(origin_revision, int)
+        or not 1 <= origin_revision <= 2147483647
+    ):
+        raise WriteSemanticError(
+            "expected_origin_revision must be a positive bounded integer"
+        )
+    receipt_digest = _sha256_digest(
+        _field(parameters, "expected_origin_final_receipt_body_digest"),
+        "expected_origin_final_receipt_body_digest",
+    )
+    plan_digest = _sha256_digest(
+        _field(parameters, "expected_recovery_plan_digest"),
+        "expected_recovery_plan_digest",
+    )
+    recovery_date = _date(_field(parameters, "recovery_date"), "recovery_date")
+    _non_empty_text(_field(parameters, "reason"), "reason")
+    return {
+        "checks": (
+            "reconciliation_undo_origin_operation_explicit",
+            "reconciliation_undo_origin_revision_explicit",
+            "reconciliation_undo_final_receipt_digest_explicit",
+            "reconciliation_undo_recovery_plan_digest_explicit",
+            "reconciliation_undo_requires_completed_verified_finalized_apply_origin",
+            "reconciliation_undo_requires_retained_release_with_facade",
+            "reconciliation_undo_requires_complete_origin_graph",
+        ),
+        "computed": {
+            "origin_operation_id": origin_operation_id,
+            "expected_origin_revision": origin_revision,
+            "expected_origin_final_receipt_body_digest": receipt_digest,
+            "expected_recovery_plan_digest": plan_digest,
+            "recovery_date": recovery_date.isoformat(),
+        },
+    }
+
+
 _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.invoice.customer_create.v1": lambda value: _validate_document(value, vendor=False),
     "acct.bill.vendor_create.v1": lambda value: _validate_document(value, vendor=True),
@@ -735,6 +782,7 @@ _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.move.draft_cancel.v1": _validate_draft_cancel,
     "acct.move.draft_cancel.v2": _validate_draft_cancel_v2,
     "acct.recovery.execute.v1": _validate_recovery,
+    "acct.reconciliation.undo.v1": _validate_reconciliation_undo,
 }
 
 

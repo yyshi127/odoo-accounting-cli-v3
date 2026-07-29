@@ -342,6 +342,19 @@ def recovery_parameters() -> dict:
     }
 
 
+def reconciliation_undo_parameters() -> dict:
+    return {
+        "company_id": 7,
+        "origin_operation_id": "op-reconciliation-apply-1001",
+        "expected_origin_revision": 6,
+        "expected_origin_final_receipt_body_digest": "d" * 64,
+        "expected_recovery_plan_digest": "e" * 64,
+        "recovery_date": "2026-07-16",
+        "reason": "Undo the complete verified reconciliation graph",
+        "idempotency_key": "undo-reconciliation-op-1001",
+    }
+
+
 VALID_CASES = {
     "acct.invoice.customer_create.v1": invoice_parameters,
     "acct.bill.vendor_create.v1": bill_parameters,
@@ -361,6 +374,7 @@ VALID_CASES = {
     "acct.move.draft_cancel.v1": draft_cancel_parameters,
     "acct.move.draft_cancel.v2": draft_cancel_v2_parameters,
     "acct.recovery.execute.v1": recovery_parameters,
+    "acct.reconciliation.undo.v1": reconciliation_undo_parameters,
 }
 
 
@@ -505,6 +519,57 @@ def test_reconciliation_writeoff_and_partial_rules_are_consistent():
     parameters["writeoff_label"] = "Unapproved zero write-off"
     with pytest.raises(WriteSemanticError, match="zero tolerance"):
         validate_write_semantics("acct.reconciliation.apply.v1", parameters)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        ("origin_operation_id", "", "origin_operation_id"),
+        ("origin_operation_id", "invalid origin", "origin_operation_id"),
+        ("expected_origin_revision", 0, "expected_origin_revision"),
+        ("expected_origin_revision", -1, "expected_origin_revision"),
+        ("expected_origin_revision", True, "expected_origin_revision"),
+        (
+            "expected_origin_final_receipt_body_digest",
+            "D" * 64,
+            "expected_origin_final_receipt_body_digest",
+        ),
+        (
+            "expected_recovery_plan_digest",
+            "e" * 63,
+            "expected_recovery_plan_digest",
+        ),
+        ("recovery_date", "2026-02-30", "recovery_date"),
+        ("reason", " ", "reason"),
+    ),
+)
+def test_reconciliation_undo_semantics_are_receipt_bound_and_fail_closed(
+    field, value, error
+):
+    parameters = reconciliation_undo_parameters()
+    parameters[field] = value
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics("acct.reconciliation.undo.v1", parameters)
+
+
+def test_reconciliation_undo_semantics_preserve_all_origin_bindings():
+    result = validate_write_semantics(
+        "acct.reconciliation.undo.v1", reconciliation_undo_parameters()
+    )
+
+    assert result["computed"] == {
+        "origin_operation_id": "op-reconciliation-apply-1001",
+        "expected_origin_revision": 6,
+        "expected_origin_final_receipt_body_digest": "d" * 64,
+        "expected_recovery_plan_digest": "e" * 64,
+        "recovery_date": "2026-07-16",
+    }
+    assert set(result["checks"]) >= {
+        "reconciliation_undo_requires_completed_verified_finalized_apply_origin",
+        "reconciliation_undo_requires_retained_release_with_facade",
+        "reconciliation_undo_requires_complete_origin_graph",
+    }
 
 
 @pytest.mark.parametrize(

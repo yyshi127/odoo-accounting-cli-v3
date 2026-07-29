@@ -173,12 +173,14 @@ class FakeOperation:
     capability_id: str = "acct.invoice.customer_create.v1"
     digest: str = "6" * 64
     state: State = State.COMPLETED
+    request_id: str = "request-origin"
 
 
 class FakeStore:
     def __init__(self) -> None:
         self.operations: dict[str, FakeOperation] = {}
         self.bindings: dict[str, Any] = {}
+        self.undo_bindings: dict[str, Any] = {}
         self.final_receipts: dict[str, tuple[Any, ...]] = {}
 
     def get_operation(self, operation_id: str) -> FakeOperation:
@@ -193,8 +195,52 @@ class FakeStore:
         except KeyError as exc:
             raise OperationNotFound("recovery binding does not exist") from exc
 
+    def get_reconciliation_undo_operation_binding(
+        self, undo_operation_id: str
+    ) -> Any:
+        try:
+            return self.undo_bindings[undo_operation_id]
+        except KeyError as exc:
+            raise OperationNotFound(
+                "reconciliation undo binding does not exist"
+            ) from exc
+
     def recovery_plan(self, operation_id: str) -> dict[str, Any]:
         operation = self.operations[operation_id]
+        if operation.capability_id == "acct.reconciliation.apply.v1":
+            return create_recovery_plan_v2(
+                origin_operation_id=operation_id,
+                recovery_capability_id="acct.recovery.execute.v1",
+                status="available",
+                method="undo_reconciliation_and_reverse_writeoff_v1",
+                requires_approval=True,
+                action_targets=[
+                    {
+                        "company_id": operation.company_id,
+                        "model": "account.full.reconcile",
+                        "record_fingerprint": "7" * 64,
+                        "record_id": 100,
+                        "record_state": "active",
+                    }
+                ],
+                guard_records=[
+                    {
+                        "company_id": operation.company_id,
+                        "expected_outcome": "absent",
+                        "model": "account.partial.reconcile",
+                        "record_fingerprint": "8" * 64,
+                        "record_id": 101,
+                        "record_state": "active",
+                    }
+                ],
+                oracle_id=(
+                    "undo_reconciliation_and_reverse_writeoff_exact_v1"
+                ),
+                parameters={
+                    "company_id": operation.company_id,
+                    "full_reconcile_id": 100,
+                },
+            )
         return create_recovery_plan_v2(
             origin_operation_id=operation_id,
             recovery_capability_id="acct.recovery.execute.v1",
@@ -226,15 +272,7 @@ class FakeStore:
 
     def receipt(self, operation_id: str, plan: dict[str, Any]) -> Any:
         operation = self.operations[operation_id]
-        return SimpleNamespace(
-            operation_id=operation.operation_id,
-            operation_digest=operation.digest,
-            operation_revision=operation.revision,
-            terminal_state=operation.state.value,
-            principal=operation.principal,
-            user_id=operation.user_id,
-            company_id=operation.company_id,
-            body={
+        body = {
                 "capability_id": operation.capability_id,
                 "company_id": operation.company_id,
                 "database_name": operation.database_name,
@@ -245,12 +283,30 @@ class FakeStore:
                 "operation_id": operation.operation_id,
                 "operation_revision": operation.revision,
                 "principal": operation.principal,
-                "receipt_details": {"recovery_plan": plan},
+                "receipt_details": {
+                    "database_finalization": {
+                        "operation_id": operation.operation_id,
+                    },
+                    "recovery_plan": plan,
+                    "verification": {"passed": True},
+                },
                 "registry_digest": operation.registry_digest,
                 "release_digest": operation.release_digest,
                 "terminal_state": operation.state.value,
                 "user_id": operation.user_id,
-            },
+            }
+        return SimpleNamespace(
+            operation_id=operation.operation_id,
+            operation_digest=operation.digest,
+            operation_revision=operation.revision,
+            terminal_state=operation.state.value,
+            principal=operation.principal,
+            user_id=operation.user_id,
+            company_id=operation.company_id,
+            receipt_id=f"receipt-{operation.operation_id}",
+            result_succeeded=True,
+            body=body,
+            body_digest=hashlib.sha256(canonical_json(body)).hexdigest(),
         )
 
     def get_final_write_receipts(self, operation_id: str) -> tuple[Any, ...]:
@@ -406,6 +462,73 @@ def _durable_operation(
         environment=context["environment"],
         registry_digest=registry_digest,
         release_digest=release_digest,
+    )
+
+
+def _reconciliation_undo_request(
+    store: FakeStore,
+    origin: FakeOperation,
+    *,
+    operation_id: str = "op-reconciliation-undo",
+) -> dict[str, Any]:
+    receipt = store.receipt(
+        origin.operation_id, store.recovery_plan(origin.operation_id)
+    )
+    return {
+        "context": _context(),
+        "operation_id": operation_id,
+        "request_id": f"request-{operation_id}",
+        "capability_id": "acct.reconciliation.undo.v1",
+        "parameters": {
+            "company_id": origin.company_id,
+            "expected_origin_final_receipt_body_digest": (
+                receipt.body_digest
+            ),
+            "expected_origin_revision": origin.revision,
+            "expected_recovery_plan_digest": (
+                receipt.body["receipt_details"]["recovery_plan"][
+                    "plan_digest"
+                ]
+            ),
+            "idempotency_key": f"key-{operation_id}",
+            "origin_operation_id": origin.operation_id,
+            "reason": "Undo the exact completed reconciliation",
+            "recovery_date": "2026-07-16",
+        },
+    }
+
+
+def _reconciliation_undo_binding(
+    origin: FakeOperation,
+    undo: Operation,
+    receipt: Any,
+) -> Any:
+    details = receipt.body["receipt_details"]
+    return SimpleNamespace(
+        binding_version=1,
+        origin_operation_id=origin.operation_id,
+        origin_request_id=origin.request_id,
+        origin_operation_digest=origin.digest,
+        origin_operation_revision=origin.revision,
+        origin_final_receipt_id=receipt.receipt_id,
+        origin_final_receipt_body_digest=receipt.body_digest,
+        origin_database_finalization_digest=hashlib.sha256(
+            canonical_json(details["database_finalization"])
+        ).hexdigest(),
+        undo_operation_id=undo.operation_id,
+        undo_request_id=undo.request_id,
+        undo_operation_digest=undo.digest,
+        undo_operation_revision=undo.revision,
+        plan_digest=details["recovery_plan"]["plan_digest"],
+        principal=undo.principal,
+        user_id=undo.user_id,
+        company_id=undo.company_id,
+        odoo_instance_id=undo.odoo_instance_id,
+        database_name=undo.database_name,
+        database_uuid=undo.database_uuid,
+        environment=undo.environment,
+        registry_digest=undo.registry_digest,
+        release_digest=undo.release_digest,
     )
 
 
@@ -1616,6 +1739,235 @@ def test_direct_recovery_capability_prepare_is_rejected_before_child(
     with pytest.raises(HistoricalRouterError, match="origin receipt"):
         router.dispatch("operation.prepare", request)
     assert called is False
+
+
+def test_reconciliation_undo_prepare_is_pinned_to_origin_retained_release(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, old = router_files
+    store = FakeStore()
+    origin = FakeOperation(
+        "op-reconciliation-origin",
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        capability_id="acct.reconciliation.apply.v1",
+    )
+    store.operations[origin.operation_id] = origin
+    request = _reconciliation_undo_request(store, origin)
+    calls: list[list[str]] = []
+
+    def run(argv, *, stdin, **_kwargs):
+        calls.append(argv)
+        child_request = json.loads(stdin)
+        undo = _durable_operation(
+            operation_id=child_request["operation_id"],
+            request_id=child_request["request_id"],
+            capability_id=child_request["capability_id"],
+            parameters=child_request["parameters"],
+            release_digest=OLD_RELEASE,
+            registry_digest=OLD_REGISTRY,
+        )
+        store.operations[undo.operation_id] = undo
+        receipt = store.receipt(
+            origin.operation_id, store.recovery_plan(origin.operation_id)
+        )
+        store.undo_bindings[undo.operation_id] = (
+            _reconciliation_undo_binding(origin, undo, receipt)
+        )
+        return _completed(
+            argv,
+            _response(
+                "operation.prepare",
+                operation_id=undo.operation_id,
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    response = router.dispatch("operation.prepare", request)
+
+    assert response["data"]["operation_id"] == request["operation_id"]
+    assert calls == [[old["executable_path"], "operation", "prepare"]]
+
+
+def test_reconciliation_undo_has_no_current_release_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = FakeOperation(
+        "op-unretained-reconciliation-origin",
+        "e" * 64,
+        "f" * 64,
+        capability_id="acct.reconciliation.apply.v1",
+    )
+    store.operations[origin.operation_id] = origin
+    request = _reconciliation_undo_request(store, origin)
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError, match="no retained historical route"
+    ):
+        router.dispatch("operation.prepare", request)
+    assert called is False
+
+
+def test_existing_reconciliation_undo_with_different_origin_release_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = FakeOperation(
+        "op-reconciliation-origin",
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        capability_id="acct.reconciliation.apply.v1",
+    )
+    store.operations[origin.operation_id] = origin
+    request = _reconciliation_undo_request(store, origin)
+    undo = _durable_operation(
+        operation_id=request["operation_id"],
+        request_id=request["request_id"],
+        capability_id=request["capability_id"],
+        parameters=request["parameters"],
+        release_digest=CURRENT_RELEASE,
+        registry_digest=CURRENT_REGISTRY,
+    )
+    store.operations[undo.operation_id] = undo
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError, match="route differs from its origin"
+    ):
+        router.dispatch("operation.prepare", request)
+    assert called is False
+
+
+def test_reconciliation_undo_preview_requires_exact_durable_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = FakeOperation(
+        "op-reconciliation-origin",
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        capability_id="acct.reconciliation.apply.v1",
+    )
+    store.operations[origin.operation_id] = origin
+    prepare = _reconciliation_undo_request(store, origin)
+    undo = _durable_operation(
+        operation_id=prepare["operation_id"],
+        request_id=prepare["request_id"],
+        capability_id=prepare["capability_id"],
+        parameters=prepare["parameters"],
+        release_digest=OLD_RELEASE,
+        registry_digest=OLD_REGISTRY,
+    )
+    store.operations[undo.operation_id] = undo
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError, match="no durable origin binding"
+    ):
+        router.dispatch(
+            "operation.preview",
+            _request("operation.preview", operation_id=undo.operation_id),
+        )
+    assert called is False
+
+
+def test_reconciliation_undo_prepare_requires_binding_after_child_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+) -> None:
+    manifest, _current, _old = router_files
+    store = FakeStore()
+    origin = FakeOperation(
+        "op-reconciliation-origin",
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        capability_id="acct.reconciliation.apply.v1",
+    )
+    store.operations[origin.operation_id] = origin
+    request = _reconciliation_undo_request(store, origin)
+
+    def run(argv, *, stdin, **_kwargs):
+        child_request = json.loads(stdin)
+        undo = _durable_operation(
+            operation_id=child_request["operation_id"],
+            request_id=child_request["request_id"],
+            capability_id=child_request["capability_id"],
+            parameters=child_request["parameters"],
+            release_digest=OLD_RELEASE,
+            registry_digest=OLD_REGISTRY,
+        )
+        store.operations[undo.operation_id] = undo
+        return _completed(
+            argv,
+            _response(
+                "operation.prepare",
+                operation_id=undo.operation_id,
+                release_digest=OLD_RELEASE,
+                registry_digest=OLD_REGISTRY,
+            ),
+        )
+
+    monkeypatch.setattr(
+        "odoo_accounting_cli_v3.historical_router._run_bounded_child", run
+    )
+    router = HistoricalReleaseRouter(
+        manifest, store, require_root_owner=False
+    )
+
+    with pytest.raises(
+        HistoricalRouterError, match="did not persist.*undo binding"
+    ):
+        router.dispatch("operation.prepare", request)
 
 
 def test_recover_rejects_orphan_or_mismatched_recovery_before_dispatch(

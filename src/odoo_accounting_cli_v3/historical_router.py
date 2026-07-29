@@ -73,6 +73,26 @@ _DURABLE_IDEMPOTENT_CREATION_ACTIONS = frozenset(
 _RECOVERY_LIFECYCLE_ADVANCING_ACTIONS = frozenset(
     {"operation.preview", "operation.approve_execute"}
 )
+_RECONCILIATION_UNDO_CAPABILITY = "acct.reconciliation.undo.v1"
+_RECONCILIATION_ORIGIN_CAPABILITY = "acct.reconciliation.apply.v1"
+_RECONCILIATION_UNDO_METHOD = (
+    "undo_reconciliation_and_reverse_writeoff_v1"
+)
+_RECONCILIATION_UNDO_ORACLE = (
+    "undo_reconciliation_and_reverse_writeoff_exact_v1"
+)
+_RECONCILIATION_UNDO_PARAMETER_FIELDS = frozenset(
+    {
+        "company_id",
+        "expected_origin_final_receipt_body_digest",
+        "expected_origin_revision",
+        "expected_recovery_plan_digest",
+        "idempotency_key",
+        "origin_operation_id",
+        "reason",
+        "recovery_date",
+    }
+)
 _EFFECT_FINALIZER_FD_ENV = "ODOO_ACCOUNTING_CLI_V3_EFFECT_FINALIZER_FD"
 _TRUSTED_DEADLINE_ENV = (
     "ODOO_ACCOUNTING_CLI_V3_TRUSTED_DEADLINE_MONOTONIC"
@@ -110,6 +130,10 @@ class HistoricalOperationStore(Protocol):
 
     def get_recovery_operation_binding(
         self, recovery_operation_id: str
+    ) -> Any: ...
+
+    def get_reconciliation_undo_operation_binding(
+        self, undo_operation_id: str
     ) -> Any: ...
 
     def get_final_write_receipts(self, operation_id: str) -> tuple[Any, ...]: ...
@@ -884,6 +908,20 @@ class HistoricalReleaseRouter:
                 "durable recovery binding could not be verified"
             ) from exc
 
+    def _optional_reconciliation_undo_binding(
+        self, undo_operation_id: str
+    ) -> Any | None:
+        try:
+            return self._store.get_reconciliation_undo_operation_binding(
+                undo_operation_id
+            )
+        except OperationNotFound:
+            return None
+        except Exception as exc:
+            raise HistoricalRouterError(
+                "durable reconciliation undo binding could not be verified"
+            ) from exc
+
     def _validated_origin_recovery_plan(self, origin: Any) -> dict[str, Any]:
         """Load one receipt-bound executable V2 plan from the current store."""
 
@@ -966,6 +1004,164 @@ class HistoricalReleaseRouter:
                 "durable origin recovery plan is not canonical JSON"
             ) from exc
 
+    def _validated_reconciliation_undo_origin(
+        self,
+        origin: Any,
+        parameters: Mapping[str, Any],
+    ) -> tuple[Any, dict[str, Any], str]:
+        """Validate the immutable receipt that authorizes one ordinary undo."""
+
+        if set(parameters) != _RECONCILIATION_UNDO_PARAMETER_FIELDS:
+            raise HistoricalRouterError(
+                "reconciliation undo parameters are incomplete"
+            )
+        try:
+            state = origin.state.value
+            expected_revision = parameters["expected_origin_revision"]
+            expected_receipt_digest = _digest(
+                parameters["expected_origin_final_receipt_body_digest"],
+                "expected origin final receipt body digest",
+            )
+            expected_plan_digest = _digest(
+                parameters["expected_recovery_plan_digest"],
+                "expected recovery plan digest",
+            )
+            receipts = tuple(
+                self._store.get_final_write_receipts(origin.operation_id)
+            )
+            if len(receipts) != 1:
+                raise HistoricalRouterError(
+                    "reconciliation undo origin has no unique final receipt"
+                )
+            receipt = receipts[0]
+            body = receipt.body
+            body_digest = _digest(
+                receipt.body_digest,
+                "durable origin final receipt body digest",
+            )
+            computed_body_digest = hashlib.sha256(
+                canonical_json(body)
+            ).hexdigest()
+            details = body.get("receipt_details")
+            plan = (
+                details.get("recovery_plan")
+                if type(details) is dict
+                else None
+            )
+            verification = (
+                details.get("verification")
+                if type(details) is dict
+                else None
+            )
+            database_finalization = (
+                details.get("database_finalization")
+                if type(details) is dict
+                else None
+            )
+            validate_executable_recovery_plan(plan)
+            index_recovery_guard_graph(
+                plan, expected_company_id=origin.company_id
+            )
+            receipt_binding = (
+                receipt.operation_id == origin.operation_id
+                and receipt.operation_digest == origin.digest
+                and receipt.operation_revision == origin.revision
+                and receipt.terminal_state == state
+                and receipt.principal == origin.principal
+                and receipt.user_id == origin.user_id
+                and receipt.company_id == origin.company_id
+                and getattr(receipt, "result_succeeded", None) is True
+            )
+            body_binding = (
+                body.get("operation_id") == origin.operation_id
+                and body.get("operation_digest") == origin.digest
+                and body.get("operation_revision") == origin.revision
+                and body.get("terminal_state") == state
+                and body.get("capability_id") == origin.capability_id
+                and body.get("principal") == origin.principal
+                and body.get("user_id") == origin.user_id
+                and body.get("company_id") == origin.company_id
+                and body.get("odoo_instance_id") == origin.odoo_instance_id
+                and body.get("database_name") == origin.database_name
+                and body.get("database_uuid") == origin.database_uuid
+                and body.get("environment") == origin.environment
+                and body.get("registry_digest") == origin.registry_digest
+                and body.get("release_digest") == origin.release_digest
+            )
+        except HistoricalRouterError:
+            raise
+        except (WriteReceiptError, AttributeError, KeyError, TypeError) as exc:
+            raise HistoricalRouterError(
+                "reconciliation undo origin receipt is not executable"
+            ) from exc
+        except (ValueError, UnicodeError) as exc:
+            raise HistoricalRouterError(
+                "reconciliation undo origin receipt is not canonical JSON"
+            ) from exc
+        except Exception as exc:
+            raise HistoricalRouterError(
+                "reconciliation undo origin receipt could not be verified"
+            ) from exc
+        if (
+            origin.capability_id != _RECONCILIATION_ORIGIN_CAPABILITY
+            or state != "completed"
+            or type(expected_revision) is not int
+            or expected_revision <= 0
+            or origin.revision != expected_revision
+            or type(parameters["company_id"]) is not int
+            or parameters["company_id"] <= 0
+            or parameters["company_id"] != origin.company_id
+        ):
+            raise HistoricalRouterError(
+                "reconciliation undo requires the exact completed origin revision"
+            )
+        if (
+            not receipt_binding
+            or not body_binding
+            or not hmac.compare_digest(body_digest, computed_body_digest)
+            or not hmac.compare_digest(
+                body_digest, expected_receipt_digest
+            )
+        ):
+            raise HistoricalRouterError(
+                "reconciliation undo origin final receipt binding is invalid"
+            )
+        if (
+            type(verification) is not dict
+            or verification.get("passed") is not True
+            or type(database_finalization) is not dict
+            or not database_finalization
+        ):
+            raise HistoricalRouterError(
+                "reconciliation undo origin is not verified and database-finalized"
+            )
+        if (
+            plan["plan_version"] != 2
+            or plan["origin_operation_id"] != origin.operation_id
+            or plan["recovery_capability_id"] != "acct.recovery.execute.v1"
+            or plan["method"] != _RECONCILIATION_UNDO_METHOD
+            or plan["oracle_id"] != _RECONCILIATION_UNDO_ORACLE
+            or plan["requires_approval"] is not True
+            or not hmac.compare_digest(
+                plan["plan_digest"], expected_plan_digest
+            )
+        ):
+            raise HistoricalRouterError(
+                "reconciliation undo origin recovery plan binding is invalid"
+            )
+        try:
+            return (
+                receipt,
+                json.loads(canonical_json(plan)),
+                hashlib.sha256(
+                    canonical_json(database_finalization)
+                ).hexdigest(),
+            )
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise HistoricalRouterError(
+                "reconciliation undo origin evidence is not canonical JSON"
+            ) from exc
+
     @staticmethod
     def _assert_context(operation: Any, parsed: WriteApiRequest) -> None:
         if not _operation_context_matches(operation, parsed):
@@ -1026,6 +1222,71 @@ class HistoricalReleaseRouter:
         if not valid:
             raise HistoricalRouterError("durable recovery binding mismatch")
 
+    @staticmethod
+    def _assert_reconciliation_undo_binding(
+        binding: Any,
+        *,
+        origin: Any,
+        undo: Any,
+        receipt: Any,
+        route: HistoricalRoute,
+        plan_digest: str,
+        database_finalization_digest: str,
+    ) -> None:
+        try:
+            valid = (
+                binding.binding_version == 1
+                and binding.origin_operation_id == origin.operation_id
+                and binding.origin_request_id == origin.request_id
+                and binding.origin_operation_digest == origin.digest
+                and binding.origin_operation_revision == origin.revision
+                and binding.origin_final_receipt_id == receipt.receipt_id
+                and hmac.compare_digest(
+                    binding.origin_final_receipt_body_digest,
+                    receipt.body_digest,
+                )
+                and hmac.compare_digest(
+                    binding.origin_database_finalization_digest,
+                    database_finalization_digest,
+                )
+                and binding.undo_operation_id == undo.operation_id
+                and binding.undo_request_id == undo.request_id
+                and binding.undo_operation_digest == undo.digest
+                and binding.undo_operation_revision == 0
+                and hmac.compare_digest(binding.plan_digest, plan_digest)
+                and binding.principal == undo.principal == origin.principal
+                and binding.user_id == undo.user_id == origin.user_id
+                and binding.company_id == undo.company_id == origin.company_id
+                and binding.odoo_instance_id
+                == undo.odoo_instance_id
+                == origin.odoo_instance_id
+                and binding.database_name
+                == undo.database_name
+                == origin.database_name
+                and binding.database_uuid
+                == undo.database_uuid
+                == origin.database_uuid
+                and binding.environment
+                == undo.environment
+                == origin.environment
+                and binding.release_digest
+                == undo.release_digest
+                == origin.release_digest
+                == route.release_digest
+                and binding.registry_digest
+                == undo.registry_digest
+                == origin.registry_digest
+                == route.registry_digest
+            )
+        except (AttributeError, TypeError) as exc:
+            raise HistoricalRouterError(
+                "durable reconciliation undo binding is incomplete"
+            ) from exc
+        if not valid:
+            raise HistoricalRouterError(
+                "durable reconciliation undo binding mismatch"
+            )
+
     def _resolve_route(
         self,
         parsed: WriteApiRequest,
@@ -1038,6 +1299,39 @@ class HistoricalReleaseRouter:
                     "recovery operations must be prepared from a verified origin receipt"
                 )
             existing = self._optional_operation(payload["operation_id"])
+            if payload["capability_id"] == _RECONCILIATION_UNDO_CAPABILITY:
+                try:
+                    origin_id = payload["parameters"]["origin_operation_id"]
+                except (KeyError, TypeError) as exc:
+                    raise HistoricalRouterError(
+                        "reconciliation undo origin operation ID is invalid"
+                    ) from exc
+                if (
+                    type(origin_id) is not str
+                    or not origin_id
+                    or origin_id == payload["operation_id"]
+                ):
+                    raise HistoricalRouterError(
+                        "reconciliation undo requires a distinct origin operation"
+                    )
+                origin = self._operation(origin_id)
+                self._assert_context(origin, parsed)
+                _receipt, plan, _finalization_digest = (
+                    self._validated_reconciliation_undo_origin(
+                        origin, payload["parameters"]
+                    )
+                )
+                origin_route = self._route_for_operation(origin, manifest)
+                if existing is None:
+                    return origin_route, origin, plan["plan_digest"]
+                operation = self._operation(payload["operation_id"])
+                self._assert_existing_prepare_request(operation, parsed)
+                route = self._route_for_operation(operation, manifest)
+                if route != origin_route:
+                    raise HistoricalRouterError(
+                        "reconciliation undo operation route differs from its origin"
+                    )
+                return route, operation, plan["plan_digest"]
             if existing is None:
                 return manifest.routes[manifest.current_release_digest], None, None
             operation = self._operation(payload["operation_id"])
@@ -1078,6 +1372,44 @@ class HistoricalReleaseRouter:
                 if route != origin_route:
                     raise HistoricalRouterError(
                         "recovery operation route differs from its origin"
+                    )
+            if (
+                operation.capability_id == _RECONCILIATION_UNDO_CAPABILITY
+                and parsed.action in _RECOVERY_LIFECYCLE_ADVANCING_ACTIONS
+            ):
+                binding = self._optional_reconciliation_undo_binding(
+                    operation.operation_id
+                )
+                if binding is None:
+                    raise HistoricalRouterError(
+                        "reconciliation undo operation has no durable origin binding"
+                    )
+                try:
+                    origin_id = binding.origin_operation_id
+                except AttributeError as exc:
+                    raise HistoricalRouterError(
+                        "durable reconciliation undo binding is incomplete"
+                    ) from exc
+                origin = self._operation(origin_id)
+                self._assert_context(origin, parsed)
+                origin_route = self._route_for_operation(origin, manifest)
+                receipt, plan, finalization_digest = (
+                    self._validated_reconciliation_undo_origin(
+                        origin, operation.parameters
+                    )
+                )
+                self._assert_reconciliation_undo_binding(
+                    binding,
+                    origin=origin,
+                    undo=operation,
+                    receipt=receipt,
+                    route=origin_route,
+                    plan_digest=plan["plan_digest"],
+                    database_finalization_digest=finalization_digest,
+                )
+                if route != origin_route:
+                    raise HistoricalRouterError(
+                        "reconciliation undo operation route differs from its origin"
                     )
             return route, operation, None
 
@@ -1405,6 +1737,53 @@ class HistoricalReleaseRouter:
                 raise HistoricalRouterError(
                     "historical prepare idempotency binding is invalid"
                 )
+        if (
+            parsed.action == "operation.prepare"
+            and payload["capability_id"] == _RECONCILIATION_UNDO_CAPABILITY
+        ):
+            parameters = getattr(operation, "parameters", None)
+            if not isinstance(parameters, dict):
+                raise HistoricalRouterError(
+                    "historical reconciliation undo parameters are invalid"
+                )
+            try:
+                origin_id = parameters["origin_operation_id"]
+            except KeyError as exc:
+                raise HistoricalRouterError(
+                    "historical reconciliation undo origin is invalid"
+                ) from exc
+            origin = self._operation(origin_id)
+            self._assert_context(origin, parsed)
+            receipt, plan, finalization_digest = (
+                self._validated_reconciliation_undo_origin(
+                    origin, parameters
+                )
+            )
+            if (
+                expected_recovery_plan_digest is None
+                or not hmac.compare_digest(
+                    plan["plan_digest"], expected_recovery_plan_digest
+                )
+            ):
+                raise HistoricalRouterError(
+                    "reconciliation undo origin plan changed during dispatch"
+                )
+            binding = self._optional_reconciliation_undo_binding(
+                operation.operation_id
+            )
+            if binding is None:
+                raise HistoricalRouterError(
+                    "historical prepare did not persist a reconciliation undo binding"
+                )
+            self._assert_reconciliation_undo_binding(
+                binding,
+                origin=origin,
+                undo=operation,
+                receipt=receipt,
+                route=route,
+                plan_digest=plan["plan_digest"],
+                database_finalization_digest=finalization_digest,
+            )
 
     def dispatch(
         self,

@@ -64,10 +64,10 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert payload["command"] == "registry.audit"
     assert data["registry_audit_ready"] is True
     assert data["blockers"] == []
-    assert data["total_count"] == 28
-    assert data["access_counts"] == {"read": 10, "write": 18}
+    assert data["total_count"] == 29
+    assert data["access_counts"] == {"read": 10, "write": 19}
     assert data["read_count"] == 10
-    assert data["write_count"] == 18
+    assert data["write_count"] == 19
     assert data["strict_schema"]["input_strict_count"] == data["total_count"]
     assert data["strict_schema"]["output_strict_count"] == data["total_count"]
     assert data["policy_counts"]["write_approval_required"] == data["write_count"]
@@ -114,6 +114,28 @@ def test_registry_get_returns_declared_disabled_payment_cancel_contract() -> Non
     }
     assert capability["recovery"] == {
         "method": "manual_escalation_after_terminal_payment_cancel",
+    }
+    assert capability["evidence"] == {"level": "declared", "receipts": []}
+    assert capability.get("staged_environments", []) == []
+    assert capability["enabled_environments"] == []
+
+
+def test_registry_get_returns_declared_disabled_reconciliation_undo_contract() -> None:
+    capability_id = "acct.reconciliation.undo.v1"
+    result = _run("registry", "get", "--capability-id", capability_id)
+
+    assert result.returncode == 0
+    assert result.stderr == ""
+    capability = json.loads(result.stdout)["data"]["capability"]
+    assert capability["id"] == capability_id
+    assert capability["risk_level"] == "critical"
+    assert capability["odoo_permissions"] == ["account.group_account_manager"]
+    assert capability["approval"] == {
+        "required": True, "policy": "reconciliation_undo",
+        "ttl_seconds": 600,
+    }
+    assert capability["idempotency"] == {
+        "required": True, "scope": "company_origin_operation",
     }
     assert capability["evidence"] == {"level": "declared", "receipts": []}
     assert capability.get("staged_environments", []) == []

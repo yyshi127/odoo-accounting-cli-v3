@@ -129,6 +129,14 @@ _ALLOWED_MODELS = {
             "account.full.reconcile",
         }
     ),
+    "acct.reconciliation.undo.v1": frozenset(
+        {
+            "account.move",
+            "account.move.line",
+            "account.partial.reconcile",
+            "account.full.reconcile",
+        }
+    ),
     "acct.asset.create.v1": frozenset(
         {"account.asset", "account.move", "account.move.line"}
     ),
@@ -638,6 +646,13 @@ class DurableWriteService:
         capability_id: str,
         parameters: dict[str, Any],
     ) -> Operation:
+        if capability_id == "acct.reconciliation.undo.v1":
+            return self._prepare_reconciliation_undo(
+                context,
+                operation_id=operation_id,
+                request_id=request_id,
+                parameters=parameters,
+            )
         return self._prepare_operation(
             context,
             operation_id=operation_id,
@@ -701,6 +716,69 @@ class DurableWriteService:
         self._assert_context_binding(context, operation)
         return operation
 
+    def _prepare_reconciliation_undo(
+        self,
+        context: RequestContext,
+        *,
+        operation_id: str,
+        request_id: str,
+        parameters: dict[str, Any],
+    ) -> Operation:
+        try:
+            normalized_parameters = json.loads(canonical_json(parameters))
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise WriteServiceError(
+                "write parameters are not canonical JSON"
+            ) from exc
+        capability = self._policy.validate_request(
+            context,
+            "acct.reconciliation.undo.v1",
+            normalized_parameters,
+        )
+        if capability.data["access"] != "write":
+            raise WriteServiceError(
+                "reconciliation undo capability is not a write"
+            )
+        origin, origin_receipt, plan = (
+            self._validated_reconciliation_undo_origin(
+                context,
+                normalized_parameters,
+            )
+        )
+        undo = self._prepare_operation(
+            context,
+            operation_id=operation_id,
+            request_id=request_id,
+            capability_id="acct.reconciliation.undo.v1",
+            parameters=normalized_parameters,
+            allow_receipt_derived_recovery=False,
+        )
+        try:
+            binding = (
+                self._store.get_reconciliation_undo_operation_binding(
+                    undo.operation_id
+                )
+            )
+        except OperationNotFound:
+            binding = self._store.bind_reconciliation_undo_operation(
+                origin_operation_id=origin.operation_id,
+                undo_operation_id=undo.operation_id,
+                expected_origin_revision=origin.revision,
+                expected_origin_final_receipt_body_digest=(
+                    origin_receipt.body_digest
+                ),
+                plan_digest=plan["plan_digest"],
+                occurred_at=self._now(),
+            )
+        self._assert_reconciliation_undo_binding(
+            undo,
+            origin,
+            origin_receipt,
+            plan,
+            binding,
+        )
+        return undo
+
     def preview(self, context: RequestContext, operation_id: str) -> dict[str, Any]:
         operation = self.status(context, operation_id)
         capability = self._capability(context, operation)
@@ -713,6 +791,7 @@ class DurableWriteService:
         self._consume_authenticated_write(
             context, capability.id, operation.parameters
         )
+        self._assert_receipt_bound_operation(context, operation)
         evidence = self._precheck_executor(
             context,
             capability,
@@ -1819,6 +1898,18 @@ class DurableWriteService:
         """Rebuild the same verified terminal output after response loss."""
 
         operation = self.status(context, operation_id)
+        self._assert_receipt_bound_operation(context, operation)
+        return self._result_for_operation(context, operation)
+
+    def _result_for_operation(
+        self,
+        context: RequestContext,
+        operation: Operation,
+    ) -> dict[str, Any]:
+        """Verify a context-bound related operation without rebinding its action digest."""
+
+        self._assert_context_binding(context, operation)
+        operation.assert_integrity()
         capability = self._capability(
             context,
             operation,
@@ -1913,6 +2004,177 @@ class DurableWriteService:
                 recovery_operation=operation,
             )
         return output
+
+    def _validated_reconciliation_undo_origin(
+        self,
+        context: RequestContext,
+        parameters: dict[str, Any],
+    ) -> tuple[Operation, Any, dict[str, Any]]:
+        origin_operation_id = parameters.get("origin_operation_id")
+        if not isinstance(origin_operation_id, str):
+            raise WriteServiceError(
+                "reconciliation undo origin operation ID is invalid"
+            )
+        origin = self._store.get_operation(origin_operation_id)
+        self._assert_context_binding(context, origin)
+        origin.assert_integrity()
+        if (
+            origin.capability_id != "acct.reconciliation.apply.v1"
+            or origin.state != State.COMPLETED
+            or origin.revision
+            != parameters.get("expected_origin_revision")
+        ):
+            raise WriteServiceError(
+                "reconciliation undo requires the exact completed "
+                "reconciliation origin revision"
+            )
+        output = self._result_for_operation(context, origin)
+        if (
+            output.get("operation_state") != State.COMPLETED.value
+            or output.get("verification", {}).get("passed") is not True
+            or not isinstance(output.get("database_finalization"), dict)
+            or not output["database_finalization"]
+        ):
+            raise WriteServiceError(
+                "reconciliation undo origin is not verified and "
+                "database-finalized"
+            )
+        receipts = [
+            receipt
+            for receipt in self._store.get_final_write_receipts(
+                origin.operation_id
+            )
+            if receipt.operation_revision == origin.revision
+            and receipt.terminal_state == State.COMPLETED.value
+        ]
+        if len(receipts) != 1:
+            raise WriteServiceError(
+                "reconciliation undo origin has no unique final receipt"
+            )
+        receipt = receipts[0]
+        expected_receipt_digest = parameters.get(
+            "expected_origin_final_receipt_body_digest"
+        )
+        if (
+            not isinstance(expected_receipt_digest, str)
+            or not hmac.compare_digest(
+                receipt.body_digest, expected_receipt_digest
+            )
+        ):
+            raise WriteServiceError(
+                "reconciliation undo origin final receipt digest changed"
+            )
+        details = receipt.body.get("receipt_details")
+        plan = (
+            details.get("recovery_plan")
+            if isinstance(details, dict)
+            else None
+        )
+        try:
+            validate_executable_recovery_plan(plan)
+            index_recovery_guard_graph(
+                plan, expected_company_id=origin.company_id
+            )
+            contract = select_recovery_action_contract(
+                origin.capability_id,
+                plan["method"],
+                plan["oracle_id"],
+            )
+        except (WriteReceiptError, RecoveryContractError) as exc:
+            raise WriteServiceError(
+                "reconciliation undo origin recovery plan is invalid"
+            ) from exc
+        expected_plan_digest = parameters.get(
+            "expected_recovery_plan_digest"
+        )
+        if (
+            plan["plan_version"] != 2
+            or plan["origin_operation_id"] != origin.operation_id
+            or plan["recovery_capability_id"]
+            != "acct.recovery.execute.v1"
+            or plan["method"]
+            != "undo_reconciliation_and_reverse_writeoff_v1"
+            or plan["oracle_id"]
+            != "undo_reconciliation_and_reverse_writeoff_exact_v1"
+            or contract.origin_capability_id != origin.capability_id
+            or plan["requires_approval"] is not True
+            or not isinstance(expected_plan_digest, str)
+            or not hmac.compare_digest(
+                plan["plan_digest"], expected_plan_digest
+            )
+            or canonical_json(output.get("recovery_plan"))
+            != canonical_json(plan)
+        ):
+            raise WriteServiceError(
+                "reconciliation undo origin recovery plan binding changed"
+            )
+        if any(
+            event.event_type == "recovery.binding.created"
+            and event.payload.get("origin_operation_id")
+            == origin.operation_id
+            for event in self._store.audit_events()
+        ):
+            raise WriteServiceError(
+                "reconciliation undo origin has an incompatible incident "
+                "recovery binding"
+            )
+        return origin, receipt, json.loads(canonical_json(plan))
+
+    @staticmethod
+    def _assert_reconciliation_undo_binding(
+        undo: Operation,
+        origin: Operation,
+        origin_receipt: Any,
+        plan: dict[str, Any],
+        binding: Any,
+    ) -> None:
+        parameters = undo.parameters
+        if (
+            undo.operation_id == origin.operation_id
+            or undo.capability_id != "acct.reconciliation.undo.v1"
+            or origin.capability_id != "acct.reconciliation.apply.v1"
+            or origin.state != State.COMPLETED
+            or binding.binding_version != 1
+            or binding.audit_event.event_type
+            != "reconciliation.undo.binding.created"
+            or binding.audit_event.operation_id != undo.operation_id
+            or binding.origin_operation_id != origin.operation_id
+            or binding.origin_request_id != origin.request_id
+            or binding.origin_operation_digest != origin.digest
+            or binding.origin_operation_revision != origin.revision
+            or binding.origin_final_receipt_id
+            != origin_receipt.receipt_id
+            or binding.origin_final_receipt_body_digest
+            != origin_receipt.body_digest
+            or binding.undo_operation_id != undo.operation_id
+            or binding.undo_request_id != undo.request_id
+            or binding.undo_operation_digest != undo.digest
+            or binding.undo_operation_revision != 0
+            or binding.plan_digest != plan["plan_digest"]
+            or parameters.get("origin_operation_id")
+            != origin.operation_id
+            or parameters.get("expected_origin_revision")
+            != origin.revision
+            or parameters.get(
+                "expected_origin_final_receipt_body_digest"
+            )
+            != origin_receipt.body_digest
+            or parameters.get("expected_recovery_plan_digest")
+            != plan["plan_digest"]
+            or binding.principal != undo.principal
+            or binding.user_id != undo.user_id
+            or binding.company_id != undo.company_id
+            or binding.odoo_instance_id != undo.odoo_instance_id
+            or binding.database_name != undo.database_name
+            or binding.database_uuid != undo.database_uuid
+            or binding.environment != undo.environment
+            or binding.registry_digest != undo.registry_digest
+            or binding.release_digest != undo.release_digest
+        ):
+            raise WriteServiceError(
+                "reconciliation undo binding differs from its immutable "
+                "origin receipt"
+            )
 
     def _validated_origin_recovery_plan(
         self,
@@ -2607,6 +2869,33 @@ class DurableWriteService:
     ) -> dict[str, Any] | None:
         """Load the server-held plan supplied to the Odoo recovery handler."""
 
+        if operation.capability_id == "acct.reconciliation.undo.v1":
+            self._assert_context_binding(context, operation)
+            try:
+                binding = (
+                    self._store.get_reconciliation_undo_operation_binding(
+                        operation.operation_id
+                    )
+                )
+            except OperationNotFound as exc:
+                raise WriteServiceError(
+                    "reconciliation undo operation has no durable origin "
+                    "binding"
+                ) from exc
+            origin, origin_receipt, plan = (
+                self._validated_reconciliation_undo_origin(
+                    context,
+                    operation.parameters,
+                )
+            )
+            self._assert_reconciliation_undo_binding(
+                operation,
+                origin,
+                origin_receipt,
+                plan,
+                binding,
+            )
+            return plan
         if operation.capability_id != "acct.recovery.execute.v1":
             return None
         self._assert_context_binding(context, operation)
@@ -2633,12 +2922,28 @@ class DurableWriteService:
         )
         return plan
 
+    def _assert_receipt_bound_operation(
+        self,
+        context: RequestContext,
+        operation: Operation,
+    ) -> None:
+        """Keep ordinary receipt-bound undo fail-closed inside the service."""
+
+        if operation.capability_id != "acct.reconciliation.undo.v1":
+            return
+        plan = self.trusted_recovery_plan(context, operation)
+        if plan is None:  # pragma: no cover - guarded by the capability check
+            raise WriteServiceError(
+                "reconciliation undo has no trusted origin plan"
+            )
+
     def _assert_live_precheck(
         self,
         context: RequestContext,
         capability: Capability,
         operation: Operation,
     ) -> None:
+        self._assert_receipt_bound_operation(context, operation)
         live_precheck = self._precheck_executor(
             context,
             capability,
@@ -2879,6 +3184,7 @@ class DurableWriteService:
             self._consume_authenticated_write(
                 context, operation.capability_id, operation.parameters
             )
+            self._assert_receipt_bound_operation(context, operation)
             return self.result(context, operation.operation_id)
         approval_expired = self._now() >= approval.expires_at
         if reconciliation_only:
@@ -2918,6 +3224,7 @@ class DurableWriteService:
         self._consume_authenticated_write(
             context, capability.id, operation.parameters
         )
+        self._assert_receipt_bound_operation(context, operation)
         live_precheck_confirmed = False
         approval_ttl_seconds = self._approval_ttl_seconds(capability)
 
@@ -2959,6 +3266,7 @@ class DurableWriteService:
             )
             if not live_precheck_confirmed:
                 self._assert_live_precheck(context, capability, operation)
+            self._assert_receipt_bound_operation(context, operation)
             executing = self._store.begin_execution(
                 approval,
                 now=self._now(),
@@ -2972,6 +3280,7 @@ class DurableWriteService:
             executing = self._validate_replayed_approval(
                 operation, approval, capability
             )
+            self._assert_receipt_bound_operation(context, operation)
         else:  # The accepted approval above must produce State.APPROVED.
             raise WriteServiceError("operation approval transition is invalid")
 

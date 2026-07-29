@@ -686,6 +686,16 @@ function writeParameterFixtures() {
 			reason: "执行已验证原操作的注册恢复计划",
 			idempotency_key: "recovery-op-origin-0001",
 		},
+		"acct.reconciliation.undo.v1": {
+			company_id: 7,
+			origin_operation_id: "op-reconciliation-apply-0001",
+			expected_origin_revision: 6,
+			expected_origin_final_receipt_body_digest: "d".repeat(64),
+			expected_recovery_plan_digest: "e".repeat(64),
+			recovery_date: "2026-08-02",
+			reason: "Undo the complete receipt-bound reconciliation graph",
+			idempotency_key: "reconciliation-undo-op-origin-0001",
+		},
 	};
 }
 
@@ -1264,12 +1274,12 @@ test("complex financial parameters are retained byte-for-byte through the test b
 	assert.deepEqual(result.data.argv, ["operation", "prepare"]);
 });
 
-test("all 18 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
+test("all 19 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
 	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
 	const registry = JSON.parse(await readFile(registryPath, "utf8"));
 	const writeCapabilities = registry.capabilities.filter((item) => item.access === "write");
 	const fixtures = writeParameterFixtures();
-	assert.equal(writeCapabilities.length, 18);
+	assert.equal(writeCapabilities.length, 19);
 	assert.deepEqual(Object.keys(fixtures).sort(), writeCapabilities.map((item) => item.id).sort());
 
 	const run = createBoundRunner({
@@ -1297,6 +1307,38 @@ test("all 18 registered write schemas have valid complete fixtures and transit b
 			assert.deepEqual(request, before);
 		});
 	}
+});
+
+test("reconciliation undo preserves every trusted origin binding and no free-form graph", async () => {
+	const run = createBoundRunner({
+		cliPath: process.execPath,
+		prefixArgs: [trustedFixture],
+		timeoutMs: 5000,
+	});
+	const parameters = writeParameterFixtures()["acct.reconciliation.undo.v1"];
+	const request = {
+		capability_id: "acct.reconciliation.undo.v1",
+		parameters,
+	};
+	const before = structuredClone(request);
+
+	const result = await run("operation.prepare", request);
+
+	assert.equal(result.ok, true);
+	assert.deepEqual(result.data.parsed_request, before);
+	assert.equal(result.data.raw_stdin, JSON.stringify(before));
+	assert.equal(result.data.parsed_request.parameters.expected_origin_revision, 6);
+	assert.equal(
+		result.data.parsed_request.parameters.expected_origin_final_receipt_body_digest,
+		"d".repeat(64),
+	);
+	assert.equal(
+		result.data.parsed_request.parameters.expected_recovery_plan_digest,
+		"e".repeat(64),
+	);
+	assert.equal(Object.hasOwn(result.data.parsed_request.parameters, "line_ids"), false);
+	assert.equal(Object.hasOwn(result.data.parsed_request.parameters, "payment_id"), false);
+	assert.deepEqual(request, before);
 });
 
 test("unknown Odoo effect preserves the complete CLI error and forbids blind replacement", async () => {

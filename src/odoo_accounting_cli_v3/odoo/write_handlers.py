@@ -51,6 +51,7 @@ from ..recovery_guard import (
 from ..write_receipts import (
     WriteReceiptError,
     create_record_snapshot,
+    index_recovery_guard_graph,
     validate_executable_recovery_plan,
     validate_record_snapshot,
 )
@@ -91,7 +92,17 @@ _CAPABILITIES = frozenset(
         "acct.move.draft_cancel.v1",
         "acct.move.draft_cancel.v2",
         "acct.recovery.execute.v1",
+        "acct.reconciliation.undo.v1",
     }
+)
+_TRUSTED_PLAN_CAPABILITIES = frozenset(
+    {"acct.recovery.execute.v1", "acct.reconciliation.undo.v1"}
+)
+_RECONCILIATION_UNDO_METHOD = (
+    "undo_reconciliation_and_reverse_writeoff_v1"
+)
+_RECONCILIATION_UNDO_ORACLE = (
+    "undo_reconciliation_and_reverse_writeoff_exact_v1"
 )
 
 # This dormant implementation is reachable only through a receipt-derived V2
@@ -1200,7 +1211,7 @@ class OdooWriteHandlers:
             tombstone_keys: set[tuple[str, int]] = set()
             raw_tombstone_keys: tuple[Any, ...] = ()
         elif (
-            capability_id == "acct.recovery.execute.v1"
+            capability_id in _TRUSTED_PLAN_CAPABILITIES
             and isinstance(result, tuple)
             and len(result) == 3
         ):
@@ -1305,6 +1316,7 @@ class OdooWriteHandlers:
             "acct.move.draft_cancel.v1",
             "acct.move.draft_cancel.v2",
             "acct.recovery.execute.v1",
+            "acct.reconciliation.undo.v1",
         }:
             verification_result = method(
                 parameters,
@@ -1315,7 +1327,7 @@ class OdooWriteHandlers:
         else:
             verification_result = method(parameters, company, records)
         if (
-            capability_id == "acct.recovery.execute.v1"
+            capability_id in _TRUSTED_PLAN_CAPABILITIES
             and isinstance(verification_result, tuple)
             and len(verification_result) == 2
         ):
@@ -1445,6 +1457,7 @@ class OdooWriteHandlers:
             "acct.move.draft_cancel.v1": "draft_cancel",
             "acct.move.draft_cancel.v2": "draft_cancel_v2",
             "acct.recovery.execute.v1": "recovery",
+            "acct.reconciliation.undo.v1": "reconciliation_undo",
         }[capability_id]
         return f"{phase}_{key}"
 
@@ -9009,6 +9022,84 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 f"recovery plan execution guard rejected the plan: {exc}"
             ) from exc
+
+    def _reconciliation_undo_plan(
+        self,
+        p: Mapping[str, Any],
+        company: Any,
+    ) -> Mapping[str, Any]:
+        plan = self.context.trusted_recovery_plan
+        try:
+            validate_executable_recovery_plan(plan)
+            index_recovery_guard_graph(
+                plan, expected_company_id=_record_id(company)
+            )
+        except WriteReceiptError as exc:
+            raise OdooWriteHandlerError(
+                "trusted reconciliation undo plan is invalid"
+            ) from exc
+        if (
+            not isinstance(plan, Mapping)
+            or plan.get("plan_version") != 2
+            or plan.get("method") != _RECONCILIATION_UNDO_METHOD
+            or plan.get("oracle_id") != _RECONCILIATION_UNDO_ORACLE
+            or plan.get("origin_operation_id") != p.get("origin_operation_id")
+            or plan.get("plan_digest")
+            != p.get("expected_recovery_plan_digest")
+            or p.get("company_id") != _record_id(company)
+        ):
+            raise OdooWriteHandlerError(
+                "trusted recovery plan is not bound to this reconciliation undo"
+            )
+        return plan
+
+    def precheck_reconciliation_undo(
+        self, p: dict[str, Any], company: Any
+    ) -> dict[str, Any]:
+        self._reconciliation_undo_plan(p, company)
+        return self.precheck_recovery(p, company)
+
+    def execute_reconciliation_undo(self, p, company, checked):
+        self._reconciliation_undo_plan(p, company)
+        result = self.execute_recovery(p, company, checked)
+        if not isinstance(result, tuple) or len(result) != 3:
+            raise OdooWriteHandlerError(
+                "reconciliation undo did not return its exact result graph"
+            )
+        records, _recovery, tombstone_keys = result
+        before = self.trusted_before_values(
+            {"before": checked.get("before")}, company
+        )
+
+        # This verification runs inside the execution savepoint.  A failed
+        # exact oracle therefore aborts the ORM action before the bootstrap can
+        # commit it.  The normal verification phase calls the facade again
+        # after commit against a fresh Odoo environment.
+        verification_result = self.verify_recovery(
+            p, company, list(records), before
+        )
+        if (
+            isinstance(verification_result, tuple)
+            and len(verification_result) == 2
+        ):
+            checks, verified_tombstones = verification_result
+        else:
+            checks = verification_result
+            verified_tombstones = frozenset()
+        if (
+            not isinstance(checks, list)
+            or not checks
+            or set(verified_tombstones) != set(tombstone_keys)
+        ):
+            raise OdooWriteHandlerError(
+                "reconciliation undo exact verification result differs "
+                "from execution"
+            )
+        return result
+
+    def verify_reconciliation_undo(self, p, company, records, before):
+        self._reconciliation_undo_plan(p, company)
+        return self.verify_recovery(p, company, records, before)
 
     def precheck_recovery(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
         plan = self.context.trusted_recovery_plan

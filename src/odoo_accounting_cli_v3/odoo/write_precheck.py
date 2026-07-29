@@ -79,6 +79,13 @@ HANDLER_CORE_FIELDS = frozenset(
 HANDLER_FORBIDDEN_FIELDS = frozenset(
     {"passed", "handler_details", "runtime_binding", "registry_digest", "release_digest"}
 )
+TRUSTED_PLAN_CAPABILITIES = frozenset(
+    {"acct.recovery.execute.v1", "acct.reconciliation.undo.v1"}
+)
+RECONCILIATION_UNDO_METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
+RECONCILIATION_UNDO_ORACLE = (
+    "undo_reconciliation_and_reverse_writeoff_exact_v1"
+)
 
 
 def _digest(value: Any) -> str:
@@ -128,7 +135,7 @@ def _trusted_recovery_plan(
     parameters: dict[str, Any],
     company_id: int,
 ) -> dict[str, Any] | None:
-    if capability_id != "acct.recovery.execute.v1":
+    if capability_id not in TRUSTED_PLAN_CAPABILITIES:
         if value is not None:
             raise OdooWritePrecheckError(
                 "trusted recovery plan must be null for non-recovery prechecks"
@@ -149,6 +156,14 @@ def _trusted_recovery_plan(
     ):
         raise OdooWritePrecheckError(
             "trusted recovery plan is unavailable or outside the bound operation"
+        )
+    if capability_id == "acct.reconciliation.undo.v1" and (
+        plan["plan_version"] != 2
+        or plan["method"] != RECONCILIATION_UNDO_METHOD
+        or plan["oracle_id"] != RECONCILIATION_UNDO_ORACLE
+    ):
+        raise OdooWritePrecheckError(
+            "trusted recovery plan is not an exact reconciliation undo plan"
         )
     try:
         index_recovery_guard_graph(plan, expected_company_id=company_id)

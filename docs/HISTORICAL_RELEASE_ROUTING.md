@@ -48,9 +48,12 @@ the child process group.
   idempotency identity from the one shared durable operation store. An exact
   retry uses the release and registry recorded by the existing operation and
   reuses its original operation and request IDs. A first request uses
-  `current_release_digest`. Changed business content, tenant bindings, or an
-  unavailable retained release fail closed. A successful child response is
-  rejected unless the selected release also persisted that exact operation.
+  `current_release_digest`, except `acct.reconciliation.undo.v1`: that
+  capability first loads the completed `acct.reconciliation.apply.v1` origin
+  and uses the origin's retained release and registry. Changed business
+  content, tenant bindings, or an unavailable retained release fail closed. A
+  successful child response is rejected unless the selected release also
+  persisted that exact operation.
 - Preview, status, result, and approve-execute first load the operation from the
   durable operation store. Its immutable release and registry bindings select
   the route. Caller-supplied context must match the stored principal, database,
@@ -60,6 +63,14 @@ the child process group.
   binding; an orphan recovery operation is rejected. A first recovery prepare
   uses the origin release and is not returned unless the child persists the new
   recovery operation and its trusted origin binding.
+- Reconciliation undo is an ordinary approved write, not incident recovery.
+  Before prepare and every lifecycle-advancing dispatch, the router rechecks
+  the exact completed origin revision, final receipt body digest, verified and
+  database-finalized result, executable V2 complete-graph undo plan, company
+  and tenant context, and durable origin-to-undo binding. The undo and origin
+  must use the same retained release and registry. There is no fallback to the
+  current release, and the completed origin is never moved into the incident
+  recovery state machine.
 - Every successful child response must contain the selected release and
   registry identity in the action's immutable operation, precheck, or audit
   receipt. The router then reloads durable state and re-hashes both route files

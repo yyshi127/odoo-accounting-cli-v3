@@ -157,6 +157,15 @@ class FakeHistoricalExecutor:
                     existing.registry_digest,
                     existing.operation_id,
                 )
+            if request["capability_id"] == "acct.reconciliation.undo.v1":
+                origin = self.operations[
+                    request["parameters"]["origin_operation_id"]
+                ]
+                return (
+                    origin.release_digest,
+                    origin.registry_digest,
+                    request["operation_id"],
+                )
             return CURRENT_RELEASE, CURRENT_REGISTRY, request["operation_id"]
         operation_id = (
             request["origin_operation_id"]
@@ -1929,6 +1938,73 @@ def _seed_old_operation(harness: Harness, operation_id: str = "old-operation") -
     )
 
 
+def _seed_completed_reconciliation_origin(
+    harness: Harness,
+    *,
+    operation_id: str = "old-reconciliation-origin",
+    release_digest: str = OLD_RELEASE,
+    registry_digest: str = OLD_REGISTRY,
+) -> Operation:
+    requester = harness.sessions["requester-session-0123456789abcdef"]
+    prepared = Operation.prepare(
+        operation_id=operation_id,
+        request_id=f"request-{operation_id}",
+        capability_id="acct.reconciliation.apply.v1",
+        parameters={
+            "company_id": requester.company_id,
+            "idempotency_key": f"key-{operation_id}",
+            "line_ids": [701, 702],
+        },
+        principal=requester.principal,
+        user_id=requester.user_id,
+        company_id=requester.company_id,
+        idempotency_key=f"key-{operation_id}",
+        odoo_instance_id=requester.odoo_instance_id,
+        database_name=requester.database_name,
+        database_uuid=requester.database_uuid,
+        environment=requester.environment,
+        registry_digest=registry_digest,
+        release_digest=release_digest,
+    )
+    completed = replace(
+        prepared,
+        state=State.COMPLETED,
+        revision=4,
+        precheck_digest="a" * 64,
+        approval_signature="b" * 64,
+        approval_nonce_digest="c" * 64,
+        approval_issued_at=NOW,
+        approval_expires_at=NOW + timedelta(minutes=2),
+        approval_revision=0,
+        approver_user_id=84,
+        execution_result_digest="d" * 64,
+        verification_result_digest="e" * 64,
+    )
+    completed.assert_integrity()
+    harness.operations[completed.operation_id] = completed
+    return completed
+
+
+def _reconciliation_undo_business_request(
+    origin: Operation,
+    *,
+    idempotency_key: str = "undo-old-reconciliation-1",
+) -> dict[str, object]:
+    return {
+        "capability_id": "acct.reconciliation.undo.v1",
+        "parameters": {
+            "company_id": origin.company_id,
+            "expected_origin_final_receipt_body_digest": "5" * 64,
+            "expected_origin_revision": origin.revision,
+            "expected_recovery_plan_digest": "6" * 64,
+            "idempotency_key": idempotency_key,
+            "origin_operation_id": origin.operation_id,
+            "reason": "Undo the exact completed reconciliation",
+            "recovery_date": "2026-07-16",
+        },
+    }
+
+
 def _seed_historical_prepare_retry(
     harness: Harness,
     *,
@@ -2006,6 +2082,84 @@ def test_prepare_retry_after_release_switch_reuses_original_release_and_ids(
         OLD_REGISTRY,
         "operation.prepare",
     )
+
+
+def test_new_reconciliation_undo_uses_origin_release_authority_and_verifier(
+    harness: Harness,
+) -> None:
+    origin = _seed_completed_reconciliation_origin(harness)
+    request = _reconciliation_undo_business_request(origin)
+
+    result = harness.dispatch("operation.prepare", request)
+
+    assert result.status_code == 200
+    assert result.body["ok"] is True
+    undo = harness.operations[result.body["data"]["operation_id"]]
+    assert undo.capability_id == "acct.reconciliation.undo.v1"
+    assert undo.release_digest == origin.release_digest == OLD_RELEASE
+    assert undo.registry_digest == origin.registry_digest == OLD_REGISTRY
+    assert result.executed_release_digest == OLD_RELEASE
+    assert result.executed_registry_digest == OLD_REGISTRY
+    assert harness.authority_resolutions == [(OLD_RELEASE, OLD_REGISTRY)]
+    assert harness.response_verifications[-1] == (
+        OLD_RELEASE,
+        OLD_REGISTRY,
+        "operation.prepare",
+    )
+    trusted_context = request_context_from_mapping(
+        harness.executor.calls[-1][1]["context"]
+    )
+    assert trusted_context.auth_key_id == "old-context-key"
+
+
+def test_new_reconciliation_undo_never_falls_back_to_current_authority(
+    harness: Harness,
+) -> None:
+    origin = _seed_completed_reconciliation_origin(harness)
+    request = _reconciliation_undo_business_request(origin)
+    del harness.authorities[(OLD_RELEASE, OLD_REGISTRY)]
+
+    result = harness.dispatch("operation.prepare", request)
+
+    assert result.status_code == 200
+    assert result.body["ok"] is False
+    assert (
+        result.body["error"]["code"]
+        == "broker_release_authority_unavailable"
+    )
+    assert harness.authority_resolutions == [(OLD_RELEASE, OLD_REGISTRY)]
+    assert harness.executor.calls == []
+    assert (CURRENT_RELEASE, CURRENT_REGISTRY) not in (
+        harness.authority_resolutions
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("expected_origin_revision", 5),
+        ("company_id", 8),
+    ],
+)
+def test_new_reconciliation_undo_rejects_origin_binding_drift_before_authority(
+    harness: Harness,
+    field: str,
+    value: object,
+) -> None:
+    origin = _seed_completed_reconciliation_origin(harness)
+    request = _reconciliation_undo_business_request(origin)
+    request["parameters"] = {**request["parameters"], field: value}
+
+    result = harness.dispatch("operation.prepare", request)
+
+    assert result.status_code == 200
+    assert result.body["ok"] is False
+    assert (
+        result.body["error"]["code"]
+        == "broker_reconciliation_undo_origin_rejected"
+    )
+    assert harness.authority_resolutions == []
+    assert harness.executor.calls == []
 
 
 def test_prepare_retry_after_release_switch_rejects_content_drift(

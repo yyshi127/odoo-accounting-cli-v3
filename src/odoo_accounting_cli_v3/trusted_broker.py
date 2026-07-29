@@ -52,6 +52,20 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SESSION_HANDLE = re.compile(r"[A-Za-z0-9._~-]{32,512}\Z")
 _MAX_LINUX_ID = 2**32 - 2
 _MAX_LINUX_PID = 2**31 - 1
+_RECONCILIATION_UNDO_CAPABILITY = "acct.reconciliation.undo.v1"
+_RECONCILIATION_ORIGIN_CAPABILITY = "acct.reconciliation.apply.v1"
+_RECONCILIATION_UNDO_PARAMETER_FIELDS = frozenset(
+    {
+        "company_id",
+        "expected_origin_final_receipt_body_digest",
+        "expected_origin_revision",
+        "expected_recovery_plan_digest",
+        "idempotency_key",
+        "origin_operation_id",
+        "reason",
+        "recovery_date",
+    }
+)
 
 _BUSINESS_FIELDS: dict[str, frozenset[str]] = {
     "read": frozenset({"capability_id", "parameters"}),
@@ -448,7 +462,27 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
     if not isinstance(action, str) or action not in _BUSINESS_FIELDS:
         raise TrustedBrokerError("broker_action_rejected", status_code=404)
     request = _canonical_object(value, "business request")
-    if set(request) != _BUSINESS_FIELDS[action] or _contains_authority_field(request):
+    authority_check = request
+    if (
+        action == "operation.prepare"
+        and request.get("capability_id") == _RECONCILIATION_UNDO_CAPABILITY
+        and isinstance(request.get("parameters"), dict)
+    ):
+        # This field is receipt-bound business input for the undo facade, not
+        # an authority-selected route control.  Keep every other occurrence
+        # of an authority field forbidden, including nested occurrences.
+        authority_check = {
+            **request,
+            "parameters": {
+                key: child
+                for key, child in request["parameters"].items()
+                if key != "expected_origin_revision"
+            },
+        }
+    if (
+        set(request) != _BUSINESS_FIELDS[action]
+        or _contains_authority_field(authority_check)
+    ):
         raise TrustedBrokerError(
             "broker_business_request_rejected", status_code=400
         )
@@ -463,6 +497,52 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
                 request["parameters"].get("idempotency_key"),
                 "idempotency_key",
             )
+            if request["capability_id"] == _RECONCILIATION_UNDO_CAPABILITY:
+                parameters = request["parameters"]
+                try:
+                    parsed_date = date.fromisoformat(
+                        parameters["recovery_date"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise TrustedBrokerError(
+                        "broker_business_request_rejected",
+                        status_code=400,
+                    ) from exc
+                reason = parameters.get("reason")
+                revision = parameters.get("expected_origin_revision")
+                company_id = parameters.get("company_id")
+                if (
+                    set(parameters)
+                    != _RECONCILIATION_UNDO_PARAMETER_FIELDS
+                    or not isinstance(
+                        parameters.get("origin_operation_id"), str
+                    )
+                    or _IDENTIFIER.fullmatch(
+                        parameters["origin_operation_id"]
+                    ) is None
+                    or type(company_id) is not int
+                    or company_id <= 0
+                    or type(revision) is not int
+                    or not 1 <= revision <= 2147483647
+                    or not _is_digest(
+                        parameters.get(
+                            "expected_origin_final_receipt_body_digest"
+                        )
+                    )
+                    or not _is_digest(
+                        parameters.get("expected_recovery_plan_digest")
+                    )
+                    or parsed_date.isoformat()
+                    != parameters["recovery_date"]
+                    or not isinstance(reason, str)
+                    or reason != reason.strip()
+                    or not reason
+                    or len(reason) > 512
+                ):
+                    raise TrustedBrokerError(
+                        "broker_business_request_rejected",
+                        status_code=400,
+                    )
     elif action == "operation.diagnostics":
         _identifier(request["operation_id"], "operation_id")
         company_id = request["company_id"]
@@ -1641,6 +1721,46 @@ class TrustedBroker:
                 session=trusted_session, request=request
             )
             if operation is None:
+                if (
+                    request["capability_id"]
+                    == _RECONCILIATION_UNDO_CAPABILITY
+                ):
+                    parameters = request["parameters"]
+                    origin = self._operation(
+                        parameters["origin_operation_id"]
+                    )
+                    if not (
+                        origin.principal == trusted_session.principal
+                        and origin.odoo_instance_id
+                        == trusted_session.odoo_instance_id
+                        and origin.database_name
+                        == trusted_session.database_name
+                        and origin.database_uuid
+                        == trusted_session.database_uuid
+                        and origin.user_id == trusted_session.user_id
+                        and origin.company_id
+                        == trusted_session.company_id
+                        == parameters["company_id"]
+                        and origin.company_id
+                        in trusted_session.allowed_company_ids
+                        and origin.environment
+                        == trusted_session.environment
+                        and origin.capability_id
+                        == _RECONCILIATION_ORIGIN_CAPABILITY
+                        and origin.state == State.COMPLETED
+                        and origin.revision
+                        == parameters["expected_origin_revision"]
+                        and _is_digest(origin.release_digest)
+                        and _is_digest(origin.registry_digest)
+                    ):
+                        raise TrustedBrokerError(
+                            "broker_reconciliation_undo_origin_rejected",
+                            status_code=409,
+                        )
+                    return (
+                        origin.release_digest,
+                        origin.registry_digest,
+                    ), None
                 return (
                     self._current_release_digest,
                     self._current_registry_digest,

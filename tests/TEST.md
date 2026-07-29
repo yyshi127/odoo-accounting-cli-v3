@@ -21,24 +21,37 @@ where practical, then record actual execution evidence separately.
   `acct.ar.open_items.v1`, `acct.ap.open_items.v1`, and
   `acct.multicurrency.balance_read.v1`,
   `acct.move.draft_cancel_eligibility.v1`,
-  `acct.report.financial_read.v1`, and `acct.tax.report_read.v1` are the eight
-  trusted, statically admissible read-handler targets staged for the isolated
-  `test` environment. Multi-company consolidation and operation diagnostics
-  remain the two declared but unimplemented read gaps.
+  `acct.report.financial_read.v1`, `acct.tax.report_read.v1`,
+  `acct.multicompany.consolidated_read.v1`, and
+  `acct.diagnostics.operation_read.v1` are the ten trusted, statically
+  admissible read-handler targets staged for the isolated `test` environment.
+  The first nine use the constrained Odoo read boundary; diagnostics uses only
+  the trusted local write store.
 - The financial and tax report reads are fixed to posted entries,
   `all_report_eligible` journals, no requested line expansion, and the bound
   company currency. They must execute against real Odoo inside the attested
   PostgreSQL read-only transaction. Both remain `contract_tested` and
   `test`-staged only; neither is production-enabled.
 - No capability is enabled and no write capability is staged.
-- The current registry contains 18 write capabilities: the original 14-capability
+- The current registry contains 19 write capabilities: the original 14-capability
   baseline plus `acct.journal.entry_create.v1`, `acct.move.post.v1`, and
   `acct.move.draft_cancel.v2`, plus the narrowly scoped
-  `acct.payment.cancel.v1`. All four additions remain
+  `acct.payment.cancel.v1` and the receipt-bound
+  `acct.reconciliation.undo.v1`. All five additions remain
   `declared`, have no retained evidence receipts, and are neither staged nor
   enabled. `tests/test_phaseb_move_write_capability_closure.py` is an offline
   schema, semantics, idempotency, signed-failure, tamper, and dispatch test; it
   does not execute Odoo and is not real-Odoo sandbox or production evidence.
+- Dev256 implements `acct.reconciliation.undo.v1` as a separate ordinary write
+  bound to one completed, verified, database-finalized
+  `acct.reconciliation.apply.v1` receipt. Prepare and every advancing lifecycle
+  step revalidate the exact origin revision, receipt and plan digests, actor,
+  company, database, release, durable binding, fixed undo method, and exact
+  oracle. The completed origin never enters incident recovery. The 2026-07-29
+  Windows offline gate collected 5,443 Python tests and completed the full
+  suite with only platform-gated skips; Pi Bridge passed 140 tests with two
+  Linux-only skips. This is development evidence only: no real Odoo sandbox
+  write was performed, and the capability remains unstaged and disabled.
 - The three Phase B handlers currently scope `tracking_disable` to their Odoo
   create/write/post call so uncontrolled mail-thread records cannot escape the
   exact accounting graph. The signed V3 operation anchor and receipts are the
@@ -321,8 +334,8 @@ requests across all enabled domains.
 
 ### Frozen F01-F03/F05 scoring contract
 
-`tests/fixtures/pi_scenarios.v1.json` is the revision-2 frozen Chinese key
-scenario corpus. Its 28 scenarios cover every one of the 24 registered
+`tests/fixtures/pi_scenarios.v1.json` is the revision-5 frozen Chinese key
+scenario corpus. Its 34 scenarios cover every one of the 29 registered
 capabilities and the
 ordinary, ambiguous, adversarial, multi-company, multi-currency, and recovery
 classes. Environment-specific Odoo record IDs are named fixture bindings, so a
@@ -344,6 +357,19 @@ distinguishes payment cancellation from refund creation, reconciliation undo,
 and bank-statement compensation. This frozen scenario and its synthetic trace
 tests are not real Odoo evidence, do not stage or enable the capability, and do
 not authorize any sandbox or production write.
+
+The `acct.reconciliation.undo.v1` scenario is also declared/offline only. It
+accepts only the company, source operation ID, exact source revision, final
+receipt-body digest, complete-graph recovery-plan digest, recovery date,
+reason, and idempotency key. It deliberately does not accept caller-selected
+line, partial-reconcile, full-reconcile, or write-off IDs. The retained source
+must be a completed, verified, database-finalized
+`acct.reconciliation.apply.v1` operation created by a V3 release that already
+contained this receipt-bound facade. Legacy, unfinalized, changed-revision, or
+digest-mismatched origins are ineligible. The scenario distinguishes this
+business undo from payment cancellation, refunds, and failed-operation
+recovery; it is not real Odoo evidence and does not stage or enable the
+capability.
 
 Payment cancellation v1 is limited to the bound company's own currency and a
 standard manual, sent, bank-unmatched two-line payment. Odoo 19's public
@@ -648,6 +674,11 @@ At the current local development checkpoint:
   this precondition by independently binding the exact 10/8/2 inventory and
   all per-capability safety fields in both collector and verifier; it does not
   make either report production-ready.
+- dev253 closes the two static handler gaps: multi-company gross-balance
+  translation now uses the constrained Odoo read executor, while operation
+  diagnostics uses the trusted local persistence reader and never enters the
+  Odoo executor. Static readiness is therefore 10/10, but all ten still lack
+  independent exact-release Goal evidence and remain test-staged only.
 
 The 2026-07-22 Dev29 pre-release worktree validation executed 4,289 tests:
 4,017 passed, 272 platform/external-environment cases skipped, and none failed
