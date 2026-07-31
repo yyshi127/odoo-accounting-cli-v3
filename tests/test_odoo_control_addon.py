@@ -84,6 +84,7 @@ def test_control_addon_is_odoo_19_scoped_and_loadable_as_a_static_package():
         "from . import approval_wizard",
         "from . import module_guard",
         "from . import operation",
+        "from . import mail_thread_projection",
         "from . import session_client",
     ]
     for python_file in ADDON.rglob("*.py"):

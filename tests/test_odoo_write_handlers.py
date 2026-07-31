@@ -9,8 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from odoo_accounting_cli_v3.odoo.write_handlers import (
+    _canonical_decimal,
     _RECOVERY_ACTIONS,
     _SNAPSHOT_FIELDS,
+    _SNAPSHOT_VALUES_SAFE_BYTES,
+    _SNAPSHOT_VALUES_SAFE_CHARS,
     _snapshot_primitive,
     OdooWriteContext,
     OdooWriteHandlerError,
@@ -51,6 +54,18 @@ TEST_MODULE_GRAPH = build_trusted_module_graph(
         for name in sorted(_TEST_MODULE_NAMES)
     ]
 )
+
+
+def test_write_handler_decimal_canonicalization_does_not_round_long_values():
+    assert _canonical_decimal(
+        "12345678901234567890123456780",
+        "amount",
+    ) == "12345678901234567890123456780"
+    assert _canonical_decimal(
+        "12345678901234567890123456781",
+        "amount",
+    ) == "12345678901234567890123456781"
+    assert _canonical_decimal(0.0, "amount") == "0"
 
 
 @pytest.mark.parametrize(
@@ -127,6 +142,32 @@ class Record:
         self.tax_effect_checks += 1
         return getattr(self, "affects_tax_report", False)
 
+    def _odoo_cli_v3_mail_thread_projection(self):
+        projection = getattr(self, "mail_thread_projection", None)
+        if projection is not None:
+            return projection
+        envelope = {
+            "company_id": getattr(
+                getattr(self, "company_id", None),
+                "id",
+                7,
+            ),
+            "mail_count": 0,
+            "mail_mails": [],
+            "message_count": 0,
+            "messages": [],
+            "move_id": self.id,
+            "notification_count": 0,
+            "notifications": [],
+            "version": 1,
+        }
+        return {
+            **envelope,
+            "projection_digest": hashlib.sha256(
+                canonical_json(envelope)
+            ).hexdigest(),
+        }
+
 
 class Model:
     def __init__(self, records=None, factory=None):
@@ -176,9 +217,14 @@ class Env:
         self.models = models
         self.uid = uid
         self.su = su
+        self.user = SimpleNamespace(partner_id=Record(420))
+        self.refs = {"mail.mt_note": Record(421)}
 
     def __getitem__(self, model):
         return self.models[model]
+
+    def ref(self, xmlid):
+        return self.refs[xmlid]
 
 
 def context(
@@ -201,7 +247,9 @@ def context(
 
 def company(**values):
     defaults = {
-        "currency_id": Record(1),
+        "currency_id": Record(1, rounding="0.01"),
+        "account_storno": False,
+        "tax_calculation_rounding_method": "round_per_line",
         "hard_lock_date": None,
         "fiscalyear_lock_date": None,
         "tax_lock_date": None,
@@ -211,6 +259,206 @@ def company(**values):
     }
     defaults.update(values)
     return Record(7, **defaults)
+
+
+def thread_projection(
+    move_id,
+    *,
+    company_id=7,
+    mail_mails=None,
+    messages=None,
+    notifications=None,
+):
+    mail_mails = list(mail_mails or [])
+    messages = [
+        {
+            **item,
+            "audit_shape": item.get(
+                "audit_shape",
+                thread_audit_shape(move_id),
+            ),
+        }
+        for item in list(messages or [])
+    ]
+    notifications = [
+        {"mail_id": None, **item}
+        for item in list(notifications or [])
+    ]
+    envelope = {
+        "company_id": company_id,
+        "mail_count": len(mail_mails),
+        "mail_mails": mail_mails,
+        "message_count": len(messages),
+        "messages": messages,
+        "move_id": move_id,
+        "notification_count": len(notifications),
+        "notifications": notifications,
+        "version": 1,
+    }
+    return {
+        **envelope,
+        "projection_digest": hashlib.sha256(
+            canonical_json(envelope)
+        ).hexdigest(),
+    }
+
+
+def thread_audit_shape(move_id, message=None):
+    def value(field, default=False):
+        return getattr(message, field, default)
+
+    def relation_id(field):
+        return getattr(value(field, None), "id", None)
+
+    def relation_ids(field):
+        raw = value(field, [])
+        identifiers = getattr(raw, "ids", None)
+        if identifiers is not None:
+            return sorted(identifiers)
+        return sorted(
+            [
+            item.id
+            for item in (raw or [])
+            if getattr(item, "id", None) is not None
+            ]
+        )
+    return {
+        "attachment_ids": relation_ids("attachment_ids"),
+        "author_guest_id": relation_id("author_guest_id"),
+        "author_id": relation_id("author_id") or 420,
+        "body_sha256": hashlib.sha256(
+            str(value("body", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "create_date": str(
+            value("create_date", date(2026, 7, 31))
+        ),
+        "create_uid": relation_id("create_uid") or 42,
+        "date": str(value("date", date(2026, 7, 31))),
+        "email_add_signature": bool(
+            value("email_add_signature", False)
+        ),
+        "email_from_sha256": hashlib.sha256(
+            str(value("email_from", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "email_layout_xmlid_sha256": hashlib.sha256(
+            str(value("email_layout_xmlid", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "incoming_email_cc_sha256": hashlib.sha256(
+            str(value("incoming_email_cc", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "incoming_email_to_sha256": hashlib.sha256(
+            str(value("incoming_email_to", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "is_internal": bool(value("is_internal", True)),
+        "mail_activity_type_id": relation_id("mail_activity_type_id"),
+        "mail_server_id": relation_id("mail_server_id"),
+        "message_id_sha256": hashlib.sha256(
+            str(value("message_id", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "message_link_preview_ids": relation_ids(
+            "message_link_preview_ids"
+        ),
+        "message_type": str(value("message_type", "notification")),
+        "model": str(value("model", "account.move")),
+        "outgoing_email_to_sha256": hashlib.sha256(
+            str(value("outgoing_email_to", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "parent_id": relation_id("parent_id"),
+        "partner_ids": relation_ids("partner_ids"),
+        "pinned_at": None,
+        "reaction_ids": relation_ids("reaction_ids"),
+        "record_alias_domain_id": relation_id(
+            "record_alias_domain_id"
+        ),
+        "record_company_id": relation_id("record_company_id"),
+        "reply_to_force_new": bool(value("reply_to_force_new", False)),
+        "reply_to_sha256": hashlib.sha256(
+            str(value("reply_to", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "res_id": move_id,
+        "starred_partner_ids": relation_ids("starred_partner_ids"),
+        "subject_sha256": hashlib.sha256(
+            str(value("subject", "") or "").encode("utf-8")
+        ).hexdigest(),
+        "subtype_id": relation_id("subtype_id") or 421,
+        "tracking_value_ids": relation_ids("tracking_value_ids"),
+        "write_date": str(
+            value("write_date", date(2026, 7, 31))
+        ),
+        "write_uid": relation_id("write_uid") or 42,
+    }
+
+
+def reversal_audit_message(origin, reversal, *, identifier=1050):
+    return Record(
+        identifier,
+        model="account.move",
+        res_id=origin.id,
+        message_type="notification",
+        is_internal=True,
+        subtype_id=Record(421),
+        author_id=Record(420),
+        create_uid=Record(42),
+        create_date=date(2026, 7, 31),
+        attachment_ids=[],
+        tracking_value_ids=[],
+        partner_ids=[],
+        parent_id=None,
+        author_guest_id=None,
+        mail_activity_type_id=None,
+        record_alias_domain_id=None,
+        record_company_id=None,
+        reaction_ids=[],
+        message_link_preview_ids=[],
+        starred_partner_ids=[],
+        pinned_at=None,
+        date=date(2026, 7, 31),
+        email_from=False,
+        email_add_signature=False,
+        email_layout_xmlid=False,
+        incoming_email_to=False,
+        incoming_email_cc=False,
+        message_id="<audit-message@odoo>",
+        outgoing_email_to=False,
+        notification_ids=[],
+        mail_ids=[],
+        mail_server_id=None,
+        reply_to=False,
+        reply_to_force_new=False,
+        subject=False,
+        write_uid=Record(42),
+        write_date=date(2026, 7, 31),
+        body=(
+            "This entry has been "
+            "<a data-oe-model='account.move' "
+            f"data-oe-id='{reversal.id}'>reversed</a>"
+        ),
+    )
+
+
+def attach_reversal_audit(origin, reversal, message):
+    origin.has_message = True
+    origin.message_ids = [message]
+    origin.audit_trail_message_ids = [message]
+    origin.mail_thread_projection = thread_projection(
+        origin.id,
+        messages=[
+            {
+                "id": message.id,
+                "audit_shape": thread_audit_shape(
+                    origin.id,
+                    message,
+                ),
+                "digest": "a" * 64,
+                "mail_ids": [],
+                "notification_ids": [],
+            }
+        ],
+    )
+    reversal.has_message = False
+    reversal.message_ids = []
+    reversal.audit_trail_message_ids = []
+    reversal.mail_thread_projection = thread_projection(reversal.id)
 
 
 class Harness(OdooWriteHandlers):
@@ -276,6 +524,57 @@ class Harness(OdooWriteHandlers):
         }
 
 
+class DraftCancelAclHarness(Harness):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.write_acl_targets = []
+
+    def record(
+        self,
+        model_name,
+        record_id,
+        company,
+        *,
+        write=False,
+        shared=False,
+    ):
+        if write:
+            self.write_acl_targets.append((model_name, record_id))
+        return super().record(
+            model_name,
+            record_id,
+            company,
+            write=write,
+            shared=shared,
+        )
+
+
+class RecoverySharedModelHarness(Harness):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.record_calls = []
+
+    def record(
+        self,
+        model_name,
+        record_id,
+        company,
+        *,
+        write=False,
+        shared=False,
+    ):
+        self.record_calls.append(
+            (model_name, record_id, write, shared)
+        )
+        return super().record(
+            model_name,
+            record_id,
+            company,
+            write=write,
+            shared=shared,
+        )
+
+
 def recovery_target(model_name, record):
     handler = Harness()
     raw = handler.snapshot(model_name, record, handler.test_company)
@@ -293,6 +592,43 @@ def recovery_target(model_name, record):
         "record_state": raw["state"],
         "record_fingerprint": hashlib.sha256(canonical_json(snapshot)).hexdigest(),
     }
+
+
+def test_recovery_loaders_use_shared_company_binding_for_audit_messages():
+    move = Record(10, state="draft", company_id=Record(7))
+    message = Record(20, model="account.move", res_id=9)
+    plan = {
+        "method": "cancel_draft_refund_v1",
+        "action_targets": [
+            {"model": "account.move", "record_id": move.id}
+        ],
+        "guard_records": [
+            {
+                "model": "mail.message",
+                "record_id": message.id,
+                "expected_outcome": "survive_exact",
+            }
+        ],
+    }
+    handler = RecoverySharedModelHarness(
+        records={
+            ("account.move", move.id): move,
+            ("mail.message", message.id): message,
+        }
+    )
+
+    handler._current_recovery_record_references(
+        plan,
+        handler.test_company,
+    )
+    handler._recovery_records_by_role(plan, handler.test_company)
+
+    assert handler.record_calls == [
+        ("account.move", move.id, True, False),
+        ("mail.message", message.id, False, True),
+        ("account.move", move.id, True, False),
+        ("mail.message", message.id, False, True),
+    ]
 
 
 def executable_recovery_plan(
@@ -739,6 +1075,379 @@ def test_snapshot_reads_binary_fields_as_sizes_without_materializing_payloads():
     assert snapshot["values"]["name"] == "USD"
 
 
+def test_account_move_snapshot_includes_validated_mail_thread_projection():
+    comp = company()
+    envelope = {
+        "company_id": comp.id,
+        "mail_count": 0,
+        "mail_mails": [],
+        "message_count": 2,
+        "messages": [
+            {
+                "id": 101,
+                "audit_shape": thread_audit_shape(81),
+                "digest": "a" * 64,
+                "mail_ids": [],
+                "notification_ids": [],
+            },
+            {
+                "id": 102,
+                "audit_shape": thread_audit_shape(81),
+                "digest": "b" * 64,
+                "mail_ids": [],
+                "notification_ids": [201],
+            },
+        ],
+        "move_id": 81,
+        "notification_count": 1,
+        "notifications": [
+            {
+                "id": 201,
+                "mail_id": None,
+                "message_id": 102,
+                "digest": "c" * 64,
+            }
+        ],
+        "version": 1,
+    }
+
+    class CompleteMove(Record):
+        def fields_get(self, fields):
+            return {field: {"type": "char"} for field in fields}
+
+        def read(self, fields):
+            return [{field: False for field in fields}]
+
+    move = CompleteMove(
+        81,
+        company_id=comp,
+        state="draft",
+        mail_thread_projection={
+            **envelope,
+            "projection_digest": hashlib.sha256(
+                canonical_json(envelope)
+            ).hexdigest(),
+        },
+    )
+    handler = OdooWriteHandlers(
+        context(Env({"account.move": Model({move.id: move})}))
+    )
+
+    snapshot = handler.snapshot("account.move", move, comp)
+
+    persisted = snapshot["values"][
+        "odoo_cli_v3_mail_thread_projection"
+    ]
+    assert persisted == {
+        "version": 1,
+        "move_id": move.id,
+        "company_id": comp.id,
+        "projection_digest": move.mail_thread_projection[
+            "projection_digest"
+        ],
+    }
+    assert set(persisted) == {
+        "version",
+        "move_id",
+        "company_id",
+        "projection_digest",
+    }
+
+
+def test_account_move_snapshot_persists_only_digest_for_large_mail_thread():
+    comp = company()
+
+    class CompleteMove(Record):
+        def fields_get(self, fields):
+            return {field: {"type": "char"} for field in fields}
+
+        def read(self, fields):
+            return [{field: False for field in fields}]
+
+    raw = thread_projection(
+        81,
+        messages=[
+            {
+                "id": identifier,
+                "digest": hashlib.sha256(
+                    f"message-{identifier}".encode("utf-8")
+                ).hexdigest(),
+                "mail_ids": [],
+                "notification_ids": [],
+            }
+            for identifier in range(1, 501)
+        ],
+    )
+    move = CompleteMove(
+        81,
+        company_id=comp,
+        state="draft",
+        mail_thread_projection=raw,
+    )
+    handler = OdooWriteHandlers(
+        context(Env({"account.move": Model({move.id: move})}))
+    )
+
+    snapshot = handler.snapshot("account.move", move, comp)
+    persisted = snapshot["values"][
+        "odoo_cli_v3_mail_thread_projection"
+    ]
+
+    assert persisted["projection_digest"] == raw["projection_digest"]
+    assert set(persisted) == {
+        "version",
+        "move_id",
+        "company_id",
+        "projection_digest",
+    }
+    assert (
+        len(canonical_json(snapshot["values"]))
+        < _SNAPSHOT_VALUES_SAFE_BYTES
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("digest", "unsorted_messages", "foreign_notification"),
+)
+def test_mail_thread_projection_validator_rejects_tampering(
+    mutation,
+):
+    comp = company()
+    envelope = {
+        "company_id": comp.id,
+        "mail_count": 0,
+        "mail_mails": [],
+        "message_count": 2,
+        "messages": [
+            {
+                "id": 101,
+                "audit_shape": thread_audit_shape(81),
+                "digest": "a" * 64,
+                "mail_ids": [],
+                "notification_ids": [],
+            },
+            {
+                "id": 102,
+                "audit_shape": thread_audit_shape(81),
+                "digest": "b" * 64,
+                "mail_ids": [],
+                "notification_ids": [201],
+            },
+        ],
+        "move_id": 81,
+        "notification_count": 1,
+        "notifications": [
+            {
+                "id": 201,
+                "mail_id": None,
+                "message_id": 102,
+                "digest": "c" * 64,
+            }
+        ],
+        "version": 1,
+    }
+    projection = {
+        **envelope,
+        "projection_digest": hashlib.sha256(
+            canonical_json(envelope)
+        ).hexdigest(),
+    }
+    if mutation == "digest":
+        projection["projection_digest"] = "f" * 64
+    elif mutation == "unsorted_messages":
+        projection["messages"] = list(reversed(projection["messages"]))
+    else:
+        projection["notifications"][0]["message_id"] = 999
+    move = Record(
+        81,
+        company_id=comp,
+        mail_thread_projection=projection,
+    )
+    handler = Harness()
+
+    with pytest.raises(OdooWriteHandlerError, match="MailThread"):
+        handler.mail_thread_projection(move, comp)
+
+
+def test_mail_thread_projection_rejects_cross_parent_notification_mail():
+    comp = company()
+    projection = thread_projection(
+        81,
+        mail_mails=[
+            {"id": 301, "message_id": 102, "digest": "d" * 64},
+        ],
+        messages=[
+            {
+                "id": 101,
+                "digest": "a" * 64,
+                "mail_ids": [],
+                "notification_ids": [201],
+            },
+            {
+                "id": 102,
+                "digest": "b" * 64,
+                "mail_ids": [301],
+                "notification_ids": [],
+            },
+        ],
+        notifications=[
+            {
+                "id": 201,
+                "mail_id": 301,
+                "message_id": 101,
+                "digest": "c" * 64,
+            }
+        ],
+    )
+    move = Record(
+        81,
+        company_id=comp,
+        mail_thread_projection=projection,
+    )
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="notification mail graph",
+    ):
+        Harness().mail_thread_projection(move, comp)
+
+
+def test_mail_thread_projection_relation_boundary_and_one_over():
+    comp = company()
+
+    def projection(count):
+        mail_ids = list(range(1, count + 1))
+        return thread_projection(
+            81,
+            mail_mails=[
+                {
+                    "id": identifier,
+                    "message_id": 101,
+                    "digest": "b" * 64,
+                }
+                for identifier in mail_ids
+            ],
+            messages=[
+                {
+                    "id": 101,
+                    "digest": "a" * 64,
+                    "mail_ids": mail_ids,
+                    "notification_ids": [],
+                }
+            ],
+        )
+
+    move = Record(
+        81,
+        company_id=comp,
+        mail_thread_projection=projection(500),
+    )
+    assert Harness().mail_thread_projection(move, comp)["mail_count"] == 500
+
+    move.mail_thread_projection = projection(501)
+    with pytest.raises(OdooWriteHandlerError, match="limit|envelope"):
+        Harness().mail_thread_projection(move, comp)
+
+
+def test_account_move_snapshot_size_budgets_accept_boundary_and_reject_one_over():
+    comp = company()
+
+    class SizedMove(Record):
+        payload = ""
+
+        def fields_get(self, fields):
+            return {field: {"type": "char"} for field in fields}
+
+        def read(self, fields):
+            return [
+                {
+                    field: (
+                        self.payload
+                        if field == "narration"
+                        else False
+                    )
+                    for field in fields
+                }
+            ]
+
+    move = SizedMove(81, company_id=comp, state="draft")
+    handler = OdooWriteHandlers(
+        context(Env({"account.move": Model({move.id: move})}))
+    )
+    empty = handler.snapshot("account.move", move, comp)
+    empty_json = canonical_json(empty["values"])
+    char_capacity = _SNAPSHOT_VALUES_SAFE_CHARS - len(
+        empty_json.decode("utf-8")
+    )
+    move.payload = "x" * char_capacity
+    at_char_boundary = handler.snapshot("account.move", move, comp)
+    assert (
+        len(canonical_json(at_char_boundary["values"]).decode("utf-8"))
+        == _SNAPSHOT_VALUES_SAFE_CHARS
+    )
+    move.payload += "x"
+    with pytest.raises(OdooWriteHandlerError, match="size budget"):
+        handler.snapshot("account.move", move, comp)
+
+    move.payload = ""
+    empty = handler.snapshot("account.move", move, comp)
+    empty_bytes = len(canonical_json(empty["values"]))
+    byte_capacity = (
+        _SNAPSHOT_VALUES_SAFE_BYTES - empty_bytes
+    ) // len("界".encode("utf-8"))
+    move.payload = "界" * byte_capacity
+    at_byte_boundary = handler.snapshot("account.move", move, comp)
+    assert (
+        len(canonical_json(at_byte_boundary["values"]))
+        <= _SNAPSHOT_VALUES_SAFE_BYTES
+    )
+    move.payload += "界"
+    with pytest.raises(OdooWriteHandlerError, match="size budget"):
+        handler.snapshot("account.move", move, comp)
+
+
+def test_mail_message_snapshot_avoids_system_only_relation_fields():
+    assert "tracking_value_ids" not in _SNAPSHOT_FIELDS["mail.message"]
+    assert "mail_ids" not in _SNAPSHOT_FIELDS["mail.message"]
+
+
+def test_mail_thread_absence_uses_privileged_projection_not_visible_relations():
+    comp = company()
+    move = Record(
+        81,
+        company_id=comp,
+        has_message=False,
+        message_ids=[],
+        audit_trail_message_ids=[],
+        message_follower_ids=[],
+        activity_ids=[],
+        website_message_ids=[],
+        rating_ids=[],
+        mail_thread_projection=thread_projection(
+            81,
+            messages=[
+                {
+                    "id": 101,
+                    "digest": "a" * 64,
+                    "mail_ids": [],
+                    "notification_ids": [],
+                }
+            ],
+        ),
+    )
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="MailThread side effect",
+    ):
+        Harness().assert_mail_thread_effects_absent(
+            move,
+            comp,
+            label="hidden-message target",
+        )
+
+
 def test_asset_and_deferred_snapshot_manifests_fail_closed_when_fields_are_missing():
     comp = company()
 
@@ -989,7 +1698,7 @@ def test_open_date_rejects_future_and_locked_periods():
         handler.assert_open_date(locked, "2026-06-30", "posting_date")
 
 
-def test_customer_invoice_uses_account_move_create_and_public_action_post():
+def test_customer_invoice_create_rejects_immediate_post_before_orm_create():
     move = Record(100, state="draft", company_id=Record(7))
     model = Model(factory=lambda values: move)
     handler = Harness(models={"account.move": model})
@@ -1003,29 +1712,12 @@ def test_customer_invoice_uses_account_move_create_and_public_action_post():
             "quantity": "2", "price_unit": "50.00", "tax_ids": [4],
         }],
     }
-    records, recovery = handler.execute_customer_invoice(parameters, handler.test_company, {})
-    assert records == [("account.move", move)]
-    assert move.action_post_calls == 1
-    values = model.creates[0]
-    assert values["move_type"] == "out_invoice"
-    assert values["date"] == "2026-07-10"
-    assert values["invoice_date_due"] == "2026-08-10"
-    assert values["invoice_payment_term_id"] is False
-    assert values["odoo_cli_v3_document_binding"] == handler.document_binding(
-        "customer_invoice", parameters
-    )
-    assert values["odoo_cli_v3_business_binding"] == handler.business_binding(
-        "customer_invoice", parameters
-    )
-    assert values["invoice_line_ids"][0][2]["tax_ids"] == [(6, 0, [4])]
-    assert values["invoice_line_ids"][0][2]["odoo_cli_v3_line_reference"] == (
-        "invoice-line-1"
-    )
-    assert recovery == {
-        "status": "manual_escalation",
-        "method": "manual_review_customer_invoice_recovery",
-        "targets": [{"model": "account.move", "record_id": 100}],
-    }
+    with pytest.raises(OdooWriteHandlerError, match="draft-only"):
+        handler.execute_customer_invoice(
+            parameters, handler.test_company, {}
+        )
+    assert model.creates == []
+    assert move.action_post_calls == 0
 
 
 def draft_invoice_creation_graph(
@@ -1056,6 +1748,7 @@ def draft_invoice_creation_graph(
         made_sequence_gap=False,
         checked=False,
         odoo_cli_v3_document_binding="a" * 64,
+        odoo_cli_v3_document_binding_v2="c" * 64,
         odoo_cli_v3_business_binding="b" * 64,
         payment_ids=list(payment_ids or []),
         adjusting_entry_origin_move_ids=list(
@@ -1130,7 +1823,7 @@ def draft_invoice_creation_graph(
         move_attachment_ids=[],
         tax_base_amount=0,
         extra_tax_data=False,
-        deductible_amount=0,
+        deductible_amount=100,
         is_imported=False,
         is_downpayment=False,
         is_storno=False,
@@ -1157,7 +1850,7 @@ def draft_invoice_creation_graph(
         move_attachment_ids=[],
         tax_base_amount=0,
         extra_tax_data=False,
-        deductible_amount=0,
+        deductible_amount=100,
         is_imported=False,
         is_downpayment=False,
         is_storno=False,
@@ -1187,6 +1880,7 @@ def test_sandbox_draft_customer_invoice_emits_only_the_exact_line_guard_descript
             ("account.move.line", 103): line2,
         },
     )
+    handler.verify_document = lambda *args, **kwargs: ["verified"]
     parameters = {
         "company_id": 7,
         "partner_id": 10,
@@ -1209,7 +1903,9 @@ def test_sandbox_draft_customer_invoice_emits_only_the_exact_line_guard_descript
     }
 
     records, recovery = handler.execute_customer_invoice(
-        parameters, handler.test_company, {}
+        parameters,
+        handler.test_company,
+        {"financial_preview": {}},
     )
 
     assert {(model_name, record.id) for model_name, record in records} == {
@@ -1249,6 +1945,7 @@ def test_sandbox_draft_vendor_bill_emits_only_the_exact_line_guard_descriptor():
             ("account.move.line", 103): line2,
         },
     )
+    handler.verify_document = lambda *args, **kwargs: ["verified"]
     parameters = {
         "company_id": 7,
         "partner_id": 10,
@@ -1271,7 +1968,9 @@ def test_sandbox_draft_vendor_bill_emits_only_the_exact_line_guard_descriptor():
     }
 
     records, recovery = handler.execute_vendor_bill(
-        parameters, handler.test_company, {}
+        parameters,
+        handler.test_company,
+        {"financial_preview": {}},
     )
 
     assert {(model_name, record.id) for model_name, record in records} == {
@@ -1310,6 +2009,7 @@ def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan(
             ("account.move.line", line2.id): line2,
         },
     )
+    handler.verify_document = lambda *args, **kwargs: ["verified"]
     parameters = {
         "company_id": 7,
         "partner_id": 10,
@@ -1332,8 +2032,12 @@ def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan(
         "idempotency_key": "invoice-draft-integration-1",
     }
     document_binding = handler.document_binding("customer_invoice", parameters)
+    document_binding_v2 = handler.document_binding_v2(
+        "customer_invoice", parameters
+    )
     business_binding = handler.business_binding("customer_invoice", parameters)
     move.odoo_cli_v3_document_binding = document_binding
+    move.odoo_cli_v3_document_binding_v2 = document_binding_v2
     move.odoo_cli_v3_business_binding = business_binding
     move.snapshot_values = {
         "name": "/",
@@ -1456,6 +2160,7 @@ def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan(
         "write_uid": [42, "V3 Executor"],
         "write_date": "2026-07-10 09:00:00",
         "odoo_cli_v3_document_binding": document_binding,
+        "odoo_cli_v3_document_binding_v2": document_binding_v2,
         "odoo_cli_v3_business_binding": business_binding,
     }
     for line in (line1, line2):
@@ -1496,7 +2201,7 @@ def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan(
             "move_attachment_ids": [],
             "tax_base_amount": "0",
             "extra_tax_data": False,
-            "deductible_amount": "0",
+            "deductible_amount": "100",
             "is_imported": False,
             "is_downpayment": False,
             "is_storno": False,
@@ -1537,6 +2242,7 @@ def test_handler_descriptor_and_real_snapshot_shapes_form_an_executable_v2_plan(
         "module_graph": handler.context.module_graph.evidence,
         "checks": ["approved_live_precheck"],
         "before": [],
+        "financial_preview": {},
     }
 
     raw = handler.execute_prechecked(
@@ -1607,10 +2313,14 @@ def test_sandbox_draft_invoice_never_advertises_recovery_for_an_unsafe_graph(
     }
 
     with pytest.raises(OdooWriteHandlerError, match=match):
-        handler.execute_customer_invoice(parameters, handler.test_company, {})
+        handler.execute_customer_invoice(
+            parameters,
+            handler.test_company,
+            {"financial_preview": {}},
+        )
 
 
-def test_production_draft_invoice_never_advertises_unverified_automatic_recovery():
+def test_production_draft_invoice_rejects_an_unverified_created_graph():
     move = Record(104, state="draft", company_id=Record(7), line_ids=[])
     handler = Harness(
         models={"account.move": Model(factory=lambda values: move)},
@@ -1637,18 +2347,134 @@ def test_production_draft_invoice_never_advertises_unverified_automatic_recovery
         }],
     }
 
-    _records, recovery = handler.execute_customer_invoice(
-        parameters, handler.test_company, {}
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="pristine V3 draft customer invoice",
+    ):
+        handler.execute_customer_invoice(
+            parameters,
+            handler.test_company,
+            {"financial_preview": {}},
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    (
+        "message_ids",
+        "audit_trail_message_ids",
+        "message_follower_ids",
+        "activity_ids",
+        "website_message_ids",
+        "rating_ids",
+        "has_message",
+    ),
+)
+def test_draft_invoice_rejects_created_mail_or_activity_effects(
+    field_name,
+):
+    move, line1, line2 = draft_invoice_creation_graph()
+    setattr(move, field_name, [Record(900)])
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        records={
+            ("account.move.line", line1.id): line1,
+            ("account.move.line", line2.id): line2,
+        },
+        environment="production",
+    )
+    parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        "reference": "INV-MAIL-EFFECT-1",
+        "lines": [{
+            "line_reference": "invoice-line-1",
+            "name": "service",
+            "product_id": None,
+            "account_id": 3,
+            "quantity": "1",
+            "price_unit": "50.00",
+            "tax_ids": [],
+        }],
+    }
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="MailThread side effect",
+    ):
+        handler.execute_customer_invoice(
+            parameters,
+            handler.test_company,
+            {"financial_preview": {}},
+        )
+
+
+def test_draft_invoice_requires_inline_verification_before_recovery():
+    move, line1, line2 = draft_invoice_creation_graph()
+    handler = Harness(
+        models={"account.move": Model(factory=lambda values: move)},
+        records={
+            ("account.move.line", line1.id): line1,
+            ("account.move.line", line2.id): line2,
+        },
+        environment="production",
+    )
+    parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        "reference": "INV-INLINE-VERIFY-1",
+        "lines": [{
+            "line_reference": "invoice-line-1",
+            "name": "service",
+            "product_id": None,
+            "account_id": 3,
+            "quantity": "1",
+            "price_unit": "50.00",
+            "tax_ids": [],
+        }],
+    }
+    recovery_calls = []
+
+    def reject_created_graph(*args, **kwargs):
+        assert kwargs["expected_financial_preview"] == {
+            "approved": "oracle"
+        }
+        raise OdooWriteHandlerError("created graph differs")
+
+    handler.verify_document = reject_created_graph
+    handler.available_recovery = (
+        lambda *args, **kwargs: recovery_calls.append((args, kwargs))
     )
 
-    assert recovery["status"] == "manual_escalation"
-    assert recovery["method"] == "manual_review_customer_invoice_recovery"
+    with pytest.raises(OdooWriteHandlerError, match="created graph differs"):
+        handler.execute_customer_invoice(
+            parameters,
+            handler.test_company,
+            {"financial_preview": {"approved": "oracle"}},
+        )
+    assert recovery_calls == []
 
 
 def test_vendor_bill_uses_vendor_reference_and_purchase_move_type():
     move = Record(101, state="draft", company_id=Record(7))
     model = Model(factory=lambda values: move)
     handler = Harness(models={"account.move": model}, environment="unit")
+    handler._assert_pristine_draft_document = (
+        lambda *args, **kwargs: None
+    )
+    handler.verify_document = lambda *args, **kwargs: ["verified"]
     parameters = {
         "company_id": 7, "partner_id": 10, "invoice_date": "2026-07-10",
         "accounting_date": "2026-07-10", "due_date": "2026-08-10",
@@ -1659,12 +2485,19 @@ def test_vendor_bill_uses_vendor_reference_and_purchase_move_type():
             "quantity": "1", "price_unit": "50.00", "tax_ids": [],
         }],
     }
-    handler.execute_vendor_bill(parameters, handler.test_company, {})
+    handler.execute_vendor_bill(
+        parameters,
+        handler.test_company,
+        {"financial_preview": {}},
+    )
     assert model.creates[0]["move_type"] == "in_invoice"
     assert model.creates[0]["ref"] == "SUP-1"
     assert model.creates[0]["invoice_payment_term_id"] is False
     assert model.creates[0]["odoo_cli_v3_document_binding"] == (
         handler.document_binding("vendor_bill", parameters)
+    )
+    assert model.creates[0]["odoo_cli_v3_document_binding_v2"] == (
+        handler.document_binding_v2("vendor_bill", parameters)
     )
     assert model.creates[0]["odoo_cli_v3_business_binding"] == (
         handler.business_binding("vendor_bill", parameters)
@@ -1672,6 +2505,15 @@ def test_vendor_bill_uses_vendor_reference_and_purchase_move_type():
     assert model.creates[0]["invoice_line_ids"][0][2][
         "odoo_cli_v3_line_reference"
     ] == "bill-line-1"
+    assert model.contexts[-1] == (
+        (),
+        {
+            "tracking_disable": True,
+            "mail_create_nosubscribe": True,
+            "mail_create_nolog": True,
+            "mail_notrack": True,
+        },
+    )
     assert move.action_post_calls == 0
 
 
@@ -1695,8 +2537,8 @@ class TaxPreviewHarness(Harness):
 
 
 def document_handler_and_parameters():
-    comp = company()
     currency = Record(1, active=True, rounding="0.01", company_id=None)
+    comp = company(currency_id=currency)
     partner = Record(10, active=True, company_id=None)
     journal = Record(
         2,
@@ -1711,17 +2553,48 @@ def document_handler_and_parameters():
         deprecated=False,
         company_id=comp,
     )
+    tax_account = Record(
+        5,
+        account_type="liability_current",
+        deprecated=False,
+        company_id=comp,
+    )
+    tax_repartition = Record(
+        40,
+        tax_id=Record(4),
+        repartition_type="tax",
+        document_type="invoice",
+        account_id=tax_account,
+        tag_ids=[Record(50)],
+        company_id=comp,
+    )
     tax = Record(
         4,
         active=True,
         type_tax_use="sale",
         company_id=comp,
+        children_tax_ids=[],
+        invoice_repartition_line_ids=[tax_repartition],
+        refund_repartition_line_ids=[],
     )
+    tax_repartition.tax_id = tax
     handler = TaxPreviewHarness(
         tax_result={
             "total_excluded": 100.0,
             "total_included": 110.0,
-            "taxes": [{"id": 4, "amount": 10.0}],
+            "base_tags": [51],
+            "taxes": [
+                {
+                    "id": 4,
+                    "amount": 10.0,
+                    "base": 100.0,
+                    "account_id": 5,
+                    "tax_repartition_line_id": 40,
+                    "group": None,
+                    "tag_ids": [50],
+                    "tax_ids": [],
+                }
+            ],
         },
         models={"account.move": Model()},
         records={
@@ -1729,7 +2602,9 @@ def document_handler_and_parameters():
             ("res.partner", 10): partner,
             ("account.journal", 2): journal,
             ("account.account", 3): account,
+            ("account.account", 5): tax_account,
             ("account.tax", 4): tax,
+            ("account.tax.repartition.line", 40): tax_repartition,
         },
     )
     handler.test_company = comp
@@ -1741,7 +2616,7 @@ def document_handler_and_parameters():
         "due_date": "2026-08-10",
         "currency_id": 1,
         "journal_id": 2,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "reference": "INV-EXT-STRICT-1",
         "lines": [
             {
@@ -1775,7 +2650,19 @@ def test_document_precheck_binds_dependencies_tax_preview_and_business_identity(
                 "amount_untaxed": "100.0",
                 "amount_tax": "10.0",
                 "amount_total": "110.0",
-                "taxes": [{"tax_id": 4, "amount": "10.0"}],
+                "base_tag_ids": [51],
+                "taxes": [
+                    {
+                        "tax_id": 4,
+                        "tax_repartition_line_id": 40,
+                        "account_id": 5,
+                        "group_tax_id": None,
+                        "tax_tag_ids": [50],
+                        "tax_ids": [],
+                        "amount": "10.0",
+                        "base": "100.0",
+                    }
+                ],
             }
         ],
     }
@@ -1786,6 +2673,7 @@ def test_document_precheck_binds_dependencies_tax_preview_and_business_identity(
         "account.journal",
         "account.account",
         "account.tax",
+        "account.tax.repartition.line",
     }
     assert handler.tax_compute_calls[0][1]["currency"].id == 1
     assert handler.tax_compute_calls[0][1]["partner"].id == 10
@@ -1799,6 +2687,48 @@ def test_document_precheck_binds_dependencies_tax_preview_and_business_identity(
         handler.precheck_customer_invoice(parameters, handler.test_company)
 
 
+def test_document_tax_preview_uses_approved_line_account_for_void_tax_account():
+    handler, parameters = document_handler_and_parameters()
+    handler.tax_result["taxes"][0]["account_id"] = False
+    handler.records[
+        ("account.tax.repartition.line", 40)
+    ].account_id = None
+
+    checked = handler.precheck_customer_invoice(
+        parameters, handler.test_company
+    )
+
+    assert checked["financial_preview"]["lines"][0]["taxes"][0][
+        "account_id"
+    ] == 3
+
+
+def test_document_tax_preview_rejects_unbound_repartition_metadata():
+    handler, parameters = document_handler_and_parameters()
+    handler.records[
+        ("account.tax.repartition.line", 40)
+    ].tax_id = Record(99)
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="repartition line is not bound",
+    ):
+        handler.precheck_customer_invoice(
+            parameters, handler.test_company
+        )
+
+
+@pytest.mark.parametrize("vendor", (False, True))
+def test_document_precheck_rejects_immediate_post(vendor):
+    handler, parameters = document_handler_and_parameters()
+    parameters["posting_mode"] = "post"
+
+    with pytest.raises(OdooWriteHandlerError, match="draft-only"):
+        handler.precheck_document(
+            parameters, handler.test_company, vendor=vendor
+        )
+
+
 def test_document_verification_requires_exact_graph_direction_and_tax_preview():
     handler, parameters = document_handler_and_parameters()
     comp = handler.test_company
@@ -1807,11 +2737,14 @@ def test_document_verification_requires_exact_graph_direction_and_tax_preview():
     journal = handler.records[("account.journal", 2)]
     income = handler.records[("account.account", 3)]
     tax = handler.records[("account.tax", 4)]
-    tax_account = Record(5, account_type="liability_current", company_id=comp)
+    tax_account = handler.records[("account.account", 5)]
+    tax_repartition = handler.records[
+        ("account.tax.repartition.line", 40)
+    ]
     receivable = Record(6, account_type="asset_receivable", company_id=comp)
     move = Record(
         100,
-        state="posted",
+        state="draft",
         move_type="out_invoice",
         company_id=comp,
         partner_id=partner,
@@ -1830,6 +2763,9 @@ def test_document_verification_requires_exact_graph_direction_and_tax_preview():
         odoo_cli_v3_document_binding=handler.document_binding(
             "customer_invoice", parameters
         ),
+        odoo_cli_v3_document_binding_v2=handler.document_binding_v2(
+            "customer_invoice", parameters
+        ),
         odoo_cli_v3_business_binding=handler.business_binding(
             "customer_invoice", parameters
         ),
@@ -1843,6 +2779,7 @@ def test_document_verification_requires_exact_graph_direction_and_tax_preview():
         account_id=income,
         product_id=None,
         tax_ids=[tax],
+        tax_tag_ids=[Record(51)],
         tax_line_id=None,
         quantity=2,
         price_unit=50,
@@ -1859,8 +2796,15 @@ def test_document_verification_requires_exact_graph_direction_and_tax_preview():
         move_id=move,
         account_id=tax_account,
         partner_id=partner,
+        currency_id=currency,
         tax_ids=[],
+        tax_tag_ids=[Record(50)],
         tax_line_id=tax,
+        tax_repartition_line_id=tax_repartition,
+        group_tax_id=None,
+        display_type="tax",
+        analytic_distribution=False,
+        tax_base_amount=-100,
         debit=0,
         credit=10,
         balance=-10,
@@ -1904,8 +2848,103 @@ def test_document_verification_requires_exact_graph_direction_and_tax_preview():
         parameters, handler.test_company, records
     )
     assert "record_graph_exact" in checks
-    assert "tax_lines_match_preview" in checks
+    assert "tax_repartition_account_tag_graph_matches_preview" in checks
+    assert "tax_base_and_amount_graph_matches_preview" in checks
     assert "unpaid_residual_matches" in checks
+
+    tax_line.tax_repartition_line_id = Record(41)
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax repartition, account, or tag graph",
+    ):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.tax_repartition_line_id = tax_repartition
+
+    tax_line.account_id = Record(8, account_type="liability_current")
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax repartition, account, or tag graph",
+    ):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.account_id = tax_account
+
+    tax_line.tax_tag_ids = [Record(52)]
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax repartition, account, or tag graph",
+    ):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.tax_tag_ids = [Record(50)]
+
+    tax_line.tax_ids = [Record(9)]
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax repartition, account, or tag graph",
+    ):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.tax_ids = []
+
+    tax_line.group_tax_id = Record(9)
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax repartition, account, or tag graph",
+    ):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.group_tax_id = None
+
+    tax_line.tax_base_amount = -99
+    with pytest.raises(OdooWriteHandlerError, match="tax line base"):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.tax_base_amount = -100
+
+    tax_line.amount_currency = -9
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax line amount_currency",
+    ):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.amount_currency = -10
+
+    tax_line.balance = -9
+    with pytest.raises(OdooWriteHandlerError, match="tax line balance"):
+        handler.verify_customer_invoice(
+            parameters, handler.test_company, records
+        )
+    tax_line.balance = -10
+
+    approved_preview = handler.document_financial_preview(
+        parameters["lines"],
+        handler.test_company,
+        partner=partner,
+        currency=currency,
+        is_refund=False,
+    )
+    approved_preview["lines"][0]["taxes"][0]["account_id"] = 8
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="approved preview",
+    ):
+        handler.verify_document(
+            parameters,
+            handler.test_company,
+            records,
+            vendor=False,
+            expected_financial_preview=approved_preview,
+        )
 
     term_line.account_id = Record(7, account_type="liability_payable")
     with pytest.raises(OdooWriteHandlerError, match="payment term account type"):
@@ -1913,7 +2952,13 @@ def test_document_verification_requires_exact_graph_direction_and_tax_preview():
 
 
 def test_refund_uses_public_reversal_wizard_and_replaces_partial_lines():
-    refund = Record(201, state="draft", company_id=Record(7))
+    refund = Record(
+        201,
+        state="draft",
+        company_id=Record(7),
+        auto_post="no",
+        auto_post_until=False,
+    )
     origin = Record(200, state="posted", company_id=Record(7), line_ids=[])
 
     class Wizard(Record):
@@ -1927,19 +2972,47 @@ def test_refund_uses_public_reversal_wizard_and_replaces_partial_lines():
         models={"account.move.reversal": model},
         records={("account.move", 200): origin, ("account.move", 201): refund},
     )
+    audit_message = Record(250)
+    handler.assert_refund_origin_approval = (
+        lambda *_args, **_kwargs: audit_message
+    )
+    verification_calls = []
+    handler.verify_refund = (
+        lambda *args, **kwargs: verification_calls.append((args, kwargs))
+    )
     parameters = {
-        "origin_move_id": 200, "refund_date": "2026-07-10", "journal_id": 2,
-        "reason": "partial", "refund_mode": "partial", "posting_mode": "post",
+        "company_id": 7, "origin_move_id": 200,
+        "refund_type": "customer_credit_note",
+        "refund_date": "2026-07-10", "journal_id": 2, "currency_id": 1,
+        "expected_total_amount": "20",
+        "reason": "partial", "refund_mode": "partial", "posting_mode": "draft",
             "lines": [{"line_reference": "refund-line-1", "name": "part", "account_id": 3, "quantity": "1", "price_unit": "20", "tax_ids": []}],
     }
     records, _ = handler.execute_refund(parameters, handler.test_company, {})
-    assert records == [("account.move", origin), ("account.move", refund)]
+    assert records == [
+        ("account.move", origin),
+        ("account.move", refund),
+        ("mail.message", audit_message),
+    ]
+    assert len(verification_calls) == 1
+    assert verification_calls[0][0][2] == records
     assert wizard.called is True
+    assert model.contexts[0][1] == {
+        "active_model": "account.move",
+        "active_ids": [200],
+        "tracking_disable": True,
+        "mail_create_nosubscribe": True,
+        "mail_create_nolog": True,
+        "mail_notrack": True,
+    }
     assert refund.writes[0]["invoice_line_ids"][0] == (5, 0, 0)
     assert refund.writes[0]["odoo_cli_v3_reason"] == "partial"
     assert refund.writes[0]["invoice_payment_term_id"] is False
     assert refund.writes[0]["odoo_cli_v3_document_binding"] == (
         handler.document_binding("refund", parameters)
+    )
+    assert refund.writes[0]["odoo_cli_v3_document_binding_v2"] == (
+        handler.document_binding_v2("refund", parameters)
     )
     assert refund.writes[0]["odoo_cli_v3_business_binding"] == (
         handler.business_binding("refund", parameters)
@@ -1947,9 +3020,216 @@ def test_refund_uses_public_reversal_wizard_and_replaces_partial_lines():
     assert refund.writes[0]["invoice_line_ids"][1][2][
         "odoo_cli_v3_line_reference"
     ] == "refund-line-1"
-    assert refund.action_post_calls == 1
+    assert refund.action_post_calls == 0
+    assert refund.contexts[0] == {
+        "tracking_disable": True,
+        "mail_notrack": True,
+        "mail_create_nolog": True,
+        "skip_is_manually_modified": True,
+    }
     assert _["status"] == "available"
-    assert _["method"] == "reverse_posted_refund_v1"
+    assert _["method"] == "cancel_draft_refund_v1"
+
+    def reject_inline_verification(*_args, **_kwargs):
+        raise OdooWriteHandlerError("inline refund verification failed")
+
+    handler.verify_refund = reject_inline_verification
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="inline refund verification failed",
+    ):
+        handler.execute_refund(parameters, handler.test_company, {})
+
+
+@pytest.mark.parametrize(
+    ("posting_mode", "expected_state", "recovery_method"),
+    (
+        ("draft", "draft", "cancel_draft_refund_v1"),
+    ),
+)
+def test_full_refund_assigns_lineage_after_odoo_copy_false_reversal(
+    posting_mode,
+    expected_state,
+    recovery_method,
+):
+    comp = company()
+    currency = Record(1)
+    partner = Record(10)
+    income = Record(3)
+    receivable = Record(6)
+    origin = Record(200, state="posted", company_id=comp)
+    refund = Record(
+        201,
+        state="draft",
+        company_id=comp,
+        auto_post="no",
+        auto_post_until=False,
+    )
+    origin_product = Record(
+        2001,
+        move_id=origin,
+        company_id=comp,
+        name="service",
+        account_id=income,
+        partner_id=partner,
+        currency_id=currency,
+        product_id=None,
+        product_uom_id=None,
+        quantity=1,
+        price_unit=100,
+        discount=0,
+        price_subtotal=100,
+        price_total=100,
+        tax_ids=[],
+        tax_line_id=None,
+        tax_tag_ids=[],
+        tax_repartition_line_id=None,
+        group_tax_id=None,
+        debit=0,
+        credit=100,
+        balance=-100,
+        amount_currency=-100,
+        display_type="product",
+        odoo_cli_v3_line_reference="origin-line-1",
+    )
+    origin_term = Record(
+        2002,
+        move_id=origin,
+        company_id=comp,
+        name="term",
+        account_id=receivable,
+        partner_id=partner,
+        currency_id=currency,
+        tax_ids=[],
+        tax_line_id=None,
+        debit=100,
+        credit=0,
+        balance=100,
+        amount_currency=100,
+        display_type="payment_term",
+    )
+    refund_product = Record(
+        2011,
+        move_id=refund,
+        company_id=comp,
+        name="service",
+        account_id=income,
+        partner_id=partner,
+        currency_id=currency,
+        product_id=None,
+        product_uom_id=None,
+        quantity=1,
+        price_unit=100,
+        discount=0,
+        price_subtotal=100,
+        price_total=100,
+        tax_ids=[],
+        tax_line_id=None,
+        tax_tag_ids=[],
+        tax_repartition_line_id=None,
+        group_tax_id=None,
+        debit=100,
+        credit=0,
+        balance=100,
+        amount_currency=100,
+        display_type="product",
+        odoo_cli_v3_line_reference=False,
+    )
+    refund_term = Record(
+        2012,
+        move_id=refund,
+        company_id=comp,
+        name="term",
+        account_id=receivable,
+        partner_id=partner,
+        currency_id=currency,
+        tax_ids=[],
+        tax_line_id=None,
+        debit=0,
+        credit=100,
+        balance=-100,
+        amount_currency=-100,
+        display_type="payment_term",
+    )
+    origin.line_ids = [origin_product, origin_term]
+    origin.invoice_line_ids = [origin_product]
+    refund.line_ids = [refund_product, refund_term]
+    refund.invoice_line_ids = [refund_product]
+
+    class Wizard(Record):
+        def refund_moves(self):
+            return {"res_id": 201}
+
+    handler = Harness(
+        models={
+            "account.move.reversal": Model(
+                factory=lambda values: Wizard(1)
+            )
+        },
+        records={
+            ("account.move", 200): origin,
+            ("account.move", 201): refund,
+            ("account.move.line", 2001): origin_product,
+            ("account.move.line", 2002): origin_term,
+            ("account.move.line", 2011): refund_product,
+            ("account.move.line", 2012): refund_term,
+        },
+    )
+    audit_message = Record(250)
+    handler.assert_refund_origin_approval = (
+        lambda *_args, **_kwargs: audit_message
+    )
+    verification_calls = []
+    handler.verify_refund = (
+        lambda *args, **kwargs: verification_calls.append((args, kwargs))
+    )
+    handler.test_company = comp
+    parameters = {
+        "company_id": 7,
+        "origin_move_id": 200,
+        "refund_type": "customer_credit_note",
+        "refund_date": "2026-07-10",
+        "journal_id": 2,
+        "currency_id": 1,
+        "expected_total_amount": "100",
+        "reason": "full",
+        "refund_mode": "full",
+        "posting_mode": posting_mode,
+        "lines": [],
+    }
+
+    records, recovery = handler.execute_refund(
+        parameters,
+        comp,
+        {},
+    )
+
+    assert refund_product.odoo_cli_v3_line_reference == (
+        "rf-full-200-2001"
+    )
+    assert refund_product.writes == [
+        {"odoo_cli_v3_line_reference": "rf-full-200-2001"}
+    ]
+    assert refund_product.contexts[0] == {
+        "tracking_disable": True,
+        "mail_notrack": True,
+        "mail_create_nolog": True,
+        "skip_is_manually_modified": True,
+    }
+    assert refund.state == expected_state
+    assert ("account.move", refund) in records
+    assert ("mail.message", audit_message) in records
+    assert len(verification_calls) == 1
+    assert recovery["method"] == recovery_method
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="already populated",
+    ):
+        handler.assign_full_refund_invoice_lineage(
+            origin,
+            refund,
+            comp,
+        )
 
 
 def test_refund_draft_fails_closed_if_public_wizard_already_posted_it():
@@ -1969,18 +3249,157 @@ def test_refund_draft_fails_closed_if_public_wizard_already_posted_it():
         },
     )
     p = {
-        "origin_move_id": 210, "refund_date": "2026-07-10", "journal_id": 2,
+        "company_id": 7, "origin_move_id": 210,
+        "refund_type": "customer_credit_note",
+        "refund_date": "2026-07-10", "journal_id": 2, "currency_id": 1,
+        "expected_total_amount": "100",
         "reason": "draft", "refund_mode": "full", "posting_mode": "draft",
         "lines": [],
     }
-    with pytest.raises(OdooWriteHandlerError, match="preserve the approved draft mode"):
+    with pytest.raises(OdooWriteHandlerError, match="editable draft"):
         handler.execute_refund(p, handler.test_company, {})
+
+
+def test_refund_execute_rejects_post_mode_before_public_wizard():
+    class Wizard(Record):
+        def refund_moves(self):
+            raise AssertionError("post mode must fail before the wizard")
+
+    handler = Harness(
+        models={
+            "account.move.reversal": Model(
+                factory=lambda values: Wizard(1)
+            )
+        },
+        records={
+            ("account.move", 210): Record(
+                210,
+                state="posted",
+                company_id=Record(7),
+                line_ids=[],
+            ),
+        },
+    )
+    parameters = {
+        "company_id": 7,
+        "origin_move_id": 210,
+        "refund_type": "customer_credit_note",
+        "refund_date": "2026-07-10",
+        "journal_id": 2,
+        "currency_id": 1,
+        "expected_total_amount": "20",
+        "reason": "unsafe immediate post",
+        "refund_mode": "partial",
+        "posting_mode": "post",
+        "lines": [
+            {
+                "line_reference": "refund-line-1",
+                "name": "part",
+                "account_id": 3,
+                "quantity": "1",
+                "price_unit": "20",
+                "tax_ids": [],
+            }
+        ],
+    }
+
+    with pytest.raises(OdooWriteHandlerError, match="draft-only"):
+        handler.execute_refund(
+            parameters, handler.test_company, {}
+        )
+
+
+def test_refund_execute_rejects_odoo_auto_post_schedule():
+    refund = Record(
+        211,
+        state="draft",
+        company_id=Record(7),
+        auto_post="at_date",
+        auto_post_until=False,
+    )
+
+    class Wizard(Record):
+        def refund_moves(self):
+            return {"res_id": 211}
+
+    handler = Harness(
+        models={
+            "account.move.reversal": Model(
+                factory=lambda values: Wizard(1)
+            )
+        },
+        records={
+            ("account.move", 210): Record(
+                210,
+                state="posted",
+                company_id=Record(7),
+                line_ids=[],
+            ),
+            ("account.move", 211): refund,
+        },
+    )
+    parameters = {
+        "company_id": 7,
+        "origin_move_id": 210,
+        "refund_type": "customer_credit_note",
+        "refund_date": "2026-07-10",
+        "journal_id": 2,
+        "currency_id": 1,
+        "expected_total_amount": "20",
+        "reason": "partial",
+        "refund_mode": "partial",
+        "posting_mode": "draft",
+        "lines": [
+            {
+                "line_reference": "origin-line-1",
+                "name": "service",
+                "account_id": 3,
+                "quantity": "1",
+                "price_unit": "20",
+                "tax_ids": [],
+            }
+        ],
+    }
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="auto-posting",
+    ):
+        handler.execute_refund(
+            parameters, handler.test_company, {}
+        )
+
+
+def refund_origin_source_parameters(*, product_id=None):
+    return {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-01",
+        "accounting_date": "2026-07-01",
+        "due_date": "2026-08-01",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        "reference": "INV-REF-200",
+        "lines": [
+            {
+                "line_reference": "origin-line-1",
+                "name": "service",
+                "account_id": 3,
+                "product_id": product_id,
+                "quantity": "1",
+                "price_unit": "100",
+                "tax_ids": [],
+            }
+        ],
+    }
 
 
 def refund_precheck_handler_and_parameters():
     comp = company()
     currency = Record(1, active=True, rounding="0.01", company_id=None)
     partner = Record(10, active=True, company_id=None)
+    partner.commercial_partner_id = partner
     journal = Record(
         2,
         type="sale",
@@ -1998,12 +3417,20 @@ def refund_precheck_handler_and_parameters():
         200,
         state="posted",
         move_type="out_invoice",
+        name="INV/2026/0001",
+        posted_before=True,
+        auto_post="no",
+        auto_post_until=False,
+        reversed_entry_id=None,
         company_id=comp,
         partner_id=partner,
+        commercial_partner_id=partner,
         journal_id=journal,
         currency_id=currency,
         date="2026-07-01",
         invoice_date="2026-07-01",
+        invoice_date_due="2026-08-01",
+        ref="INV-REF-200",
         amount_untaxed=100,
         amount_tax=0,
         amount_total=100,
@@ -2015,10 +3442,28 @@ def refund_precheck_handler_and_parameters():
         2001,
         company_id=comp,
         move_id=origin,
+        parent_state="posted",
+        display_type="product",
+        name="service",
         account_id=income,
+        partner_id=partner,
+        currency_id=currency,
         product_id=None,
+        quantity=1,
+        price_unit=100,
+        price_subtotal=100,
+        price_total=100,
+        discount=0,
+        debit=0,
+        credit=100,
+        balance=-100,
+        amount_currency=-100,
         tax_ids=[],
         tax_line_id=None,
+        tax_tag_ids=[],
+        tax_repartition_line_id=None,
+        group_tax_id=None,
+        odoo_cli_v3_line_reference="origin-line-1",
         reconciled=False,
         full_reconcile_id=None,
         matched_debit_ids=[],
@@ -2026,15 +3471,34 @@ def refund_precheck_handler_and_parameters():
         asset_ids=[],
         deferred_start_date=None,
         deferred_end_date=None,
+        is_storno=False,
+        matching_number=False,
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=100,
     )
     term_line = Record(
         2002,
         company_id=comp,
         move_id=origin,
+        parent_state="posted",
+        display_type="payment_term",
+        name="INV/2026/0001",
         account_id=receivable,
+        partner_id=partner,
+        currency_id=currency,
         product_id=None,
+        debit=100,
+        credit=0,
+        balance=100,
+        amount_currency=100,
+        amount_residual=100,
+        amount_residual_currency=100,
         tax_ids=[],
         tax_line_id=None,
+        tax_tag_ids=[],
+        tax_repartition_line_id=None,
+        group_tax_id=None,
         reconciled=False,
         full_reconcile_id=None,
         matched_debit_ids=[],
@@ -2042,6 +3506,11 @@ def refund_precheck_handler_and_parameters():
         asset_ids=[],
         deferred_start_date=None,
         deferred_end_date=None,
+        is_storno=False,
+        matching_number=False,
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=100,
     )
     origin.line_ids = [product_line, term_line]
     origin.invoice_line_ids = [product_line]
@@ -2060,6 +3529,18 @@ def refund_precheck_handler_and_parameters():
         },
     )
     handler.test_company = comp
+    origin_source = refund_origin_source_parameters()
+    origin.odoo_cli_v3_document_binding = handler.document_binding(
+        "customer_invoice", origin_source
+    )
+    origin.odoo_cli_v3_document_binding_v2 = (
+        handler.document_binding_v2(
+            "customer_invoice", origin_source
+        )
+    )
+    origin.odoo_cli_v3_business_binding = handler.business_binding(
+        "customer_invoice", origin_source
+    )
     parameters = {
         "company_id": 7,
         "origin_move_id": 200,
@@ -2070,11 +3551,11 @@ def refund_precheck_handler_and_parameters():
         "currency_id": 1,
         "expected_total_amount": "20",
         "reason": "partial service refund",
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "lines": [
             {
-                "line_reference": "refund-line-1",
-                "name": "part",
+                "line_reference": "origin-line-1",
+                "name": "service",
                 "account_id": 3,
                 "quantity": "1",
                 "price_unit": "20",
@@ -2107,12 +3588,308 @@ def test_refund_precheck_binds_origin_graph_and_exact_partial_total():
         handler.precheck_refund(parameters, handler.test_company)
 
 
+def test_partial_refund_precheck_rejects_nonexistent_origin_line_reference():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    parameters["lines"][0]["line_reference"] = "missing-origin-line"
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="partial refund origin line relation",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+
+def test_partial_refund_precheck_rejects_account_identity_mismatch():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    handler.records[("account.account", 4)] = Record(
+        4,
+        account_type="income",
+        deprecated=False,
+        company_id=handler.test_company,
+    )
+    parameters["lines"][0]["account_id"] = 4
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="partial refund origin line relation",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+
+def test_partial_refund_precheck_rejects_per_line_quantity_overrun():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    parameters["lines"][0]["quantity"] = "2"
+    parameters["lines"][0]["price_unit"] = "10"
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="partial refund origin line relation",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+
+def test_partial_refund_precheck_rejects_duplicate_origin_line_mapping():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    parameters["lines"] = [
+        {
+            **parameters["lines"][0],
+            "quantity": "0.5",
+            "price_unit": "20",
+        },
+        {
+            **parameters["lines"][0],
+            "quantity": "0.5",
+            "price_unit": "20",
+        },
+    ]
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="partial refund origin line relation",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+
+def test_full_refund_precheck_rejects_computed_origin_amounts_that_drift_from_v3_binding():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    origin = handler.records[("account.move", 200)]
+    product = handler.records[("account.move.line", 2001)]
+    term = handler.records[("account.move.line", 2002)]
+    parameters.update(
+        {
+            "refund_mode": "full",
+            "lines": [],
+            "expected_total_amount": "99",
+        }
+    )
+    origin.amount_untaxed = 99
+    origin.amount_total = 99
+    origin.amount_residual = 99
+    product.price_subtotal = 99
+    product.price_total = 99
+    product.credit = 99
+    product.balance = -99
+    product.amount_currency = -99
+    term.debit = 99
+    term.balance = 99
+    term.amount_currency = 99
+    term.amount_residual = 99
+    term.amount_residual_currency = 99
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="taxless document line subtotal",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+
+def test_partial_refund_precheck_rejects_product_identity_not_in_contract():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    origin = handler.records[("account.move", 200)]
+    line = handler.records[("account.move.line", 2001)]
+    product = Record(
+        930,
+        active=True,
+        company_id=None,
+        categ_id=None,
+        property_account_income_id=None,
+        property_account_expense_id=None,
+    )
+    handler.records[("product.product", 930)] = product
+    line.product_id = product
+    origin_source = refund_origin_source_parameters(product_id=930)
+    origin.odoo_cli_v3_document_binding = handler.document_binding(
+        "customer_invoice", origin_source
+    )
+    origin.odoo_cli_v3_document_binding_v2 = (
+        handler.document_binding_v2(
+            "customer_invoice", origin_source
+        )
+    )
+    origin.odoo_cli_v3_business_binding = handler.business_binding(
+        "customer_invoice", origin_source
+    )
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="partial refund origin line relation",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+
 def test_refund_precheck_rejects_reconciled_or_previously_reversed_origin():
     handler, parameters = refund_precheck_handler_and_parameters()
     origin = handler.records[("account.move", 200)]
     origin.reversal_move_ids = [Record(300)]
-    with pytest.raises(OdooWriteHandlerError, match="accounting dependencies"):
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="accounting dependencies",
+    ):
         handler.precheck_refund(parameters, handler.test_company)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("sale_line_ids", [Record(901)]),
+        ("purchase_line_id", Record(902)),
+        ("analytic_distribution", {"10": 100}),
+        ("analytic_line_ids", [Record(903)]),
+        ("is_downpayment", True),
+        ("expense_id", Record(904)),
+        ("cogs_origin_id", Record(905)),
+        ("move_attachment_ids", [Record(906)]),
+    ),
+)
+def test_refund_precheck_rejects_unbound_origin_line_business_effects(
+    field,
+    value,
+):
+    handler, parameters = refund_precheck_handler_and_parameters()
+    line = handler.records[("account.move.line", 2001)]
+    setattr(line, field, value)
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="external line effects",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+    assert handler.models["account.move.reversal"].creates == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("attachment_ids", [Record(907)]),
+        ("edi_document_ids", [Record(908)]),
+        ("message_main_attachment_id", Record(909)),
+    ),
+)
+def test_refund_precheck_rejects_unbound_origin_move_business_effects(
+    field,
+    value,
+):
+    handler, parameters = refund_precheck_handler_and_parameters()
+    origin = handler.records[("account.move", 200)]
+    setattr(origin, field, value)
+
+    with pytest.raises(OdooWriteHandlerError, match="dependencies"):
+        handler.precheck_refund(parameters, handler.test_company)
+
+    assert handler.models["account.move.reversal"].creates == []
+
+
+def test_refund_precheck_rejects_structural_invoice_lines():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    line = handler.records[("account.move.line", 2001)]
+    line.display_type = "line_note"
+    line.quantity = 0
+    line.price_unit = 0
+    line.price_subtotal = 0
+    line.price_total = 0
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="unsupported structural",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+    assert handler.models["account.move.reversal"].creates == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("tax_ids", [Record(920)]),
+        ("tax_line_id", Record(921)),
+        ("tax_tag_ids", [Record(922)]),
+        ("tax_repartition_line_id", Record(923)),
+        ("group_tax_id", Record(924)),
+    ),
+)
+def test_refund_precheck_rejects_all_unbound_tax_lineage(
+    field,
+    value,
+):
+    handler, parameters = refund_precheck_handler_and_parameters()
+    line = handler.records[("account.move.line", 2001)]
+    setattr(line, field, value)
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax lineage.*taxless",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+    assert handler.models["account.move.reversal"].creates == []
+
+
+def test_refund_precheck_rejects_taxed_partial_parameters():
+    handler, parameters = refund_precheck_handler_and_parameters()
+    parameters["lines"][0]["tax_ids"] = [920]
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="partial refund tax lineage",
+    ):
+        handler.precheck_refund(parameters, handler.test_company)
+
+    assert handler.models["account.move.reversal"].creates == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        (
+            lambda handler, _parameters: setattr(
+                handler.test_company, "currency_id", Record(99)
+            ),
+            "company currency",
+        ),
+        (
+            lambda handler, _parameters: setattr(
+                handler.test_company, "account_storno", True
+            ),
+            "storno",
+        ),
+        (
+            lambda handler, _parameters: setattr(
+                handler.records[("account.move", 200)],
+                "odoo_cli_v3_document_binding_v2",
+                "",
+            ),
+            "immutable V3 provenance",
+        ),
+        (
+            lambda handler, _parameters: setattr(
+                handler.records[("account.move", 200)],
+                "odoo_cli_v3_document_binding_v2",
+                "f" * 64,
+            ),
+            "cannot reproduce",
+        ),
+        (
+            lambda handler, _parameters: setattr(
+                handler.records[("account.move", 200)],
+                "reversed_entry_id",
+                Record(199),
+            ),
+            "identity",
+        ),
+    ),
+)
+def test_refund_precheck_rejects_outside_recoverable_scope_before_wizard(
+    mutation,
+    error,
+):
+    handler, parameters = refund_precheck_handler_and_parameters()
+    mutation(handler, parameters)
+
+    with pytest.raises(OdooWriteHandlerError, match=error):
+        handler.precheck_refund(parameters, handler.test_company)
+
+    assert handler.models["account.move.reversal"].creates == []
 
 
 def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
@@ -2139,6 +3916,10 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
                 "amount_currency": -100,
                 "display_type": "product",
                 "odoo_cli_v3_line_reference": "origin-line-1",
+                "quantity": 1,
+                "price_unit": 100,
+                "price_subtotal": 100,
+                "price_total": 100,
             },
         ),
         (
@@ -2153,6 +3934,8 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
                 "amount_currency": 100,
                 "display_type": "payment_term",
                 "date_maturity": "2026-08-01",
+                "amount_residual": 100,
+                "amount_residual_currency": 100,
                 "odoo_cli_v3_line_reference": "",
             },
         ),
@@ -2161,12 +3944,25 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
             setattr(line, key, value)
     refund = Record(
         300,
-        state="posted",
+        state="draft",
         move_type="out_refund",
+        name="/",
+        posted_before=False,
+        auto_post="no",
+        auto_post_until=False,
+        is_manually_modified=False,
+        sequence_prefix=False,
+        sequence_number=0,
+        made_sequence_gap=False,
+        checked=False,
+        secure_sequence_number=0,
+        inalterable_hash=False,
+        need_cancel_request=False,
         company_id=handler.test_company,
         reversed_entry_id=origin,
         reversal_move_ids=[],
         partner_id=partner,
+        commercial_partner_id=partner,
         journal_id=journal,
         currency_id=currency,
         date="2026-07-10",
@@ -2182,6 +3978,9 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
         odoo_cli_v3_document_binding=handler.document_binding(
             "refund", parameters
         ),
+        odoo_cli_v3_document_binding_v2=handler.document_binding_v2(
+            "refund", parameters
+        ),
         odoo_cli_v3_business_binding=handler.business_binding(
             "refund", parameters
         ),
@@ -2195,6 +3994,9 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
         currency_id=currency,
         account_id=origin_product.account_id,
         product_id=None,
+        product_uom_id=None,
+        parent_id=None,
+        discount=0,
         quantity=1,
         price_unit=100,
         price_subtotal=100,
@@ -2205,14 +4007,21 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
         credit=0,
         balance=100,
         amount_currency=100,
+        amount_residual=0,
+        amount_residual_currency=0,
         display_type="product",
-        odoo_cli_v3_line_reference="origin-line-1",
+        parent_state="draft",
+        is_storno=False,
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=100,
+        odoo_cli_v3_line_reference="rf-full-200-2001",
     )
     refund_term = Record(
         3002,
         company_id=handler.test_company,
         move_id=refund,
-        name="INV/ORIGIN",
+        name=False,
         partner_id=partner,
         currency_id=currency,
         account_id=origin_term.account_id,
@@ -2224,7 +4033,14 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
         credit=100,
         balance=-100,
         amount_currency=-100,
+        amount_residual=-100,
+        amount_residual_currency=-100,
         display_type="payment_term",
+        parent_state="draft",
+        is_storno=False,
+        tax_base_amount=0,
+        extra_tax_data=False,
+        deductible_amount=100,
         reconciled=False,
         full_reconcile_id=None,
         matched_debit_ids=[],
@@ -2234,11 +4050,34 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
     refund.invoice_line_ids = [refund_product]
     refund.line_ids = [refund_product, refund_term]
     origin.reversal_move_ids = [refund]
+    reversal_message = Record(
+        3500,
+        model="account.move",
+        res_id=origin.id,
+        message_type="notification",
+        is_internal=True,
+        subtype_id=handler.context.env.ref("mail.mt_note"),
+        author_id=handler.context.env.user.partner_id,
+        create_uid=Record(42),
+        create_date=date(2026, 7, 31),
+        attachment_ids=[],
+        tracking_value_ids=[],
+        partner_ids=[],
+        parent_id=None,
+        write_uid=Record(42),
+        write_date=date(2026, 7, 31),
+        body=(
+            "This entry has been "
+            "<a href=# data-oe-model='account.move' "
+            "data-oe-id='300'>reversed</a>"
+        ),
+    )
     handler.records.update(
         {
             ("account.move", 300): refund,
             ("account.move.line", 3001): refund_product,
             ("account.move.line", 3002): refund_term,
+            ("mail.message", 3500): reversal_message,
         }
     )
     origin_before = {
@@ -2249,10 +4088,14 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
         "reversal_move_ids": [],
         "amount_total": "100",
         "amount_residual": "100",
+        "message_ids": [],
+        "audit_trail_message_ids": [],
     }
     origin.snapshot_values = {
         **origin_before,
         "reversal_move_ids": [300],
+        "message_ids": [3500],
+        "audit_trail_message_ids": [3500],
     }
     origin_product.snapshot_values = {"balance": "-100"}
     origin_term.snapshot_values = {"balance": "100"}
@@ -2268,6 +4111,7 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
         ("account.move", refund),
         ("account.move.line", refund_product),
         ("account.move.line", refund_term),
+        ("mail.message", reversal_message),
     ]
 
     checks = handler.verify_refund(
@@ -2275,7 +4119,268 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
     )
     assert "origin_approval_matches" in checks
     assert "linewise_full_refund_exact" in checks
+    assert "full_refund_lineage_references_match" in checks
+    assert "origin_reversal_audit_message_exact" in checks
     assert "record_graph_exact" in checks
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="no unique audit message",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records[:-1],
+            trusted_before,
+        )
+    refund.message_ids = [Record(3501)]
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="MailThread side effect",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    refund.message_ids = []
+    refund.has_message = True
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="MailThread side effect",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    refund.has_message = False
+
+    child_partner = Record(
+        11,
+        active=True,
+        commercial_partner_id=partner,
+    )
+    origin.partner_id = child_partner
+    refund.partner_id = child_partner
+    handler.verify_refund(
+        parameters, handler.test_company, records, trusted_before
+    )
+    origin.partner_id = partner
+    refund.partner_id = partner
+
+    refund.auto_post = "at_date"
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="auto-post or manual-modification",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    refund.auto_post = "no"
+
+    refund.is_manually_modified = True
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="auto-post or manual-modification",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    refund.is_manually_modified = False
+
+    reversal_message.body = "unbound reversal log"
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="exact Odoo reversal log",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    reversal_message.body = (
+        "This entry has been "
+        "<a href=# data-oe-model='account.move' "
+        "data-oe-id='300'>reversed</a>"
+    )
+
+    origin_product.tax_tag_ids = [Record(931)]
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax lineage.*taxless",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    origin_product.tax_tag_ids = []
+
+    for line in (origin_product, refund_product):
+        line.matching_number = "I-import-batch"
+        with pytest.raises(
+            OdooWriteHandlerError,
+            match="external line effects",
+        ):
+            handler.verify_refund(
+                parameters,
+                handler.test_company,
+                records,
+                trusted_before,
+            )
+        line.matching_number = False
+
+    for line in (origin_product, refund_product):
+        line.deductible_amount = 50
+        with pytest.raises(
+            OdooWriteHandlerError,
+            match="tax lineage.*taxless",
+        ):
+            handler.verify_refund(
+                parameters,
+                handler.test_company,
+                records,
+                trusted_before,
+            )
+        line.deductible_amount = 100
+
+    partial_parameters = {
+        **parameters,
+        "refund_mode": "partial",
+        "lines": [
+            {
+                "line_reference": "origin-line-1",
+                "name": "service",
+                "account_id": 3,
+                "quantity": "1",
+                "price_unit": "100",
+                "tax_ids": [],
+            }
+        ],
+    }
+    refund.odoo_cli_v3_document_binding = handler.document_binding(
+        "refund", partial_parameters
+    )
+    refund.odoo_cli_v3_document_binding_v2 = (
+        handler.document_binding_v2(
+            "refund", partial_parameters
+        )
+    )
+    refund.odoo_cli_v3_business_binding = handler.business_binding(
+        "refund", partial_parameters
+    )
+    refund_product.odoo_cli_v3_line_reference = "origin-line-1"
+    partial_checks = handler.verify_refund(
+        partial_parameters,
+        handler.test_company,
+        records,
+        trusted_before,
+    )
+    assert "partial_origin_line_relation_exact" in partial_checks
+
+    origin_product.odoo_cli_v3_line_reference = "post-action-drift"
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="partial refund origin line relation",
+    ):
+        handler.verify_refund(
+            partial_parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    origin_product.odoo_cli_v3_line_reference = "origin-line-1"
+
+    trusted_before[("account.move.line", 2001)] = {
+        "balance": "-100",
+        "quantity": "1",
+        "price_unit": "100",
+    }
+    origin_product.snapshot_values = {
+        "balance": "-100",
+        "quantity": "2",
+        "price_unit": "50",
+    }
+    origin_product.quantity = 2
+    origin_product.price_unit = 50
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="origin changed after approval",
+    ):
+        handler.verify_refund(
+            partial_parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    origin_product.quantity = 1
+    origin_product.price_unit = 100
+    origin_product.snapshot_values = {"balance": "-100"}
+    trusted_before[("account.move.line", 2001)] = {"balance": "-100"}
+
+    original_term_account = refund_term.account_id
+    refund_term.account_id = Record(
+        932, account_type="asset_receivable"
+    )
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="payment term account or currency lineage",
+    ):
+        handler.verify_refund(
+            partial_parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    refund_term.account_id = original_term_account
+
+    refund_term.currency_id = Record(99)
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="journal item identity",
+    ):
+        handler.verify_refund(
+            partial_parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    refund_term.currency_id = currency
+    refund.odoo_cli_v3_document_binding = handler.document_binding(
+        "refund", parameters
+    )
+    refund.odoo_cli_v3_document_binding_v2 = (
+        handler.document_binding_v2("refund", parameters)
+    )
+    refund.odoo_cli_v3_business_binding = handler.business_binding(
+        "refund", parameters
+    )
+    refund_product.odoo_cli_v3_line_reference = "rf-full-200-2001"
+
+    refund_product.quantity = 2
+    refund_product.price_unit = 50
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="business graph differs",
+    ):
+        handler.verify_refund(
+            parameters,
+            handler.test_company,
+            records,
+            trusted_before,
+        )
+    refund_product.quantity = 1
+    refund_product.price_unit = 100
 
     with pytest.raises(
         OdooWriteHandlerError,
@@ -2286,14 +4391,20 @@ def test_full_refund_verification_binds_origin_and_exact_reversal_graph():
         )
 
     refund_product.debit = 99
-    with pytest.raises(OdooWriteHandlerError, match="linewise reversal"):
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="linewise reversal|taxless document line debit",
+    ):
         handler.verify_refund(
             parameters, handler.test_company, records, trusted_before
         )
 
     origin.reversal_move_ids = []
     handler.records[("account.move.line", 2002)].reconciled = True
-    with pytest.raises(OdooWriteHandlerError, match="accounting dependencies"):
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="external line effects",
+    ):
         handler.precheck_refund(parameters, handler.test_company)
 
 
@@ -2756,28 +4867,11 @@ def test_payment_precheck_rejects_ambiguous_multi_target_partial_allocation():
         "amount": "100",
         "memo": "PAY-SINGLE",
     }
-    checked = handler.precheck_payment(single_target, comp)
-    assert {
-        (item["model"], item["record_id"])
-        for item in checked["dependencies"]
-    } == {
-        ("res.company", 7),
-        ("res.partner", 10),
-        ("account.journal", 2),
-        ("res.currency", 1),
-        ("account.payment.method.line", 3),
-        ("account.payment.method", 4),
-    }
-    assert {
-        (item["model"], item["record_id"])
-        for item in checked["before"]
-    } == {("account.move", 11), ("account.move.line", 111)}
-    comp.tax_exigibility = True
-    with pytest.raises(OdooWriteHandlerError, match="cash-basis"):
+    with pytest.raises(OdooWriteHandlerError, match="fail-closed"):
         handler.precheck_payment(single_target, comp)
-    comp.tax_exigibility = False
-    with pytest.raises(OdooWriteHandlerError, match="allocation"):
+    with pytest.raises(OdooWriteHandlerError, match="fail-closed"):
         handler.precheck_payment(parameters, comp)
+    assert handler.models["account.payment.register"].creates == []
 
 
 def test_bank_import_creates_complete_statement_and_full_posted_move_graph():
@@ -3191,7 +5285,7 @@ def test_reconciliation_uses_public_wizard_reconcile():
         handler.verify_reconciliation(p, handler.test_company, records, before)
     assert recovery["status"] == "available"
     assert recovery["method"] == (
-        "undo_reconciliation_and_reverse_writeoff_v1"
+        "undo_reconciliation_without_writeoff_v1"
     )
 
 
@@ -3636,9 +5730,10 @@ def test_full_reconciliation_captures_exact_writeoff_move_closure():
         {"model": "account.move.line", "record_id": 511},
         {"model": "account.move.line", "record_id": 512},
     ]
-    records, _recovery = handler.execute_reconciliation(
-        p, comp, {"before": before_refs}
-    )
+    with pytest.raises(OdooWriteHandlerError, match="fail-closed"):
+        handler.execute_reconciliation(p, comp, {"before": before_refs})
+    assert handler.models["account.reconcile.wizard"].creates == []
+    return
     assert {(model, record.id) for model, record in records} == {
         ("account.move", 811),
         ("account.move", 812),
@@ -3941,8 +6036,10 @@ def test_asset_uses_public_create_and_validate_and_does_not_write_state_or_curre
         ("account.move.line", 603),
         ("account.move.line", 604),
     ]
-    assert recovery["status"] == "available"
-    assert recovery["method"] == "cancel_asset_and_reverse_schedule_v1"
+    assert recovery["status"] == "manual_escalation"
+    assert recovery["method"] == (
+        "manual_review_asset_cancellation_or_disposal"
+    )
 
 
 def test_asset_precheck_binds_full_source_model_accounts_and_allows_cancelled_prior_asset():
@@ -4108,9 +6205,9 @@ def test_depreciation_posts_only_the_explicit_depreciation_move():
         ("account.move.line", 703), ("account.move.line", 704),
     ]
     assert move.action_post_calls == 1
-    assert recovery["status"] == "available"
+    assert recovery["status"] == "manual_escalation"
     assert recovery["method"] == (
-        "reverse_depreciation_and_restore_schedule_v1"
+        "manual_review_reverse_depreciation_and_restore_asset_schedule"
     )
 
 
@@ -4304,7 +6401,25 @@ def test_depreciation_verifier_binds_full_schedule_residual_and_other_moves():
 def test_adjustment_creates_balanced_public_account_move():
     move = Record(801, state="draft", company_id=Record(7))
     model = Model(factory=lambda values: move)
-    handler = Harness(models={"account.move": model})
+    account_debit = Record(
+        10,
+        account_type="expense",
+        reconcile=False,
+        deprecated=False,
+    )
+    account_credit = Record(
+        11,
+        account_type="liability_current",
+        reconcile=False,
+        deprecated=False,
+    )
+    handler = Harness(
+        models={"account.move": model},
+        records={
+            ("account.account", 10): account_debit,
+            ("account.account", 11): account_credit,
+        },
+    )
     p = {
         "company_id": 7, "journal_id": 2, "posting_date": "2026-07-10",
         "reference": "ADJ-1", "reason": "Month-end cutoff",
@@ -4337,8 +6452,20 @@ def test_journal_entry_precheck_binds_every_approved_dependency_separately():
     journal = Record(
         2, company_id=comp, type="general", active=True, currency_id=currency
     )
-    debit_account = Record(3, company_id=comp, deprecated=False)
-    credit_account = Record(4, company_id=comp, deprecated=False)
+    debit_account = Record(
+        3,
+        company_id=comp,
+        deprecated=False,
+        account_type="expense",
+        reconcile=False,
+    )
+    credit_account = Record(
+        4,
+        company_id=comp,
+        deprecated=False,
+        account_type="liability_current",
+        reconcile=False,
+    )
     partner = Record(5, company_id=None, active=True)
     handler = Harness(
         models={"account.move": Model()},
@@ -4458,20 +6585,66 @@ def test_adjustment_verification_requires_exact_graph_and_document_binding():
 
 
 def test_posted_accrual_creates_public_scheduled_reversal_receipt():
-    move = Record(811, state="draft", company_id=Record(7))
-    scheduled = Record(812, state="draft", company_id=Record(7))
+    comp = company()
+    move = Record(
+        811,
+        state="draft",
+        company_id=comp,
+        has_message=False,
+        message_ids=[],
+        audit_trail_message_ids=[],
+    )
+    scheduled = Record(
+        812,
+        state="draft",
+        company_id=comp,
+        has_message=False,
+        message_ids=[],
+        audit_trail_message_ids=[],
+    )
+    move.mail_thread_projection = thread_projection(move.id)
+    scheduled.mail_thread_projection = thread_projection(scheduled.id)
+    audit_message = reversal_audit_message(
+        move,
+        scheduled,
+        identifier=813,
+    )
+    records_by_key = {
+        ("account.move", scheduled.id): scheduled,
+        (
+            "account.account",
+            10,
+        ): Record(
+            10,
+            account_type="expense",
+            reconcile=False,
+            deprecated=False,
+        ),
+        (
+            "account.account",
+            11,
+        ): Record(
+            11,
+            account_type="liability_current",
+            reconcile=False,
+            deprecated=False,
+        ),
+    }
 
     class Wizard(Record):
         def reverse_moves(self, is_modify=False):
             self.argument = is_modify
+            attach_reversal_audit(move, scheduled, audit_message)
+            records_by_key[("mail.message", audit_message.id)] = audit_message
             return {"res_id": 812}
 
     move_model = Model(factory=lambda values: move)
     reversal_model = Model(factory=lambda values: Wizard(1))
     handler = Harness(
         models={"account.move": move_model, "account.move.reversal": reversal_model},
-        records={("account.move", 812): scheduled},
+        records=records_by_key,
     )
+    handler.test_company = comp
     p = {
         "company_id": 7, "journal_id": 2, "posting_date": "2026-07-10",
         "reference": "ACCR-1", "posting_mode": "post",
@@ -4483,9 +6656,18 @@ def test_posted_accrual_creates_public_scheduled_reversal_receipt():
     }
     records, recovery = handler.execute_accrual(p, handler.test_company, {})
     assert [(model, record.id) for model, record in records] == [
-        ("account.move", 811), ("account.move", 812)
+        ("account.move", 811),
+        ("account.move", 812),
+        ("mail.message", 813),
     ]
-    assert reversal_model.contexts[0][1]["active_ids"] == [811]
+    assert reversal_model.contexts[0][1] == {
+        "active_model": "account.move",
+        "active_ids": [811],
+        "tracking_disable": True,
+        "mail_create_nosubscribe": True,
+        "mail_create_nolog": True,
+        "mail_notrack": True,
+    }
     assert reversal_model.creates[0]["date"] == "2026-08-01"
     assert move_model.creates[0]["line_ids"][0][2][
         "odoo_cli_v3_line_reference"
@@ -4526,7 +6708,9 @@ def test_accrual_precheck_rejects_draft_or_nonfuture_reversal_before_orm_writes(
 
 def test_accrual_precheck_rejects_existing_company_reference_business_binding():
     class DuplicateAccrualHarness(Harness):
-        def precheck_journal_entry(self, p, company, *, adjustment):
+        def precheck_journal_entry(
+            self, p, company, *, adjustment, **_kwargs
+        ):
             return {"checks": ["journal_entry"], "before": [], "dependencies": []}
 
         def create_model(self, *args, **kwargs):
@@ -4580,7 +6764,15 @@ def test_accrual_verification_rejects_changed_reversal_date_and_auto_post_mode()
         date=date(2026, 8, 2), auto_post="at_date", move_type="entry",
         journal_id=journal, currency_id=currency,
     )
-    handler = VerifyHarness()
+    audit_message = reversal_audit_message(
+        origin,
+        scheduled,
+        identifier=823,
+    )
+    attach_reversal_audit(origin, scheduled, audit_message)
+    handler = VerifyHarness(
+        records={("mail.message", audit_message.id): audit_message}
+    )
     p = {
         "posting_mode": "post", "reversal_date": "2026-08-01",
         "journal_id": 2, "currency_id": 1, "reference": "ACCR-1",
@@ -4593,7 +6785,11 @@ def test_accrual_verification_rejects_changed_reversal_date_and_auto_post_mode()
     scheduled.odoo_cli_v3_business_binding = handler.business_binding(
         "accrual_scheduled_reversal", p
     )
-    records = [("account.move", origin), ("account.move", scheduled)]
+    records = [
+        ("account.move", origin),
+        ("account.move", scheduled),
+        ("mail.message", audit_message),
+    ]
     with pytest.raises(OdooWriteHandlerError, match="reversal date differs"):
         handler.verify_accrual(p, handler.test_company, records)
     scheduled.date = date(2026, 8, 1)
@@ -4606,6 +6802,44 @@ def test_accrual_verification_rejects_changed_reversal_date_and_auto_post_mode()
     )
     origin.odoo_cli_v3_business_binding = "f" * 64
     with pytest.raises(OdooWriteHandlerError, match="business binding"):
+        handler.verify_accrual(p, handler.test_company, records)
+    origin.odoo_cli_v3_business_binding = handler.business_binding(
+        "accrual", p
+    )
+    unsafe_shape = thread_audit_shape(origin.id, audit_message)
+    unsafe_shape["tracking_value_ids"] = [9001]
+    origin.mail_thread_projection = thread_projection(
+        origin.id,
+        messages=[
+            {
+                "id": audit_message.id,
+                "audit_shape": unsafe_shape,
+                "digest": "a" * 64,
+                "mail_ids": [],
+                "notification_ids": [],
+            }
+        ],
+    )
+    with pytest.raises(OdooWriteHandlerError, match="MailThread"):
+        handler.verify_accrual(p, handler.test_company, records)
+    origin.mail_thread_projection = thread_projection(
+        origin.id,
+        messages=[
+            {
+                "id": audit_message.id,
+                "digest": "a" * 64,
+                "mail_ids": [],
+                "notification_ids": [],
+            },
+            {
+                "id": 824,
+                "digest": "b" * 64,
+                "mail_ids": [],
+                "notification_ids": [],
+            },
+        ],
+    )
+    with pytest.raises(OdooWriteHandlerError, match="MailThread"):
         handler.verify_accrual(p, handler.test_company, records)
 
 
@@ -4655,12 +6889,19 @@ def test_accrual_verification_requires_exact_linewise_reversal_and_record_graph(
         balance=100, amount_currency=100, tax_ids=[], tax_line_id=None,
         display_type="product",
     )
+    audit_message = reversal_audit_message(
+        origin,
+        scheduled,
+        identifier=837,
+    )
+    attach_reversal_audit(origin, scheduled, audit_message)
     records_by_key = {
         ("res.currency", 1): currency,
         ("account.move.line", 833): origin_debit,
         ("account.move.line", 834): origin_credit,
         ("account.move.line", 835): reverse_credit,
         ("account.move.line", 836): reverse_debit,
+        ("mail.message", audit_message.id): audit_message,
     }
     handler = Harness(records=records_by_key)
     handler.test_company = comp
@@ -4696,13 +6937,17 @@ def test_accrual_verification_requires_exact_linewise_reversal_and_record_graph(
         ("account.move", scheduled),
         ("account.move.line", reverse_credit),
         ("account.move.line", reverse_debit),
+        ("mail.message", audit_message),
     ]
 
     assert "scheduled_reversal_lines_exact" in handler.verify_accrual(
         parameters, comp, graph
     )
     reverse_credit.amount_currency = -99
-    with pytest.raises(OdooWriteHandlerError, match="linewise reversal"):
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="linewise reversal|taxless document line balance",
+    ):
         handler.verify_accrual(parameters, comp, graph)
     reverse_credit.amount_currency = -100
     with pytest.raises(OdooWriteHandlerError, match="record graph"):
@@ -4739,8 +6984,8 @@ def test_deferred_writes_only_dates_then_posts_source_and_returns_generated_move
         ("account.move.line", 904), ("account.move", 903),
         ("account.move.line", 905), ("account.move.line", 906),
     ]
-    assert recovery["status"] == "available"
-    assert recovery["method"] == "reverse_deferred_source_and_schedule_v1"
+    assert recovery["status"] == "manual_escalation"
+    assert recovery["method"] == "manual_review_reverse_deferred_schedule"
 
 
 def test_deferred_precheck_binds_full_invoice_config_and_account_types():
@@ -4792,22 +7037,7 @@ def test_deferred_precheck_binds_full_invoice_config_and_account_types():
         "expected_deferred_journal_id": 40,
         "currency_id": 1, "total_amount": "1200",
     }
-    checked = handler.precheck_deferred(parameters, comp)
-    assert {(item["model"], item["record_id"]) for item in checked["before"]} == {
-        ("account.move", 902), ("account.move.line", 901),
-        ("account.move.line", 904),
-    }
-    assert {(item["model"], item["record_id"]) for item in checked["dependencies"]} == {
-        ("res.company", 7), ("res.currency", 1),
-        ("account.account", 20), ("account.account", 30),
-        ("account.journal", 10), ("account.journal", 40),
-    }
-    deferred.account_type = "asset_fixed"
-    with pytest.raises(OdooWriteHandlerError, match="account type"):
-        handler.precheck_deferred(parameters, comp)
-    deferred.account_type = "asset_current"
-    payable.deferred_start_date = date(2026, 7, 1)
-    with pytest.raises(OdooWriteHandlerError, match="another source line"):
+    with pytest.raises(OdooWriteHandlerError, match="fail-closed"):
         handler.precheck_deferred(parameters, comp)
 
 
@@ -4947,40 +7177,169 @@ def test_deferred_verifier_proves_transfer_release_schedule_and_exact_graph():
 
 
 def test_reversal_uses_public_reverse_moves_and_readable_action_receipt():
-    origin_line = Record(1003, company_id=Record(7))
-    reversal_line = Record(1004, company_id=Record(7))
+    comp = company()
+    currency = Record(1, company_id=None, active=True, rounding="0.01")
+    account = Record(
+        10,
+        company_id=comp,
+        account_type="expense",
+        reconcile=False,
+        deprecated=False,
+    )
     origin = Record(
-        1001, state="posted", company_id=Record(7),
+        1001,
+        state="posted",
+        move_type="entry",
+        company_id=comp,
+        auto_post="no",
+        auto_post_until=None,
+        reversed_entry_id=None,
+        reversal_move_ids=[],
         line_ids=SimpleNamespace(ids=[1003]),
     )
     reversal = Record(
-        1002, state="draft", company_id=Record(7),
+        1002,
+        state="posted",
+        move_type="entry",
+        company_id=comp,
+        auto_post="no",
+        auto_post_until=None,
+        reversed_entry_id=origin,
+        reversal_move_ids=[],
         line_ids=SimpleNamespace(ids=[1004]),
+    )
+    origin_line = Record(
+        1003,
+        company_id=comp,
+        parent_state="posted",
+        move_id=origin,
+        account_id=account,
+        name="plain line",
+        partner_id=None,
+        currency_id=currency,
+        debit=100,
+        credit=0,
+        balance=100,
+        amount_currency=100,
+        tax_ids=[],
+        tax_line_id=None,
+        display_type="product",
+        odoo_cli_v3_line_reference="origin-line",
+    )
+    reversal_line = Record(
+        1004,
+        company_id=comp,
+        parent_state="posted",
+        move_id=reversal,
+        account_id=account,
+        name="plain line",
+        partner_id=None,
+        currency_id=currency,
+        debit=0,
+        credit=100,
+        balance=-100,
+        amount_currency=-100,
+        tax_ids=[],
+        tax_line_id=None,
+        display_type="product",
+        odoo_cli_v3_line_reference="",
+    )
+    approved_move = {
+        "state": "posted",
+        "move_type": "entry",
+        "reversal_move_ids": [],
+        "message_ids": [],
+        "audit_trail_message_ids": [],
+    }
+    origin.snapshot_values = {
+        **approved_move,
+        "reversal_move_ids": [reversal.id],
+        "message_ids": [1050],
+        "audit_trail_message_ids": [1050],
+    }
+    approved_line = {
+        "move_id": origin.id,
+        "parent_state": "posted",
+        "account_id": account.id,
+        "balance": "100",
+        "odoo_cli_v3_line_reference": "origin-line",
+    }
+    origin_line.snapshot_values = dict(approved_line)
+    audit_message = Record(
+        1050,
+        model="account.move",
+        res_id=origin.id,
+        message_type="notification",
+        is_internal=True,
+        subtype_id=Record(421),
+        author_id=Record(420),
+        create_uid=Record(42),
+        create_date=date(2026, 7, 31),
+        attachment_ids=[],
+        tracking_value_ids=[],
+        partner_ids=[],
+        parent_id=None,
+        write_uid=Record(42),
+        write_date=date(2026, 7, 31),
+        body=(
+            "This entry has been "
+            "<a data-oe-model='account.move' data-oe-id='1002'>reversed</a>"
+        ),
     )
 
     class Wizard(Record):
         def reverse_moves(self, is_modify=False):
             self.argument = is_modify
+            origin.reversal_move_ids = [reversal]
+            origin.message_ids = [audit_message]
+            origin.audit_trail_message_ids = [audit_message]
             return {"res_id": 1002}
 
     wizard = Wizard(1)
+    reversal_model = Model(factory=lambda values: wizard)
     handler = Harness(
-        models={"account.move.reversal": Model(factory=lambda values: wizard)},
+        models={"account.move.reversal": reversal_model},
         records={
             ("account.move", 1001): origin,
             ("account.move", 1002): reversal,
             ("account.move.line", 1003): origin_line,
             ("account.move.line", 1004): reversal_line,
+            ("account.account", 10): account,
+            ("mail.message", 1050): audit_message,
         },
     )
+    handler.test_company = comp
     p = {"move_id": 1001, "reversal_date": "2026-07-10", "journal_id": 2, "reason": "correct", "posting_mode": "post"}
-    records, recovery = handler.execute_reversal(p, handler.test_company, {})
+    checked = {
+        "before": [
+            {
+                "model": "account.move",
+                "record_id": origin.id,
+                "values": approved_move,
+            },
+            {
+                "model": "account.move.line",
+                "record_id": origin_line.id,
+                "values": approved_line,
+            },
+        ]
+    }
+    records, recovery = handler.execute_reversal(p, comp, checked)
     assert records == [
         ("account.move", origin), ("account.move.line", origin_line),
         ("account.move", reversal), ("account.move.line", reversal_line),
+        ("mail.message", audit_message),
     ]
     assert wizard.argument is False
-    assert reversal.action_post_calls == 1
+    assert reversal_model.contexts[0][1] == {
+        "active_model": "account.move",
+        "active_ids": [1001],
+        "tracking_disable": True,
+        "mail_create_nosubscribe": True,
+        "mail_create_nolog": True,
+        "mail_notrack": True,
+    }
+    assert reversal.action_post_calls == 0
     assert reversal.writes == [
         {
             "odoo_cli_v3_reason": "correct",
@@ -4989,8 +7348,8 @@ def test_reversal_uses_public_reverse_moves_and_readable_action_receipt():
             ),
         }
     ]
-    assert recovery["status"] == "available"
-    assert recovery["method"] == "reverse_the_reversal_v1"
+    assert recovery["status"] == "manual_escalation"
+    assert recovery["method"] == "manual_review_move_reversal"
 
 
 def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_graph():
@@ -4999,13 +7358,31 @@ def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_gra
     journal = Record(
         2, company_id=comp, type="general", active=True, currency_id=currency
     )
+    debit_account = Record(
+        10,
+        company_id=comp,
+        account_type="expense",
+        reconcile=False,
+        deprecated=False,
+    )
+    credit_account = Record(
+        11,
+        company_id=comp,
+        account_type="liability_current",
+        reconcile=False,
+        deprecated=False,
+    )
     line_debit = Record(
-        1003, company_id=comp, reconciled=False, full_reconcile_id=None,
+        1003, company_id=comp, parent_state="posted",
+        reconciled=False, full_reconcile_id=None,
         matched_debit_ids=[], matched_credit_ids=[], asset_ids=[],
+        account_id=debit_account,
     )
     line_credit = Record(
-        1004, company_id=comp, reconciled=False, full_reconcile_id=None,
+        1004, company_id=comp, parent_state="posted",
+        reconciled=False, full_reconcile_id=None,
         matched_debit_ids=[], matched_credit_ids=[], asset_ids=[],
+        account_id=credit_account,
     )
     move = Record(
         1001, company_id=comp, state="posted", move_type="entry",
@@ -5015,6 +7392,8 @@ def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_gra
         deferred_move_ids=[], deferred_original_move_ids=[],
         tax_cash_basis_rec_id=None, tax_cash_basis_origin_move_id=None,
     )
+    line_debit.move_id = move
+    line_credit.move_id = move
     handler = Harness(
         models={"account.move.reversal": Model()},
         records={
@@ -5023,6 +7402,8 @@ def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_gra
             ("account.move.line", 1004): line_credit,
             ("account.journal", 2): journal,
             ("res.currency", 1): currency,
+            ("account.account", 10): debit_account,
+            ("account.account", 11): credit_account,
         },
     )
     handler.test_company = comp
@@ -5037,6 +7418,16 @@ def test_reversal_precheck_requires_safe_general_entry_and_binds_full_origin_gra
         ("account.move", 1001),
         ("account.move.line", 1003),
         ("account.move.line", 1004),
+    }
+    assert {
+        (item["model"], item["record_id"])
+        for item in checked["dependencies"]
+    } == {
+        ("res.company", 7),
+        ("account.journal", 2),
+        ("res.currency", 1),
+        ("account.account", 10),
+        ("account.account", 11),
     }
 
     move.move_type = "out_invoice"
@@ -5079,9 +7470,18 @@ def test_reversal_precheck_rejects_existing_accounting_dependencies(
     journal = Record(
         2, company_id=comp, type="general", active=True, currency_id=currency
     )
+    account = Record(
+        10,
+        company_id=comp,
+        account_type="expense",
+        reconcile=False,
+        deprecated=False,
+    )
     line = Record(
-        1003, company_id=comp, reconciled=False, full_reconcile_id=None,
+        1003, company_id=comp, parent_state="posted",
+        reconciled=False, full_reconcile_id=None,
         matched_debit_ids=[], matched_credit_ids=[], asset_ids=[],
+        account_id=account,
     )
     move = Record(
         1001, company_id=comp, state="posted", move_type="entry",
@@ -5091,6 +7491,7 @@ def test_reversal_precheck_rejects_existing_accounting_dependencies(
         deferred_move_ids=[], deferred_original_move_ids=[],
         tax_cash_basis_rec_id=None, tax_cash_basis_origin_move_id=None,
     )
+    line.move_id = move
     setattr(move if target == "move" else line, field, value)
     handler = Harness(
         models={"account.move.reversal": Model()},
@@ -5099,6 +7500,7 @@ def test_reversal_precheck_rejects_existing_accounting_dependencies(
             ("account.move.line", 1003): line,
             ("account.journal", 2): journal,
             ("res.currency", 1): currency,
+            ("account.account", 10): account,
         },
     )
     handler.test_company = comp
@@ -5127,9 +7529,18 @@ def test_reversal_precheck_rejects_exchange_and_caba_reverse_dependencies(
     journal = Record(
         2, company_id=comp, type="general", active=True, currency_id=currency
     )
+    account = Record(
+        10,
+        company_id=comp,
+        account_type="expense",
+        reconcile=False,
+        deprecated=False,
+    )
     line = Record(
-        1003, company_id=comp, reconciled=False, full_reconcile_id=None,
+        1003, company_id=comp, parent_state="posted",
+        reconciled=False, full_reconcile_id=None,
         matched_debit_ids=[], matched_credit_ids=[], asset_ids=[],
+        account_id=account,
     )
     move = Record(
         1001, company_id=comp, state="posted", move_type="entry",
@@ -5139,6 +7550,7 @@ def test_reversal_precheck_rejects_exchange_and_caba_reverse_dependencies(
         deferred_move_ids=[], deferred_original_move_ids=[],
         tax_cash_basis_rec_id=None, tax_cash_basis_origin_move_id=None,
     )
+    line.move_id = move
     handler = DependencyHarness(
         models={"account.move.reversal": Model()},
         records={
@@ -5146,6 +7558,7 @@ def test_reversal_precheck_rejects_exchange_and_caba_reverse_dependencies(
             ("account.move.line", 1003): line,
             ("account.journal", 2): journal,
             ("res.currency", 1): currency,
+            ("account.account", 10): account,
         },
     )
     handler.test_company = comp
@@ -5163,8 +7576,20 @@ def test_reversal_verification_requires_exact_linewise_graph_and_approved_origin
     comp = company()
     currency = Record(1, company_id=comp, active=True, rounding="0.01")
     journal = Record(2, company_id=comp, type="general", active=True)
-    account_debit = Record(10, company_id=comp)
-    account_credit = Record(11, company_id=comp)
+    account_debit = Record(
+        10,
+        company_id=comp,
+        account_type="expense",
+        reconcile=False,
+        deprecated=False,
+    )
+    account_credit = Record(
+        11,
+        company_id=comp,
+        account_type="liability_current",
+        reconcile=False,
+        deprecated=False,
+    )
     origin = Record(
         1001, state="posted", company_id=comp, move_type="entry",
         journal_id=journal, currency_id=currency, date=date(2026, 7, 9),
@@ -5178,31 +7603,59 @@ def test_reversal_verification_requires_exact_linewise_graph_and_approved_origin
         odoo_cli_v3_reason="fix", line_ids=SimpleNamespace(ids=[1005, 1006]),
     )
     origin_debit = Record(
-        1003, company_id=comp, move_id=origin, name="debit", account_id=account_debit,
+        1003, company_id=comp, parent_state="posted",
+        move_id=origin, name="debit", account_id=account_debit,
         partner_id=None, currency_id=currency, debit=100, credit=0, balance=100,
         amount_currency=100, tax_ids=[], tax_line_id=None, display_type="product",
     )
     origin_credit = Record(
-        1004, company_id=comp, move_id=origin, name="credit", account_id=account_credit,
+        1004, company_id=comp, parent_state="posted",
+        move_id=origin, name="credit", account_id=account_credit,
         partner_id=None, currency_id=currency, debit=0, credit=100, balance=-100,
         amount_currency=-100, tax_ids=[], tax_line_id=None, display_type="product",
     )
     reverse_credit = Record(
-        1005, company_id=comp, move_id=reversal, name="debit", account_id=account_debit,
+        1005, company_id=comp, parent_state="posted",
+        move_id=reversal, name="debit", account_id=account_debit,
         partner_id=None, currency_id=currency, debit=0, credit=100, balance=-100,
         amount_currency=-100, tax_ids=[], tax_line_id=None, display_type="product",
     )
     reverse_debit = Record(
-        1006, company_id=comp, move_id=reversal, name="credit", account_id=account_credit,
+        1006, company_id=comp, parent_state="posted",
+        move_id=reversal, name="credit", account_id=account_credit,
         partner_id=None, currency_id=currency, debit=100, credit=0, balance=100,
         amount_currency=100, tax_ids=[], tax_line_id=None, display_type="product",
     )
+    audit_message = Record(
+        1050,
+        model="account.move",
+        res_id=origin.id,
+        message_type="notification",
+        is_internal=True,
+        subtype_id=Record(421),
+        author_id=Record(420),
+        create_uid=Record(42),
+        create_date=date(2026, 7, 31),
+        attachment_ids=[],
+        tracking_value_ids=[],
+        partner_ids=[],
+        parent_id=None,
+        write_uid=Record(42),
+        write_date=date(2026, 7, 31),
+        body=(
+            "This entry has been "
+            "<a data-oe-model='account.move' data-oe-id='1002'>reversed</a>"
+        ),
+    )
     handler = Harness(records={
         ("res.currency", 1): currency,
+        ("account.account", 10): account_debit,
+        ("account.account", 11): account_credit,
         ("account.move.line", 1003): origin_debit,
         ("account.move.line", 1004): origin_credit,
         ("account.move.line", 1005): reverse_credit,
         ("account.move.line", 1006): reverse_debit,
+        ("mail.message", 1050): audit_message,
     })
     handler.test_company = comp
     parameters = {
@@ -5220,31 +7673,77 @@ def test_reversal_verification_requires_exact_linewise_graph_and_approved_origin
         ("account.move", reversal),
         ("account.move.line", reverse_credit),
         ("account.move.line", reverse_debit),
+        ("mail.message", audit_message),
     ]
-    before = {
-        ("account.move", 1001): {
+    before_move = {
             "state": "posted", "move_type": "entry", "journal_id": 2,
             "currency_id": 1, "line_ids": [1003, 1004], "amount_total": "100",
             "date": "2026-07-09", "ref": False, "partner_id": False,
             "odoo_cli_v3_document_binding": False,
-        },
-        ("account.move.line", 1003): {
-            "move_id": 1001, "name": "debit", "account_id": 10,
-            "partner_id": False, "currency_id": 1, "debit": "100",
-            "credit": "0", "balance": "100", "amount_currency": "100",
-            "tax_ids": [], "tax_line_id": False, "display_type": "product",
-        },
-        ("account.move.line", 1004): {
-            "move_id": 1001, "name": "credit", "account_id": 11,
-            "partner_id": False, "currency_id": 1, "debit": "0",
-            "credit": "100", "balance": "-100", "amount_currency": "-100",
-            "tax_ids": [], "tax_line_id": False, "display_type": "product",
-        },
+            "reversal_move_ids": [],
+            "message_ids": [],
+            "audit_trail_message_ids": [],
+    }
+    before_debit = {
+                "move_id": 1001, "name": "debit", "account_id": 10,
+                "partner_id": False, "currency_id": 1, "debit": "100",
+                "credit": "0", "balance": "100", "amount_currency": "100",
+                "tax_ids": [], "tax_line_id": False, "display_type": "product",
+    }
+    before_credit = {
+                "move_id": 1001, "name": "credit", "account_id": 11,
+                "partner_id": False, "currency_id": 1, "debit": "0",
+                "credit": "100", "balance": "-100", "amount_currency": "-100",
+                "tax_ids": [], "tax_line_id": False, "display_type": "product",
+    }
+    origin.snapshot_values = {
+        **before_move,
+        "reversal_move_ids": [reversal.id],
+        "message_ids": [audit_message.id],
+        "audit_trail_message_ids": [audit_message.id],
+    }
+    origin_debit.snapshot_values = dict(before_debit)
+    origin_credit.snapshot_values = dict(before_credit)
+    before = {
+        ("account.move", 1001): before_move,
+        ("account.move.line", 1003): before_debit,
+        ("account.move.line", 1004): before_credit,
     }
 
-    assert "linewise_reversal_exact" in handler.verify_reversal(
-        parameters, comp, graph, before
+    checks = handler.verify_reversal(parameters, comp, graph, before)
+    assert "linewise_reversal_exact" in checks
+    assert "origin_audit_message_exact" in checks
+    reversal.message_follower_ids = [Record(1101)]
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="MailThread side effect",
+    ):
+        handler.verify_reversal(parameters, comp, graph, before)
+    reversal.message_follower_ids = []
+    reversal.has_message = True
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="MailThread side effect",
+    ):
+        handler.verify_reversal(parameters, comp, graph, before)
+    reversal.has_message = False
+    audit_message.body = "unbound reversal log"
+    with pytest.raises(OdooWriteHandlerError, match="exact Odoo reversal log"):
+        handler.verify_reversal(parameters, comp, graph, before)
+    audit_message.body = (
+        "This entry has been "
+        "<a data-oe-model='account.move' data-oe-id='1002'>reversed</a>"
     )
+    reverse_credit.tax_tag_ids = [Record(1100)]
+    with pytest.raises(OdooWriteHandlerError, match="external business"):
+        handler.verify_reversal(parameters, comp, graph, before)
+    reverse_credit.tax_tag_ids = []
+    origin.snapshot_values["narration"] = "unapproved drift"
+    with pytest.raises(OdooWriteHandlerError, match="exact Odoo reversal delta"):
+        handler.verify_reversal(parameters, comp, graph, before)
+    origin.snapshot_values.pop("narration")
+    with pytest.raises(OdooWriteHandlerError, match="audit message"):
+        handler.verify_reversal(parameters, comp, graph[:-1], before)
     reverse_credit.balance = -99
     with pytest.raises(OdooWriteHandlerError, match="linewise reversal"):
         handler.verify_reversal(parameters, comp, graph, before)
@@ -5257,6 +7756,19 @@ def test_reversal_verification_requires_exact_linewise_graph_and_approved_origin
 
 def draft_move_recovery_fixture(*, vendor=False):
     currency = Record(1, active=True, rounding=0.01)
+    partner = Record(10, active=True)
+    invoice_account = Record(
+        10,
+        deprecated=False,
+        account_type="expense" if vendor else "income",
+    )
+    term_account = Record(
+        20,
+        deprecated=False,
+        account_type=(
+            "liability_payable" if vendor else "asset_receivable"
+        ),
+    )
     journal = Record(
         2,
         company_id=Record(7),
@@ -5271,10 +7783,12 @@ def draft_move_recovery_fixture(*, vendor=False):
         company_id=Record(7),
         journal_id=journal,
         currency_id=currency,
+        partner_id=partner,
         amount_total=100,
         amount_residual=100,
         payment_state="not_paid",
         invoice_date="2026-07-10",
+        date="2026-07-10",
         invoice_date_due="2026-08-10",
         invoice_line_ids=[],
         invoice_payment_term_id=None,
@@ -5383,8 +7897,9 @@ def draft_move_recovery_fixture(*, vendor=False):
         write_date="2026-07-10 09:00:00",
         need_cancel_request=False,
         is_manually_modified=False,
-        odoo_cli_v3_document_binding="a" * 64,
-        odoo_cli_v3_business_binding="b" * 64,
+        odoo_cli_v3_document_binding="",
+        odoo_cli_v3_document_binding_v2="",
+        odoo_cli_v3_business_binding="",
     )
     line1 = Record(
         1102,
@@ -5421,7 +7936,7 @@ def draft_move_recovery_fixture(*, vendor=False):
         move_attachment_ids=[],
         tax_base_amount=0,
         extra_tax_data=False,
-        deductible_amount=0,
+        deductible_amount=100,
         is_imported=False,
         is_storno=False,
         is_downpayment=False,
@@ -5444,9 +7959,16 @@ def draft_move_recovery_fixture(*, vendor=False):
         matching_number=False,
         name="Invoice line",
         partner_id=Record(10),
+        account_id=invoice_account,
+        currency_id=currency,
+        debit=100 if vendor else 0,
+        credit=0 if vendor else 100,
+        balance=100 if vendor else -100,
+        amount_currency=100 if vendor else -100,
         price_unit=100,
         product_id=None,
         quantity=1,
+        odoo_cli_v3_line_reference="line-1",
         reconciled=False,
         parent_state="draft",
     )
@@ -5485,7 +8007,7 @@ def draft_move_recovery_fixture(*, vendor=False):
         move_attachment_ids=[],
         tax_base_amount=0,
         extra_tax_data=False,
-        deductible_amount=0,
+        deductible_amount=100,
         is_imported=False,
         is_storno=False,
         is_downpayment=False,
@@ -5508,6 +8030,12 @@ def draft_move_recovery_fixture(*, vendor=False):
         matching_number=False,
         name="Payment term",
         partner_id=Record(10),
+        account_id=term_account,
+        currency_id=currency,
+        debit=0 if vendor else 100,
+        credit=100 if vendor else 0,
+        balance=-100 if vendor else 100,
+        amount_currency=-100 if vendor else 100,
         price_unit=0,
         product_id=None,
         quantity=0,
@@ -5517,6 +8045,44 @@ def draft_move_recovery_fixture(*, vendor=False):
     move.line_ids = [line1, line2]
     move.invoice_line_ids = [line1]
     move.journal_line_ids = [line1, line2]
+    source_parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        (
+            "vendor_reference" if vendor else "reference"
+        ): (
+            "BILL-DRAFT-RECOVERY-1"
+            if vendor
+            else "DRAFT-RECOVERY-1"
+        ),
+        "lines": [
+            {
+                "line_reference": "line-1",
+                "name": "Invoice line",
+                "product_id": None,
+                "account_id": 10,
+                "quantity": "1",
+                "price_unit": "100",
+                "tax_ids": [],
+            }
+        ],
+    }
+    kind = "vendor_bill" if vendor else "customer_invoice"
+    move.odoo_cli_v3_document_binding = OdooWriteHandlers.document_binding(
+        kind, source_parameters
+    )
+    move.odoo_cli_v3_document_binding_v2 = (
+        OdooWriteHandlers.document_binding_v2(kind, source_parameters)
+    )
+    move.odoo_cli_v3_business_binding = (
+        OdooWriteHandlers.business_binding(kind, source_parameters)
+    )
     move.snapshot_values = {
         "state": "draft",
         "name": "/",
@@ -5643,8 +8209,15 @@ def draft_move_recovery_fixture(*, vendor=False):
         "write_date": "2026-07-10 09:00:00",
         "need_cancel_request": False,
         "is_manually_modified": False,
-        "odoo_cli_v3_document_binding": "a" * 64,
-        "odoo_cli_v3_business_binding": "b" * 64,
+        "odoo_cli_v3_document_binding": (
+            move.odoo_cli_v3_document_binding
+        ),
+        "odoo_cli_v3_document_binding_v2": (
+            move.odoo_cli_v3_document_binding_v2
+        ),
+        "odoo_cli_v3_business_binding": (
+            move.odoo_cli_v3_business_binding
+        ),
     }
     line1.snapshot_values = {
         "move_id": [
@@ -5694,7 +8267,7 @@ def draft_move_recovery_fixture(*, vendor=False):
         "move_attachment_ids": [],
         "tax_base_amount": "0",
         "extra_tax_data": False,
-        "deductible_amount": "0",
+        "deductible_amount": "100",
         "is_imported": False,
         "is_storno": False,
         "is_downpayment": False,
@@ -5770,7 +8343,7 @@ def draft_move_recovery_fixture(*, vendor=False):
         "move_attachment_ids": [],
         "tax_base_amount": "0",
         "extra_tax_data": False,
-        "deductible_amount": "0",
+        "deductible_amount": "100",
         "is_imported": False,
         "is_storno": False,
         "is_downpayment": False,
@@ -5830,6 +8403,8 @@ def draft_move_recovery_fixture(*, vendor=False):
         ("account.move", move.id): move,
         ("account.move.line", line1.id): line1,
         ("account.move.line", line2.id): line2,
+        ("account.account", invoice_account.id): invoice_account,
+        ("account.account", term_account.id): term_account,
     }
     plan = executable_recovery_plan(
         action_targets=[recovery_target("account.move", move)],
@@ -5852,12 +8427,50 @@ def draft_move_recovery_fixture(*, vendor=False):
 
 
 def draft_cancel_parameters(*, vendor=False):
+    source_parameters = {
+        "company_id": 7,
+        "partner_id": 10,
+        "invoice_date": "2026-07-10",
+        "accounting_date": "2026-07-10",
+        "due_date": "2026-08-10",
+        "currency_id": 1,
+        "journal_id": 2,
+        "posting_mode": "draft",
+        (
+            "vendor_reference" if vendor else "reference"
+        ): (
+            "BILL-DRAFT-RECOVERY-1"
+            if vendor
+            else "DRAFT-RECOVERY-1"
+        ),
+        "lines": [
+            {
+                "line_reference": "line-1",
+                "name": "Invoice line",
+                "product_id": None,
+                "account_id": 10,
+                "quantity": "1",
+                "price_unit": "100",
+                "tax_ids": [],
+            }
+        ],
+    }
+    kind = "vendor_bill" if vendor else "customer_invoice"
     return {
         "company_id": 7,
         "move_id": 1101,
         "expected_move_type": "in_invoice" if vendor else "out_invoice",
-        "expected_document_binding": "a" * 64,
-        "expected_business_binding": "b" * 64,
+        "expected_document_binding": OdooWriteHandlers.document_binding(
+            kind, source_parameters
+        ),
+        "expected_document_binding_v2": (
+            OdooWriteHandlers.document_binding_v2(
+                kind, source_parameters
+            )
+        ),
+        "expected_business_binding": OdooWriteHandlers.business_binding(
+            kind, source_parameters
+        ),
         "reason": "cancel duplicate pristine draft",
         "idempotency_key": (
             "cancel-pristine-vendor-bill-1101"
@@ -5937,6 +8550,7 @@ def draft_cancel_v2_entry_parameters():
         "expected_document_binding": OdooWriteHandlers.document_binding(
             "journal_entry", source
         ),
+        "expected_document_binding_v2": None,
         "expected_business_binding": OdooWriteHandlers.business_binding(
             "journal_entry", source
         ),
@@ -7177,6 +9791,43 @@ def test_draft_cancel_v2_cancels_pristine_manual_entry_exactly():
     }
 
 
+@pytest.mark.parametrize("vendor", [False, True])
+def test_draft_cancel_v2_locks_document_v2_and_complete_line_graph(
+    vendor,
+):
+    move, _line1, _line2, records, _plan = (
+        draft_move_recovery_fixture(vendor=vendor)
+    )
+    handler = Harness(records=records)
+    parameters = {
+        **draft_cancel_parameters(vendor=vendor),
+        "expected_line_ids": [1102, 1103],
+        "idempotency_key": (
+            "draft-cancel-v2-vendor"
+            if vendor
+            else "draft-cancel-v2-customer"
+        ),
+    }
+
+    checked = handler.precheck(
+        "acct.move.draft_cancel.v2", parameters
+    )
+    execution = handler.execute_prechecked(
+        "acct.move.draft_cancel.v2", parameters, checked
+    )
+    verification = handler.verify(
+        "acct.move.draft_cancel.v2", parameters, execution
+    )
+
+    assert move.writes == [{"state": "cancel"}]
+    assert verification["passed"] is True
+    assert "approved_line_ids_preserved" in verification["checks"]
+    assert (
+        "document_v1_v2_and_business_bindings_preserved"
+        in verification["checks"]
+    )
+
+
 @pytest.mark.parametrize(
     ("drift", "error"),
     (
@@ -7212,18 +9863,27 @@ def test_draft_cancel_v2_rejects_line_or_binding_drift_after_precheck(
 def test_draft_cancel_is_normal_exact_verified_write_without_recovery_plan(
     vendor,
 ):
-    move, line1, _line2, records_by_key, _plan = (
+    move, line1, line2, records_by_key, _plan = (
         draft_move_recovery_fixture(vendor=vendor)
     )
-    handler = Harness(records=records_by_key, recovery_plan=None)
+    handler = DraftCancelAclHarness(
+        records=records_by_key, recovery_plan=None
+    )
     parameters = draft_cancel_parameters(vendor=vendor)
     assert "expected_line_ids" not in parameters
 
     checked = handler.precheck("acct.move.draft_cancel.v1", parameters)
     assert checked["semantic_precheck"]["computed"] == {
         "expected_move_type": parameters["expected_move_type"],
-        "expected_document_binding": "a" * 64,
-        "expected_business_binding": "b" * 64,
+        "expected_document_binding": parameters[
+            "expected_document_binding"
+        ],
+        "expected_document_binding_v2": parameters[
+            "expected_document_binding_v2"
+        ],
+        "expected_business_binding": parameters[
+            "expected_business_binding"
+        ],
     }
     assert {
         (item["model"], item["record_id"])
@@ -7232,6 +9892,30 @@ def test_draft_cancel_is_normal_exact_verified_write_without_recovery_plan(
         ("account.move", 1101),
         ("account.move.line", 1102),
         ("account.move.line", 1103),
+    }
+    move_before = next(
+        item
+        for item in checked["before"]
+        if item["model"] == "account.move"
+    )
+    assert move_before["values"][
+        "odoo_cli_v3_document_binding_v2"
+    ] == parameters["expected_document_binding_v2"]
+    assert {
+        (item["model"], item["record_id"])
+        for item in checked["dependencies"]
+    } >= {
+        ("res.company", 7),
+        ("res.partner", 10),
+        ("account.journal", 2),
+        ("res.currency", 1),
+        ("account.account", 10),
+        ("account.account", 20),
+    }
+    assert set(handler.write_acl_targets) >= {
+        ("account.move", 1101),
+        ("account.move.line", line1.id),
+        ("account.move.line", line2.id),
     }
 
     execution = handler.execute_prechecked(
@@ -7270,11 +9954,36 @@ def test_draft_cancel_rejects_injected_trusted_recovery_plan_and_binding_drift()
     handler = Harness(records=records_by_key)
     for field in (
         "expected_document_binding",
+        "expected_document_binding_v2",
         "expected_business_binding",
     ):
         tampered = {**parameters, field: "c" * 64}
-        with pytest.raises(OdooWriteHandlerError, match="binding differs"):
+        with pytest.raises(OdooWriteHandlerError, match="binding"):
             handler.precheck("acct.move.draft_cancel.v1", tampered)
+
+
+def test_draft_cancel_rejects_missing_or_drifted_stored_v2_before_write():
+    move, _line1, _line2, records_by_key, _plan = (
+        draft_move_recovery_fixture()
+    )
+    handler = Harness(records=records_by_key)
+    parameters = draft_cancel_parameters()
+
+    move.odoo_cli_v3_document_binding_v2 = False
+    with pytest.raises(OdooWriteHandlerError, match="binding"):
+        handler.precheck("acct.move.draft_cancel.v1", parameters)
+
+    move.odoo_cli_v3_document_binding_v2 = parameters[
+        "expected_document_binding_v2"
+    ]
+    checked = handler.precheck("acct.move.draft_cancel.v1", parameters)
+    move.odoo_cli_v3_document_binding_v2 = "f" * 64
+    move.snapshot_values["odoo_cli_v3_document_binding_v2"] = "f" * 64
+    with pytest.raises(OdooWriteHandlerError, match="binding"):
+        handler.execute_prechecked(
+            "acct.move.draft_cancel.v1", parameters, checked
+        )
+    assert move.writes == []
 
 
 @pytest.mark.parametrize(
@@ -7374,7 +10083,7 @@ def test_draft_cancel_rejects_cross_company_graph_and_fingerprint_drift():
     checked = handler.precheck("acct.move.draft_cancel.v1", parameters)
     move.ref = "DRIFTED-AFTER-APPROVAL"
     move.snapshot_values["ref"] = move.ref
-    with pytest.raises(OdooWriteHandlerError, match="changed outside the approved"):
+    with pytest.raises(OdooWriteHandlerError, match="binding"):
         handler.execute_prechecked(
             "acct.move.draft_cancel.v1", parameters, checked
         )
@@ -8480,21 +11189,12 @@ def test_customer_and_vendor_recovery_method_oracle_pairs_cannot_be_crossed(
 def test_every_advertised_available_recovery_method_has_an_execute_allowlist_branch():
     assert _RECOVERY_ACTIONS == {
         "cancel_and_unreconcile_payment_v1",
-        "cancel_asset_and_reverse_schedule_v1",
         "cancel_draft_period_adjustment_v1",
         "cancel_draft_refund_v1",
         "cancel_pristine_v3_draft_customer_invoice_v1",
         "cancel_pristine_v3_draft_vendor_bill_v1",
-        "cancel_scheduled_and_reverse_accrual_origin_v1",
         "post_compensating_bank_statement_v1",
-        "reverse_deferred_source_and_schedule_v1",
-        "reverse_depreciation_and_restore_schedule_v1",
-        "reverse_posted_customer_invoice_v1",
-        "reverse_posted_period_adjustment_v1",
-        "reverse_posted_refund_v1",
-        "reverse_posted_vendor_bill_v1",
-        "reverse_the_reversal_v1",
-        "undo_reconciliation_and_reverse_writeoff_v1",
+        "undo_reconciliation_without_writeoff_v1",
     }
 
 
@@ -8673,12 +11373,17 @@ def existing_document_post_parameters(*, vendor=False):
         "expected_document_binding": OdooWriteHandlers.document_binding(
             kind, source
         ),
+        "expected_document_binding_v2": (
+            OdooWriteHandlers.document_binding_v2(kind, source)
+        ),
         "expected_business_binding": OdooWriteHandlers.business_binding(
             kind, source
         ),
         "expected_partner_id": 10,
         "expected_journal_id": 2,
         "expected_currency_id": 1,
+        "expected_payment_term_line_id": 1103,
+        "expected_payment_term_account_id": 20,
         "expected_invoice_date": "2026-07-10",
         "expected_accounting_date": "2026-07-10",
         "expected_due_date": "2026-08-10",
@@ -8739,6 +11444,57 @@ def test_document_graph_reconstruction_uses_the_same_canonical_order_as_eligibil
     assert binding_lines[1]["tax_ids"] == [3, 4]
 
 
+def test_canonical_document_binding_v2_is_stable_across_lexemes_and_order():
+    first = existing_document_create_parameters()
+    first["lines"] = [
+        {
+            "line_reference": "line-b",
+            "name": "Second line",
+            "product_id": None,
+            "account_id": 11,
+            "quantity": "2.00",
+            "price_unit": "10.00",
+            "tax_ids": [4, 3],
+        },
+        {
+            "line_reference": "line-a",
+            "name": "First line",
+            "product_id": None,
+            "account_id": 10,
+            "quantity": "1.0",
+            "price_unit": "80.0",
+            "tax_ids": [],
+        },
+    ]
+    second = {
+        **first,
+        "lines": [
+            {
+                **first["lines"][1],
+                "quantity": "1",
+                "price_unit": "80",
+            },
+            {
+                **first["lines"][0],
+                "quantity": "2",
+                "price_unit": "10",
+                "tax_ids": [3, 4],
+            },
+        ],
+    }
+
+    assert OdooWriteHandlers.document_binding(
+        "customer_invoice", first
+    ) != OdooWriteHandlers.document_binding(
+        "customer_invoice", second
+    )
+    assert OdooWriteHandlers.document_binding_v2(
+        "customer_invoice", first
+    ) == OdooWriteHandlers.document_binding_v2(
+        "customer_invoice", second
+    )
+
+
 def existing_document_post_fixture(*, vendor=False):
     move, line1, line2, records, _plan = draft_move_recovery_fixture(
         vendor=vendor
@@ -8787,19 +11543,27 @@ def existing_document_post_fixture(*, vendor=False):
     move.odoo_cli_v3_document_binding = parameters[
         "expected_document_binding"
     ]
+    move.odoo_cli_v3_document_binding_v2 = parameters[
+        "expected_document_binding_v2"
+    ]
     move.odoo_cli_v3_business_binding = parameters[
         "expected_business_binding"
     ]
     move.snapshot_values.update(
         {
             "odoo_cli_v3_document_binding": move.odoo_cli_v3_document_binding,
+            "odoo_cli_v3_document_binding_v2": (
+                move.odoo_cli_v3_document_binding_v2
+            ),
             "odoo_cli_v3_business_binding": move.odoo_cli_v3_business_binding,
         }
     )
-    for line, account_id, debit, credit in (
-        (line1, 10, 100, 0),
-        (line2, 20, 0, 100),
-    ):
+    line_amounts = (
+        ((line1, 10, 100, 0), (line2, 20, 0, 100))
+        if vendor
+        else ((line1, 10, 0, 100), (line2, 20, 100, 0))
+    )
+    for line, account_id, debit, credit in line_amounts:
         line.account_id = Record(
             account_id,
             company_ids=[Record(7)],
@@ -8823,11 +11587,29 @@ def existing_document_post_fixture(*, vendor=False):
         line.credit = credit
         line.balance = debit - credit
         line.amount_currency = debit - credit
+        line.snapshot_values.update(
+            {
+                "account_id": [account_id, f"Account {account_id}"],
+                "debit": str(debit),
+                "credit": str(credit),
+                "balance": str(debit - credit),
+                "amount_currency": str(debit - credit),
+            }
+        )
         line.deductible_amount = 100
         line.snapshot_values["deductible_amount"] = "100"
         if line is line1:
             line.price_subtotal = 100
             line.price_total = 100
+        else:
+            line.amount_residual = debit - credit
+            line.amount_residual_currency = debit - credit
+            line.snapshot_values.update(
+                {
+                    "amount_residual": str(debit - credit),
+                    "amount_residual_currency": str(debit - credit),
+                }
+            )
         line.odoo_cli_v3_line_reference = line.snapshot_values[
             "odoo_cli_v3_line_reference"
         ]
@@ -8840,7 +11622,11 @@ def existing_document_post_fixture(*, vendor=False):
 
 
 def install_exact_existing_document_post(
-    move, lines, *, unexpected_reference_drift=False
+    move,
+    lines,
+    *,
+    unexpected_reference_drift=False,
+    unexpected_term_account_drift=None,
 ):
     def action_post():
         move.action_post_calls += 1
@@ -8880,6 +11666,16 @@ def install_exact_existing_document_post(
                     "write_uid": [42, "V3 Executor"],
                     "write_date": "2026-07-10 09:01:00",
                 }
+            )
+        if unexpected_term_account_drift is not None:
+            term_line = next(
+                line
+                for line in lines
+                if line.display_type == "payment_term"
+            )
+            term_line.account_id = unexpected_term_account_drift
+            term_line.snapshot_values["account_id"] = (
+                unexpected_term_account_drift.id
             )
         rank_field = (
             "supplier_rank"
@@ -8958,11 +11754,21 @@ def refund_draft_cancel_parameters(*, vendor=False):
         "expected_document_binding": OdooWriteHandlers.document_binding(
             "refund", refund_source
         ),
+        "expected_document_binding_v2": (
+            OdooWriteHandlers.document_binding_v2(
+                "refund", refund_source
+            )
+        ),
         "expected_business_binding": OdooWriteHandlers.business_binding(
             "refund", refund_source
         ),
         "expected_origin_document_binding": OdooWriteHandlers.document_binding(
             origin_kind, origin_source
+        ),
+        "expected_origin_document_binding_v2": (
+            OdooWriteHandlers.document_binding_v2(
+                origin_kind, origin_source
+            )
         ),
         "expected_origin_business_binding": OdooWriteHandlers.business_binding(
             origin_kind, origin_source
@@ -9000,14 +11806,17 @@ def refund_draft_cancel_fixture(*, vendor=False):
     )
     currency = refund.currency_id
     partner = Record(10, active=True)
+    partner.commercial_partner_id = partner
     for move in (refund, origin):
         move.partner_id = partner
+        move.commercial_partner_id = partner
         move.date = "2026-07-10"
         move.amount_untaxed = 100
         move.amount_tax = 0
         move.snapshot_values.update(
             {
                 "partner_id": 10,
+                "commercial_partner_id": [10, "Test Partner"],
                 "date": "2026-07-10",
                 "amount_untaxed": "100",
                 "amount_tax": "0",
@@ -9021,6 +11830,9 @@ def refund_draft_cancel_fixture(*, vendor=False):
     refund.odoo_cli_v3_document_binding = parameters[
         "expected_document_binding"
     ]
+    refund.odoo_cli_v3_document_binding_v2 = parameters[
+        "expected_document_binding_v2"
+    ]
     refund.odoo_cli_v3_business_binding = parameters[
         "expected_business_binding"
     ]
@@ -9030,6 +11842,9 @@ def refund_draft_cancel_fixture(*, vendor=False):
             "odoo_cli_v3_reason": "Duplicate refund",
             "odoo_cli_v3_document_binding": (
                 refund.odoo_cli_v3_document_binding
+            ),
+            "odoo_cli_v3_document_binding_v2": (
+                refund.odoo_cli_v3_document_binding_v2
             ),
             "odoo_cli_v3_business_binding": (
                 refund.odoo_cli_v3_business_binding
@@ -9045,6 +11860,9 @@ def refund_draft_cancel_fixture(*, vendor=False):
     origin.odoo_cli_v3_document_binding = parameters[
         "expected_origin_document_binding"
     ]
+    origin.odoo_cli_v3_document_binding_v2 = parameters[
+        "expected_origin_document_binding_v2"
+    ]
     origin.odoo_cli_v3_business_binding = parameters[
         "expected_origin_business_binding"
     ]
@@ -9058,6 +11876,9 @@ def refund_draft_cancel_fixture(*, vendor=False):
             "checked": True,
             "odoo_cli_v3_document_binding": (
                 origin.odoo_cli_v3_document_binding
+            ),
+            "odoo_cli_v3_document_binding_v2": (
+                origin.odoo_cli_v3_document_binding_v2
             ),
             "odoo_cli_v3_business_binding": (
                 origin.odoo_cli_v3_business_binding
@@ -9102,10 +11923,14 @@ def refund_draft_cancel_fixture(*, vendor=False):
                 )
             )
             line.currency_id = currency
+            line.partner_id = partner
             line.debit = debit
             line.credit = credit
             line.balance = debit - credit
             line.amount_currency = debit - credit
+            if line is lines[1]:
+                line.amount_residual = debit - credit
+                line.amount_residual_currency = debit - credit
             line.snapshot_values.update(
                 {
                     "debit": str(debit),
@@ -9126,6 +11951,12 @@ def refund_draft_cancel_fixture(*, vendor=False):
             line.odoo_cli_v3_line_reference = line.snapshot_values[
                 "odoo_cli_v3_line_reference"
             ]
+    refund_line1.odoo_cli_v3_line_reference = (
+        f"rf-full-{origin.id}-{origin_line1.id}"
+    )
+    refund_line1.snapshot_values["odoo_cli_v3_line_reference"] = (
+        refund_line1.odoo_cli_v3_line_reference
+    )
     refund_line2.date_maturity = "2026-07-10"
     refund_line2.snapshot_values["date_maturity"] = "2026-07-10"
     refund.button_cancel = lambda: pytest.fail("button_cancel must not be called")
@@ -9189,6 +12020,137 @@ def test_existing_v3_document_post_is_exact_and_verified(vendor, capability_id):
         ),
         "targets": [{"model": "account.move", "record_id": 1101}],
     }
+
+
+@pytest.mark.parametrize(
+    ("vendor", "capability_id", "account_type"),
+    (
+        (False, "acct.invoice.customer_post.v1", "asset_receivable"),
+        (True, "acct.bill.vendor_post.v1", "liability_payable"),
+    ),
+)
+def test_existing_document_post_rejects_alternate_same_type_term_account(
+    vendor, capability_id, account_type
+):
+    comp, move, _line1, term_line, records = (
+        existing_document_post_fixture(vendor=vendor)
+    )
+    alternate = Record(
+        21,
+        company_ids=[Record(7)],
+        deprecated=False,
+        account_type=account_type,
+    )
+    term_line.account_id = alternate
+    term_line.snapshot_values["account_id"] = 21
+    records[("account.account", 21)] = alternate
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="approved payment term line, account",
+    ):
+        handler.precheck(
+            capability_id,
+            existing_document_post_parameters(vendor=vendor),
+        )
+
+    assert move.action_post_calls == 0
+
+
+def test_existing_document_post_rejects_foreign_currency_before_write():
+    comp, move, _line1, _term_line, records = (
+        existing_document_post_fixture()
+    )
+    comp.currency_id = Record(99, active=True, rounding=0.01)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="fail-closed outside company currency",
+    ):
+        handler.precheck(
+            "acct.invoice.customer_post.v1",
+            existing_document_post_parameters(),
+        )
+
+    assert move.action_post_calls == 0
+
+
+def test_existing_document_post_verifier_rejects_term_account_drift():
+    comp, move, line1, line2, records = existing_document_post_fixture()
+    alternate = Record(
+        21,
+        company_ids=[Record(7)],
+        deprecated=False,
+        account_type="asset_receivable",
+    )
+    records[("account.account", 21)] = alternate
+    install_exact_existing_document_post(
+        move,
+        [line1, line2],
+        unexpected_term_account_drift=alternate,
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+    parameters = existing_document_post_parameters()
+    checked = handler.precheck("acct.invoice.customer_post.v1", parameters)
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="payment term line or approved account|posting allowlist",
+    ):
+        handler.execute_prechecked(
+            "acct.invoice.customer_post.v1",
+            parameters,
+            checked,
+        )
+
+    assert move.action_post_calls == 1
+
+
+def test_existing_v3_document_post_rejects_tampered_v2_binding_before_write():
+    comp, move, _line1, _line2, records = (
+        existing_document_post_fixture()
+    )
+    move.odoo_cli_v3_document_binding_v2 = "f" * 64
+    move.snapshot_values[
+        "odoo_cli_v3_document_binding_v2"
+    ] = move.odoo_cli_v3_document_binding_v2
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError, match="cannot reproduce"
+    ):
+        handler.precheck(
+            "acct.invoice.customer_post.v1",
+            existing_document_post_parameters(),
+        )
+
+    assert move.action_post_calls == 0
+
+
+def test_existing_v3_document_post_rejects_missing_v2_provenance():
+    comp, move, _line1, _line2, records = (
+        existing_document_post_fixture()
+    )
+    move.odoo_cli_v3_document_binding_v2 = False
+    move.snapshot_values["odoo_cli_v3_document_binding_v2"] = False
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError, match="immutable binding"
+    ):
+        handler.precheck(
+            "acct.invoice.customer_post.v1",
+            existing_document_post_parameters(),
+        )
+
+    assert move.action_post_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -9332,12 +12294,22 @@ def test_refund_draft_cancel_accepts_origin_created_and_posted_directly():
     direct_post_binding = OdooWriteHandlers.document_binding(
         "customer_invoice", source
     )
+    direct_post_binding_v2 = OdooWriteHandlers.document_binding_v2(
+        "customer_invoice", source
+    )
     origin.odoo_cli_v3_document_binding = direct_post_binding
+    origin.odoo_cli_v3_document_binding_v2 = direct_post_binding_v2
     origin.snapshot_values[
         "odoo_cli_v3_document_binding"
     ] = direct_post_binding
+    origin.snapshot_values[
+        "odoo_cli_v3_document_binding_v2"
+    ] = direct_post_binding_v2
     parameters = refund_draft_cancel_parameters()
     parameters["expected_origin_document_binding"] = direct_post_binding
+    parameters[
+        "expected_origin_document_binding_v2"
+    ] = direct_post_binding_v2
     handler = Harness(records=records)
     handler.test_company = comp
 
@@ -9357,17 +12329,17 @@ def test_refund_draft_cancel_rejects_full_refund_linewise_drift():
     handler = Harness(records=records)
     handler.test_company = comp
 
-    with pytest.raises(OdooWriteHandlerError, match="linewise reversal"):
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="linewise reversal|taxless document line balance",
+    ):
         handler.precheck(
             "acct.refund.draft_cancel.v1",
             refund_draft_cancel_parameters(),
         )
 
 
-def test_refund_draft_cancel_rejects_partial_refund_financial_graph_drift():
-    comp, refund, refund_lines, _origin, _origin_lines, records = (
-        refund_draft_cancel_fixture()
-    )
+def configure_partial_refund_draft_cancel(refund, refund_lines):
     source = refund_create_source_parameters()
     source.update(
         {
@@ -9388,40 +12360,195 @@ def test_refund_draft_cancel_rejects_partial_refund_financial_graph_drift():
     parameters["expected_document_binding"] = (
         OdooWriteHandlers.document_binding("refund", source)
     )
+    parameters["expected_document_binding_v2"] = (
+        OdooWriteHandlers.document_binding_v2("refund", source)
+    )
     parameters["expected_business_binding"] = (
         OdooWriteHandlers.business_binding("refund", source)
     )
     refund.odoo_cli_v3_document_binding = parameters[
         "expected_document_binding"
     ]
+    refund.odoo_cli_v3_document_binding_v2 = parameters[
+        "expected_document_binding_v2"
+    ]
     refund.odoo_cli_v3_business_binding = parameters[
         "expected_business_binding"
     ]
     refund.snapshot_values.update(
         {
-            "odoo_cli_v3_document_binding": refund.odoo_cli_v3_document_binding,
-            "odoo_cli_v3_business_binding": refund.odoo_cli_v3_business_binding,
+            "odoo_cli_v3_document_binding": (
+                refund.odoo_cli_v3_document_binding
+            ),
+            "odoo_cli_v3_document_binding_v2": (
+                refund.odoo_cli_v3_document_binding_v2
+            ),
+            "odoo_cli_v3_business_binding": (
+                refund.odoo_cli_v3_business_binding
+            ),
         }
     )
-    refund_lines[0].price_total = 99
+    refund_lines[0].odoo_cli_v3_line_reference = "line-1"
+    refund_lines[0].snapshot_values[
+        "odoo_cli_v3_line_reference"
+    ] = "line-1"
+    return parameters
+
+
+def test_refund_draft_cancel_rejects_partial_refund_financial_graph_drift():
+    comp, refund, refund_lines, _origin, _origin_lines, records = (
+        refund_draft_cancel_fixture()
+    )
+    parameters = configure_partial_refund_draft_cancel(
+        refund, refund_lines
+    )
+    refund_lines[0].debit = 99
+    refund_lines[0].balance = 99
+    refund_lines[0].amount_currency = 99
+    refund_lines[1].credit = 99
+    refund_lines[1].balance = -99
+    refund_lines[1].amount_currency = -99
+    refund_lines[1].amount_residual = -99
+    refund_lines[1].amount_residual_currency = -99
     handler = Harness(records=records)
     handler.test_company = comp
 
     with pytest.raises(
         OdooWriteHandlerError,
-        match="partial refund line total amount differs",
+        match="partial refund line debit|taxless document line debit",
     ):
         handler.precheck("acct.refund.draft_cancel.v1", parameters)
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("product_id", Record(1801)),
+        ("product_uom_id", Record(1802)),
+        ("parent_id", Record(1803)),
+        ("discount", 5),
+        ("display_type", "line_note"),
+    ),
+)
+def test_refund_draft_cancel_rejects_unapproved_partial_line_shape(
+    field, value
+):
+    comp, refund, refund_lines, _origin, _origin_lines, records = (
+        refund_draft_cancel_fixture()
+    )
+    parameters = configure_partial_refund_draft_cancel(
+        refund, refund_lines
+    )
+    setattr(refund_lines[0], field, value)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match=(
+            "partial refund line differs or is ambiguous"
+            "|partial refund origin line relation"
+            "|taxless document line shape or discount"
+        ),
+    ):
+        handler.precheck("acct.refund.draft_cancel.v1", parameters)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("tax_ids", [Record(1810)]),
+        ("tax_line_id", Record(1811)),
+        ("tax_tag_ids", [Record(1812)]),
+        ("tax_repartition_line_id", Record(1813)),
+        ("group_tax_id", Record(1814)),
+        ("tax_base_amount", 1),
+        ("extra_tax_data", {"unexpected": True}),
+        ("deductible_amount", 50),
+    ),
+)
+def test_refund_draft_cancel_rejects_refund_side_tax_lineage(
+    field, value
+):
+    comp, _refund, refund_lines, _origin, _origin_lines, records = (
+        refund_draft_cancel_fixture()
+    )
+    setattr(refund_lines[0], field, value)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="tax lineage.*taxless|recovery line graph",
+    ):
+        handler.precheck(
+            "acct.refund.draft_cancel.v1",
+            refund_draft_cancel_parameters(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("move_id", Record(1820)),
+        ("company_id", Record(1821)),
+        ("parent_state", "posted"),
+        ("currency_id", Record(1822)),
+        ("partner_id", Record(1823)),
+        ("is_storno", True),
+    ),
+)
+def test_refund_draft_cancel_rejects_refund_line_identity_drift(
+    field, value
+):
+    comp, _refund, refund_lines, _origin, _origin_lines, records = (
+        refund_draft_cancel_fixture()
+    )
+    setattr(refund_lines[0], field, value)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="recovery line graph|journal item identity",
+    ):
+        handler.precheck(
+            "acct.refund.draft_cancel.v1",
+            refund_draft_cancel_parameters(),
+        )
+
+
+@pytest.mark.parametrize(
     ("target", "field", "value", "error"),
     (
-        ("refund", "edi_document_ids", [Record(1701)], "linked|external"),
+        ("refund", "payment_ids", [Record(1700)], "linked|external"),
+        ("refund", "asset_ids", [Record(1701)], "linked|external"),
+        ("refund", "edi_document_ids", [Record(1702)], "linked|external"),
+        ("refund", "attachment_ids", [Record(1703)], "linked|external"),
+        ("refund", "access_token", "secret", "sending|attachment"),
         ("refund_line", "reconciled", True, "external"),
+        (
+            "refund_line",
+            "matching_number",
+            "I-import-batch",
+            "external",
+        ),
+        ("refund_line", "sale_line_ids", [Record(1704)], "external"),
+        (
+            "refund_line",
+            "analytic_distribution",
+            {"10": 100},
+            "external",
+        ),
         ("origin", "reversal_move_ids", [], "origin"),
-        ("origin", "payment_ids", [Record(1702)], "external"),
-        ("origin_line", "matched_debit_ids", [Record(1703)], "external"),
+        ("origin", "payment_ids", [Record(1705)], "external"),
+        ("origin_line", "matched_debit_ids", [Record(1706)], "external"),
+        (
+            "origin_line",
+            "matching_number",
+            "I-import-batch",
+            "external",
+        ),
     ),
 )
 def test_refund_draft_cancel_rejects_unsafe_or_unbound_graph(
@@ -9599,27 +12726,36 @@ def test_existing_document_post_rejects_graph_and_hash_rewrite():
         )
 
 
-def test_existing_document_post_rejects_irreversible_decimal_lexeme():
+def test_existing_document_post_accepts_equivalent_decimal_lexeme_with_v2():
     comp, move, _line1, _line2, records = existing_document_post_fixture()
     lexical_source = existing_document_create_parameters()
     lexical_source["lines"][0]["price_unit"] = "100.00"
     lexical_binding = OdooWriteHandlers.document_binding(
         "customer_invoice", lexical_source
     )
+    lexical_binding_v2 = OdooWriteHandlers.document_binding_v2(
+        "customer_invoice", lexical_source
+    )
     move.odoo_cli_v3_document_binding = lexical_binding
+    move.odoo_cli_v3_document_binding_v2 = lexical_binding_v2
     move.snapshot_values["odoo_cli_v3_document_binding"] = lexical_binding
+    move.snapshot_values[
+        "odoo_cli_v3_document_binding_v2"
+    ] = lexical_binding_v2
     parameters = existing_document_post_parameters()
     parameters["expected_document_binding"] = lexical_binding
+    parameters["expected_document_binding_v2"] = lexical_binding_v2
     handler = Harness(records=records)
     handler.test_company = comp
 
-    with pytest.raises(
-        OdooWriteHandlerError, match="cannot reproduce"
-    ):
-        handler.precheck("acct.invoice.customer_post.v1", parameters)
+    checked = handler.precheck(
+        "acct.invoice.customer_post.v1", parameters
+    )
+
+    assert checked["before"]
 
 
-def test_refund_draft_cancel_rejects_irreversible_total_lexeme():
+def test_refund_draft_cancel_accepts_equivalent_total_lexeme_with_v2():
     comp, refund, _lines, _origin, _origin_lines, records = (
         refund_draft_cancel_fixture()
     )
@@ -9628,17 +12764,26 @@ def test_refund_draft_cancel_rejects_irreversible_total_lexeme():
     lexical_binding = OdooWriteHandlers.document_binding(
         "refund", lexical_source
     )
+    lexical_binding_v2 = OdooWriteHandlers.document_binding_v2(
+        "refund", lexical_source
+    )
     refund.odoo_cli_v3_document_binding = lexical_binding
+    refund.odoo_cli_v3_document_binding_v2 = lexical_binding_v2
     refund.snapshot_values["odoo_cli_v3_document_binding"] = lexical_binding
+    refund.snapshot_values[
+        "odoo_cli_v3_document_binding_v2"
+    ] = lexical_binding_v2
     parameters = refund_draft_cancel_parameters()
     parameters["expected_document_binding"] = lexical_binding
+    parameters["expected_document_binding_v2"] = lexical_binding_v2
     handler = Harness(records=records)
     handler.test_company = comp
 
-    with pytest.raises(
-        OdooWriteHandlerError, match="unique immutable binding"
-    ):
-        handler.precheck("acct.refund.draft_cancel.v1", parameters)
+    checked = handler.precheck(
+        "acct.refund.draft_cancel.v1", parameters
+    )
+
+    assert checked["before"]
 
 
 @pytest.mark.parametrize("refund", (False, True))
@@ -9675,8 +12820,13 @@ def test_existing_document_post_handler_rejects_zero_value_graph():
     binding = OdooWriteHandlers.document_binding(
         "customer_invoice", source
     )
+    binding_v2 = OdooWriteHandlers.document_binding_v2(
+        "customer_invoice", source
+    )
     move.odoo_cli_v3_document_binding = binding
+    move.odoo_cli_v3_document_binding_v2 = binding_v2
     move.snapshot_values["odoo_cli_v3_document_binding"] = binding
+    move.snapshot_values["odoo_cli_v3_document_binding_v2"] = binding_v2
     move.amount_untaxed = 0
     move.amount_total = 0
     move.amount_residual = 0
@@ -9698,6 +12848,7 @@ def test_existing_document_post_handler_rejects_zero_value_graph():
     parameters.update(
         {
             "expected_document_binding": binding,
+            "expected_document_binding_v2": binding_v2,
             "expected_amount_untaxed": "0",
             "expected_amount_total": "0",
             "expected_amount_residual": "0",
@@ -9716,7 +12867,12 @@ def test_existing_document_post_handler_rejects_zero_value_graph():
     ("target", "field", "value", "match"),
     (
         ("move", "partner_bank_id", Record(1901), "partner bank"),
-        ("line", "matching_number", "I-import-batch", "reconciliation marker"),
+        (
+            "line",
+            "matching_number",
+            "I-import-batch",
+            "reconciliation marker|recovery line graph",
+        ),
         ("line", "partner_id", Record(1902), "line partner"),
         ("partner", "customer_rank", 1, "zero customer_rank"),
         (
@@ -9755,7 +12911,10 @@ def test_vendor_bill_post_rejects_partial_deductibility_side_effect():
     handler = Harness(records=records)
     handler.test_company = comp
 
-    with pytest.raises(OdooWriteHandlerError, match="fully deductible"):
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="fully deductible|recovery line graph",
+    ):
         handler.precheck(
             "acct.bill.vendor_post.v1",
             existing_document_post_parameters(vendor=True),

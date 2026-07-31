@@ -116,7 +116,7 @@ def _parameters(idempotency_key: str = "vendor-bill-full-parameters-1") -> dict[
         "due_date": "2026-08-15",
         "currency_id": 12,
         "journal_id": 5,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "vendor_reference": "SUPPLIER-SG-2026-0715",
         "lines": [
             {
@@ -290,6 +290,7 @@ class FakeOdoo:
             "line_ids": [502],
             "posted_before": False,
             "odoo_cli_v3_document_binding": "a" * 64,
+            "odoo_cli_v3_document_binding_v2": "f" * 64,
             "odoo_cli_v3_business_binding": "b" * 64,
         }
         if is_recovery:
@@ -553,10 +554,10 @@ class FakeOdoo:
             "operation_id": operation.operation_id,
             "capability_id": operation.capability_id,
             "passed": verification_passes,
-            "method": (
-                "read_back_trusted_plan_target_fingerprints_and_action_specific_compensation_state_v1"
-                if operation.capability_id == "acct.recovery.execute.v1"
-                else "read_back_exact_move_lines_tax_preview_single_due_residual_and_content_business_bindings_v1"
+            "method": next(
+                capability.data["verification"]["method"]
+                for capability in self.harness.capabilities
+                if capability.id == operation.capability_id
             ),
             "checks": [
                 "company_matches",

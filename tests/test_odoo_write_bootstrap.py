@@ -20,6 +20,10 @@ from odoo_accounting_cli_v3.draft_invoice_recovery import (
     vendor_bill_business_binding,
     vendor_bill_document_binding,
 )
+from odoo_accounting_cli_v3.document_bindings import (
+    customer_invoice_document_binding_v2,
+    vendor_bill_document_binding_v2,
+)
 from odoo_accounting_cli_v3.odoo.write_bootstrap import (
     OdooWriteBootstrapError,
     _bank_recovery_journal_from_precheck,
@@ -719,6 +723,72 @@ def test_execution_difference_rejects_a_graph_too_large_for_the_receipt_contract
         _difference([], after, 7)
 
 
+def _snapshot_with_values(values):
+    return {
+        "model": "account.move",
+        "record_id": 501,
+        "company_id": 7,
+        "state": "draft",
+        "values": values,
+        "values_digest": hashlib.sha256(canonical_json(values)).hexdigest(),
+    }
+
+
+def test_snapshot_values_accept_the_exact_canonical_json_budget():
+    empty_size = len(canonical_json({"text": ""}))
+    values = {
+        "text": "x"
+        * (write_bootstrap.MAX_SNAPSHOT_VALUES_JSON_CHARS - empty_size)
+    }
+
+    assert (
+        len(canonical_json(values))
+        == write_bootstrap.MAX_SNAPSHOT_VALUES_JSON_CHARS
+    )
+    difference, _records = _difference(
+        [],
+        [_snapshot_with_values(values)],
+        7,
+    )
+
+    assert difference["after"][0]["values_json"] == canonical_json(
+        values
+    ).decode("utf-8")
+
+
+def test_snapshot_values_reject_one_ascii_byte_over_the_budget():
+    empty_size = len(canonical_json({"text": ""}))
+    values = {
+        "text": "x"
+        * (write_bootstrap.MAX_SNAPSHOT_VALUES_JSON_CHARS - empty_size + 1)
+    }
+
+    with pytest.raises(
+        OdooWriteBootstrapError,
+        match="auditable values limit",
+    ):
+        _difference([], [_snapshot_with_values(values)], 7)
+
+
+def test_snapshot_values_reject_utf8_bytes_over_the_character_budget():
+    values = {
+        "text": "界"
+        * (write_bootstrap.MAX_SNAPSHOT_VALUES_JSON_CHARS // 3)
+    }
+    encoded = canonical_json(values)
+
+    assert (
+        len(encoded.decode("utf-8"))
+        < write_bootstrap.MAX_SNAPSHOT_VALUES_JSON_CHARS
+    )
+    assert len(encoded) > write_bootstrap.MAX_SNAPSHOT_VALUES_JSON_BYTES
+    with pytest.raises(
+        OdooWriteBootstrapError,
+        match="auditable values limit",
+    ):
+        _difference([], [_snapshot_with_values(values)], 7)
+
+
 def test_difference_ignores_only_the_display_label_of_the_same_line_move_relation():
     def line_snapshot(move_id, display_name):
         values = {
@@ -907,6 +977,13 @@ def _draft_invoice_available_raw(
                     vendor_bill_document_binding(operation.parameters)
                     if vendor
                     else customer_invoice_document_binding(operation.parameters)
+                ),
+                "odoo_cli_v3_document_binding_v2": (
+                    vendor_bill_document_binding_v2(operation.parameters)
+                    if vendor
+                    else customer_invoice_document_binding_v2(
+                        operation.parameters
+                    )
                 ),
                 "odoo_cli_v3_business_binding": (
                     vendor_bill_business_binding(operation.parameters)
@@ -1311,6 +1388,7 @@ def test_draft_vendor_bill_descriptor_requires_stock_effect_fields(field):
         "write_uid",
         "write_date",
         "date",
+        "odoo_cli_v3_document_binding_v2",
     ],
 )
 @pytest.mark.parametrize(
@@ -1768,6 +1846,7 @@ def test_draft_document_descriptor_rejects_stock_effect_lines(
     [
         {"move_type": "out_invoice"},
         {"odoo_cli_v3_document_binding": "0" * 64},
+        {"odoo_cli_v3_document_binding_v2": "0" * 64},
         {"odoo_cli_v3_business_binding": "0" * 64},
     ],
 )
@@ -1857,6 +1936,11 @@ def test_available_recovery_descriptor_rejects_posted_or_incomplete_invoice_grap
         ({"line_ids": [502, True]}, {}, "complete line graph"),
         ({"line_ids": [502, 502, 503]}, {}, "complete line graph"),
         ({"odoo_cli_v3_document_binding": "0" * 64}, {}, "pristine V3 draft"),
+        (
+            {"odoo_cli_v3_document_binding_v2": "0" * 64},
+            {},
+            "pristine V3 draft",
+        ),
         ({"odoo_cli_v3_business_binding": "0" * 64}, {}, "pristine V3 draft"),
         ({"payment_ids": [991]}, {}, "external effects"),
         ({"adjusting_entry_origin_move_ids": [991]}, {}, "external effects"),
@@ -1923,7 +2007,7 @@ def _parameters(*, company_id=7, idempotency_key="invoice-1"):
         "due_date": "2026-08-15",
         "currency_id": 12,
         "journal_id": 5,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "reference": "INV-SANDBOX-1",
         "lines": [
             {
@@ -1957,6 +2041,7 @@ def _draft_cancel_parameters(
         "move_id": 501,
         "expected_move_type": "out_invoice",
         "expected_document_binding": "a" * 64,
+        "expected_document_binding_v2": "c" * 64,
         "expected_business_binding": "b" * 64,
         "reason": "Cancel duplicate pristine draft",
         "idempotency_key": idempotency_key,
@@ -2907,7 +2992,7 @@ def test_normal_verification_rolls_back_handler_side_effect_before_control_commi
     assert next(iter(anchors.by_scope.values())).state == "verified"
 
 
-def test_metadata_authority_scope_wraps_only_approved_handler_execution():
+def test_metadata_authority_scope_wraps_live_precheck_execution_and_verify():
     active = False
     observations: list[tuple[str, bool]] = []
 
@@ -2943,9 +3028,64 @@ def test_metadata_authority_scope_wraps_only_approved_handler_execution():
     )
 
     assert observations == [
-        ("precheck", False),
+        ("precheck", True),
         ("execute", True),
-        ("verify", False),
+        ("verify", True),
+    ]
+    assert active is False
+
+
+def test_metadata_authority_scope_wraps_precheck_repeated_after_row_lock():
+    active = False
+    observations: list[tuple[str, bool]] = []
+
+    @contextmanager
+    def metadata_scope():
+        nonlocal active
+        assert active is False
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    class ScopeDependencyHandler(DependencyHandler):
+        def precheck(self, capability_id, parameters):
+            observations.append(("precheck", active))
+            return super().precheck(capability_id, parameters)
+
+        def execute_prechecked(self, capability_id, parameters, checked):
+            observations.append(("execute", active))
+            return super().execute_prechecked(
+                capability_id, parameters, checked
+            )
+
+        def verify(self, capability_id, parameters, execution):
+            observations.append(("verify", active))
+            return super().verify(capability_id, parameters, execution)
+
+    record = LockableRecordset(901)
+    handler = ScopeDependencyHandler(record)
+    parameters = _parameters()
+    raw_precheck = _dependency_precheck(
+        "acct.invoice.customer_create.v1", parameters, record
+    )
+    context, operation, approval = _executing(
+        parameters, raw_precheck=raw_precheck
+    )
+    root, _cr, anchors, _handler, kwargs = _harness(handler=handler)
+    anchors.bound_env._models["account.asset"] = LockableModel(record)
+    kwargs["metadata_execution_scope_factory"] = metadata_scope
+
+    execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert observations == [
+        ("precheck", True),
+        ("precheck", True),
+        ("execute", True),
+        ("verify", True),
     ]
     assert active is False
 

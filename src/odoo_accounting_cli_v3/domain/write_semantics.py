@@ -88,6 +88,11 @@ def _unique_field(lines: list[dict[str, Any]], field: str, label: str) -> None:
 
 
 def _validate_document(parameters: dict[str, Any], *, vendor: bool) -> dict[str, Any]:
+    if _field(parameters, "posting_mode") != "draft":
+        raise WriteSemanticError(
+            "document creation is draft-only; use the dedicated approved "
+            "document-post capability"
+        )
     invoice_date = _date(_field(parameters, "invoice_date"), "invoice_date")
     _date(_field(parameters, "accounting_date"), "accounting_date")
     due_date = _date(_field(parameters, "due_date"), "due_date")
@@ -127,6 +132,10 @@ def _validate_refund(parameters: dict[str, Any]) -> dict[str, Any]:
         positive=True,
     )
     lines = _lines(_field(parameters, "lines"))
+    if _field(parameters, "posting_mode") != "draft":
+        raise WriteSemanticError(
+            "refund creation is draft-only until post-commit partner rank effects are auditable"
+        )
     mode = _field(parameters, "refund_mode")
     if mode == "full" and lines:
         raise WriteSemanticError("full refund must not override origin lines")
@@ -136,10 +145,19 @@ def _validate_refund(parameters: dict[str, Any]) -> dict[str, Any]:
         raise WriteSemanticError("refund_mode is invalid")
     _unique_field(lines, "line_reference", "line_reference")
     for index, line in enumerate(lines):
+        if _field(line, "tax_ids"):
+            raise WriteSemanticError(
+                "refund creation is taxless in the current verified scope"
+            )
         _decimal(_field(line, "quantity"), f"lines[{index}].quantity", positive=True)
         _decimal(_field(line, "price_unit"), f"lines[{index}].price_unit")
     return {
-        "checks": ("refund_mode_lines_consistent", "refund_total_explicit"),
+        "checks": (
+            "refund_mode_lines_consistent",
+            "refund_total_explicit",
+            "refund_creation_draft_only",
+            "refund_parameters_taxless",
+        ),
         "computed": {"refund_line_count": len(lines)},
     }
 
@@ -330,6 +348,11 @@ def _validate_reconciliation(parameters: dict[str, Any]) -> dict[str, Any]:
     provided = tuple(value is not None for value in writeoff)
     if any(provided) and not all(provided):
         raise WriteSemanticError("all write-off fields must be provided together")
+    if tolerance != 0 or any(provided):
+        raise WriteSemanticError(
+            "reconciliation write-off is disabled until its Odoo result and "
+            "recovery graphs are verified exactly"
+        )
     mode = _field(parameters, "mode")
     if mode == "partial" and (tolerance != 0 or any(provided)):
         raise WriteSemanticError("partial reconciliation cannot create a write-off")
@@ -648,6 +671,7 @@ def _validate_draft_cancel(parameters: dict[str, Any]) -> dict[str, Any]:
     computed: dict[str, str] = {"expected_move_type": move_type}
     for field in (
         "expected_document_binding",
+        "expected_document_binding_v2",
         "expected_business_binding",
     ):
         computed[field] = _sha256_digest(_field(parameters, field), field)
@@ -656,6 +680,7 @@ def _validate_draft_cancel(parameters: dict[str, Any]) -> dict[str, Any]:
             "draft_cancel_target_explicit",
             "draft_cancel_move_type_explicit",
             "draft_cancel_document_binding_explicit",
+            "draft_cancel_document_binding_v2_explicit",
             "draft_cancel_business_binding_explicit",
         ),
         "computed": computed,
@@ -673,6 +698,27 @@ def _validate_draft_cancel_v2(parameters: dict[str, Any]) -> dict[str, Any]:
         _field(parameters, "expected_document_binding"),
         "expected_document_binding",
     )
+    raw_document_binding_v2 = _field(
+        parameters, "expected_document_binding_v2"
+    )
+    document_binding_v2 = (
+        None
+        if move_type == "entry"
+        and raw_document_binding_v2 is None
+        else _sha256_digest(
+            raw_document_binding_v2,
+            "expected_document_binding_v2",
+        )
+    )
+    if move_type == "entry" and document_binding_v2 is not None:
+        raise WriteSemanticError(
+            "expected_document_binding_v2 must be null for entry"
+        )
+    if move_type != "entry" and document_binding_v2 is None:
+        raise WriteSemanticError(
+            "expected_document_binding_v2 must be a SHA-256 digest "
+            "for invoice or bill"
+        )
     business_binding = _sha256_digest(
         _field(parameters, "expected_business_binding"),
         "expected_business_binding",
@@ -698,6 +744,7 @@ def _validate_draft_cancel_v2(parameters: dict[str, Any]) -> dict[str, Any]:
             "move_id": move_id,
             "expected_move_type": move_type,
             "expected_document_binding": document_binding,
+            "expected_document_binding_v2": document_binding_v2,
             "expected_business_binding": business_binding,
             "expected_line_ids": list(line_ids),
             "expected_line_count": len(line_ids),
@@ -735,6 +782,10 @@ def _validate_document_post(
         _field(parameters, "expected_document_binding"),
         "expected_document_binding",
     )
+    document_binding_v2 = _sha256_digest(
+        _field(parameters, "expected_document_binding_v2"),
+        "expected_document_binding_v2",
+    )
     business_binding = _sha256_digest(
         _field(parameters, "expected_business_binding"),
         "expected_business_binding",
@@ -747,6 +798,14 @@ def _validate_document_post(
     )
     currency_id = _positive_id(
         _field(parameters, "expected_currency_id"), "expected_currency_id"
+    )
+    payment_term_line_id = _positive_id(
+        _field(parameters, "expected_payment_term_line_id"),
+        "expected_payment_term_line_id",
+    )
+    payment_term_account_id = _positive_id(
+        _field(parameters, "expected_payment_term_account_id"),
+        "expected_payment_term_account_id",
     )
     invoice_date = _date(
         _field(parameters, "expected_invoice_date"), "expected_invoice_date"
@@ -772,6 +831,11 @@ def _validate_document_post(
     tax = _decimal(
         _field(parameters, "expected_amount_tax"), "expected_amount_tax"
     )
+    if tax != 0:
+        raise WriteSemanticError(
+            "expected_amount_tax must be zero for the current taxless "
+            "document-post scope"
+        )
     total = _decimal(
         _field(parameters, "expected_amount_total"),
         "expected_amount_total",
@@ -791,6 +855,10 @@ def _validate_document_post(
             "expected_amount_residual must equal expected_amount_total"
         )
     line_ids = _bounded_sorted_unique_ids(parameters, "expected_line_ids")
+    if payment_term_line_id not in line_ids:
+        raise WriteSemanticError(
+            "expected_payment_term_line_id must belong to expected_line_ids"
+        )
     _non_empty_text(_field(parameters, "reason"), "reason")
     _non_empty_text(
         _field(parameters, "idempotency_key"), "idempotency_key"
@@ -804,15 +872,19 @@ def _validate_document_post(
             "document_post_amounts_consistent",
             "document_post_fully_unpaid",
             "document_post_complete_line_set_explicit",
+            "document_post_payment_term_line_and_account_explicit",
         ),
         "computed": {
             "move_id": move_id,
             "expected_move_type": move_type,
             "expected_document_binding": document_binding,
+            "expected_document_binding_v2": document_binding_v2,
             "expected_business_binding": business_binding,
             "expected_partner_id": partner_id,
             "expected_journal_id": journal_id,
             "expected_currency_id": currency_id,
+            "expected_payment_term_line_id": payment_term_line_id,
+            "expected_payment_term_account_id": payment_term_account_id,
             "expected_invoice_date": invoice_date.isoformat(),
             "expected_accounting_date": accounting_date.isoformat(),
             "expected_due_date": due_date.isoformat(),
@@ -848,8 +920,10 @@ def _validate_refund_draft_cancel(
         field: _sha256_digest(_field(parameters, field), field)
         for field in (
             "expected_document_binding",
+            "expected_document_binding_v2",
             "expected_business_binding",
             "expected_origin_document_binding",
+            "expected_origin_document_binding_v2",
             "expected_origin_business_binding",
         )
     }

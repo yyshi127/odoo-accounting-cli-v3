@@ -17,6 +17,8 @@ from odoo_accounting_cli_v3.effect_finalizer import (
 )
 from odoo_accounting_cli_v3.operations import canonical_json
 from odoo_accounting_cli_v3.write_receipts import (
+    MAX_SNAPSHOT_VALUES_JSON_BYTES,
+    MAX_SNAPSHOT_VALUES_JSON_CHARS,
     WriteReceiptError,
     create_difference,
     create_record_snapshot,
@@ -25,6 +27,7 @@ from odoo_accounting_cli_v3.write_receipts import (
     create_write_audit_receipt,
     index_recovery_guard_graph,
     validate_executable_recovery_plan,
+    validate_record_snapshot,
     validate_recovery_plan,
     verify_write_audit_receipt,
 )
@@ -258,6 +261,76 @@ def test_record_snapshot_is_canonical_strict_and_content_addressed():
         "values_digest",
     }
     assert first["values_json"] == '{"amount_total":"125.50","name":"INV/2026/0001","state":"draft"}'
+
+
+def test_record_snapshot_accepts_the_exact_auditable_values_budget():
+    empty_size = len(canonical_json({"text": ""}))
+    values = {"text": "x" * (MAX_SNAPSHOT_VALUES_JSON_BYTES - empty_size)}
+
+    created = create_record_snapshot(
+        model="account.move",
+        record_id=880,
+        exists=True,
+        record_state="draft",
+        values=values,
+    )
+
+    assert len(created["values_json"]) == MAX_SNAPSHOT_VALUES_JSON_CHARS
+    assert (
+        len(created["values_json"].encode("utf-8"))
+        == MAX_SNAPSHOT_VALUES_JSON_BYTES
+    )
+    validate_record_snapshot(created)
+
+
+def test_record_snapshot_rejects_values_over_the_ascii_budget():
+    empty_size = len(canonical_json({"text": ""}))
+    values = {
+        "text": "x" * (MAX_SNAPSHOT_VALUES_JSON_BYTES - empty_size + 1)
+    }
+
+    with pytest.raises(WriteReceiptError, match="auditable limit"):
+        create_record_snapshot(
+            model="account.move",
+            record_id=880,
+            exists=True,
+            record_state="draft",
+            values=values,
+        )
+
+
+def test_record_snapshot_rejects_utf8_bytes_over_the_character_budget():
+    values = {"text": "界" * (MAX_SNAPSHOT_VALUES_JSON_CHARS // 3)}
+    encoded = canonical_json(values)
+
+    assert len(encoded.decode("utf-8")) < MAX_SNAPSHOT_VALUES_JSON_CHARS
+    assert len(encoded) > MAX_SNAPSHOT_VALUES_JSON_BYTES
+    with pytest.raises(WriteReceiptError, match="auditable limit"):
+        create_record_snapshot(
+            model="account.move",
+            record_id=880,
+            exists=True,
+            record_state="draft",
+            values=values,
+        )
+
+
+def test_record_snapshot_validation_rejects_oversized_external_evidence():
+    empty_size = len(canonical_json({"text": ""}))
+    encoded = canonical_json(
+        {"text": "x" * (MAX_SNAPSHOT_VALUES_JSON_BYTES - empty_size + 1)}
+    )
+    external = {
+        "model": "account.move",
+        "record_id": 880,
+        "exists": True,
+        "record_state": "draft",
+        "values_json": encoded.decode("utf-8"),
+        "values_digest": hashlib.sha256(encoded).hexdigest(),
+    }
+
+    with pytest.raises(WriteReceiptError, match="auditable limit"):
+        validate_record_snapshot(external)
 
 
 def test_difference_and_recovery_plan_bind_every_effect_reference():

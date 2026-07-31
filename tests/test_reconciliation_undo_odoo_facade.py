@@ -26,8 +26,8 @@ from odoo_accounting_cli_v3.write_receipts import create_recovery_plan_v2
 
 
 CAPABILITY_ID = "acct.reconciliation.undo.v1"
-METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
-ORACLE = "undo_reconciliation_and_reverse_writeoff_exact_v1"
+METHOD = "undo_reconciliation_without_writeoff_v1"
+ORACLE = "undo_reconciliation_without_writeoff_exact_v1"
 ORIGIN_OPERATION_ID = "operation-reconciliation-origin"
 COMPANY_ID = 7
 MODULE_GRAPH_DIGEST = "b" * 64

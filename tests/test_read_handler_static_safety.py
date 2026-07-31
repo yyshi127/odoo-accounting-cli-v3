@@ -47,6 +47,7 @@ REVIEWED_READ_IMPORT_CLOSURE = frozenset(
         "odoo_accounting_cli_v3",
         "odoo_accounting_cli_v3.auth",
         "odoo_accounting_cli_v3.contracts",
+        "odoo_accounting_cli_v3.document_bindings",
         "odoo_accounting_cli_v3.domain",
         "odoo_accounting_cli_v3.domain.ap_open_items",
         "odoo_accounting_cli_v3.domain.ar_open_items",
@@ -69,6 +70,7 @@ REVIEWED_READ_IMPORT_CLOSURE = frozenset(
         "odoo_accounting_cli_v3.odoo.read_transaction",
         "odoo_accounting_cli_v3.odoo.trial_balance",
         "odoo_accounting_cli_v3.operations",
+        "odoo_accounting_cli_v3.partial_refund_lineage",
         "odoo_accounting_cli_v3.receipts",
         "odoo_accounting_cli_v3.report_definition_baseline",
         "odoo_accounting_cli_v3.report_definition_projection",
@@ -114,10 +116,10 @@ REVIEWED_EXTERNAL_IMPORTS = frozenset(
     }
 )
 REVIEWED_EXTERNAL_IMPORT_BINDINGS_SHA256 = (
-    "454e88f3acc168ffb8e6bd85d5174b0fc44b5fa196da1a26d793c25aaad01e1e"
+    "f8bee9c9f7d708c63e16ac553dcd9b170746e053e78f1e881262ad4f05addaea"
 )
 REVIEWED_EXPLICIT_IMPORT_BINDINGS_SHA256 = (
-    "d3b62267026599ccb55d6a303a3b8cf9f61231b5f3c71dca5c1c66d9caccdd66"
+    "9f8f9204008f930631ccee739b8d4b89b0896906aac7818d61d127ba0aff704b"
 )
 REVIEWED_READ_DISPATCH = {
     "acct.registry.list.v1": "_read_registry",
@@ -149,7 +151,7 @@ READ_BOOTSTRAP_SOURCE_SHA256 = (
     "e089b7c0d7607d65ee49cf40c527dbc2ae28b5f025e9b36fe716c0f4b4909ec7"
 )
 READ_EXECUTOR_SOURCE_SHA256 = (
-    "3bfd34896321523726e50148d1c28e9b18a2237f19052da7b57dd137e8f490f3"
+    "6101d81072d92837a617f37e93a6f3ca57ea700f4aaeb647064ed4b1166fa3b6"
 )
 REVIEWED_INITIALIZER_ATTRIBUTES = {
     ("odoo_accounting_cli_v3.gateway", "CapabilityGateway"): frozenset(
@@ -388,6 +390,51 @@ REVIEWED_COPY_CALLS = frozenset(
 )
 REVIEWED_SOURCE_VIOLATIONS = frozenset(
     {
+        (
+            "odoo_accounting_cli_v3.document_bindings",
+            177,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.document_bindings",
+            182,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.document_bindings",
+            187,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.document_bindings",
+            219,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.document_bindings",
+            222,
+            "mutation:assignment-target",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.executor",
+            560,
+            "dynamic:getattr",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.executor",
+            582,
+            "dynamic:getattr",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.executor",
+            823,
+            "dynamic:getattr",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.executor",
+            847,
+            "dynamic:getattr",
+        ),
         (
             "odoo_accounting_cli_v3.domain.multicompany_consolidated",
             780,
@@ -1187,11 +1234,11 @@ def test_read_entrypoint_has_exact_reviewed_transitive_import_closure():
     }
     assert observed == set(REVIEWED_READ_IMPORT_CLOSURE)
     assert external_imports == set(REVIEWED_EXTERNAL_IMPORTS)
-    assert len(external_import_bindings) == 224
+    assert len(external_import_bindings) == 239
     assert _import_binding_digest(external_import_bindings) == (
         REVIEWED_EXTERNAL_IMPORT_BINDINGS_SHA256
     )
-    assert len(explicit_import_bindings) == 342
+    assert len(explicit_import_bindings) == 363
     assert _import_binding_digest(explicit_import_bindings) == (
         REVIEWED_EXPLICIT_IMPORT_BINDINGS_SHA256
     )

@@ -46,8 +46,8 @@ from test_write_service import (
 
 APPLY_CAPABILITY_ID = "acct.reconciliation.apply.v1"
 UNDO_CAPABILITY_ID = "acct.reconciliation.undo.v1"
-UNDO_METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
-UNDO_ORACLE = "undo_reconciliation_and_reverse_writeoff_exact_v1"
+UNDO_METHOD = "undo_reconciliation_without_writeoff_v1"
+UNDO_ORACLE = "undo_reconciliation_without_writeoff_exact_v1"
 
 
 def _digest(value: object) -> str:

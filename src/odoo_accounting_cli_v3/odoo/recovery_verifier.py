@@ -76,7 +76,7 @@ _IMPLEMENTED_VERIFICATION_METHODS = frozenset(
         *_GENERIC_METHOD_TYPES,
         "cancel_and_unreconcile_payment_v1",
         "post_compensating_bank_statement_v1",
-        "undo_reconciliation_and_reverse_writeoff_v1",
+        "undo_reconciliation_without_writeoff_v1",
         "cancel_asset_and_reverse_schedule_v1",
         "reverse_depreciation_and_restore_schedule_v1",
         "cancel_scheduled_and_reverse_accrual_origin_v1",
@@ -287,7 +287,10 @@ def _normalize_records(
             not isinstance(item, tuple)
             or len(item) != 2
             or not isinstance(item[0], str)
-            or not item[0].startswith("account.")
+            or (
+                not item[0].startswith("account.")
+                and item[0] != "mail.message"
+            )
         ):
             raise _error("records contain an invalid record tuple")
         model_name, record = item
@@ -497,7 +500,7 @@ def _expected_tombstones(
         for identity, outcome in guard_outcomes.items()
         if outcome == "absent"
     }
-    if method == "undo_reconciliation_and_reverse_writeoff_v1":
+    if method == "undo_reconciliation_without_writeoff_v1":
         result.update(
             identity
             for identity in action_keys
@@ -691,6 +694,18 @@ def _assert_global_graph_closure(graph: _Graph) -> None:
                     _record_id(getattr(record, field, None)),
                 ) not in graph.by_key:
                     raise _error("fresh partial reconcile endpoint is absent")
+        elif model_name == "mail.message":
+            if (
+                str(getattr(record, "model", "") or "") != "account.move"
+                or (
+                    "account.move",
+                    getattr(record, "res_id", None),
+                )
+                not in graph.by_key
+            ):
+                raise _error(
+                    "fresh audit message is not bound to a result move"
+                )
     for (model_name, _record_id_value), record in graph.by_key.items():
         if model_name != "account.move":
             continue
@@ -1656,14 +1671,10 @@ def _verify_reconciliation(
     }
     if not partial_keys:
         raise _error("reconciliation recovery has no partial tombstone")
-    writeoff_moves = [
-        graph.by_key[identity]
-        for identity in sorted(graph.action_keys)
-        if identity[0] == "account.move" and identity in graph.by_key
-    ]
-    if len(writeoff_moves) > 1:
-        raise _error("fresh reconciliation write-off graph is ambiguous")
-    writeoff_ids = {_record_id(move) for move in writeoff_moves}
+    if any(identity[0] == "account.move" for identity in graph.action_keys):
+        raise _error(
+            "fresh no-writeoff reconciliation has an account.move action"
+        )
     debit_amounts: dict[int, Decimal] = {}
     credit_amounts: dict[int, Decimal] = {}
     debit_currency_amounts: dict[int, Decimal] = {}
@@ -1692,18 +1703,7 @@ def _verify_reconciliation(
             "partial credit currency amount",
         )
         endpoints.update((debit_id, credit_id))
-    source_ids = {
-        line_id
-        for line_id in endpoints
-        if _record_id(
-            getattr(
-                graph.record("account.move.line", line_id),
-                "move_id",
-                None,
-            )
-        )
-        not in writeoff_ids
-    }
+    source_ids = set(endpoints)
     if not source_ids:
         raise _error("fresh reconciliation has no source endpoint")
     tombstone_partial_ids = {
@@ -1794,29 +1794,7 @@ def _verify_reconciliation(
                 ),
                 label="reconciliation endpoint line",
             )
-    reversal_roots: list[Any] = []
-    if writeoff_moves:
-        reversal = _assert_new_reversal(
-            graph, writeoff_moves[0], recovery_date, reason
-        )
-        reversal_roots.append(reversal)
-        writeoff_key = ("account.move", _record_id(writeoff_moves[0]))
-        _assert_allowed_delta(
-            graph.before_values(writeoff_key),
-            graph.values(writeoff_key),
-            frozenset(
-                {
-                    "reversal_move_ids",
-                    "amount_residual",
-                    "payment_state",
-                    *_LOG_FIELDS,
-                }
-            ),
-            label="reconciliation write-off move",
-        )
-    if reversal_roots:
-        graph.assert_only_new_move_graphs(reversal_roots)
-    elif graph.new_keys:
+    if graph.new_keys:
         raise _error("reconciliation recovery created an unexpected record")
     for identity, outcome in graph.guard_outcomes.items():
         if (
@@ -1841,11 +1819,7 @@ def _verify_reconciliation(
         "reconciliation_tombstones_fresh_absent",
         "reconciliation_source_links_fresh_removed",
         "reconciliation_source_residuals_fresh_restored",
-        (
-            "reconciliation_writeoff_fresh_reversed"
-            if writeoff_moves
-            else "reconciliation_writeoff_not_applicable"
-        ),
+        "reconciliation_writeoff_fresh_absent_by_contract",
         "reconciliation_result_graph_complete",
     )
 
@@ -2323,7 +2297,7 @@ def verify_recovery_action(
             oracle_checks = _verify_bank(
                 graph, recovery_date, reason
             )
-        elif method == "undo_reconciliation_and_reverse_writeoff_v1":
+        elif method == "undo_reconciliation_without_writeoff_v1":
             oracle_checks = _verify_reconciliation(
                 graph, recovery_date, reason
             )

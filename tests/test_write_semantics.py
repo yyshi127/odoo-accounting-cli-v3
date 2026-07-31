@@ -19,7 +19,7 @@ def invoice_parameters() -> dict:
         "due_date": "2026-08-14",
         "currency_id": 12,
         "journal_id": 4,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "reference": "SO-2026-1001",
         "lines": [
             {
@@ -55,7 +55,7 @@ def refund_parameters() -> dict:
         "currency_id": 12,
         "expected_total_amount": "125.50",
         "reason": "Service scope reduced",
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "lines": [
             {
                 "line_reference": "refund-1",
@@ -313,6 +313,7 @@ def draft_cancel_parameters() -> dict:
         "move_id": 881,
         "expected_move_type": "out_invoice",
         "expected_document_binding": "a" * 64,
+        "expected_document_binding_v2": "c" * 64,
         "expected_business_binding": "b" * 64,
         "reason": "Cancel duplicate pristine draft",
         "idempotency_key": "cancel-draft-881",
@@ -324,6 +325,7 @@ def draft_cancel_v2_parameters() -> dict:
     result.update(
         {
             "expected_move_type": "entry",
+            "expected_document_binding_v2": None,
             "expected_line_ids": [2001, 2002],
             "idempotency_key": "cancel-draft-entry-881",
         }
@@ -337,18 +339,21 @@ def document_post_parameters(*, vendor: bool = False) -> dict:
         "move_id": 883,
         "expected_move_type": "in_invoice" if vendor else "out_invoice",
         "expected_document_binding": "1" * 64,
+        "expected_document_binding_v2": "7" * 64,
         "expected_business_binding": "2" * 64,
         "expected_partner_id": 10,
         "expected_journal_id": 4,
         "expected_currency_id": 12,
+        "expected_payment_term_line_id": 2103,
+        "expected_payment_term_account_id": 20,
         "expected_invoice_date": "2026-07-15",
         "expected_accounting_date": "2026-07-16",
         "expected_due_date": "2026-08-15",
         "expected_reference": "VENDOR-REF-1" if vendor else "CUSTOMER-REF-1",
         "expected_amount_untaxed": "100.00",
-        "expected_amount_tax": "13.00",
-        "expected_amount_total": "113.00",
-        "expected_amount_residual": "113.00",
+        "expected_amount_tax": "0.00",
+        "expected_amount_total": "100.00",
+        "expected_amount_residual": "100.00",
         "expected_line_ids": [2101, 2102, 2103],
         "reason": "Approved document posting",
         "idempotency_key": (
@@ -364,8 +369,10 @@ def refund_draft_cancel_parameters() -> dict:
         "expected_move_type": "out_refund",
         "expected_origin_move_id": 880,
         "expected_document_binding": "3" * 64,
+        "expected_document_binding_v2": "7" * 64,
         "expected_business_binding": "4" * 64,
         "expected_origin_document_binding": "5" * 64,
+        "expected_origin_document_binding_v2": "8" * 64,
         "expected_origin_business_binding": "6" * 64,
         "expected_partner_id": 10,
         "expected_journal_id": 4,
@@ -467,6 +474,16 @@ def test_invoice_rejects_due_date_before_invoice_date_and_zero_effect():
     with pytest.raises(WriteSemanticError, match="positive total"):
         validate_write_semantics("acct.invoice.customer_create.v1", parameters)
 
+    parameters = invoice_parameters()
+    parameters["posting_mode"] = "post"
+    with pytest.raises(WriteSemanticError, match="draft-only"):
+        validate_write_semantics("acct.invoice.customer_create.v1", parameters)
+
+    parameters = bill_parameters()
+    parameters["posting_mode"] = "post"
+    with pytest.raises(WriteSemanticError, match="draft-only"):
+        validate_write_semantics("acct.bill.vendor_create.v1", parameters)
+
 
 def test_refund_full_and_partial_line_rules_are_fail_closed():
     full = refund_parameters()
@@ -478,6 +495,16 @@ def test_refund_full_and_partial_line_rules_are_fail_closed():
     partial["lines"] = []
     with pytest.raises(WriteSemanticError, match="partial refund"):
         validate_write_semantics("acct.refund.create.v1", partial)
+
+    posted = refund_parameters()
+    posted["posting_mode"] = "post"
+    with pytest.raises(WriteSemanticError, match="draft-only"):
+        validate_write_semantics("acct.refund.create.v1", posted)
+
+    taxed = refund_parameters()
+    taxed["lines"][0]["tax_ids"] = [31]
+    with pytest.raises(WriteSemanticError, match="taxless"):
+        validate_write_semantics("acct.refund.create.v1", taxed)
 
 
 @pytest.mark.parametrize(
@@ -566,7 +593,7 @@ def test_bank_balances_foreign_pairs_dates_and_unique_external_ids():
 def test_reconciliation_writeoff_and_partial_rules_are_consistent():
     parameters = reconcile_parameters()
     parameters["tolerance_amount"] = "0.01"
-    with pytest.raises(WriteSemanticError, match="write-off fields"):
+    with pytest.raises(WriteSemanticError, match="write-off is disabled"):
         validate_write_semantics("acct.reconciliation.apply.v1", parameters)
 
     parameters = reconcile_parameters()
@@ -574,7 +601,7 @@ def test_reconciliation_writeoff_and_partial_rules_are_consistent():
     parameters["writeoff_account_id"] = 99
     parameters["writeoff_journal_id"] = 4
     parameters["writeoff_label"] = "Difference"
-    with pytest.raises(WriteSemanticError, match="partial reconciliation"):
+    with pytest.raises(WriteSemanticError, match="write-off is disabled"):
         validate_write_semantics("acct.reconciliation.apply.v1", parameters)
 
     parameters = reconcile_parameters()
@@ -586,7 +613,15 @@ def test_reconciliation_writeoff_and_partial_rules_are_consistent():
     parameters["writeoff_account_id"] = 99
     parameters["writeoff_journal_id"] = 4
     parameters["writeoff_label"] = "Unapproved zero write-off"
-    with pytest.raises(WriteSemanticError, match="zero tolerance"):
+    with pytest.raises(WriteSemanticError, match="write-off is disabled"):
+        validate_write_semantics("acct.reconciliation.apply.v1", parameters)
+
+    parameters = reconcile_parameters()
+    parameters["tolerance_amount"] = "0.01"
+    parameters["writeoff_account_id"] = 99
+    parameters["writeoff_journal_id"] = 4
+    parameters["writeoff_label"] = "Complete but unsupported write-off"
+    with pytest.raises(WriteSemanticError, match="write-off is disabled"):
         validate_write_semantics("acct.reconciliation.apply.v1", parameters)
 
 
@@ -849,6 +884,11 @@ def test_reversal_semantics_fail_closed_to_post_only():
         ("move_id", 0, "move_id"),
         ("expected_move_type", "entry", "expected_move_type"),
         ("expected_document_binding", "not-a-digest", "document_binding"),
+        (
+            "expected_document_binding_v2",
+            "not-a-digest",
+            "document_binding_v2",
+        ),
         ("expected_business_binding", "A" * 64, "business_binding"),
     ),
 )
@@ -865,10 +905,16 @@ def test_draft_cancel_semantics_bind_exact_pristine_document(
 def test_draft_cancel_v2_accepts_only_supported_pristine_move_types(move_type):
     parameters = draft_cancel_v2_parameters()
     parameters["expected_move_type"] = move_type
+    parameters["expected_document_binding_v2"] = (
+        None if move_type == "entry" else "c" * 64
+    )
 
     result = validate_write_semantics("acct.move.draft_cancel.v2", parameters)
 
     assert result["computed"]["expected_move_type"] == move_type
+    assert result["computed"]["expected_document_binding_v2"] == (
+        None if move_type == "entry" else "c" * 64
+    )
     assert result["computed"]["expected_line_count"] == 2
 
 
@@ -882,6 +928,10 @@ def test_draft_cancel_v2_accepts_only_supported_pristine_move_types(move_type):
         (
             lambda value: value.update(expected_document_binding="not-a-digest"),
             "document_binding",
+        ),
+        (
+            lambda value: value.update(expected_document_binding_v2="c" * 64),
+            "must be null for entry",
         ),
         (
             lambda value: value.update(expected_line_ids=[2001]),
@@ -929,7 +979,10 @@ def test_document_post_semantics_fix_document_type_and_complete_identity(
     assert result["computed"]["expected_move_type"] == parameters[
         "expected_move_type"
     ]
+    assert result["computed"]["expected_document_binding_v2"] == "7" * 64
     assert result["computed"]["expected_line_count"] == 3
+    assert result["computed"]["expected_payment_term_line_id"] == 2103
+    assert result["computed"]["expected_payment_term_account_id"] == 20
 
     parameters["expected_move_type"] = wrong_type
     with pytest.raises(WriteSemanticError, match="expected_move_type"):
@@ -944,6 +997,14 @@ def test_document_post_semantics_fix_document_type_and_complete_identity(
             "expected_due_date",
         ),
         (
+            lambda value: value.pop("expected_document_binding_v2"),
+            "expected_document_binding_v2 is required",
+        ),
+        (
+            lambda value: value.update(expected_document_binding_v2="A" * 64),
+            "expected_document_binding_v2 must be a SHA-256 digest",
+        ),
+        (
             lambda value: value.update(expected_amount_total="112.99"),
             "untaxed plus tax",
         ),
@@ -954,6 +1015,14 @@ def test_document_post_semantics_fix_document_type_and_complete_identity(
         (
             lambda value: value.update(expected_amount_tax="-1"),
             "canonical decimal",
+        ),
+        (
+            lambda value: value.update(
+                expected_amount_tax="1",
+                expected_amount_total="101",
+                expected_amount_residual="101",
+            ),
+            "must be zero",
         ),
         (
             lambda value: value.update(
@@ -971,6 +1040,14 @@ def test_document_post_semantics_fix_document_type_and_complete_identity(
         (
             lambda value: value.update(expected_line_ids=[2101, 2101]),
             "unique",
+        ),
+        (
+            lambda value: value.update(expected_payment_term_line_id=9999),
+            "must belong",
+        ),
+        (
+            lambda value: value.update(expected_payment_term_account_id=0),
+            "expected_payment_term_account_id",
         ),
         (
             lambda value: value.update(expected_reference=7),
@@ -1000,6 +1077,8 @@ def test_refund_draft_cancel_semantics_bind_both_complete_graphs(move_type):
     )
 
     assert result["computed"]["expected_move_type"] == move_type
+    assert result["computed"]["expected_document_binding_v2"] == "7" * 64
+    assert result["computed"]["expected_origin_document_binding_v2"] == "8" * 64
     assert result["computed"]["expected_line_count"] == 3
     assert result["computed"]["expected_origin_line_count"] == 3
 
@@ -1018,6 +1097,24 @@ def test_refund_draft_cancel_semantics_bind_both_complete_graphs(move_type):
         (
             lambda value: value.update(expected_origin_document_binding="bad"),
             "origin_document_binding",
+        ),
+        (
+            lambda value: value.pop("expected_document_binding_v2"),
+            "expected_document_binding_v2 is required",
+        ),
+        (
+            lambda value: value.update(expected_document_binding_v2="bad"),
+            "expected_document_binding_v2 must be a SHA-256 digest",
+        ),
+        (
+            lambda value: value.update(
+                expected_origin_document_binding_v2="B" * 64
+            ),
+            "expected_origin_document_binding_v2 must be a SHA-256 digest",
+        ),
+        (
+            lambda value: value.pop("expected_origin_document_binding_v2"),
+            "expected_origin_document_binding_v2 is required",
         ),
         (
             lambda value: value.update(expected_total_amount="-1"),

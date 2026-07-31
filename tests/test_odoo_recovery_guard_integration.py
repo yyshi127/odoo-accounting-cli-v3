@@ -7,6 +7,9 @@ import pytest
 from odoo_accounting_cli_v3.odoo.module_graph import (
     build_trusted_module_graph,
 )
+from odoo_accounting_cli_v3.odoo.recovery_actions import (
+    FAIL_CLOSED_RECOVERY_METHODS,
+)
 from odoo_accounting_cli_v3.odoo.write_handlers import (
     OdooWriteHandlerError,
     OdooWriteHandlers,
@@ -26,6 +29,16 @@ CHANGED_MODULE_GRAPH = build_trusted_module_graph(
     [{"name": "account", "latest_version": "19.0.changed"}]
 )
 METHODS = tuple(sorted(RECOVERY_ACTION_CONTRACTS))
+ALLOWED_METHODS = tuple(
+    method
+    for method in METHODS
+    if method not in FAIL_CLOSED_RECOVERY_METHODS
+)
+BLOCKED_METHODS = tuple(
+    method
+    for method in METHODS
+    if method in FAIL_CLOSED_RECOVERY_METHODS
+)
 PRISTINE_DRAFT_METHODS = frozenset(
     {
         "cancel_pristine_v3_draft_customer_invoice_v1",
@@ -334,9 +347,9 @@ def _assert_valid_guard_reached_precheck_end(
         assert "public_orm_recovery_action_registered" in checked["checks"]
 
 
-@pytest.mark.parametrize("method", METHODS)
+@pytest.mark.parametrize("method", ALLOWED_METHODS)
 @pytest.mark.parametrize("environment", ["test", "sandbox"])
-def test_precheck_guard_accepts_all_contracts_only_in_nonproduction(
+def test_precheck_guard_accepts_allowed_contracts_only_in_nonproduction(
     method,
     environment,
 ):
@@ -344,6 +357,71 @@ def test_precheck_guard_accepts_all_contracts_only_in_nonproduction(
     handler = _GuardHarness(plan, environment=environment)
 
     _assert_valid_guard_reached_precheck_end(method, handler, plan)
+
+
+@pytest.mark.parametrize("method", BLOCKED_METHODS)
+@pytest.mark.parametrize("environment", ["test", "sandbox"])
+def test_precheck_guard_fail_closes_blocked_contracts_in_nonproduction(
+    method,
+    environment,
+):
+    plan = _plan(method)
+    handler = _GuardHarness(plan, environment=environment)
+
+    with pytest.raises(OdooWriteHandlerError, match="fail-closed"):
+        handler.precheck_recovery(
+            _parameters_for(plan), handler.test_company
+        )
+
+
+@pytest.mark.parametrize("environment", ["test", "sandbox"])
+def test_precheck_guard_fail_closes_reconciliation_writeoff_plan(
+    environment,
+):
+    method = "undo_reconciliation_without_writeoff_v1"
+    oracle_id = "undo_reconciliation_without_writeoff_exact_v1"
+    action_targets = [
+        _reference(
+            "account.move",
+            101,
+            record_state="posted",
+        )
+    ]
+    guard_records = [
+        {
+            **_reference(
+                "account.move.line",
+                201,
+                record_state="posted",
+            ),
+            "expected_outcome": "survive_allowed_delta",
+        }
+    ]
+    plan = create_recovery_plan_v2(
+        origin_operation_id=ORIGIN_OPERATION_ID,
+        recovery_capability_id="acct.recovery.execute.v1",
+        status="available",
+        method=method,
+        requires_approval=True,
+        action_targets=action_targets,
+        guard_records=guard_records,
+        oracle_id=oracle_id,
+        parameters=_parameters(
+            method=method,
+            oracle_id=oracle_id,
+            action_targets=action_targets,
+            guard_records=guard_records,
+        ),
+    )
+    handler = _GuardHarness(plan, environment=environment)
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="write-off recovery is fail-closed",
+    ):
+        handler.precheck_recovery(
+            _parameters_for(plan), handler.test_company
+        )
 
 
 @pytest.mark.parametrize("method", METHODS)

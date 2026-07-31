@@ -201,6 +201,15 @@ class RegistryTest(unittest.TestCase):
             ],
         )
         self.assertIn("oneOf", output["properties"]["write_parameters"])
+        target = output["properties"]["target"]
+        self.assertIn("document_binding_v2", target["required"])
+        write_parameters = output["properties"]["write_parameters"][
+            "oneOf"
+        ][0]
+        self.assertIn(
+            "expected_document_binding_v2",
+            write_parameters["required"],
+        )
         basis = "odoo_pristine_v3_draft_cancel_eligibility_read"
         basis_schema = output["properties"]["basis"]
         self.assertEqual(basis_schema["minLength"], len(basis))

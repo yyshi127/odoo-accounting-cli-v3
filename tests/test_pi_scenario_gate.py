@@ -648,7 +648,7 @@ class PiScenarioGateTest(unittest.TestCase):
             for scenario in self.corpus["scenarios"]
         }
         self.assertEqual(covered, registered)
-        self.assertEqual(self.corpus["frozen_revision"], 7)
+        self.assertEqual(self.corpus["frozen_revision"], 11)
         self.assertEqual(len(self.corpus["scenarios"]), 43)
         self.assertEqual(
             {scenario["category"] for scenario in self.corpus["scenarios"]},
@@ -699,6 +699,7 @@ class PiScenarioGateTest(unittest.TestCase):
                     "move_id",
                     "expected_move_type",
                     "expected_document_binding",
+                    "expected_document_binding_v2",
                     "expected_business_binding",
                     "reason",
                     "idempotency_key",
@@ -778,6 +779,7 @@ class PiScenarioGateTest(unittest.TestCase):
                 "move_id",
                 "expected_move_type",
                 "expected_document_binding",
+                "expected_document_binding_v2",
                 "expected_business_binding",
                 "expected_line_ids",
                 "reason",
@@ -849,10 +851,13 @@ class PiScenarioGateTest(unittest.TestCase):
             "move_id",
             "expected_move_type",
             "expected_document_binding",
+            "expected_document_binding_v2",
             "expected_business_binding",
             "expected_partner_id",
             "expected_journal_id",
             "expected_currency_id",
+            "expected_payment_term_line_id",
+            "expected_payment_term_account_id",
             "expected_invoice_date",
             "expected_accounting_date",
             "expected_due_date",
@@ -889,8 +894,10 @@ class PiScenarioGateTest(unittest.TestCase):
                 "expected_move_type",
                 "expected_origin_move_id",
                 "expected_document_binding",
+                "expected_document_binding_v2",
                 "expected_business_binding",
                 "expected_origin_document_binding",
+                "expected_origin_document_binding_v2",
                 "expected_origin_business_binding",
                 "expected_partner_id",
                 "expected_journal_id",
@@ -927,16 +934,35 @@ class PiScenarioGateTest(unittest.TestCase):
         )
         binding_values = {
             customer_post["expected_document_binding"],
+            customer_post["expected_document_binding_v2"],
             customer_post["expected_business_binding"],
             vendor_post["expected_document_binding"],
+            vendor_post["expected_document_binding_v2"],
             vendor_post["expected_business_binding"],
             refund_cancel["expected_document_binding"],
+            refund_cancel["expected_document_binding_v2"],
             refund_cancel["expected_business_binding"],
             refund_cancel["expected_origin_document_binding"],
+            refund_cancel["expected_origin_document_binding_v2"],
             refund_cancel["expected_origin_business_binding"],
         }
-        self.assertEqual(len(binding_values), 8)
+        self.assertEqual(len(binding_values), 12)
         self.assertTrue(all(len(value) == 64 for value in binding_values))
+        v2_binding_values = {
+            customer_post["expected_document_binding_v2"],
+            vendor_post["expected_document_binding_v2"],
+            refund_cancel["expected_document_binding_v2"],
+            refund_cancel["expected_origin_document_binding_v2"],
+        }
+        self.assertEqual(len(v2_binding_values), 4)
+        self.assertTrue(
+            all(
+                len(value) == 64
+                and value == value.lower()
+                and set(value) <= set("0123456789abcdef")
+                for value in v2_binding_values
+            )
+        )
         line_id_groups = (
             customer_post["expected_line_ids"],
             vendor_post["expected_line_ids"],
@@ -961,6 +987,16 @@ class PiScenarioGateTest(unittest.TestCase):
             },
             {self._bindings()["currency_cny_id"]},
         )
+        self.assertEqual(
+            customer_post["expected_payment_term_line_id"],
+            customer_post["expected_line_ids"][-1],
+        )
+        self.assertEqual(
+            vendor_post["expected_payment_term_line_id"],
+            vendor_post["expected_line_ids"][-1],
+        )
+        self.assertEqual(customer_post["expected_amount_tax"], "0.00")
+        self.assertEqual(vendor_post["expected_amount_tax"], "0.00")
 
         payment_cancel_scenarios = [
             scenario
@@ -1160,24 +1196,24 @@ class PiScenarioGateTest(unittest.TestCase):
             bank_compensation_scenarios[3]["input"],
         )
 
-        invoice_post_route = next(
+        invoice_draft_route = next(
             scenario
             for scenario in self.corpus["scenarios"]
-            if scenario["id"] == "pi-v1-customer-invoice-create-and-post-route"
+            if scenario["id"] == "pi-v1-customer-invoice-draft-route"
         )
-        self.assertIn("新建", invoice_post_route["input"])
-        self.assertIn("过账发票", invoice_post_route["input"])
+        self.assertIn("新建一张发票草稿", invoice_draft_route["input"])
+        self.assertIn("不要过账", invoice_draft_route["input"])
         self.assertEqual(
-            invoice_post_route["expected"]["capability_id"],
+            invoice_draft_route["expected"]["capability_id"],
             "acct.invoice.customer_create.v1",
         )
         self.assertNotEqual(
-            invoice_post_route["expected"]["capability_id"],
+            invoice_draft_route["expected"]["capability_id"],
             "acct.move.post.v1",
         )
         self.assertEqual(
-            invoice_post_route["expected"]["material_parameters"]["posting_mode"],
-            "post",
+            invoice_draft_route["expected"]["material_parameters"]["posting_mode"],
+            "draft",
         )
         self.assertNotIn("acct.invoice.post.v1", registered)
 
@@ -2445,7 +2481,7 @@ class PiScenarioGateTest(unittest.TestCase):
                     )
                     second = self._trace(
                         trace_document,
-                        "pi-v1-customer-invoice-create-and-post-route",
+                        "pi-v1-customer-invoice-draft-route",
                     )
                     duplicate = self._event(first, "prepare")[
                         "operation_id"

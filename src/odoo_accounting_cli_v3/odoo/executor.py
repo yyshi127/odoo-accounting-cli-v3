@@ -7,7 +7,7 @@ import hmac
 import json
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable, Iterable
 
 from ..domain.ap_open_items import ApOpenItemsBackend, read_ap_open_items
@@ -26,7 +26,16 @@ from ..domain.report_read import (
     read_tax_report,
 )
 from ..domain.trial_balance import TrialBalanceBackend, read_trial_balance
+from ..document_bindings import (
+    DocumentBindingError,
+    canonical_document_binding_v2,
+    full_refund_line_reference,
+)
 from ..gateway import RequestContext
+from ..partial_refund_lineage import (
+    partial_refund_line_from_odoo,
+    partial_refund_origin_line_relation_is_exact,
+)
 from ..receipts import (
     create_read_receipt,
     valid_read_runtime_binding,
@@ -111,7 +120,11 @@ def _valid_sha_binding(value: Any) -> bool:
 
 
 def _decimal(value: Any) -> Decimal | None:
-    if value in (False, None, ""):
+    if (
+        value is False
+        or value is None
+        or (isinstance(value, str) and value == "")
+    ):
         return None
     try:
         return Decimal(str(value))
@@ -137,8 +150,9 @@ def _canonical_graph_decimal(
         or (positive and decimal <= 0)
     ):
         return None
-    normalized = decimal.normalize()
-    result = format(normalized, "f")
+    result = format(decimal, "f")
+    if "." in result:
+        result = result.rstrip("0").rstrip(".")
     return "0" if result in {"", "-0"} else result
 
 
@@ -224,7 +238,7 @@ def _document_graph_binding_candidate(
     company_id: int,
     vendor: bool,
     posting_mode: str,
-) -> tuple[str, str] | None:
+) -> tuple[str, str, str] | None:
     partner_id = _record_id(getattr(move, "partner_id", None))
     journal_id = _record_id(getattr(move, "journal_id", None))
     currency_id = _record_id(getattr(move, "currency_id", None))
@@ -278,6 +292,13 @@ def _document_graph_binding_candidate(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+    try:
+        document_binding_v2 = canonical_document_binding_v2(
+            "vendor_bill" if vendor else "customer_invoice",
+            parameters,
+        )
+    except DocumentBindingError:
+        return None
     business_identity = (
         {
             "partner_id": partner_id,
@@ -302,6 +323,7 @@ def _document_graph_binding_candidate(
     ).hexdigest()
     return (
         document_binding,
+        document_binding_v2,
         business_binding,
     )
 
@@ -312,7 +334,7 @@ def _refund_graph_binding_candidates(
     company_id: int,
     origin_move_id: int,
     vendor: bool,
-) -> list[tuple[str, str, str]]:
+) -> list[tuple[str, str, str, str]]:
     refund_date = _date_text(getattr(refund, "invoice_date", None))
     journal_id = _record_id(getattr(refund, "journal_id", None))
     currency_id = _record_id(getattr(refund, "currency_id", None))
@@ -352,7 +374,7 @@ def _refund_graph_binding_candidates(
         "posting_mode": "draft",
     }
     candidates = [("full", []), ("partial", partial_lines)]
-    result: list[tuple[str, str, str]] = []
+    result: list[tuple[str, str, str, str]] = []
     for refund_mode, lines in candidates:
         parameters = {
             **common,
@@ -374,6 +396,12 @@ def _refund_graph_binding_candidates(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        try:
+            document_binding_v2 = canonical_document_binding_v2(
+                "refund", parameters
+            )
+        except DocumentBindingError:
+            continue
         business_binding = hashlib.sha256(
             json.dumps(
                 {
@@ -393,7 +421,12 @@ def _refund_graph_binding_candidates(
             ).encode("utf-8")
         ).hexdigest()
         result.append(
-            (refund_mode, document_binding, business_binding)
+            (
+                refund_mode,
+                document_binding,
+                document_binding_v2,
+                business_binding,
+            )
         )
     return result
 
@@ -506,15 +539,107 @@ def _account_dependency_valid(
     ) in expected_types
 
 
+def _product_dependency_graph_valid(
+    product: Any,
+    company_id: int,
+) -> bool:
+    if _record_id(product) is None:
+        return True
+    if (
+        not _acl_granted(product, "read")
+        or getattr(product, "active", True) is False
+        or not _record_company_bound(
+            product, company_id, shared=True
+        )
+    ):
+        return False
+    for field in (
+        "property_account_income_id",
+        "property_account_expense_id",
+    ):
+        account = getattr(product, field, None)
+        if _record_id(account) is not None and not _account_dependency_valid(
+            account, company_id
+        ):
+            return False
+    category = getattr(product, "categ_id", None)
+    if _record_id(category) is None:
+        return True
+    if (
+        not _acl_granted(category, "read")
+        or not _record_company_bound(
+            category, company_id, shared=True
+        )
+    ):
+        return False
+    for field in (
+        "property_account_income_categ_id",
+        "property_account_expense_categ_id",
+        "property_stock_account_input_categ_id",
+        "property_stock_account_output_categ_id",
+        "property_stock_valuation_account_id",
+    ):
+        account = getattr(category, field, None)
+        if _record_id(account) is not None and not _account_dependency_valid(
+            account, company_id
+        ):
+            return False
+    stock_journal = getattr(category, "property_stock_journal", None)
+    return bool(
+        _record_id(stock_journal) is None
+        or (
+            _acl_granted(stock_journal, "read")
+            and _record_company_bound(
+                stock_journal, company_id, shared=False
+            )
+        )
+    )
+
+
+def _amounts_equal_at_rounding(
+    left: Any,
+    right: Any,
+    rounding: Any,
+) -> bool:
+    left_decimal = _decimal(left)
+    right_decimal = _decimal(right)
+    rounding_decimal = _decimal(rounding)
+    if (
+        left_decimal is None
+        or right_decimal is None
+        or rounding_decimal is None
+        or not all(
+            value.is_finite()
+            for value in (
+                left_decimal,
+                right_decimal,
+                rounding_decimal,
+            )
+        )
+        or rounding_decimal <= 0
+    ):
+        return False
+    return (
+        left_decimal / rounding_decimal
+    ).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    ) == (
+        right_decimal / rounding_decimal
+    ).quantize(
+        Decimal("1"), rounding=ROUND_HALF_UP
+    )
+
+
 def _taxless_document_graph_is_exact(
     move: Any,
     lines: list[Any],
     invoice_line_ids: list[int],
     *,
     company_id: int,
-    partner_id: int,
+    commercial_partner_id: int,
     vendor: bool,
     expected_term_date: str | None = None,
+    require_company_currency_amount_graph: bool = False,
 ) -> bool:
     keyed = {_record_id(line): line for line in lines}
     if (
@@ -533,6 +658,15 @@ def _taxless_document_graph_is_exact(
     expected_term_type = (
         "liability_payable" if vendor else "asset_receivable"
     )
+    currency_rounding = getattr(
+        getattr(move, "currency_id", None),
+        "rounding",
+        None,
+    )
+    if not _amounts_equal_at_rounding(
+        0, 0, currency_rounding
+    ):
+        return False
     untaxed = Decimal("0")
     for line in lines:
         account = getattr(line, "account_id", None)
@@ -543,10 +677,37 @@ def _taxless_document_graph_is_exact(
             account, company_id, expected_types=expected_types
         ):
             return False
+        if not _product_dependency_graph_valid(
+            getattr(line, "product_id", None),
+            company_id,
+        ):
+            return False
         if (
-            _record_id(getattr(line, "product_id", None)) is not None
-            or _ids(getattr(line, "tax_ids", []))
+            _ids(getattr(line, "tax_ids", []))
             or _record_id(getattr(line, "tax_line_id", None)) is not None
+            or _ids(getattr(line, "tax_tag_ids", []))
+            or _record_id(
+                getattr(line, "tax_repartition_line_id", None)
+            )
+            is not None
+            or _record_id(getattr(line, "group_tax_id", None)) is not None
+            or (
+                _decimal(getattr(line, "tax_base_amount", 0))
+                or Decimal("0")
+            )
+            != Decimal("0")
+            or getattr(line, "extra_tax_data", False)
+            not in (False, None, {})
+            or getattr(line, "matching_number", False)
+            not in (False, None, "")
+            or _decimal(getattr(line, "deductible_amount", None))
+            != Decimal("100")
+            or (
+                str(getattr(line, "display_type", "") or "")
+                not in {"line_section", "line_subsection", "line_note"}
+                and _record_id(getattr(line, "partner_id", None))
+                != commercial_partner_id
+            )
         ):
             return False
         debit = _decimal(getattr(line, "debit", None))
@@ -592,8 +753,16 @@ def _taxless_document_graph_is_exact(
             )
             or quantity <= 0
             or price_unit < 0
-            or price_subtotal != quantity * price_unit
-            or price_total != price_subtotal
+            or not _amounts_equal_at_rounding(
+                price_subtotal,
+                quantity * price_unit,
+                currency_rounding,
+            )
+            or not _amounts_equal_at_rounding(
+                price_total,
+                price_subtotal,
+                currency_rounding,
+            )
         ):
             return False
         untaxed += price_subtotal
@@ -614,7 +783,7 @@ def _taxless_document_graph_is_exact(
         )
         != expected_term_type
         or _record_id(getattr(term_lines[0], "partner_id", None))
-        != partner_id
+        != commercial_partner_id
         or (
             expected_term_date is not None
             and _date_text(
@@ -627,6 +796,72 @@ def _taxless_document_graph_is_exact(
     amount_untaxed = _decimal(getattr(move, "amount_untaxed", None))
     amount_tax = _decimal(getattr(move, "amount_tax", None))
     amount_total = _decimal(getattr(move, "amount_total", None))
+    if require_company_currency_amount_graph:
+        balance_direction = {
+            "out_invoice": Decimal("-1"),
+            "in_invoice": Decimal("1"),
+            "out_refund": Decimal("1"),
+            "in_refund": Decimal("-1"),
+        }.get(str(getattr(move, "move_type", "") or ""))
+        if (
+            balance_direction is None
+            or amount_total is None
+            or not amount_total.is_finite()
+            or amount_total <= 0
+        ):
+            return False
+        for line in invoice_lines:
+            price_total = _decimal(getattr(line, "price_total", None))
+            if price_total is None or not price_total.is_finite():
+                return False
+            expected_balance = balance_direction * price_total
+            expected_debit = max(expected_balance, Decimal("0"))
+            expected_credit = max(-expected_balance, Decimal("0"))
+            if not all(
+                (
+                    _amounts_equal_at_rounding(
+                        getattr(line, field, None),
+                        expected,
+                        currency_rounding,
+                    )
+                    for field, expected in (
+                        ("debit", expected_debit),
+                        ("credit", expected_credit),
+                        ("balance", expected_balance),
+                        ("amount_currency", expected_balance),
+                    )
+                )
+            ):
+                return False
+        term = term_lines[0]
+        expected_term_balance = -balance_direction * amount_total
+        expected_term_debit = max(
+            expected_term_balance, Decimal("0")
+        )
+        expected_term_credit = max(
+            -expected_term_balance, Decimal("0")
+        )
+        if not all(
+            (
+                _amounts_equal_at_rounding(
+                    getattr(term, field, None),
+                    expected,
+                    currency_rounding,
+                )
+                for field, expected in (
+                    ("debit", expected_term_debit),
+                    ("credit", expected_term_credit),
+                    ("balance", expected_term_balance),
+                    ("amount_currency", expected_term_balance),
+                    ("amount_residual", expected_term_balance),
+                    (
+                        "amount_residual_currency",
+                        expected_term_balance,
+                    ),
+                )
+            )
+        ):
+            return False
     debit_total = sum(
         (_decimal(getattr(line, "debit", None)) for line in lines),
         Decimal("0"),
@@ -701,14 +936,16 @@ def _journal_line_signature(
         debit, credit = credit, debit
         balance = -balance
         amount_currency = -amount_currency
+    display_type = str(
+        getattr(line, "display_type", "") or ""
+    )
+    line_name = (
+        ""
+        if display_type == "payment_term"
+        else str(getattr(line, "name", "") or "")
+    )
     return (
-        str(getattr(line, "name", "") or ""),
-        str(
-            getattr(
-                line, "odoo_cli_v3_line_reference", ""
-            )
-            or ""
-        ),
+        line_name,
         _record_id(getattr(line, "account_id", None)),
         _record_id(getattr(line, "partner_id", None)),
         _record_id(getattr(line, "currency_id", None)),
@@ -718,7 +955,7 @@ def _journal_line_signature(
         amount_currency,
         tuple(_ids(getattr(line, "tax_ids", []))),
         _record_id(getattr(line, "tax_line_id", None)),
-        str(getattr(line, "display_type", "") or ""),
+        display_type,
     )
 
 
@@ -740,105 +977,15 @@ def _partial_refund_origin_line_relation_is_exact(
         or any(line_id not in refund_by_id for line_id in refund_invoice_line_ids)
     ):
         return False
-    origin_reference_pairs = [
+    return partial_refund_origin_line_relation_is_exact(
         (
-            str(
-                getattr(
-                    origin_by_id[line_id],
-                    "odoo_cli_v3_line_reference",
-                    "",
-                )
-                or ""
-            ),
-            origin_by_id[line_id],
-        )
-        for line_id in origin_invoice_line_ids
-    ]
-    origin_references = [
-        reference for reference, _line in origin_reference_pairs
-    ]
-    if (
-        any(not reference for reference in origin_references)
-        or len(origin_references) != len(set(origin_references))
-    ):
-        return False
-    origin_by_reference = {
-        reference: line for reference, line in origin_reference_pairs
-    }
-    seen_refund_references: set[str] = set()
-    for line_id in refund_invoice_line_ids:
-        refund_line = refund_by_id[line_id]
-        reference = str(
-            getattr(
-                refund_line, "odoo_cli_v3_line_reference", ""
-            )
-            or ""
-        )
-        origin_line = origin_by_reference.get(reference)
-        if (
-            not reference
-            or reference in seen_refund_references
-            or origin_line is None
-            or str(getattr(refund_line, "name", "") or "")
-            != str(getattr(origin_line, "name", "") or "")
-            or _record_id(getattr(refund_line, "account_id", None))
-            != _record_id(getattr(origin_line, "account_id", None))
-            or _record_id(getattr(refund_line, "partner_id", None))
-            != _record_id(getattr(origin_line, "partner_id", None))
-            or _record_id(getattr(refund_line, "currency_id", None))
-            != _record_id(getattr(origin_line, "currency_id", None))
-            or _record_id(getattr(refund_line, "product_id", None))
-            != _record_id(getattr(origin_line, "product_id", None))
-            or _ids(getattr(refund_line, "tax_ids", []))
-            != _ids(getattr(origin_line, "tax_ids", []))
-            or _record_id(getattr(refund_line, "tax_line_id", None))
-            != _record_id(getattr(origin_line, "tax_line_id", None))
-        ):
-            return False
-        refund_quantity = _decimal(
-            getattr(refund_line, "quantity", None)
-        )
-        origin_quantity = _decimal(
-            getattr(origin_line, "quantity", None)
-        )
-        refund_subtotal = _decimal(
-            getattr(refund_line, "price_subtotal", None)
-        )
-        origin_subtotal = _decimal(
-            getattr(origin_line, "price_subtotal", None)
-        )
-        refund_total = _decimal(
-            getattr(refund_line, "price_total", None)
-        )
-        origin_total = _decimal(
-            getattr(origin_line, "price_total", None)
-        )
-        values = (
-            refund_quantity,
-            origin_quantity,
-            refund_subtotal,
-            origin_subtotal,
-            refund_total,
-            origin_total,
-        )
-        if (
-            any(value is None for value in values)
-            or not all(value.is_finite() for value in values if value is not None)
-            or refund_quantity <= 0
-            or origin_quantity <= 0
-            or refund_subtotal < 0
-            or origin_subtotal < 0
-            or refund_total < 0
-            or origin_total < 0
-            or refund_quantity > origin_quantity
-            or refund_subtotal > origin_subtotal
-            or refund_total > origin_total
-        ):
-            return False
-        seen_refund_references.add(reference)
-    return bool(
-        seen_refund_references
-        and len(seen_refund_references) == len(refund_invoice_line_ids)
+            partial_refund_line_from_odoo(origin_by_id[line_id])
+            for line_id in origin_invoice_line_ids
+        ),
+        (
+            partial_refund_line_from_odoo(refund_by_id[line_id])
+            for line_id in refund_invoice_line_ids
+        ),
     )
 
 
@@ -858,6 +1005,149 @@ def _linewise_reversal_is_exact(
         and sorted(repr(signature) for signature in expected)
         == sorted(repr(signature) for signature in actual)
     )
+
+
+def _full_refund_invoice_line_signature(
+    line: Any,
+    *,
+    reversed_amounts: bool,
+) -> tuple[Any, ...] | None:
+    journal_signature = _journal_line_signature(
+        line,
+        reversed_amounts=reversed_amounts,
+    )
+    quantity = _decimal(getattr(line, "quantity", None))
+    price_unit = _decimal(getattr(line, "price_unit", None))
+    discount = _decimal(getattr(line, "discount", 0))
+    price_subtotal = _decimal(getattr(line, "price_subtotal", None))
+    price_total = _decimal(getattr(line, "price_total", None))
+    decimal_values = (
+        quantity,
+        price_unit,
+        discount,
+        price_subtotal,
+        price_total,
+    )
+    if (
+        journal_signature is None
+        or any(value is None for value in decimal_values)
+        or not all(
+            value.is_finite()
+            for value in decimal_values
+            if value is not None
+        )
+        or quantity <= 0
+        or price_unit < 0
+        or price_subtotal < 0
+        or price_total < 0
+    ):
+        return None
+    return (
+        *journal_signature,
+        _record_id(getattr(line, "product_id", None)),
+        _record_id(getattr(line, "product_uom_id", None)),
+        quantity,
+        price_unit,
+        discount,
+        price_subtotal,
+        price_total,
+        _record_id(
+            getattr(line, "tax_repartition_line_id", None)
+        ),
+        tuple(_ids(getattr(line, "tax_tag_ids", []))),
+        _record_id(getattr(line, "group_tax_id", None)),
+    )
+
+
+def _full_refund_invoice_lineage_is_exact(
+    origin_lines: list[Any],
+    refund_lines: list[Any],
+    *,
+    origin_move_id: int,
+    origin_invoice_line_ids: list[int],
+    refund_invoice_line_ids: list[int],
+) -> bool:
+    origin_by_id = {_record_id(line): line for line in origin_lines}
+    refund_by_id = {_record_id(line): line for line in refund_lines}
+    if (
+        None in origin_by_id
+        or None in refund_by_id
+        or len(origin_by_id) != len(origin_lines)
+        or len(refund_by_id) != len(refund_lines)
+        or len(origin_invoice_line_ids) != len(refund_invoice_line_ids)
+        or not origin_invoice_line_ids
+        or any(
+            line_id not in origin_by_id
+            for line_id in origin_invoice_line_ids
+        )
+        or any(
+            line_id not in refund_by_id
+            for line_id in refund_invoice_line_ids
+        )
+    ):
+        return False
+
+    origin_groups: dict[tuple[Any, ...], list[Any]] = {}
+    refund_groups: dict[tuple[Any, ...], list[Any]] = {}
+    for line_id in origin_invoice_line_ids:
+        line = origin_by_id[line_id]
+        signature = _full_refund_invoice_line_signature(
+            line,
+            reversed_amounts=True,
+        )
+        if signature is None:
+            return False
+        origin_groups.setdefault(signature, []).append(line)
+    for line_id in refund_invoice_line_ids:
+        line = refund_by_id[line_id]
+        signature = _full_refund_invoice_line_signature(
+            line,
+            reversed_amounts=False,
+        )
+        if signature is None:
+            return False
+        refund_groups.setdefault(signature, []).append(line)
+    if set(origin_groups) != set(refund_groups):
+        return False
+
+    observed_references: set[str] = set()
+    for signature in origin_groups:
+        origins = sorted(
+            origin_groups[signature],
+            key=lambda line: _record_id(line) or 0,
+        )
+        refunds = sorted(
+            refund_groups[signature],
+            key=lambda line: _record_id(line) or 0,
+        )
+        if len(origins) != len(refunds):
+            return False
+        for origin_line, refund_line in zip(origins, refunds, strict=True):
+            origin_line_id = _record_id(origin_line)
+            if origin_line_id is None:
+                return False
+            try:
+                expected_reference = full_refund_line_reference(
+                    origin_move_id,
+                    origin_line_id,
+                )
+            except DocumentBindingError:
+                return False
+            observed_reference = str(
+                getattr(
+                    refund_line,
+                    "odoo_cli_v3_line_reference",
+                    "",
+                )
+                or ""
+            )
+            if (
+                observed_reference != expected_reference
+                or observed_reference in observed_references
+            ):
+                return False
+            observed_references.add(observed_reference)
+    return len(observed_references) == len(refund_invoice_line_ids)
 
 
 def _line_external_effect_present(
@@ -1455,6 +1745,10 @@ class OdooReadExecutor:
         document_binding = str(
             getattr(move, "odoo_cli_v3_document_binding", "") or ""
         )
+        raw_document_binding_v2 = getattr(
+            move, "odoo_cli_v3_document_binding_v2", None
+        )
+        document_binding_v2 = str(raw_document_binding_v2 or "")
         business_binding = str(
             getattr(move, "odoo_cli_v3_business_binding", "") or ""
         )
@@ -1465,9 +1759,16 @@ class OdooReadExecutor:
         partner_id = _record_id(partner)
         journal_id = _record_id(journal)
         currency_id = _record_id(currency)
+        company_currency_id = _record_id(
+            getattr(company, "currency_id", None)
+        )
         commercial_partner_id = _record_id(commercial_partner)
         self._read_related_acl(
-            partner, commercial_partner, journal, currency
+            partner,
+            commercial_partner,
+            journal,
+            currency,
+            getattr(company, "currency_id", None),
         )
 
         invoice_date = _date_text(getattr(move, "invoice_date", None))
@@ -1532,6 +1833,14 @@ class OdooReadExecutor:
             failures.append("posting_hash_edi_or_manual_mutation_evidence")
         if not _valid_sha_binding(document_binding):
             failures.append("document_binding_missing_or_invalid")
+        if not _valid_sha_binding(document_binding_v2):
+            failures.append(
+                (
+                    "legacy_binding_requires_provenance_migration"
+                    if raw_document_binding_v2 in {None, False, ""}
+                    else "document_binding_v2_invalid"
+                )
+            )
         if not _valid_sha_binding(business_binding):
             failures.append("business_binding_missing_or_invalid")
         graph_binding = _document_graph_binding_candidate(
@@ -1540,7 +1849,11 @@ class OdooReadExecutor:
             vendor=expected_move_type == "in_invoice",
             posting_mode="draft",
         )
-        if graph_binding != (document_binding, business_binding):
+        if (
+            graph_binding is None
+            or graph_binding[1:]
+            != (document_binding_v2, business_binding)
+        ):
             failures.append("document_graph_binding_mismatch")
 
         vendor = expected_move_type == "in_invoice"
@@ -1564,6 +1877,11 @@ class OdooReadExecutor:
             or currency_id is None
         ):
             failures.append("partner_currency_or_company_binding_invalid")
+        if (
+            company_currency_id is None
+            or currency_id != company_currency_id
+        ):
+            failures.append("document_currency_not_company_currency")
         rank_field = "supplier_rank" if vendor else "customer_rank"
         partner_rank = (
             getattr(partner, "supplier_rank", None)
@@ -1681,6 +1999,8 @@ class OdooReadExecutor:
                 "line_reconciliation_or_external_effect_present"
             )
         invoice_line_set = set(invoice_line_ids)
+        payment_term_line_id = None
+        payment_term_account_id = None
         if (
             not invoice_line_ids
             or not invoice_line_set.issubset(line_ids)
@@ -1700,6 +2020,11 @@ class OdooReadExecutor:
                 if _record_id(line) not in invoice_line_set
                 and line not in tax_lines
             ]
+            if len(term_lines) == 1:
+                payment_term_line_id = _record_id(term_lines[0])
+                payment_term_account_id = _record_id(
+                    getattr(term_lines[0], "account_id", None)
+                )
             expected_term_type = (
                 "liability_payable"
                 if expected_move_type == "in_invoice"
@@ -1728,8 +2053,10 @@ class OdooReadExecutor:
             lines,
             invoice_line_ids,
             company_id=company_id,
-            partner_id=partner_id or 0,
+            commercial_partner_id=commercial_partner_id or 0,
             vendor=vendor,
+            expected_term_date=due_date,
+            require_company_currency_amount_graph=True,
         ):
             failures.append(
                 "taxless_financial_and_dependency_graph_not_exact"
@@ -1755,10 +2082,15 @@ class OdooReadExecutor:
                 "move_id": move_id,
                 "expected_move_type": expected_move_type,
                 "expected_document_binding": document_binding,
+                "expected_document_binding_v2": document_binding_v2,
                 "expected_business_binding": business_binding,
                 "expected_partner_id": partner_id,
                 "expected_journal_id": journal_id,
                 "expected_currency_id": currency_id,
+                "expected_payment_term_line_id": payment_term_line_id,
+                "expected_payment_term_account_id": (
+                    payment_term_account_id
+                ),
                 "expected_invoice_date": invoice_date,
                 "expected_accounting_date": accounting_date,
                 "expected_due_date": due_date,
@@ -1790,10 +2122,13 @@ class OdooReadExecutor:
                 "posted_before": getattr(move, "posted_before", None),
                 "payment_state": payment_state,
                 "document_binding": document_binding,
+                "document_binding_v2": document_binding_v2,
                 "business_binding": business_binding,
                 "partner_id": partner_id,
                 "journal_id": journal_id,
                 "currency_id": currency_id,
+                "payment_term_line_id": payment_term_line_id,
+                "payment_term_account_id": payment_term_account_id,
                 "invoice_date": invoice_date,
                 "accounting_date": accounting_date,
                 "due_date": due_date,
@@ -1816,7 +2151,8 @@ class OdooReadExecutor:
                 "move_line_and_partner_write_acl",
                 "self_commercial_partner_rank_zero",
                 "active_currency_journal_and_company_currency",
-                "taxless_financial_dependency_graph_exact",
+                "company_currency_taxless_financial_dependency_graph_exact",
+                "payment_term_line_and_account_bound",
                 "effective_odoo_lock_date_open",
                 "fully_unpaid_residual_matches_total",
                 "no_payment_reconciliation_or_external_effects",
@@ -1877,11 +2213,21 @@ class OdooReadExecutor:
         document_binding = str(
             getattr(refund, "odoo_cli_v3_document_binding", "") or ""
         )
+        raw_document_binding_v2 = getattr(
+            refund, "odoo_cli_v3_document_binding_v2", None
+        )
+        document_binding_v2 = str(raw_document_binding_v2 or "")
         business_binding = str(
             getattr(refund, "odoo_cli_v3_business_binding", "") or ""
         )
         origin_document_binding = str(
             getattr(origin, "odoo_cli_v3_document_binding", "") or ""
+        )
+        raw_origin_document_binding_v2 = getattr(
+            origin, "odoo_cli_v3_document_binding_v2", None
+        )
+        origin_document_binding_v2 = str(
+            raw_origin_document_binding_v2 or ""
         )
         origin_business_binding = str(
             getattr(origin, "odoo_cli_v3_business_binding", "") or ""
@@ -1892,14 +2238,26 @@ class OdooReadExecutor:
         origin_partner = getattr(origin, "partner_id", None)
         origin_journal = getattr(origin, "journal_id", None)
         origin_currency = getattr(origin, "currency_id", None)
+        commercial_partner = getattr(
+            refund, "commercial_partner_id", None
+        )
+        origin_commercial_partner = getattr(
+            origin, "commercial_partner_id", None
+        )
         partner_id = _record_id(partner)
         journal_id = _record_id(journal)
         currency_id = _record_id(currency)
+        commercial_partner_id = _record_id(commercial_partner)
+        origin_commercial_partner_id = _record_id(
+            origin_commercial_partner
+        )
         self._read_related_acl(
             partner,
+            commercial_partner,
             journal,
             currency,
             origin_partner,
+            origin_commercial_partner,
             origin_journal,
             origin_currency,
         )
@@ -1995,6 +2353,14 @@ class OdooReadExecutor:
             )
         if not _valid_sha_binding(document_binding):
             failures.append("refund_document_binding_missing_or_invalid")
+        if not _valid_sha_binding(document_binding_v2):
+            failures.append(
+                (
+                    "refund_legacy_binding_requires_provenance_migration"
+                    if raw_document_binding_v2 in {None, False, ""}
+                    else "refund_document_binding_v2_invalid"
+                )
+            )
         if not _valid_sha_binding(business_binding):
             failures.append("refund_business_binding_missing_or_invalid")
         if origin_type != expected_origin_type:
@@ -2011,11 +2377,25 @@ class OdooReadExecutor:
             failures.append("origin_posting_identity_invalid")
         if not _valid_sha_binding(origin_document_binding):
             failures.append("origin_document_binding_missing_or_invalid")
+        if not _valid_sha_binding(origin_document_binding_v2):
+            failures.append(
+                (
+                    "origin_legacy_binding_requires_provenance_migration"
+                    if raw_origin_document_binding_v2
+                    in {None, False, ""}
+                    else "origin_document_binding_v2_invalid"
+                )
+            )
         if not _valid_sha_binding(origin_business_binding):
             failures.append("origin_business_binding_missing_or_invalid")
         refund_binding_matches = [
             refund_mode
-            for refund_mode, candidate_document, candidate_business in (
+            for (
+                refund_mode,
+                _candidate_document,
+                candidate_document_v2,
+                candidate_business,
+            ) in (
                 _refund_graph_binding_candidates(
                     refund,
                     company_id=company_id,
@@ -2024,26 +2404,25 @@ class OdooReadExecutor:
                 )
             )
             if (
-                candidate_document == document_binding
+                candidate_document_v2 == document_binding_v2
                 and candidate_business == business_binding
             )
         ]
         if len(refund_binding_matches) != 1:
             failures.append("refund_graph_binding_mismatch")
-        origin_binding_matches = [
-            posting_mode
-            for posting_mode in ("draft", "post")
-            if _document_graph_binding_candidate(
+        origin_binding_matches: list[str] = []
+        for posting_mode in ("draft", "post"):
+            origin_candidate = _document_graph_binding_candidate(
                 origin,
                 company_id=company_id,
                 vendor=expected_move_type == "in_refund",
                 posting_mode=posting_mode,
             )
-            == (
-                origin_document_binding,
+            if origin_candidate is not None and origin_candidate[1:] == (
+                origin_document_binding_v2,
                 origin_business_binding,
-            )
-        ]
+            ):
+                origin_binding_matches.append(posting_mode)
         if len(origin_binding_matches) != 1:
             failures.append("origin_graph_binding_mismatch")
         if origin_reversal_ids != [refund_id]:
@@ -2057,6 +2436,11 @@ class OdooReadExecutor:
         )
         if (
             partner_id is None
+            or commercial_partner_id is None
+            or _record_id(
+                getattr(partner, "commercial_partner_id", None)
+            )
+            != commercial_partner_id
             or journal_id is None
             or currency_id is None
             or partner_company_id not in {None, company_id}
@@ -2069,6 +2453,12 @@ class OdooReadExecutor:
             failures.append("refund_identity_binding_invalid")
         if (
             _record_id(origin_partner) != partner_id
+            or origin_commercial_partner_id
+            != commercial_partner_id
+            or _record_id(
+                getattr(origin_partner, "commercial_partner_id", None)
+            )
+            != origin_commercial_partner_id
             or _record_id(origin_journal) != journal_id
             or _record_id(origin_currency) != currency_id
             or _record_id(
@@ -2101,6 +2491,14 @@ class OdooReadExecutor:
         ):
             failures.append(
                 "refund_currency_journal_or_company_configuration_invalid"
+            )
+        if (
+            currency_id
+            != _record_id(getattr(company, "currency_id", None))
+            or getattr(company, "account_storno", None) is not False
+        ):
+            failures.append(
+                "refund_company_currency_non_storno_scope_invalid"
             )
         if refund_date is None or accounting_date != refund_date:
             failures.append("refund_date_binding_invalid")
@@ -2258,9 +2656,10 @@ class OdooReadExecutor:
             origin_lines,
             origin_invoice_line_ids,
             company_id=company_id,
-            partner_id=partner_id or 0,
+            commercial_partner_id=commercial_partner_id or 0,
             vendor=vendor,
             expected_term_date=origin_due_date,
+            require_company_currency_amount_graph=True,
         ):
             failures.append(
                 "origin_taxless_financial_dependency_graph_not_exact"
@@ -2270,9 +2669,10 @@ class OdooReadExecutor:
             refund_lines,
             refund_invoice_line_ids,
             company_id=company_id,
-            partner_id=partner_id or 0,
+            commercial_partner_id=commercial_partner_id or 0,
             vendor=vendor,
             expected_term_date=refund_date,
+            require_company_currency_amount_graph=True,
         ):
             failures.append(
                 "refund_taxless_financial_dependency_graph_not_exact"
@@ -2286,6 +2686,14 @@ class OdooReadExecutor:
                 )
             ):
                 failures.append("full_refund_linewise_reversal_not_exact")
+            if not _full_refund_invoice_lineage_is_exact(
+                origin_lines,
+                refund_lines,
+                origin_move_id=origin_id,
+                origin_invoice_line_ids=origin_invoice_line_ids,
+                refund_invoice_line_ids=refund_invoice_line_ids,
+            ):
+                failures.append("full_refund_invoice_lineage_not_exact")
         if source_refund_mode == "partial":
             refund_total = _decimal(getattr(refund, "amount_total", None))
             origin_total = _decimal(getattr(origin, "amount_total", None))
@@ -2315,9 +2723,13 @@ class OdooReadExecutor:
                 "expected_move_type": expected_move_type,
                 "expected_origin_move_id": origin_id,
                 "expected_document_binding": document_binding,
+                "expected_document_binding_v2": document_binding_v2,
                 "expected_business_binding": business_binding,
                 "expected_origin_document_binding": (
                     origin_document_binding
+                ),
+                "expected_origin_document_binding_v2": (
+                    origin_document_binding_v2
                 ),
                 "expected_origin_business_binding": (
                     origin_business_binding
@@ -2357,6 +2769,7 @@ class OdooReadExecutor:
                     ),
                     "payment_state": refund_payment_state,
                     "document_binding": document_binding,
+                    "document_binding_v2": document_binding_v2,
                     "business_binding": business_binding,
                     "origin_move_id": origin_id,
                     "partner_id": partner_id,
@@ -2383,6 +2796,9 @@ class OdooReadExecutor:
                     ),
                     "payment_state": origin_payment_state,
                     "document_binding": origin_document_binding,
+                    "document_binding_v2": (
+                        origin_document_binding_v2
+                    ),
                     "business_binding": origin_business_binding,
                     "partner_id": _record_id(origin_partner),
                     "journal_id": _record_id(origin_journal),
@@ -2415,8 +2831,10 @@ class OdooReadExecutor:
                 "immutable_refund_and_origin_bindings",
                 "refund_and_refund_line_write_acl",
                 "active_partner_currency_journal_and_company_scope",
+                "company_currency_and_non_storno_scope",
                 "taxless_financial_dependency_graphs_exact",
                 "full_refund_linewise_reversal_exact_when_applicable",
+                "full_refund_invoice_lineage_exact_when_applicable",
                 "partial_refund_total_within_origin_when_applicable",
                 "partial_refund_origin_line_relation_exact_when_applicable",
                 "fully_unpaid_residuals_match_totals",
@@ -2456,6 +2874,10 @@ class OdooReadExecutor:
         move_type = str(getattr(move, "move_type", "") or "")
         state = str(getattr(move, "state", "") or "")
         document_binding = str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
+        raw_document_binding_v2 = getattr(
+            move, "odoo_cli_v3_document_binding_v2", None
+        )
+        document_binding_v2 = str(raw_document_binding_v2 or "")
         business_binding = str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
         vendor = expected_move_type == "in_invoice"
         journal = getattr(move, "journal_id", None)
@@ -2463,6 +2885,10 @@ class OdooReadExecutor:
         line_ids = _ids(getattr(move, "line_ids", []))
         failures: list[str] = []
 
+        if not _acl_granted(move, "write"):
+            failures.append("move_write_acl_denied")
+        if any(not _acl_granted(line, "write") for line in lines):
+            failures.append("line_write_acl_denied")
         if expected_move_type not in {"out_invoice", "in_invoice"}:
             failures.append("expected_move_type_not_allowlisted")
         if move_type != expected_move_type:
@@ -2494,8 +2920,28 @@ class OdooReadExecutor:
             failures.append("journal_not_active_expected_type")
         if not _valid_sha_binding(document_binding):
             failures.append("document_binding_missing_or_invalid")
+        if not _valid_sha_binding(document_binding_v2):
+            failures.append(
+                (
+                    "legacy_binding_requires_provenance_migration"
+                    if raw_document_binding_v2 in {None, False, ""}
+                    else "document_binding_v2_invalid"
+                )
+            )
         if not _valid_sha_binding(business_binding):
             failures.append("business_binding_missing_or_invalid")
+        graph_binding = _document_graph_binding_candidate(
+            move,
+            company_id=company_id,
+            vendor=expected_move_type == "in_invoice",
+            posting_mode="draft",
+        )
+        if (
+            graph_binding is None
+            or graph_binding[1:]
+            != (document_binding_v2, business_binding)
+        ):
+            failures.append("document_graph_binding_mismatch")
         if _record_id(currency) is None:
             failures.append("currency_missing")
         if str(getattr(move, "payment_state", "") or "") != "not_paid":
@@ -2573,6 +3019,7 @@ class OdooReadExecutor:
             "expected_move_type_allowlist",
             "pristine_draft_state_and_sequence",
             "immutable_v3_document_bindings_present",
+            "move_and_complete_line_graph_write_acl",
             "active_sale_or_purchase_journal",
             "fully_unpaid_residual_matches_total",
             "no_payment_reconciliation_tax_asset_or_edi_links",
@@ -2585,6 +3032,7 @@ class OdooReadExecutor:
                 "move_id": move_id,
                 "expected_move_type": expected_move_type,
                 "expected_document_binding": document_binding,
+                "expected_document_binding_v2": document_binding_v2,
                 "expected_business_binding": business_binding,
             }
             if eligible
@@ -2608,6 +3056,7 @@ class OdooReadExecutor:
                 "currency_id": _record_id(currency),
                 "line_ids": line_ids,
                 "document_binding": document_binding,
+                "document_binding_v2": document_binding_v2,
                 "business_binding": business_binding,
             },
             "eligible": eligible,

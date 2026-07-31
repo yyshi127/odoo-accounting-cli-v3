@@ -13,8 +13,15 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-All ten registered read capabilities now have trusted, statically admissible
-handlers for the dedicated test environment. Nine run through the constrained
+The current Dev260 development baseline registers 35 capabilities: 12 reads
+and 23 writes. The reads are staged only for `test`; no capability is enabled
+or production-routed. All 23 writes have concrete source paths, 21 can reach
+capability-specific ORM prechecks, and payment registration plus deferred
+creation stop before ORM access. All write evidence remains `declared` with no
+retained real-Odoo receipt, so the real-Odoo write-evidence count is 0/23.
+
+All twelve registered read capabilities now have trusted, statically admissible
+handlers for the dedicated test environment. Eleven run through the constrained
 Odoo read executor, including multi-company gross-balance translation; operation
 diagnostics reads only the trusted local write store. They remain
 `contract_tested` and staged for `test`, with no production enablement or
@@ -29,7 +36,7 @@ Dev257 adds the declared, disabled
 verified, database-finalized bank-import graph and creates a separate
 whole-batch opposite-signed statement from the exact retained available plan;
 it is not a delete, partial correction, or implicit unreconciliation path.
-Control add-on version `19.0.0.7.0` serializes supported ORM mutations of bank
+Control add-on version `19.0.0.7.1` serializes supported ORM mutations of bank
 statements, statement lines, their linked moves and journal items, and their
 reconciliation records on the same company-and-journal transaction lock.
 Specialized compensation and generic recovery acquire the complete ordered
@@ -163,7 +170,7 @@ non-symlink, must not be group/world writable, and all ancestors must be
 root-owned directories that are not group/world writable; verification also
 uses no-follow, open-file identity, before/after identity, and bounded-read
 checks. The contract-tested FD4 terminal-answer boundary is not the complete
-live Pi 38-scenario trace gate, which has not yet been evidenced for the target
+live Pi 43-scenario trace gate, which has not yet been evidenced for the target
 release. See `docs/PI_SCENARIO_ACCEPTANCE.md`.
 
 ## Development

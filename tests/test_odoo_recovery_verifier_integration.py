@@ -17,6 +17,7 @@ import odoo_accounting_cli_v3.odoo.write_handlers as write_handlers_module
 from odoo_accounting_cli_v3.odoo.recovery_verifier import (
     RecoveryVerificationError,
 )
+from odoo_accounting_cli_v3.odoo.recovery_actions import RecoveryActionResult
 from odoo_accounting_cli_v3.odoo.write_handlers import (
     OdooWriteHandlerError,
     OdooWriteHandlers,
@@ -100,6 +101,76 @@ class DirectVerifyHarness(OdooWriteHandlers):
         return None
 
 
+class InlineExecutionHarness(OdooWriteHandlers):
+    """Isolate the execution-to-verifier transaction boundary."""
+
+    def __init__(self, *, reject_verification: bool = False) -> None:
+        self.action = Record(101)
+        self.guard = Record(202)
+        self.plan = {
+            "method": "cancel_draft_period_adjustment_v1",
+            "action_targets": [
+                {"model": "account.move", "record_id": self.action.id}
+            ],
+            "guard_records": [
+                {
+                    "model": "account.move.line",
+                    "record_id": self.guard.id,
+                    "expected_outcome": "survive_allowed_delta",
+                }
+            ],
+        }
+        self.context = SimpleNamespace(trusted_recovery_plan=self.plan)
+        self.reject_verification = reject_verification
+        self.calls: list[str] = []
+
+    def _recovery_records_by_role(self, _plan, _company):
+        actions = [("account.move", self.action)]
+        guards = [("account.move.line", self.guard)]
+        return actions, guards, [*actions, *guards]
+
+    def _current_recovery_record_references(
+        self, _plan, _company, *, known_records=None
+    ):
+        assert known_records == [
+            ("account.move", self.action),
+            ("account.move.line", self.guard),
+        ]
+        return {}
+
+    def _validate_recovery_execution_guard(
+        self, _parameters, _plan, _company, _references
+    ):
+        return None
+
+    def trusted_before_values(self, execution, _company):
+        assert {
+            (item["model"], item["record_id"])
+            for item in execution["before"]
+        } == {
+            ("account.move", self.action.id),
+            ("account.move.line", self.guard.id),
+        }
+        return {
+            ("account.move", self.action.id): {"state": "draft"},
+            ("account.move.line", self.guard.id): {"parent_state": "draft"},
+        }
+
+    def verify_recovery(self, _parameters, _company, records, before):
+        self.calls.append("verify")
+        assert records == [
+            ("account.move", self.action),
+            ("account.move.line", self.guard),
+        ]
+        assert set(before) == {
+            ("account.move", self.action.id),
+            ("account.move.line", self.guard.id),
+        }
+        if self.reject_verification:
+            raise OdooWriteHandlerError("inline oracle mismatch")
+        return ["inline_exact_business_oracle"]
+
+
 def _plan_and_graph(
     method: str,
 ) -> tuple[
@@ -140,6 +211,104 @@ def _plan_and_graph(
         before[(action_model, action.id)]["company_id"] = [7, "Company"]
         before[(action_model, action.id)]["journal_id"] = [2, "Bank"]
     return plan, records, before
+
+
+def _inline_execution_checked(
+    handler: InlineExecutionHarness,
+) -> dict[str, Any]:
+    return {
+        "before": [
+            {
+                "model": "account.move",
+                "record_id": handler.action.id,
+                "values": {"state": "draft"},
+            },
+            {
+                "model": "account.move.line",
+                "record_id": handler.guard.id,
+                "values": {"parent_state": "draft"},
+            },
+        ]
+    }
+
+
+def test_generic_recovery_executes_fresh_verifier_before_return(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = InlineExecutionHarness()
+
+    def execute_action(*_args: Any, **_kwargs: Any) -> RecoveryActionResult:
+        handler.calls.append("action")
+        return RecoveryActionResult(
+            records=(
+                ("account.move", handler.action),
+                ("account.move.line", handler.guard),
+            ),
+            tombstones=frozenset(),
+            checks=("draft_cancelled",),
+        )
+
+    monkeypatch.setattr(
+        write_handlers_module,
+        "execute_recovery_action",
+        execute_action,
+    )
+
+    records, recovery, tombstones = handler.execute_recovery(
+        {
+            "recovery_date": "2026-08-02",
+            "reason": "Approved recovery",
+        },
+        Record(7),
+        _inline_execution_checked(handler),
+    )
+
+    assert handler.calls == ["action", "verify"]
+    assert records == [
+        ("account.move", handler.action),
+        ("account.move.line", handler.guard),
+    ]
+    assert recovery == {
+        "status": "not_applicable",
+        "method": "recovery_completed",
+        "targets": [],
+    }
+    assert tombstones == frozenset()
+
+
+def test_generic_recovery_aborts_when_inline_verifier_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handler = InlineExecutionHarness(reject_verification=True)
+
+    def execute_action(*_args: Any, **_kwargs: Any) -> RecoveryActionResult:
+        handler.calls.append("action")
+        return RecoveryActionResult(
+            records=(
+                ("account.move", handler.action),
+                ("account.move.line", handler.guard),
+            ),
+            tombstones=frozenset(),
+            checks=("draft_cancelled",),
+        )
+
+    monkeypatch.setattr(
+        write_handlers_module,
+        "execute_recovery_action",
+        execute_action,
+    )
+
+    with pytest.raises(OdooWriteHandlerError, match="inline oracle mismatch"):
+        handler.execute_recovery(
+            {
+                "recovery_date": "2026-08-02",
+                "reason": "Approved recovery",
+            },
+            Record(7),
+            _inline_execution_checked(handler),
+        )
+
+    assert handler.calls == ["action", "verify"]
 
 
 @pytest.mark.parametrize("method", METHODS)

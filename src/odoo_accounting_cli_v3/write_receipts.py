@@ -26,6 +26,8 @@ MODEL = re.compile(r"[a-z][a-z0-9_.]{0,127}")
 WRITE_RECEIPT_PURPOSE = "write_audit_receipt_v1"
 WRITE_SIGNATURE_VERSION = 1
 MIN_HMAC_SECRET_BYTES = 32
+MAX_SNAPSHOT_VALUES_JSON_CHARS = 65_536
+MAX_SNAPSHOT_VALUES_JSON_BYTES = 65_536
 ENVIRONMENTS = frozenset({"test", "sandbox", "production"})
 CHANNELS = frozenset({"staged", "enabled"})
 
@@ -209,9 +211,15 @@ def create_record_snapshot(
     if not isinstance(values, dict):
         raise WriteReceiptError("snapshot values must be an object")
     try:
-        values_json = canonical_json(values).decode("utf-8")
+        encoded_values = canonical_json(values)
+        values_json = encoded_values.decode("utf-8")
     except (TypeError, ValueError, UnicodeError) as exc:
         raise WriteReceiptError("snapshot values are not canonical JSON") from exc
+    if (
+        len(values_json) > MAX_SNAPSHOT_VALUES_JSON_CHARS
+        or len(encoded_values) > MAX_SNAPSHOT_VALUES_JSON_BYTES
+    ):
+        raise WriteReceiptError("snapshot values exceed the auditable limit")
     return {
         "model": model,
         "record_id": record_id,
@@ -233,6 +241,12 @@ def _validate_snapshot(value: Any) -> None:
     _text(value["record_state"], "snapshot record_state", maximum=128)
     if not isinstance(value["values_json"], str):
         raise WriteReceiptError("snapshot values_json is invalid")
+    encoded_values = value["values_json"].encode("utf-8")
+    if (
+        len(value["values_json"]) > MAX_SNAPSHOT_VALUES_JSON_CHARS
+        or len(encoded_values) > MAX_SNAPSHOT_VALUES_JSON_BYTES
+    ):
+        raise WriteReceiptError("snapshot values exceed the auditable limit")
     try:
         decoded = json.loads(value["values_json"])
     except json.JSONDecodeError as exc:
@@ -241,7 +255,7 @@ def _validate_snapshot(value: Any) -> None:
         not isinstance(decoded, dict)
         or canonical_json(decoded).decode("utf-8") != value["values_json"]
         or _sha(value["values_digest"], "snapshot values_digest")
-        != hashlib.sha256(value["values_json"].encode("utf-8")).hexdigest()
+        != hashlib.sha256(encoded_values).hexdigest()
     ):
         raise WriteReceiptError("record snapshot content digest is invalid")
 

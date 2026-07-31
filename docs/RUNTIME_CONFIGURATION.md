@@ -503,17 +503,19 @@ Production writes require separate explicit authorization and production-safety
 review.
 
 In particular, `acct.move.draft_cancel.v1` has no enabled or staged environment.
-Its two 64-character inputs are not caller-generated secrets: the trusted value
-source is the exact V3-created `account.move` record's
-`odoo_cli_v3_document_binding` and `odoo_cli_v3_business_binding`, read under the
-bound user, company, ACL, database, release, and Odoo receipt identity. Runtime
-configuration must not supply defaults for either value. Before enabling this
-write in any sandbox, `acct.move.draft_cancel_eligibility.v1` must return the
-exact company, move ID, `out_invoice`/`in_invoice` type, both bindings, and
-pristine-draft eligibility. The contract is registered for test staging only and
-has strict output-schema, ACL, cross-company, and Pi parameter-transit coverage;
-it still lacks retained real-sandbox Odoo receipt evidence, so the write remains
-disabled.
+Its three 64-character inputs are not caller-generated secrets: the trusted
+value source is the exact V3-created `account.move` record's
+`odoo_cli_v3_document_binding`, `odoo_cli_v3_document_binding_v2`, and
+`odoo_cli_v3_business_binding`, read under the bound user, company, ACL,
+database, release, and Odoo receipt identity. Runtime configuration must not
+supply defaults for any of these values. Before enabling this write in any
+sandbox, `acct.move.draft_cancel_eligibility.v1` must return the exact company,
+move ID, `out_invoice`/`in_invoice` type, all three bindings, and pristine-draft
+eligibility. A legacy invoice/bill draft without V2 fails closed; runtime
+configuration must not synthesize or backfill it. The contract is registered
+for test staging only and has strict output-schema, ACL, cross-company, and Pi
+parameter-transit coverage; it still lacks retained real-sandbox Odoo receipt
+evidence, so the write remains disabled.
 The installed-module graph proves only that the module name/version set is
 stable; it is not a semantic override allowlist. Staging also requires an
 explicit review of target-module overrides and a database automation inventory
@@ -535,8 +537,9 @@ from the matching eligibility read:
 Both reads are only `contract_tested`, staged for `test`, and have no retained
 real-Odoo receipt. The three writes remain `declared`, with no staged or enabled
 environment and no real-Odoo write evidence. Runtime configuration must not
-default, invent, or copy any document/business binding from an untrusted
-message. The current write schemas do not include an eligibility receipt or
+default, invent, or copy any V1 document, V2 document, or business binding from
+an untrusted message. The current write schemas do not include an eligibility
+receipt or
 receipt digest and therefore do not cryptographically chain the read to the
 write. Each write precheck instead independently reconstructs and validates the
 bound Odoo graph. Pi/evidence receipt correlation remains a separate
@@ -549,28 +552,30 @@ Odoo 19 partner-rank postcommit delta only when the target partner's relevant
 `1` afterward. It is not a general production posting implementation for
 partners with an existing rank or for unreviewed module extensions.
 
-The Dev259 eligibility oracle is also restricted to complete productless,
-taxless, undiscounted graphs with one receivable/payable maturity line. A
-taxed, product, discounted, or complex payment-term document must return
-ineligible even if the lower-level write handler could otherwise inspect it.
-Do not treat this fail-closed slice as general invoice/bill/refund support.
+The eligibility oracle and lower-level document-post write handler are both
+restricted to complete company-currency, product-line, taxless, undiscounted
+graphs with one receivable/payable maturity line. The signed candidate binds
+the exact Odoo-created payment-term line and account IDs; the write precheck,
+approval snapshot, and post-action verifier reject either ID drifting, including
+substitution with another account of the same type. Foreign-currency, taxed,
+non-product-line, discounted, or complex payment-term documents fail closed. Do not
+treat this slice as general invoice/bill/refund support.
 
-The eligibility boundary rebuilds a normalized Odoo graph and requires both
-the document and business SHA-256 bindings to match. For a refund's posted
-origin, exactly one binding-shape candidate must match both hashes: creation
-recorded `posting_mode:"post"`, or creation recorded `posting_mode:"draft"` and
-the current document is now posted. The latter proves only the binding stored
-at creation; it does not record the later caller or entry point for
-`action_post` and cannot prove that a controlled posting capability performed
-the transition.
+Dev260 preserves the original V1 digest as an exact approved-source binding and
+adds a separate canonical V2 digest. New invoice, bill, and refund creates
+write V1, V2, and business bindings together. Eligibility reconstructs V2 from
+the current graph, so decimal trailing zeros, tax-ID order, and line order do
+not create false mismatches; real amounts, accounts, products, text, dates,
+company, partner, currency, journal, and posting mode remain bound.
 
-The current create-to-eligibility reconstruction can reject an economically
-equivalent document because Odoo loses source decimal spelling such as `100`
-versus `100.00`, the runtime normalizes tax-ID order, and it stably orders
-invoice lines by `line_reference`. The original create-v1 paths did not enforce
-one matching canonical representation for all three cases. Do not weaken the
-check; admit affected records only after a future versioned canonical
-binding/provenance migration has proved them.
+V2 is mandatory for these document-posting and refund-cancellation slices.
+Missing V2 on a legacy record is an explicit provenance-migration failure;
+invalid or mismatched V2 is a hard rejection with no V1 fallback. For a posted
+refund origin, the matching draft/post V2 candidate still proves only the
+creation-time binding, not which later caller invoked `action_post`. This
+release does not provide a metadata migration capability. Runtime
+configuration, operators, and Pi must never backfill V2 from the current graph
+alone.
 
 The current `acct.recovery.execute.v1` contract is also disabled and is limited
 to an incident whose origin is durably `failed` after one successful execution

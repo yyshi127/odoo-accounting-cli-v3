@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 import hashlib
+import hmac
 import json
 import re
 from typing import Any, Mapping
@@ -20,6 +21,7 @@ from .module_graph import (
     conditional_required_fields,
 )
 from .recovery_actions import (
+    FAIL_CLOSED_RECOVERY_METHODS,
     RECOVERY_ACTION_METHODS,
     RecoveryActionError,
     execute_recovery_action,
@@ -36,10 +38,21 @@ from ..draft_invoice_recovery import (
     classic_read_many2one_id,
     customer_invoice_business_binding,
     customer_invoice_document_binding,
+    customer_invoice_document_binding_v2,
     vendor_bill_business_binding,
     vendor_bill_document_binding,
+    vendor_bill_document_binding_v2,
+)
+from ..document_bindings import (
+    full_refund_line_reference,
+    refund_document_binding_v2,
 )
 from ..domain.write_semantics import WriteSemanticError, validate_write_semantics
+from ..partial_refund_lineage import (
+    partial_refund_line_from_approved,
+    partial_refund_line_from_odoo,
+    partial_refund_origin_line_relation_is_exact,
+)
 from ..recovery_contracts import (
     EXECUTABLE_RECOVERY_METHODS,
     RECOVERY_ACTION_CONTRACTS,
@@ -108,10 +121,10 @@ _TRUSTED_PLAN_CAPABILITIES = frozenset(
     }
 )
 _RECONCILIATION_UNDO_METHOD = (
-    "undo_reconciliation_and_reverse_writeoff_v1"
+    "undo_reconciliation_without_writeoff_v1"
 )
 _RECONCILIATION_UNDO_ORACLE = (
-    "undo_reconciliation_and_reverse_writeoff_exact_v1"
+    "undo_reconciliation_without_writeoff_exact_v1"
 )
 _BANK_STATEMENT_COMPENSATE_METHOD = "post_compensating_bank_statement_v1"
 _BANK_STATEMENT_COMPENSATE_ORACLE = (
@@ -123,7 +136,7 @@ _BANK_STATEMENT_COMPENSATE_ORACLE = (
 # even if a plan is replayed there; promotion still requires real Odoo evidence.
 _RECOVERY_ACTIONS = frozenset(
     EXECUTABLE_RECOVERY_METHODS
-)
+) - FAIL_CLOSED_RECOVERY_METHODS
 _MANUAL_RECOVERY_METHODS = {
     "cancel_and_unreconcile_payment_v1": "manual_review_payment_recovery",
     "cancel_asset_and_reverse_schedule_v1": (
@@ -152,10 +165,72 @@ _MANUAL_RECOVERY_METHODS = {
     "reverse_posted_refund_v1": "manual_review_refund_recovery",
     "reverse_posted_vendor_bill_v1": "manual_review_vendor_bill_recovery",
     "reverse_the_reversal_v1": "manual_review_move_reversal",
-    "undo_reconciliation_and_reverse_writeoff_v1": (
+    "undo_reconciliation_without_writeoff_v1": (
         "manual_review_reconciliation_recovery"
     ),
 }
+
+_REVERSAL_UNSAFE_ACCOUNT_TYPES = frozenset(
+    {
+        "asset_receivable",
+        "liability_payable",
+        "off_balance",
+        "asset_cash",
+        "liability_credit_card",
+    }
+)
+
+_REVERSAL_UNSAFE_MOVE_FIELDS = (
+    "adjusting_entry_origin_move_ids",
+    "adjusting_entries_move_ids",
+    "exchange_diff_partial_ids",
+    "origin_payment_id",
+    "payment_ids",
+    "matched_payment_ids",
+    "reconciled_payment_ids",
+    "statement_line_id",
+    "statement_line_ids",
+    "statement_id",
+    "tax_cash_basis_rec_id",
+    "tax_cash_basis_origin_move_id",
+    "tax_cash_basis_created_move_ids",
+    "stock_move_ids",
+    "landed_costs_ids",
+    "closing_return_id",
+    "transfer_model_id",
+    "transaction_ids",
+    "authorized_transaction_ids",
+    "purchase_id",
+    "asset_ids",
+    "edi_document_ids",
+    "expense_ids",
+    "pos_order_ids",
+    "debit_note_ids",
+    "debit_origin_id",
+    "invoice_pdf_report_id",
+    "invoice_vendor_bill_id",
+    "purchase_vendor_bill_id",
+    "ubl_cii_xml_id",
+    "l10n_es_edi_facturae_xml_id",
+    "invoice_pdf_report_file",
+    "ubl_cii_xml_file",
+    "l10n_es_edi_facturae_xml_file",
+    "signature",
+    "signing_user",
+    "sending_data",
+    "is_being_sent",
+    "invoice_source_email",
+    "attachment_ids",
+    "message_main_attachment_id",
+    "activity_ids",
+    "message_follower_ids",
+    "rating_ids",
+    "website_message_ids",
+    "auto_post_origin_id",
+    "asset_id",
+    "deferred_move_ids",
+    "deferred_original_move_ids",
+)
 
 _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "account.move": (
@@ -188,7 +263,8 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
         "is_move_sent", "sending_data", "is_being_sent",
         "invoice_source_email", "attachment_ids",
         "message_main_attachment_id", "audit_trail_message_ids",
-        "activity_ids", "message_follower_ids", "message_ids", "rating_ids",
+        "activity_ids", "message_follower_ids", "message_ids", "has_message",
+        "rating_ids",
         "website_message_ids", "access_token",
         "fiscal_position_id", "invoice_cash_rounding_id",
         "invoice_incoterm_id", "incoterm_location", "partner_shipping_id",
@@ -209,7 +285,9 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
         "asset_depreciation_beginning_date", "depreciation_value",
         "deferred_move_ids", "deferred_original_move_ids",
         "odoo_cli_v3_reason", "odoo_cli_v3_period_end_date",
-        "odoo_cli_v3_document_binding", "odoo_cli_v3_business_binding",
+        "odoo_cli_v3_document_binding",
+        "odoo_cli_v3_document_binding_v2",
+        "odoo_cli_v3_business_binding",
     ),
     "account.move.line": (
         "move_id", "company_id", "parent_state", "name", "ref",
@@ -320,7 +398,7 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "product.product": (
         "name", "active", "company_id", "categ_id",
         "property_account_income_id", "property_account_expense_id",
-        "taxes_id", "supplier_taxes_id",
+        "taxes_id", "supplier_taxes_id", "account_tag_ids",
     ),
     "product.category": (
         "name", "parent_id", "property_account_income_categ_id",
@@ -335,6 +413,7 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
         "tax_lock_date", "sale_lock_date", "purchase_lock_date",
         "tax_exigibility",
         "tax_calculation_rounding_method", "account_price_include",
+        "account_storno",
         "anglo_saxon_accounting",
         "generate_deferred_expense_entries_method",
         "deferred_expense_amount_computation_method",
@@ -352,6 +431,18 @@ _SNAPSHOT_FIELDS: dict[str, tuple[str, ...]] = {
     "account.full.reconcile": (
         "partial_reconcile_ids", "reconciled_line_ids",
     ),
+    "mail.message": (
+        "model", "res_id", "date", "body", "message_type", "is_internal",
+        "subtype_id", "author_id", "author_guest_id",
+        "mail_activity_type_id", "attachment_ids",
+        "partner_ids", "parent_id", "record_alias_domain_id",
+        "record_company_id", "pinned_at",
+        "email_from", "incoming_email_to", "incoming_email_cc",
+        "outgoing_email_to", "notification_ids", "mail_server_id", "reply_to",
+        "reply_to_force_new", "subject", "message_id",
+        "email_layout_xmlid", "email_add_signature",
+        "create_uid", "create_date", "write_uid", "write_date",
+    ),
 }
 
 _PRESENCE_ONLY_SNAPSHOT_FIELDS = frozenset(
@@ -364,12 +455,19 @@ _PRESENCE_ONLY_SNAPSHOT_FIELDS = frozenset(
     }
 )
 
+_MAIL_THREAD_PROJECTION_FIELD = "odoo_cli_v3_mail_thread_projection"
+_MAIL_THREAD_PROJECTION_LIMIT = 500
+_MAIL_THREAD_PROJECTION_EDGE_LIMIT = 2_000
+_SNAPSHOT_VALUES_SAFE_CHARS = 60_000
+_SNAPSHOT_VALUES_SAFE_BYTES = 60_000
+
 _SHARED_SNAPSHOT_MODELS = frozenset(
     {
         "res.partner",
         "product.product",
         "product.category",
         "account.payment.method",
+        "mail.message",
     }
 )
 
@@ -378,6 +476,8 @@ _REQUIRED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
         {
             "state", "move_type", "company_id", "journal_id", "currency_id",
             "partner_id", "commercial_partner_id", "date", "line_ids",
+            "reversal_move_ids", "audit_trail_message_ids", "message_ids",
+            "has_message",
             "odoo_cli_v3_document_binding",
             "odoo_cli_v3_business_binding",
         }
@@ -445,6 +545,20 @@ _REQUIRED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
             "refund_repartition_line_ids",
         }
     ),
+    "mail.message": frozenset(
+        {
+            "model", "res_id", "date", "body", "message_type",
+            "is_internal", "subtype_id", "author_id",
+            "author_guest_id", "mail_activity_type_id",
+            "attachment_ids", "partner_ids", "record_alias_domain_id",
+            "record_company_id", "pinned_at", "email_from",
+            "incoming_email_to", "incoming_email_cc",
+            "outgoing_email_to", "notification_ids",
+            "mail_server_id", "reply_to", "reply_to_force_new", "subject",
+            "message_id", "email_layout_xmlid", "email_add_signature",
+            "create_uid", "create_date",
+        }
+    ),
     "account.tax.repartition.line": frozenset(
         {
             "company_id", "tax_id", "factor_percent", "repartition_type",
@@ -456,10 +570,26 @@ _REQUIRED_SNAPSHOT_FIELDS: dict[str, frozenset[str]] = {
             "name", "currency_id", "hard_lock_date", "fiscalyear_lock_date",
             "tax_lock_date", "sale_lock_date", "purchase_lock_date",
             "tax_exigibility", "tax_calculation_rounding_method",
-            "account_price_include",
+            "account_price_include", "account_storno",
         }
     ),
 }
+
+_PARTIAL_REFUND_LINEAGE_SNAPSHOT_FIELDS = frozenset(
+    {
+        "name",
+        "account_id",
+        "partner_id",
+        "currency_id",
+        "product_id",
+        "tax_ids",
+        "tax_line_id",
+        "quantity",
+        "price_subtotal",
+        "price_total",
+        "odoo_cli_v3_line_reference",
+    }
+)
 
 _DEFERRED_COMPANY_REQUIRED_FIELDS: dict[str, frozenset[str]] = {
     deferred_type: frozenset(
@@ -511,6 +641,18 @@ def _canonical(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _text_digest(value: Any) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _temporal(value: Any) -> str | None:
+    if value in (False, None):
+        return None
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
 
 
 def _bank_statement_sequence_lock_digest(
@@ -588,8 +730,9 @@ def _decimal(value: Any, field: str) -> Decimal:
 
 
 def _canonical_decimal(value: Any, field: str) -> str:
-    normalized = _decimal(value, field).normalize()
-    result = format(normalized, "f")
+    result = format(_decimal(value, field), "f")
+    if "." in result:
+        result = result.rstrip("0").rstrip(".")
     return "0" if result in {"-0", ""} else result
 
 
@@ -916,6 +1059,620 @@ class OdooWriteHandlers:
                 f"{field} exceeds the approved currency precision"
             )
 
+    def validated_mail_thread_projection(
+        self,
+        raw: Any,
+        *,
+        move_id: int,
+        company_id: int,
+    ) -> dict[str, Any]:
+        expected_fields = {
+            "version",
+            "move_id",
+            "company_id",
+            "mail_count",
+            "mail_mails",
+            "message_count",
+            "messages",
+            "notification_count",
+            "notifications",
+            "projection_digest",
+        }
+        if type(raw) is not dict or set(raw) != expected_fields:
+            raise OdooWriteHandlerError(
+                "trusted MailThread projection schema is invalid"
+            )
+        mail_mails = raw["mail_mails"]
+        messages = raw["messages"]
+        notifications = raw["notifications"]
+        if (
+            raw["version"] != 1
+            or type(raw["move_id"]) is not int
+            or raw["move_id"] != move_id
+            or type(raw["company_id"]) is not int
+            or raw["company_id"] != company_id
+            or type(raw["mail_count"]) is not int
+            or type(raw["message_count"]) is not int
+            or type(raw["notification_count"]) is not int
+            or type(mail_mails) is not list
+            or type(messages) is not list
+            or type(notifications) is not list
+            or raw["mail_count"] != len(mail_mails)
+            or raw["message_count"] != len(messages)
+            or raw["notification_count"] != len(notifications)
+            or len(mail_mails) > _MAIL_THREAD_PROJECTION_LIMIT
+            or len(messages) > _MAIL_THREAD_PROJECTION_LIMIT
+            or len(notifications) > _MAIL_THREAD_PROJECTION_LIMIT
+        ):
+            raise OdooWriteHandlerError(
+                "trusted MailThread projection envelope is invalid"
+            )
+
+        normalized_messages: list[dict[str, Any]] = []
+        audit_shape_fields = {
+            "attachment_ids",
+            "author_guest_id",
+            "author_id",
+            "body_sha256",
+            "create_date",
+            "create_uid",
+            "date",
+            "email_add_signature",
+            "email_from_sha256",
+            "email_layout_xmlid_sha256",
+            "incoming_email_cc_sha256",
+            "incoming_email_to_sha256",
+            "is_internal",
+            "mail_activity_type_id",
+            "mail_server_id",
+            "message_id_sha256",
+            "message_link_preview_ids",
+            "message_type",
+            "model",
+            "outgoing_email_to_sha256",
+            "parent_id",
+            "partner_ids",
+            "pinned_at",
+            "reaction_ids",
+            "record_alias_domain_id",
+            "record_company_id",
+            "reply_to_force_new",
+            "reply_to_sha256",
+            "res_id",
+            "starred_partner_ids",
+            "subject_sha256",
+            "subtype_id",
+            "tracking_value_ids",
+            "write_date",
+            "write_uid",
+        }
+        audit_relation_fields = (
+            "attachment_ids",
+            "message_link_preview_ids",
+            "partner_ids",
+            "reaction_ids",
+            "starred_partner_ids",
+            "tracking_value_ids",
+        )
+        audit_relation_id_fields = (
+            "author_guest_id",
+            "author_id",
+            "mail_activity_type_id",
+            "mail_server_id",
+            "parent_id",
+            "record_alias_domain_id",
+            "record_company_id",
+            "subtype_id",
+        )
+        audit_hash_fields = (
+            "body_sha256",
+            "email_from_sha256",
+            "email_layout_xmlid_sha256",
+            "incoming_email_cc_sha256",
+            "incoming_email_to_sha256",
+            "message_id_sha256",
+            "outgoing_email_to_sha256",
+            "reply_to_sha256",
+            "subject_sha256",
+        )
+        audit_temporal_fields = ("create_date", "date", "write_date")
+        audit_required_id_fields = ("create_uid", "write_uid")
+        for item in messages:
+            shape = (
+                item.get("audit_shape")
+                if type(item) is dict
+                else None
+            )
+            if (
+                type(item) is not dict
+                or set(item)
+                != {
+                    "id",
+                    "audit_shape",
+                    "digest",
+                    "mail_ids",
+                    "notification_ids",
+                }
+                or type(item["id"]) is not int
+                or item["id"] <= 0
+                or not isinstance(item["digest"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["digest"]) is None
+                or type(item["mail_ids"]) is not list
+                or type(item["notification_ids"]) is not list
+                or len(item["mail_ids"]) > _MAIL_THREAD_PROJECTION_LIMIT
+                or len(item["notification_ids"])
+                > _MAIL_THREAD_PROJECTION_LIMIT
+                or any(
+                    type(identifier) is not int or identifier <= 0
+                    for identifier in [
+                        *item["mail_ids"],
+                        *item["notification_ids"],
+                    ]
+                )
+                or item["mail_ids"] != sorted(set(item["mail_ids"]))
+                or item["notification_ids"]
+                != sorted(set(item["notification_ids"]))
+                or type(shape) is not dict
+                or set(shape) != audit_shape_fields
+                or shape["model"] != "account.move"
+                or type(shape["res_id"]) is not int
+                or shape["res_id"] != move_id
+                or not isinstance(shape["message_type"], str)
+                or type(shape["is_internal"]) is not bool
+                or type(shape["email_add_signature"]) is not bool
+                or type(shape["reply_to_force_new"]) is not bool
+                or any(
+                    not isinstance(shape[field], str)
+                    or not shape[field]
+                    for field in audit_temporal_fields
+                )
+                or (
+                    shape["pinned_at"] is not None
+                    and not isinstance(shape["pinned_at"], str)
+                )
+                or any(
+                    type(shape[field]) is not list
+                    or len(shape[field]) > _MAIL_THREAD_PROJECTION_LIMIT
+                    or any(
+                        type(identifier) is not int or identifier <= 0
+                        for identifier in shape[field]
+                    )
+                    or shape[field] != sorted(set(shape[field]))
+                    for field in audit_relation_fields
+                )
+                or any(
+                    shape[field] is not None
+                    and (
+                        type(shape[field]) is not int
+                        or shape[field] <= 0
+                    )
+                    for field in audit_relation_id_fields
+                )
+                or any(
+                    type(shape[field]) is not int
+                    or shape[field] <= 0
+                    for field in audit_required_id_fields
+                )
+                or shape["record_company_id"]
+                not in {None, company_id}
+                or any(
+                    not isinstance(shape[field], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", shape[field])
+                    is None
+                    for field in audit_hash_fields
+                )
+            ):
+                raise OdooWriteHandlerError(
+                    "trusted MailThread message projection is invalid"
+                )
+            normalized_messages.append(
+                {
+                    **item,
+                    "audit_shape": dict(shape),
+                }
+            )
+        message_ids = [item["id"] for item in normalized_messages]
+        if (
+            message_ids != sorted(message_ids)
+            or len(message_ids) != len(set(message_ids))
+        ):
+            raise OdooWriteHandlerError(
+                "trusted MailThread message projection is not canonical"
+            )
+        message_id_set = set(message_ids)
+
+        normalized_notifications: list[dict[str, Any]] = []
+        for item in notifications:
+            if (
+                type(item) is not dict
+                or set(item)
+                != {"id", "mail_id", "message_id", "digest"}
+                or type(item["id"]) is not int
+                or item["id"] <= 0
+                or type(item["message_id"]) is not int
+                or item["message_id"] not in message_id_set
+                or (
+                    item["mail_id"] is not None
+                    and (
+                        type(item["mail_id"]) is not int
+                        or item["mail_id"] <= 0
+                    )
+                )
+                or not isinstance(item["digest"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["digest"]) is None
+            ):
+                raise OdooWriteHandlerError(
+                    "trusted MailThread notification projection is invalid"
+                )
+            normalized_notifications.append(dict(item))
+        notification_ids = [
+            item["id"] for item in normalized_notifications
+        ]
+        if (
+            notification_ids != sorted(notification_ids)
+            or len(notification_ids) != len(set(notification_ids))
+        ):
+            raise OdooWriteHandlerError(
+                "trusted MailThread notification projection is not canonical"
+            )
+
+        normalized_mail_mails: list[dict[str, Any]] = []
+        for item in mail_mails:
+            if (
+                type(item) is not dict
+                or set(item) != {"id", "message_id", "digest"}
+                or type(item["id"]) is not int
+                or item["id"] <= 0
+                or type(item["message_id"]) is not int
+                or item["message_id"] not in message_id_set
+                or not isinstance(item["digest"], str)
+                or re.fullmatch(r"[0-9a-f]{64}", item["digest"]) is None
+            ):
+                raise OdooWriteHandlerError(
+                    "trusted MailThread mail projection is invalid"
+                )
+            normalized_mail_mails.append(dict(item))
+        mail_ids = [item["id"] for item in normalized_mail_mails]
+        if (
+            mail_ids != sorted(mail_ids)
+            or len(mail_ids) != len(set(mail_ids))
+        ):
+            raise OdooWriteHandlerError(
+                "trusted MailThread mail projection is not canonical"
+            )
+
+        projected_notification_ids = sorted(
+            notification_id
+            for item in normalized_messages
+            for notification_id in item["notification_ids"]
+        )
+        if projected_notification_ids != notification_ids:
+            raise OdooWriteHandlerError(
+                "trusted MailThread notification graph is inconsistent"
+            )
+        projected_mail_ids = sorted(
+            mail_id
+            for item in normalized_messages
+            for mail_id in item["mail_ids"]
+        )
+        if projected_mail_ids != mail_ids:
+            raise OdooWriteHandlerError(
+                "trusted MailThread mail graph is inconsistent"
+            )
+        mail_parent_by_id = {
+            item["id"]: item["message_id"]
+            for item in normalized_mail_mails
+        }
+        if any(
+            item["mail_id"] is not None
+            and mail_parent_by_id.get(item["mail_id"])
+            != item["message_id"]
+            for item in normalized_notifications
+        ):
+            raise OdooWriteHandlerError(
+                "trusted MailThread notification mail graph is inconsistent"
+            )
+        relation_edge_count = sum(
+            len(item["mail_ids"])
+            + len(item["notification_ids"])
+            + sum(
+                len(item["audit_shape"][field])
+                for field in audit_relation_fields
+            )
+            for item in normalized_messages
+        )
+        if relation_edge_count > _MAIL_THREAD_PROJECTION_EDGE_LIMIT:
+            raise OdooWriteHandlerError(
+                "trusted MailThread projection edge limit exceeded"
+            )
+
+        envelope = {
+            "company_id": raw["company_id"],
+            "mail_count": raw["mail_count"],
+            "mail_mails": normalized_mail_mails,
+            "message_count": raw["message_count"],
+            "messages": normalized_messages,
+            "move_id": raw["move_id"],
+            "notification_count": raw["notification_count"],
+            "notifications": normalized_notifications,
+            "version": raw["version"],
+        }
+        if (
+            not isinstance(raw["projection_digest"], str)
+            or not hmac.compare_digest(
+                raw["projection_digest"],
+                _digest(envelope),
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "trusted MailThread projection digest is invalid"
+            )
+        return {
+            **envelope,
+            "projection_digest": raw["projection_digest"],
+        }
+
+    def validated_mail_thread_projection_summary(
+        self,
+        raw: Any,
+        *,
+        move_id: int,
+        company_id: int,
+    ) -> dict[str, Any]:
+        if (
+            type(raw) is not dict
+            or set(raw)
+            != {
+                "version",
+                "move_id",
+                "company_id",
+                "projection_digest",
+            }
+            or raw["version"] != 1
+            or type(raw["move_id"]) is not int
+            or raw["move_id"] != move_id
+            or type(raw["company_id"]) is not int
+            or raw["company_id"] != company_id
+            or not isinstance(raw["projection_digest"], str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                raw["projection_digest"],
+            )
+            is None
+        ):
+            raise OdooWriteHandlerError(
+                "trusted MailThread projection summary is invalid"
+            )
+        return dict(raw)
+
+    def mail_thread_projection_summary(
+        self,
+        raw: Any,
+        *,
+        move_id: int,
+        company_id: int,
+    ) -> dict[str, Any]:
+        projection = self.validated_mail_thread_projection(
+            raw,
+            move_id=move_id,
+            company_id=company_id,
+        )
+        return {
+            "version": projection["version"],
+            "move_id": projection["move_id"],
+            "company_id": projection["company_id"],
+            "projection_digest": projection["projection_digest"],
+        }
+
+    def mail_thread_projection(
+        self,
+        move: Any,
+        company: Any,
+    ) -> dict[str, Any]:
+        move_id = _record_id(move)
+        company_id = _record_id(company)
+        if (
+            move_id is None
+            or company_id is None
+            or _record_id(getattr(move, "company_id", None)) != company_id
+        ):
+            raise OdooWriteHandlerError(
+                "MailThread projection move is outside the bound company"
+            )
+        projector = getattr(
+            move,
+            "_odoo_cli_v3_mail_thread_projection",
+            None,
+        )
+        if not callable(projector):
+            raise OdooWriteHandlerError(
+                "trusted MailThread projection is unavailable"
+            )
+        try:
+            raw = projector()
+        except Exception as exc:
+            raise OdooWriteHandlerError(
+                "trusted MailThread projection failed"
+            ) from exc
+        return self.validated_mail_thread_projection(
+            raw,
+            move_id=move_id,
+            company_id=company_id,
+        )
+
+    def empty_mail_thread_projection(
+        self,
+        move: Any,
+        company: Any,
+    ) -> dict[str, Any]:
+        envelope = {
+            "company_id": _record_id(company),
+            "mail_count": 0,
+            "mail_mails": [],
+            "message_count": 0,
+            "messages": [],
+            "move_id": _record_id(move),
+            "notification_count": 0,
+            "notifications": [],
+            "version": 1,
+        }
+        return self.validated_mail_thread_projection(
+            {
+                **envelope,
+                "projection_digest": _digest(envelope),
+            },
+            move_id=_record_id(move),
+            company_id=_record_id(company),
+        )
+
+    def assert_mail_thread_projection_delta(
+        self,
+        before: Any,
+        current_summary: Any,
+        move: Any,
+        company: Any,
+        *,
+        expected_message_id: int,
+    ) -> None:
+        move_id = _record_id(move)
+        company_id = _record_id(company)
+        before_summary = self.validated_mail_thread_projection_summary(
+            before,
+            move_id=move_id,
+            company_id=company_id,
+        )
+        current_summary = self.validated_mail_thread_projection_summary(
+            current_summary,
+            move_id=move_id,
+            company_id=company_id,
+        )
+        current = self.mail_thread_projection(move, company)
+        if current_summary != self.mail_thread_projection_summary(
+            current,
+            move_id=move_id,
+            company_id=company_id,
+        ):
+            raise OdooWriteHandlerError(
+                "MailThread projection changed during exact read-back"
+            )
+        current_messages = {
+            item["id"]: item for item in current["messages"]
+        }
+        expected_message = self.record(
+            "mail.message",
+            expected_message_id,
+            company,
+            shared=True,
+        )
+        expected_shape = current_messages.get(
+            expected_message_id,
+            {},
+        ).get("audit_shape", {})
+        empty_text_digest = _text_digest("")
+        if (
+            type(expected_message_id) is not int
+            or expected_message_id <= 0
+            or expected_message_id not in current_messages
+            or current_messages[expected_message_id]["mail_ids"]
+            or current_messages[expected_message_id]["notification_ids"]
+            or expected_shape.get("model") != "account.move"
+            or expected_shape.get("res_id") != move_id
+            or expected_shape.get("message_type") != "notification"
+            or expected_shape.get("is_internal") is not True
+            or expected_shape.get("author_id")
+            != _record_id(getattr(expected_message, "author_id", None))
+            or expected_shape.get("subtype_id")
+            != _record_id(getattr(expected_message, "subtype_id", None))
+            or expected_shape.get("body_sha256")
+            != _text_digest(getattr(expected_message, "body", ""))
+            or expected_shape.get("create_uid")
+            != _record_id(getattr(expected_message, "create_uid", None))
+            or expected_shape.get("create_uid")
+            != self.context.user_id
+            or expected_shape.get("write_uid")
+            != _record_id(getattr(expected_message, "write_uid", None))
+            or expected_shape.get("write_uid")
+            != self.context.user_id
+            or expected_shape.get("create_date")
+            != _temporal(getattr(expected_message, "create_date", None))
+            or expected_shape.get("write_date")
+            != _temporal(getattr(expected_message, "write_date", None))
+            or expected_shape.get("create_date")
+            != expected_shape.get("write_date")
+            or expected_shape.get("date")
+            != _temporal(getattr(expected_message, "date", None))
+            or expected_shape.get("attachment_ids")
+            != _ids(getattr(expected_message, "attachment_ids", []))
+            or expected_shape.get("attachment_ids")
+            or expected_shape.get("author_guest_id") is not None
+            or expected_shape.get("mail_activity_type_id") is not None
+            or expected_shape.get("record_alias_domain_id") is not None
+            or expected_shape.get("message_link_preview_ids")
+            or expected_shape.get("reaction_ids")
+            or expected_shape.get("starred_partner_ids")
+            or expected_shape.get("pinned_at") is not None
+            or expected_shape.get("tracking_value_ids")
+            or expected_shape.get("partner_ids")
+            != _ids(getattr(expected_message, "partner_ids", []))
+            or expected_shape.get("partner_ids")
+            or expected_shape.get("parent_id")
+            != _record_id(getattr(expected_message, "parent_id", None))
+            or expected_shape.get("parent_id") is not None
+            or expected_shape.get("record_company_id") is not None
+            or expected_shape.get("mail_server_id") is not None
+            or expected_shape.get("email_add_signature") is not False
+            or expected_shape.get("reply_to_force_new") is not False
+            or expected_shape.get("email_from_sha256")
+            != _text_digest(getattr(expected_message, "email_from", ""))
+            or expected_shape.get("incoming_email_cc_sha256")
+            != empty_text_digest
+            or expected_shape.get("incoming_email_to_sha256")
+            != empty_text_digest
+            or expected_shape.get("email_layout_xmlid_sha256")
+            != empty_text_digest
+            or expected_shape.get("message_id_sha256")
+            != _text_digest(getattr(expected_message, "message_id", ""))
+            or expected_shape.get("outgoing_email_to_sha256")
+            != empty_text_digest
+            or expected_shape.get("reply_to_sha256")
+            != _text_digest(getattr(expected_message, "reply_to", ""))
+            or expected_shape.get("subject_sha256")
+            != empty_text_digest
+        ):
+            raise OdooWriteHandlerError(
+                "MailThread projection differs outside the exact reversal "
+                "audit-message delta"
+            )
+        remaining_messages = [
+            item
+            for item in current["messages"]
+            if item["id"] != expected_message_id
+        ]
+        remaining_envelope = {
+            "company_id": current["company_id"],
+            "mail_count": current["mail_count"],
+            "mail_mails": current["mail_mails"],
+            "message_count": len(remaining_messages),
+            "messages": remaining_messages,
+            "move_id": current["move_id"],
+            "notification_count": current["notification_count"],
+            "notifications": current["notifications"],
+            "version": current["version"],
+        }
+        remaining_summary = self.mail_thread_projection_summary(
+            {
+                **remaining_envelope,
+                "projection_digest": _digest(remaining_envelope),
+            },
+            move_id=move_id,
+            company_id=company_id,
+        )
+        if remaining_summary != before_summary:
+            raise OdooWriteHandlerError(
+                "MailThread projection differs outside the exact reversal "
+                "audit-message delta"
+            )
+
     def snapshot(
         self,
         model_name: str,
@@ -960,6 +1717,26 @@ class OdooWriteHandlers:
             for key in sorted(values)
             if key != "id"
         }
+        if model_name == "account.move":
+            raw_projection = self.mail_thread_projection(
+                visible, company
+            )
+            values[_MAIL_THREAD_PROJECTION_FIELD] = (
+                self.mail_thread_projection_summary(
+                    raw_projection,
+                    move_id=record_id,
+                    company_id=_record_id(company),
+                )
+            )
+        canonical_values = _canonical(values)
+        if (
+            len(canonical_values) > _SNAPSHOT_VALUES_SAFE_CHARS
+            or len(canonical_values.encode("utf-8"))
+            > _SNAPSHOT_VALUES_SAFE_BYTES
+        ):
+            raise OdooWriteHandlerError(
+                f"{model_name} snapshot exceeds the safe auditable size budget"
+            )
         return {
             "model": model_name,
             "record_id": record_id,
@@ -1033,7 +1810,7 @@ class OdooWriteHandlers:
             method
             in {
                 "cancel_and_unreconcile_payment_v1",
-                "undo_reconciliation_and_reverse_writeoff_v1",
+                "undo_reconciliation_without_writeoff_v1",
             }
             and model_name
             in {"account.partial.reconcile", "account.full.reconcile"}
@@ -1095,6 +1872,15 @@ class OdooWriteHandlers:
                 "write recovery outcome override is outside the guard graph"
             )
         manual_method = _MANUAL_RECOVERY_METHODS[method]
+        if method in FAIL_CLOSED_RECOVERY_METHODS:
+            return _recovery(
+                "manual_escalation",
+                manual_method,
+                [
+                    {"model": model_name, "record_id": record_id}
+                    for model_name, record_id in sorted(action_keys)
+                ],
+            )
         if (
             self.context.environment not in contract.allowed_environments
             or not guard_keys
@@ -1567,7 +2353,12 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError("affected record graph differs")
 
     @staticmethod
-    def journal_line_signature(line: Any, *, reversed_amounts: bool = False) -> tuple[Any, ...]:
+    def journal_line_signature(
+        line: Any,
+        *,
+        reversed_amounts: bool = False,
+        include_plain_business_fields: bool = False,
+    ) -> tuple[Any, ...]:
         debit = _decimal(getattr(line, "debit", 0), "journal line debit")
         credit = _decimal(getattr(line, "credit", 0), "journal line credit")
         balance = _decimal(getattr(line, "balance", debit - credit), "journal line balance")
@@ -1578,8 +2369,16 @@ class OdooWriteHandlers:
             debit, credit = credit, debit
             balance = -balance
             amount_currency = -amount_currency
-        return (
-            str(getattr(line, "name", "") or ""),
+        display_type = str(
+            getattr(line, "display_type", "") or ""
+        )
+        line_name = (
+            ""
+            if display_type == "payment_term"
+            else str(getattr(line, "name", "") or "")
+        )
+        signature = (
+            line_name,
             _record_id(getattr(line, "account_id", None)),
             _record_id(getattr(line, "partner_id", None)),
             _record_id(getattr(line, "currency_id", None)),
@@ -1589,20 +2388,312 @@ class OdooWriteHandlers:
             amount_currency,
             tuple(_ids(getattr(line, "tax_ids", []))),
             _record_id(getattr(line, "tax_line_id", None)),
-            str(getattr(line, "display_type", "") or ""),
+            display_type,
+        )
+        if not include_plain_business_fields:
+            return signature
+        return (
+            *signature,
+            _decimal(getattr(line, "quantity", 0), "journal line quantity"),
+            _decimal(getattr(line, "price_unit", 0), "journal line price_unit"),
+            _decimal(
+                getattr(line, "price_subtotal", 0),
+                "journal line price_subtotal",
+            ),
+            _decimal(
+                getattr(line, "price_total", 0),
+                "journal line price_total",
+            ),
+            int(getattr(line, "sequence", 0) or 0),
         )
 
+    @staticmethod
+    def refund_line_has_tax_lineage(line: Any) -> bool:
+        tax_base_amount = getattr(line, "tax_base_amount", 0)
+        if tax_base_amount in {False, None, ""}:
+            tax_base_amount = 0
+        deductible_amount = getattr(line, "deductible_amount", 100)
+        if deductible_amount in {False, None, ""}:
+            deductible_amount = 0
+        return bool(
+            _ids(getattr(line, "tax_ids", []))
+            or _record_id(getattr(line, "tax_line_id", None))
+            is not None
+            or _ids(getattr(line, "tax_tag_ids", []))
+            or _record_id(
+                getattr(line, "tax_repartition_line_id", None)
+            )
+            is not None
+            or _record_id(getattr(line, "group_tax_id", None))
+            is not None
+            or _decimal(
+                tax_base_amount,
+                "refund line tax_base_amount",
+            )
+            != 0
+            or getattr(line, "extra_tax_data", False)
+            not in (False, None, {})
+            or _decimal(
+                deductible_amount,
+                "refund line deductible_amount",
+            )
+            != Decimal("100")
+        )
+
+    @staticmethod
+    def refund_line_has_external_effects(line: Any) -> bool:
+        return bool(
+            bool(getattr(line, "reconciled", False))
+            or _record_id(getattr(line, "full_reconcile_id", None))
+            is not None
+            or getattr(line, "matching_number", False)
+            not in (False, None, "")
+            or _ids(getattr(line, "matched_debit_ids", []))
+            or _ids(getattr(line, "matched_credit_ids", []))
+            or _ids(getattr(line, "reconciled_lines_ids", []))
+            or _ids(
+                getattr(
+                    line,
+                    "reconciled_lines_excluding_exchange_diff_ids",
+                    [],
+                )
+            )
+            or _record_id(getattr(line, "payment_id", None)) is not None
+            or _record_id(getattr(line, "statement_line_id", None))
+            is not None
+            or _record_id(getattr(line, "statement_id", None)) is not None
+            or _record_id(getattr(line, "reconcile_model_id", None))
+            is not None
+            or _ids(getattr(line, "asset_ids", []))
+            or _ids(getattr(line, "sale_line_ids", []))
+            or _ids(
+                getattr(
+                    line,
+                    "distribution_analytic_account_ids",
+                    [],
+                )
+            )
+            or _ids(getattr(line, "analytic_line_ids", []))
+            or _ids(getattr(line, "move_attachment_ids", []))
+            or _record_id(getattr(line, "purchase_line_id", None))
+            is not None
+            or _record_id(getattr(line, "purchase_order_id", None))
+            is not None
+            or _record_id(getattr(line, "expense_id", None)) is not None
+            or _record_id(getattr(line, "cogs_origin_id", None)) is not None
+            or bool(getattr(line, "is_landed_costs_line", False))
+            or bool(getattr(line, "is_imported", False))
+            or bool(getattr(line, "is_downpayment", False))
+            or getattr(line, "analytic_distribution", False)
+            not in (False, None, {})
+            or getattr(line, "deferred_start_date", None)
+            or getattr(line, "deferred_end_date", None)
+        )
+
+    def assert_company_currency_taxless_document_amount_graph(
+        self,
+        move: Any,
+        lines: list[Any],
+        invoice_line_ids: list[int],
+        currency: Any,
+        company: Any,
+        *,
+        expected_move_type: str,
+    ) -> None:
+        keyed = {line.id: line for line in lines}
+        if (
+            len(keyed) != len(lines)
+            or not invoice_line_ids
+            or any(line_id not in keyed for line_id in invoice_line_ids)
+        ):
+            raise OdooWriteHandlerError(
+                "taxless company-currency document line graph is incomplete"
+            )
+        balance_direction = {
+            "out_invoice": Decimal("-1"),
+            "in_invoice": Decimal("1"),
+            "out_refund": Decimal("1"),
+            "in_refund": Decimal("-1"),
+        }.get(expected_move_type)
+        if (
+            balance_direction is None
+            or str(getattr(move, "move_type", "") or "")
+            != expected_move_type
+        ):
+            raise OdooWriteHandlerError(
+                "taxless company-currency document type differs"
+            )
+        total = Decimal("0")
+        for line_id in invoice_line_ids:
+            line = keyed[line_id]
+            quantity = _decimal(
+                getattr(line, "quantity", None),
+                "taxless document line quantity",
+            )
+            price_unit = _decimal(
+                getattr(line, "price_unit", None),
+                "taxless document line price_unit",
+            )
+            discount = _decimal(
+                getattr(line, "discount", 0),
+                "taxless document line discount",
+            )
+            if (
+                str(getattr(line, "display_type", "") or "")
+                != "product"
+                or quantity <= 0
+                or price_unit < 0
+                or discount != 0
+            ):
+                raise OdooWriteHandlerError(
+                    "taxless document line shape or discount is unsupported"
+                )
+            expected_amount = quantity * price_unit
+            self.assert_amount(
+                getattr(line, "price_subtotal", None),
+                expected_amount,
+                currency,
+                "taxless document line subtotal",
+            )
+            self.assert_amount(
+                getattr(line, "price_total", None),
+                expected_amount,
+                currency,
+                "taxless document line total",
+            )
+            expected_balance = balance_direction * expected_amount
+            expected_debit = max(expected_balance, Decimal("0"))
+            expected_credit = max(-expected_balance, Decimal("0"))
+            for actual, expected, label in (
+                (
+                    getattr(line, "debit", None),
+                    expected_debit,
+                    "taxless document line debit",
+                ),
+                (
+                    getattr(line, "credit", None),
+                    expected_credit,
+                    "taxless document line credit",
+                ),
+                (
+                    getattr(line, "balance", None),
+                    expected_balance,
+                    "taxless document line balance",
+                ),
+                (
+                    getattr(line, "amount_currency", None),
+                    expected_balance,
+                    "taxless document line amount_currency",
+                ),
+            ):
+                self.assert_amount(actual, expected, currency, label)
+            total += expected_amount
+
+        term_lines = [
+            line for line in lines if line.id not in set(invoice_line_ids)
+        ]
+        if (
+            len(term_lines) != 1
+            or str(getattr(term_lines[0], "display_type", "") or "")
+            != "payment_term"
+        ):
+            raise OdooWriteHandlerError(
+                "taxless document requires one exact payment term line"
+            )
+        term = term_lines[0]
+        expected_term_balance = -balance_direction * total
+        expected_term_debit = max(
+            expected_term_balance, Decimal("0")
+        )
+        expected_term_credit = max(
+            -expected_term_balance, Decimal("0")
+        )
+        for actual, expected, label in (
+            (
+                getattr(term, "debit", None),
+                expected_term_debit,
+                "taxless document payment term debit",
+            ),
+            (
+                getattr(term, "credit", None),
+                expected_term_credit,
+                "taxless document payment term credit",
+            ),
+            (
+                getattr(term, "balance", None),
+                expected_term_balance,
+                "taxless document payment term balance",
+            ),
+            (
+                getattr(term, "amount_currency", None),
+                expected_term_balance,
+                "taxless document payment term amount_currency",
+            ),
+            (
+                getattr(term, "amount_residual", None),
+                expected_term_balance,
+                "taxless document payment term residual",
+            ),
+            (
+                getattr(term, "amount_residual_currency", None),
+                expected_term_balance,
+                "taxless document payment term residual currency",
+            ),
+        ):
+            self.assert_amount(actual, expected, currency, label)
+        for actual, expected, label in (
+            (
+                getattr(move, "amount_untaxed", None),
+                total,
+                "taxless document untaxed total",
+            ),
+            (
+                getattr(move, "amount_tax", None),
+                Decimal("0"),
+                "taxless document tax total",
+            ),
+            (
+                getattr(move, "amount_total", None),
+                total,
+                "taxless document total",
+            ),
+            (
+                getattr(move, "amount_residual", None),
+                total,
+                "taxless document residual",
+            ),
+        ):
+            self.assert_amount(actual, expected, currency, label)
+        self.assert_move_balanced(move, company)
+
     def assert_linewise_reversal(
-        self, origin: Any, reversal: Any, company: Any
+        self,
+        origin: Any,
+        reversal: Any,
+        company: Any,
+        *,
+        include_plain_business_fields: bool = False,
     ) -> None:
         origin_lines = self.checked_move_lines(origin, company)
         reversal_lines = self.checked_move_lines(reversal, company)
         expected = sorted(
-            repr(self.journal_line_signature(line, reversed_amounts=True))
+            repr(
+                self.journal_line_signature(
+                    line,
+                    reversed_amounts=True,
+                    include_plain_business_fields=include_plain_business_fields,
+                )
+            )
             for line in origin_lines
         )
         actual = sorted(
-            repr(self.journal_line_signature(line)) for line in reversal_lines
+            repr(
+                self.journal_line_signature(
+                    line,
+                    include_plain_business_fields=include_plain_business_fields,
+                )
+            )
+            for line in reversal_lines
         )
         if expected != actual:
             raise OdooWriteHandlerError("journal items are not an exact linewise reversal")
@@ -1614,6 +2705,227 @@ class OdooWriteHandlers:
         ):
             raise OdooWriteHandlerError("reversal journal item graph differs")
 
+    def full_refund_invoice_line_signature(
+        self,
+        line: Any,
+        *,
+        reversed_amounts: bool,
+    ) -> tuple[Any, ...]:
+        quantity = _decimal(
+            getattr(line, "quantity", None),
+            "full refund line quantity",
+        )
+        price_unit = _decimal(
+            getattr(line, "price_unit", None),
+            "full refund line price_unit",
+        )
+        discount = _decimal(
+            getattr(line, "discount", 0),
+            "full refund line discount",
+        )
+        price_subtotal = _decimal(
+            getattr(line, "price_subtotal", None),
+            "full refund line price_subtotal",
+        )
+        price_total = _decimal(
+            getattr(line, "price_total", None),
+            "full refund line price_total",
+        )
+        if (
+            quantity <= 0
+            or price_unit < 0
+            or price_subtotal < 0
+            or price_total < 0
+        ):
+            raise OdooWriteHandlerError(
+                "full refund invoice line business values are invalid"
+            )
+        return (
+            *self.journal_line_signature(
+                line,
+                reversed_amounts=reversed_amounts,
+            ),
+            _record_id(getattr(line, "product_id", None)),
+            _record_id(getattr(line, "product_uom_id", None)),
+            quantity,
+            price_unit,
+            discount,
+            price_subtotal,
+            price_total,
+            _record_id(
+                getattr(line, "tax_repartition_line_id", None)
+            ),
+            tuple(_ids(getattr(line, "tax_tag_ids", []))),
+            _record_id(getattr(line, "group_tax_id", None)),
+        )
+
+    def full_refund_invoice_line_mapping(
+        self,
+        origin: Any,
+        refund: Any,
+        company: Any,
+    ) -> list[tuple[Any, Any, str]]:
+        origin_line_ids = _ids(getattr(origin, "invoice_line_ids", []))
+        refund_line_ids = _ids(getattr(refund, "invoice_line_ids", []))
+        if (
+            not origin_line_ids
+            or len(origin_line_ids) != len(refund_line_ids)
+        ):
+            raise OdooWriteHandlerError(
+                "full refund invoice line graph differs from origin"
+            )
+        origin_lines = [
+            self.record("account.move.line", line_id, company)
+            for line_id in origin_line_ids
+        ]
+        refund_lines = [
+            self.record(
+                "account.move.line",
+                line_id,
+                company,
+                write=True,
+            )
+            for line_id in refund_line_ids
+        ]
+        if any(
+            _record_id(getattr(line, "move_id", None)) != origin.id
+            for line in origin_lines
+        ) or any(
+            _record_id(getattr(line, "move_id", None)) != refund.id
+            for line in refund_lines
+        ):
+            raise OdooWriteHandlerError(
+                "full refund invoice line ownership differs"
+            )
+
+        origin_groups: dict[tuple[Any, ...], list[Any]] = {}
+        refund_groups: dict[tuple[Any, ...], list[Any]] = {}
+        for line in origin_lines:
+            signature = self.full_refund_invoice_line_signature(
+                line,
+                reversed_amounts=True,
+            )
+            origin_groups.setdefault(signature, []).append(line)
+        for line in refund_lines:
+            signature = self.full_refund_invoice_line_signature(
+                line,
+                reversed_amounts=False,
+            )
+            refund_groups.setdefault(signature, []).append(line)
+        if set(origin_groups) != set(refund_groups):
+            raise OdooWriteHandlerError(
+                "full refund invoice line business graph differs"
+            )
+
+        mapping: list[tuple[Any, Any, str]] = []
+        for signature in origin_groups:
+            origins = sorted(
+                origin_groups[signature],
+                key=lambda line: line.id,
+            )
+            refunds = sorted(
+                refund_groups[signature],
+                key=lambda line: line.id,
+            )
+            if len(origins) != len(refunds):
+                raise OdooWriteHandlerError(
+                    "full refund invoice line graph is ambiguous"
+                )
+            for origin_line, refund_line in zip(
+                origins,
+                refunds,
+                strict=True,
+            ):
+                mapping.append(
+                    (
+                        origin_line,
+                        refund_line,
+                        full_refund_line_reference(
+                            origin.id,
+                            origin_line.id,
+                        ),
+                    )
+                )
+        mapping.sort(key=lambda item: item[0].id)
+        return mapping
+
+    def assert_full_refund_invoice_lineage(
+        self,
+        origin: Any,
+        refund: Any,
+        company: Any,
+    ) -> None:
+        mapping = self.full_refund_invoice_line_mapping(
+            origin,
+            refund,
+            company,
+        )
+        observed: set[str] = set()
+        for _origin_line, refund_line, expected_reference in mapping:
+            actual_reference = str(
+                getattr(
+                    refund_line,
+                    "odoo_cli_v3_line_reference",
+                    "",
+                )
+                or ""
+            )
+            if (
+                actual_reference != expected_reference
+                or actual_reference in observed
+            ):
+                raise OdooWriteHandlerError(
+                    "full refund invoice line lineage reference differs"
+                )
+            observed.add(actual_reference)
+        if len(observed) != len(mapping):
+            raise OdooWriteHandlerError(
+                "full refund invoice line lineage is incomplete"
+            )
+
+    def assign_full_refund_invoice_lineage(
+        self,
+        origin: Any,
+        refund: Any,
+        company: Any,
+    ) -> None:
+        mapping = self.full_refund_invoice_line_mapping(
+            origin,
+            refund,
+            company,
+        )
+        if any(
+            _is_present(
+                getattr(
+                    refund_line,
+                    "odoo_cli_v3_line_reference",
+                    False,
+                )
+            )
+            for _origin_line, refund_line, _reference in mapping
+        ):
+            raise OdooWriteHandlerError(
+                "full refund invoice line reference is already populated"
+            )
+        for _origin_line, refund_line, reference in mapping:
+            if refund_line.with_context(
+                tracking_disable=True,
+                mail_notrack=True,
+                mail_create_nolog=True,
+                skip_is_manually_modified=True,
+            ).write(
+                {"odoo_cli_v3_line_reference": reference}
+            ) is not True:
+                raise OdooWriteHandlerError(
+                    "full refund invoice line reference write failed"
+                )
+        self.assert_full_refund_invoice_lineage(
+            origin,
+            refund,
+            company,
+        )
+        self.assert_linewise_reversal(origin, refund, company)
+
     @staticmethod
     def snapshot_relation_id(value: Any) -> int | None:
         identifiers = _ids(value)
@@ -1624,9 +2936,10 @@ class OdooWriteHandlers:
     def assert_approved_reversal_origin(
         self,
         origin: Any,
+        reversal: Any,
         company: Any,
         trusted_before: Mapping[tuple[str, int], dict[str, Any]] | None,
-    ) -> None:
+    ) -> Any:
         if not isinstance(trusted_before, Mapping):
             raise OdooWriteHandlerError("approved reversal snapshots are missing")
         origin_lines = self.checked_move_lines(origin, company)
@@ -1636,65 +2949,290 @@ class OdooWriteHandlers:
         }
         if set(trusted_before) != expected_keys:
             raise OdooWriteHandlerError("approved reversal origin graph differs")
-        move_before = trusted_before[("account.move", origin.id)]
-        if (
-            str(move_before.get("state")) != str(origin.state)
-            or str(move_before.get("move_type")) != str(origin.move_type)
-            or self.snapshot_relation_id(move_before.get("journal_id"))
-            != _record_id(origin.journal_id)
-            or self.snapshot_relation_id(move_before.get("currency_id"))
-            != _record_id(origin.currency_id)
-            or set(_ids(move_before.get("line_ids"))) != {line.id for line in origin_lines}
-            or _decimal(move_before.get("amount_total"), "approved reversal total")
-            != _decimal(origin.amount_total, "reversal origin total")
-            or str(move_before.get("date") or "") != str(origin.date or "")
-            or str(move_before.get("ref") or "")
-            != str(getattr(origin, "ref", "") or "")
-            or self.snapshot_relation_id(move_before.get("partner_id"))
-            != _record_id(getattr(origin, "partner_id", None))
-            or str(move_before.get("odoo_cli_v3_document_binding") or "")
-            != str(
-                getattr(origin, "odoo_cli_v3_document_binding", "") or ""
+        self.assert_reversal_safe_move(
+            origin,
+            company,
+            label="reversal origin",
+            expected_reversed_entry_id=None,
+            expected_reversal_move_ids={reversal.id},
+        )
+        approved_move = trusted_before[("account.move", origin.id)]
+        current_move = self.snapshot(
+            "account.move", origin, company
+        )["values"]
+        if not isinstance(approved_move, Mapping):
+            raise OdooWriteHandlerError(
+                "approved reversal origin snapshot is invalid"
             )
+        approved_move = dict(approved_move)
+        current_move = dict(current_move)
+        audit_message = self.assert_move_reversal_origin_audit_message_delta(
+            origin,
+            reversal,
+            company,
+            approved_move,
+            current_move,
+        )
+        projection_in_approved = (
+            _MAIL_THREAD_PROJECTION_FIELD in approved_move
+        )
+        projection_in_current = (
+            _MAIL_THREAD_PROJECTION_FIELD in current_move
+        )
+        if projection_in_approved != projection_in_current:
+            raise OdooWriteHandlerError(
+                "reversal origin MailThread projection differs from approval"
+            )
+        if projection_in_approved:
+            self.assert_mail_thread_projection_delta(
+                approved_move.pop(_MAIL_THREAD_PROJECTION_FIELD),
+                current_move.pop(_MAIL_THREAD_PROJECTION_FIELD),
+                origin,
+                company,
+                expected_message_id=audit_message.id,
+            )
+        has_message_in_approved = "has_message" in approved_move
+        has_message_in_current = "has_message" in current_move
+        if has_message_in_approved != has_message_in_current:
+            raise OdooWriteHandlerError(
+                "reversal origin message presence differs from approval"
+            )
+        if has_message_in_approved:
+            before_has_message = approved_move.pop("has_message")
+            current_has_message = current_move.pop("has_message")
+            if (
+                type(before_has_message) is not bool
+                or type(current_has_message) is not bool
+                or before_has_message
+                != bool(
+                    self.refund_audit_snapshot_ids(
+                        approved_move,
+                        "message_ids",
+                    )
+                )
+                or current_has_message is not True
+            ):
+                raise OdooWriteHandlerError(
+                    "reversal origin message presence delta is invalid"
+                )
+        approved_move.pop("message_ids")
+        current_move.pop("message_ids")
+        approved_move.pop("audit_trail_message_ids")
+        current_move.pop("audit_trail_message_ids")
+        approved_reversals = set(
+            _ids(approved_move.pop("reversal_move_ids", []))
+        )
+        current_reversals = set(
+            _ids(current_move.pop("reversal_move_ids", []))
+        )
+        if (
+            approved_reversals
+            or current_reversals != {reversal.id}
+            or current_move != approved_move
         ):
-            raise OdooWriteHandlerError("reversal origin changed after approval")
+            raise OdooWriteHandlerError(
+                "reversal origin changed outside the exact Odoo reversal delta"
+            )
+        line_references: list[str] = []
         for line in origin_lines:
-            values = trusted_before[("account.move.line", line.id)]
-            approved = (
-                str(values.get("name") or ""),
-                self.snapshot_relation_id(values.get("account_id")),
-                self.snapshot_relation_id(values.get("partner_id")),
-                self.snapshot_relation_id(values.get("currency_id")),
-                _decimal(values.get("debit"), "approved line debit"),
-                _decimal(values.get("credit"), "approved line credit"),
-                _decimal(values.get("balance"), "approved line balance"),
-                _decimal(values.get("amount_currency"), "approved amount_currency"),
-                tuple(_ids(values.get("tax_ids"))),
-                self.snapshot_relation_id(values.get("tax_line_id")),
-                str(values.get("display_type") or ""),
+            approved_line = trusted_before[
+                ("account.move.line", line.id)
+            ]
+            current_line = self.snapshot(
+                "account.move.line", line, company
+            )["values"]
+            self.assert_reversal_safe_line(
+                line,
+                origin,
+                company,
+                label="reversal origin line",
+                allow_line_reference=True,
             )
             if (
-                approved != self.journal_line_signature(line)
-                or str(values.get("odoo_cli_v3_line_reference") or "")
-                != str(
-                    getattr(line, "odoo_cli_v3_line_reference", "") or ""
-                )
-                or bool(values.get("reconciled"))
-                != bool(getattr(line, "reconciled", False))
-                or self.snapshot_relation_id(values.get("full_reconcile_id"))
-                != _record_id(getattr(line, "full_reconcile_id", None))
-                or set(_ids(values.get("matched_debit_ids")))
-                != set(_ids(getattr(line, "matched_debit_ids", [])))
-                or set(_ids(values.get("matched_credit_ids")))
-                != set(_ids(getattr(line, "matched_credit_ids", [])))
-                or set(_ids(values.get("asset_ids")))
-                != set(_ids(getattr(line, "asset_ids", [])))
-                or str(values.get("deferred_start_date") or "")
-                != str(getattr(line, "deferred_start_date", "") or "")
-                or str(values.get("deferred_end_date") or "")
-                != str(getattr(line, "deferred_end_date", "") or "")
+                not isinstance(approved_line, Mapping)
+                or current_line != dict(approved_line)
             ):
                 raise OdooWriteHandlerError("reversal origin line changed after approval")
+            line_reference = str(
+                getattr(line, "odoo_cli_v3_line_reference", "") or ""
+            )
+            if line_reference:
+                line_references.append(line_reference)
+        if len(line_references) != len(set(line_references)):
+            raise OdooWriteHandlerError(
+                "reversal origin line references are not unique"
+            )
+        return audit_message
+
+    def assert_move_reversal_origin_audit_message_delta(
+        self,
+        origin: Any,
+        reversal: Any,
+        company: Any,
+        approved: Mapping[str, Any],
+        current: Mapping[str, Any],
+    ) -> Any:
+        before_messages = self.refund_audit_snapshot_ids(
+            approved, "message_ids"
+        )
+        current_messages = self.refund_audit_snapshot_ids(
+            current, "message_ids"
+        )
+        before_audit = self.refund_audit_snapshot_ids(
+            approved, "audit_trail_message_ids"
+        )
+        current_audit = self.refund_audit_snapshot_ids(
+            current, "audit_trail_message_ids"
+        )
+        new_messages = current_messages - before_messages
+        if (
+            not before_audit.issubset(before_messages)
+            or not current_audit.issubset(current_messages)
+            or len(new_messages) != 1
+            or current_messages != before_messages | new_messages
+            or current_audit != before_audit | new_messages
+        ):
+            raise OdooWriteHandlerError(
+                "move reversal audit-message delta differs from Odoo"
+            )
+        message = self.record(
+            "mail.message",
+            next(iter(new_messages)),
+            company,
+            shared=True,
+        )
+        env_ref = getattr(self.context.env, "ref", None)
+        user = getattr(self.context.env, "user", None)
+        if not callable(env_ref) or user is None:
+            raise OdooWriteHandlerError(
+                "move reversal audit-message oracle is unavailable"
+            )
+        try:
+            note_subtype = env_ref("mail.mt_note")
+        except Exception as exc:
+            raise OdooWriteHandlerError(
+                "move reversal audit-message oracle is unavailable"
+            ) from exc
+        body = str(getattr(message, "body", "") or "")
+        reversal_link = re.compile(
+            r"data-oe-model=['\"]account\.move['\"]\s+"
+            rf"data-oe-id=['\"]{reversal.id}['\"]"
+        )
+        if (
+            str(getattr(message, "model", "") or "") != "account.move"
+            or getattr(message, "res_id", None) != origin.id
+            or str(getattr(message, "message_type", "") or "")
+            != "notification"
+            or getattr(message, "is_internal", None) is not True
+            or _record_id(getattr(message, "subtype_id", None))
+            != _record_id(note_subtype)
+            or _record_id(getattr(message, "author_id", None))
+            != _record_id(getattr(user, "partner_id", None))
+            or _record_id(getattr(message, "create_uid", None))
+            != self.context.user_id
+            or _record_id(getattr(message, "write_uid", None))
+            != self.context.user_id
+            or _temporal(getattr(message, "create_date", None)) is None
+            or _temporal(getattr(message, "create_date", None))
+            != _temporal(getattr(message, "write_date", None))
+            or _record_id(
+                getattr(message, "author_guest_id", None)
+            )
+            is not None
+            or _record_id(
+                getattr(message, "mail_activity_type_id", None)
+            )
+            is not None
+            or _ids(getattr(message, "attachment_ids", []))
+            or _ids(getattr(message, "partner_ids", []))
+            or _record_id(getattr(message, "parent_id", None)) is not None
+            or _record_id(
+                getattr(message, "record_alias_domain_id", None)
+            )
+            is not None
+            or _record_id(
+                getattr(message, "record_company_id", None)
+            )
+            is not None
+            or bool(getattr(message, "email_add_signature", False))
+            or _is_present(
+                getattr(message, "email_layout_xmlid", False)
+            )
+            or _is_present(
+                getattr(message, "incoming_email_to", False)
+            )
+            or _is_present(
+                getattr(message, "incoming_email_cc", False)
+            )
+            or _is_present(
+                getattr(message, "outgoing_email_to", False)
+            )
+            or _record_id(
+                getattr(message, "mail_server_id", None)
+            )
+            is not None
+            or bool(getattr(message, "reply_to_force_new", False))
+            or _is_present(getattr(message, "subject", False))
+            or reversal_link.search(body) is None
+        ):
+            raise OdooWriteHandlerError(
+                "move reversal audit message is not the exact Odoo reversal log"
+            )
+        return message
+
+    def assert_fresh_reversal_audit_message(
+        self,
+        origin: Any,
+        reversal: Any,
+        company: Any,
+    ) -> Any:
+        audit_message = (
+            self.assert_move_reversal_origin_audit_message_delta(
+                origin,
+                reversal,
+                company,
+                {
+                    "audit_trail_message_ids": [],
+                    "message_ids": [],
+                },
+                {
+                    "audit_trail_message_ids": _ids(
+                        getattr(
+                            origin,
+                            "audit_trail_message_ids",
+                            [],
+                        )
+                    ),
+                    "message_ids": _ids(
+                        getattr(origin, "message_ids", [])
+                    ),
+                },
+            )
+        )
+        if getattr(origin, "has_message", None) is not True:
+            raise OdooWriteHandlerError(
+                "fresh reversal origin has no exact message-presence receipt"
+            )
+        empty_projection = self.empty_mail_thread_projection(
+            origin, company
+        )
+        current_projection = self.mail_thread_projection(origin, company)
+        self.assert_mail_thread_projection_delta(
+            self.mail_thread_projection_summary(
+                empty_projection,
+                move_id=origin.id,
+                company_id=_record_id(company),
+            ),
+            self.mail_thread_projection_summary(
+                current_projection,
+                move_id=origin.id,
+                company_id=_record_id(company),
+            ),
+            origin,
+            company,
+            expected_message_id=audit_message.id,
+        )
+        return audit_message
 
     @staticmethod
     def unique_records(
@@ -1831,6 +3369,135 @@ class OdooWriteHandlers:
         if getattr(account, "deprecated", False):
             raise OdooWriteHandlerError("account is deprecated")
         return account
+
+    @staticmethod
+    def assert_reversal_safe_account(account: Any, *, label: str) -> None:
+        account_type = getattr(account, "account_type", None)
+        if (
+            not isinstance(account_type, str)
+            or not account_type
+            or getattr(account, "reconcile", None) is not False
+            or account_type in _REVERSAL_UNSAFE_ACCOUNT_TYPES
+        ):
+            raise OdooWriteHandlerError(
+                f"{label} uses an account that can trigger an unapproved "
+                "reconciliation, partner-rank, liquidity, or off-balance effect"
+            )
+
+    def assert_mail_thread_effects_absent(
+        self,
+        record: Any,
+        company: Any,
+        *,
+        label: str,
+    ) -> None:
+        projection = self.mail_thread_projection(record, company)
+        if (
+            projection["message_count"]
+            or projection["notification_count"]
+            or projection["mail_count"]
+            or bool(getattr(record, "has_message", False))
+            or any(
+                _ids(getattr(record, field, []))
+                for field in (
+                    "message_ids",
+                    "audit_trail_message_ids",
+                    "message_follower_ids",
+                    "activity_ids",
+                    "website_message_ids",
+                    "rating_ids",
+                )
+            )
+        ):
+            raise OdooWriteHandlerError(
+                f"{label} has an unapproved MailThread side effect"
+            )
+
+    @staticmethod
+    def assert_reversal_safe_move(
+        move: Any,
+        company: Any,
+        *,
+        label: str,
+        expected_reversed_entry_id: int | None,
+        expected_reversal_move_ids: set[int],
+    ) -> None:
+        if (
+            _record_id(getattr(move, "company_id", None)) != _record_id(company)
+            or str(getattr(move, "state", "") or "") != "posted"
+            or str(getattr(move, "move_type", "") or "") != "entry"
+            or bool(getattr(company, "account_storno", False))
+            or bool(getattr(move, "is_storno", False))
+            or str(getattr(move, "auto_post", "no") or "no") != "no"
+            or bool(getattr(move, "auto_post_until", False))
+            or _record_id(getattr(move, "reversed_entry_id", None))
+            != expected_reversed_entry_id
+            or set(_ids(getattr(move, "reversal_move_ids", [])))
+            != expected_reversal_move_ids
+            or any(
+                bool(getattr(move, field, False))
+                for field in _REVERSAL_UNSAFE_MOVE_FIELDS
+            )
+        ):
+            raise OdooWriteHandlerError(
+                f"{label} is outside the plain non-storno general-entry "
+                "graph or has external accounting dependencies"
+            )
+
+    def assert_reversal_safe_line(
+        self,
+        line: Any,
+        move: Any,
+        company: Any,
+        *,
+        label: str,
+        allow_line_reference: bool,
+    ) -> None:
+        line_reference = str(
+            getattr(line, "odoo_cli_v3_line_reference", "") or ""
+        )
+        display_type = str(getattr(line, "display_type", "") or "")
+        if (
+            _record_id(getattr(line, "move_id", None)) != _record_id(move)
+            or _record_id(getattr(line, "company_id", None))
+            != _record_id(company)
+            or str(getattr(line, "parent_state", "") or "") != "posted"
+            or display_type not in {"", "product"}
+            or self.refund_line_has_tax_lineage(line)
+            or self.refund_line_has_external_effects(line)
+            or _record_id(getattr(line, "product_id", None)) is not None
+            or _record_id(getattr(line, "product_uom_id", None)) is not None
+            or _record_id(getattr(line, "parent_id", None)) is not None
+            or _record_id(
+                getattr(line, "l10n_latam_document_type_id", None)
+            )
+            is not None
+            or bool(getattr(line, "date_maturity", False))
+            or bool(getattr(line, "discount_date", False))
+            or _decimal(
+                getattr(line, "discount", 0), f"{label} discount"
+            )
+            != 0
+            or _decimal(
+                getattr(line, "discount_amount_currency", 0),
+                f"{label} discount_amount_currency",
+            )
+            != 0
+            or _decimal(
+                getattr(line, "discount_balance", 0),
+                f"{label} discount_balance",
+            )
+            != 0
+            or bool(getattr(line, "no_followup", False))
+            or bool(getattr(line, "collapse_composition", False))
+            or bool(getattr(line, "collapse_prices", False))
+            or bool(getattr(line, "is_storno", False))
+            or (line_reference and not allow_line_reference)
+        ):
+            raise OdooWriteHandlerError(
+                f"{label} has tax, analytic, product, maturity, lineage, "
+                "storno, or external business effects/dependencies"
+            )
 
     def check_taxes(
         self, tax_ids: list[int], company: Any, expected_use: str | None = None
@@ -2008,6 +3675,17 @@ class OdooWriteHandlers:
                     raise OdooWriteHandlerError(
                         "Odoo tax preview returned no tax breakdown"
                     )
+                raw_base_tags = tax_result.get("base_tags")
+                if not isinstance(raw_base_tags, list) or any(
+                    isinstance(item, bool)
+                    or not isinstance(item, int)
+                    or item <= 0
+                    for item in raw_base_tags
+                ):
+                    raise OdooWriteHandlerError(
+                        "Odoo tax preview base tags are invalid"
+                    )
+                base_tag_ids = sorted(set(raw_base_tags))
                 normalized_taxes = []
                 for item in raw_taxes:
                     if not isinstance(item, Mapping):
@@ -2023,16 +3701,96 @@ class OdooWriteHandlers:
                         raise OdooWriteHandlerError(
                             "Odoo tax preview identity is invalid"
                         )
+                    repartition_line_id = _record_id(
+                        item.get("tax_repartition_line_id")
+                    )
+                    if repartition_line_id is None:
+                        raise OdooWriteHandlerError(
+                            "Odoo tax preview accounting identity is invalid"
+                        )
+                    repartition = self.record(
+                        "account.tax.repartition.line",
+                        repartition_line_id,
+                        company,
+                    )
+                    if (
+                        _record_id(getattr(repartition, "tax_id", None))
+                        != tax_id
+                        or str(
+                            getattr(repartition, "repartition_type", "")
+                        )
+                        != "tax"
+                        or str(getattr(repartition, "document_type", ""))
+                        != ("refund" if is_refund else "invoice")
+                    ):
+                        raise OdooWriteHandlerError(
+                            "Odoo tax preview repartition line is not bound "
+                            "to the computed tax"
+                        )
+                    account_id = _record_id(item.get("account_id"))
+                    repartition_account_id = _record_id(
+                        getattr(repartition, "account_id", None)
+                    )
+                    if account_id is None:
+                        if (
+                            item.get("account_id") not in (False, None, 0)
+                            or repartition_account_id is not None
+                        ):
+                            raise OdooWriteHandlerError(
+                                "Odoo tax preview account identity is invalid"
+                            )
+                        account_id = line["account_id"]
+                    self.check_account(account_id, company)
+
+                    group_value = item.get("group")
+                    group_tax_id = _record_id(group_value)
+                    if group_value not in (False, None) and group_tax_id is None:
+                        raise OdooWriteHandlerError(
+                            "Odoo tax preview group identity is invalid"
+                        )
+
+                    normalized_id_lists: dict[str, list[int]] = {}
+                    for source_field, target_field in (
+                        ("tag_ids", "tax_tag_ids"),
+                        ("tax_ids", "tax_ids"),
+                    ):
+                        raw_ids = item.get(source_field)
+                        if not isinstance(raw_ids, list) or any(
+                            isinstance(identifier, bool)
+                            or not isinstance(identifier, int)
+                            or identifier <= 0
+                            for identifier in raw_ids
+                        ):
+                            raise OdooWriteHandlerError(
+                                f"Odoo tax preview {source_field} are invalid"
+                            )
+                        normalized_id_lists[target_field] = sorted(set(raw_ids))
                     normalized_taxes.append(
                         {
                             "tax_id": tax_id,
+                            "tax_repartition_line_id": repartition_line_id,
+                            "account_id": account_id,
+                            "group_tax_id": group_tax_id,
+                            **normalized_id_lists,
                             "amount": format(
                                 _decimal(item.get("amount"), "tax amount"), "f"
+                            ),
+                            "base": format(
+                                _decimal(item.get("base"), "tax base"), "f"
                             ),
                         }
                     )
                 normalized_taxes.sort(
-                    key=lambda item: (item["tax_id"], item["amount"])
+                    key=lambda item: (
+                        item["tax_id"],
+                        item["tax_repartition_line_id"],
+                        item["account_id"],
+                        item["group_tax_id"] or 0,
+                        item["tax_ids"],
+                        item["tax_tag_ids"],
+                        item["amount"],
+                        item["base"],
+                    )
                 )
                 computed_tax = sum(
                     (_decimal(item["amount"], "tax amount") for item in normalized_taxes),
@@ -2048,6 +3806,7 @@ class OdooWriteHandlers:
                 excluded = quantity * price_unit
                 included = excluded
                 normalized_taxes = []
+                base_tag_ids = []
             if excluded < 0 or included < 0:
                 raise OdooWriteHandlerError(
                     "document line tax preview cannot be negative"
@@ -2057,6 +3816,7 @@ class OdooWriteHandlers:
                 "amount_untaxed": format(excluded, "f"),
                 "amount_tax": format(included - excluded, "f"),
                 "amount_total": format(included, "f"),
+                "base_tag_ids": base_tag_ids,
                 "taxes": normalized_taxes,
             }
             previews.append(line_preview)
@@ -2103,6 +3863,11 @@ class OdooWriteHandlers:
         return self.unique_records(dependencies)
 
     def precheck_document(self, parameters: dict[str, Any], company: Any, *, vendor: bool) -> dict[str, Any]:
+        if parameters["posting_mode"] != "draft":
+            raise OdooWriteHandlerError(
+                "document creation is draft-only; use the dedicated approved "
+                "document-post capability"
+            )
         partner = self.check_partner(parameters["partner_id"], company)
         journal = self.check_journal(parameters, company, {"purchase" if vendor else "sale"})
         currency = self.assert_currency(parameters["currency_id"], company, journal)
@@ -2116,6 +3881,7 @@ class OdooWriteHandlers:
         )
         kind = "vendor_bill" if vendor else "customer_invoice"
         binding = self.document_binding(kind, parameters)
+        binding_v2 = self.document_binding_v2(kind, parameters)
         business_binding = self.business_binding(kind, parameters)
         move_type = "in_invoice" if vendor else "out_invoice"
         if self.search_records(
@@ -2130,6 +3896,19 @@ class OdooWriteHandlers:
         ):
             raise OdooWriteHandlerError(
                 "business document already exists for the approved parameters"
+            )
+        if self.search_records(
+            "account.move",
+            [
+                ("company_id", "=", company.id),
+                ("move_type", "=", move_type),
+                ("odoo_cli_v3_document_binding_v2", "=", binding_v2),
+            ],
+            company,
+            limit=1,
+        ):
+            raise OdooWriteHandlerError(
+                "business document already exists for the canonical approved parameters"
             )
         if self.search_records(
             "account.move",
@@ -2156,12 +3935,50 @@ class OdooWriteHandlers:
             for line in financial_preview["lines"]
             for item in line["taxes"]
         }
+        computed_tax_ids.update(
+            tax_id
+            for line in financial_preview["lines"]
+            for item in line["taxes"]
+            for tax_id in item["tax_ids"]
+        )
+        computed_tax_ids.update(
+            item["group_tax_id"]
+            for line in financial_preview["lines"]
+            for item in line["taxes"]
+            if item["group_tax_id"] is not None
+        )
+        computed_repartition_ids = {
+            item["tax_repartition_line_id"]
+            for line in financial_preview["lines"]
+            for item in line["taxes"]
+        }
+        computed_account_ids = {
+            item["account_id"]
+            for line in financial_preview["lines"]
+            for item in line["taxes"]
+        }
         dependency_tax_ids = {
             record.id
             for model_name, record in line_dependencies
             if model_name == "account.tax"
         }
-        if not computed_tax_ids.issubset(dependency_tax_ids):
+        dependency_repartition_ids = {
+            record.id
+            for model_name, record in line_dependencies
+            if model_name == "account.tax.repartition.line"
+        }
+        dependency_account_ids = {
+            record.id
+            for model_name, record in line_dependencies
+            if model_name == "account.account"
+        }
+        if (
+            not computed_tax_ids.issubset(dependency_tax_ids)
+            or not computed_repartition_ids.issubset(
+                dependency_repartition_ids
+            )
+            or not computed_account_ids.issubset(dependency_account_ids)
+        ):
             raise OdooWriteHandlerError(
                 "computed tax graph is not fully bound to the preview"
             )
@@ -2184,6 +4001,7 @@ class OdooWriteHandlers:
             "dependencies": self.snapshots(dependencies, company),
             "financial_preview": financial_preview,
             "document_binding": binding,
+            "document_binding_v2": binding_v2,
             "business_binding": business_binding,
         }
 
@@ -2211,8 +4029,23 @@ class OdooWriteHandlers:
         return commands
 
     def execute_document(
-        self, p: dict[str, Any], company: Any, *, vendor: bool
+        self,
+        p: dict[str, Any],
+        company: Any,
+        checked: dict[str, Any],
+        *,
+        vendor: bool,
     ) -> tuple[list[tuple[str, Any]], dict[str, Any]]:
+        if p["posting_mode"] != "draft":
+            raise OdooWriteHandlerError(
+                "document creation is draft-only; use the dedicated approved "
+                "document-post capability"
+            )
+        approved_financial_preview = checked.get("financial_preview")
+        if not isinstance(approved_financial_preview, Mapping):
+            raise OdooWriteHandlerError(
+                "approved document financial preview is missing"
+            )
         values = {
             "move_type": "in_invoice" if vendor else "out_invoice",
             "company_id": p["company_id"],
@@ -2228,43 +4061,54 @@ class OdooWriteHandlers:
             "odoo_cli_v3_document_binding": self.document_binding(
                 "vendor_bill" if vendor else "customer_invoice", p
             ),
+            "odoo_cli_v3_document_binding_v2": self.document_binding_v2(
+                "vendor_bill" if vendor else "customer_invoice", p
+            ),
             "odoo_cli_v3_business_binding": self.business_binding(
                 "vendor_bill" if vendor else "customer_invoice", p
             ),
         }
-        move = self.create_model("account.move", company).create(values)
+        move = self.create_model(
+            "account.move",
+            company,
+            context={
+                "tracking_disable": True,
+                "mail_create_nosubscribe": True,
+                "mail_create_nolog": True,
+                "mail_notrack": True,
+            },
+        ).create(values)
         self.require_created(move, "account.move", company)
-        if p["posting_mode"] == "post":
-            move.action_post()
         records = self.move_records(move, company)
-        if (
-            p["posting_mode"] == "draft"
-            and self.context.environment in {"test", "sandbox"}
-        ):
-            lines = [
-                record
-                for model_name, record in records
-                if model_name == "account.move.line"
-            ]
-            self._assert_pristine_draft_document(
-                move,
-                lines,
-                company,
-                expected_state="draft",
-                vendor=vendor,
-            )
-        if p["posting_mode"] == "draft":
-            recovery_method = (
-                DRAFT_VENDOR_BILL_RECOVERY_METHOD
-                if vendor
-                else DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
-            )
-        else:
-            recovery_method = (
-                "reverse_posted_vendor_bill_v1"
-                if vendor
-                else "reverse_posted_customer_invoice_v1"
-            )
+        lines = [
+            record
+            for model_name, record in records
+            if model_name == "account.move.line"
+        ]
+        self._assert_pristine_draft_document(
+            move,
+            lines,
+            company,
+            expected_state="draft",
+            vendor=vendor,
+            require_mail_thread_empty=True,
+        )
+        self.verify_document(
+            p,
+            company,
+            records,
+            vendor=vendor,
+            expected_document_binding=checked.get("document_binding"),
+            expected_document_binding_v2=checked.get(
+                "document_binding_v2"
+            ),
+            expected_financial_preview=approved_financial_preview,
+        )
+        recovery_method = (
+            DRAFT_VENDOR_BILL_RECOVERY_METHOD
+            if vendor
+            else DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD
+        )
         recovery = self.available_recovery(
             (
                 "acct.bill.vendor_create.v1"
@@ -2278,19 +4122,32 @@ class OdooWriteHandlers:
         return records, recovery
 
     def execute_customer_invoice(self, p: dict[str, Any], company: Any, checked: dict[str, Any]):
-        return self.execute_document(p, company, vendor=False)
+        return self.execute_document(p, company, checked, vendor=False)
 
     def execute_vendor_bill(self, p: dict[str, Any], company: Any, checked: dict[str, Any]):
-        return self.execute_document(p, company, vendor=True)
+        return self.execute_document(p, company, checked, vendor=True)
 
     def verify_document(
-        self, p: dict[str, Any], company: Any, records: list[tuple[str, Any]], *, vendor: bool
+        self,
+        p: dict[str, Any],
+        company: Any,
+        records: list[tuple[str, Any]],
+        *,
+        vendor: bool,
+        expected_document_binding: str | None = None,
+        expected_document_binding_v2: str | None = None,
+        expected_financial_preview: Mapping[str, Any] | None = None,
     ) -> list[str]:
+        if p["posting_mode"] != "draft":
+            raise OdooWriteHandlerError(
+                "document creation is draft-only; use the dedicated approved "
+                "document-post capability"
+            )
         move = self.only_record(records, "account.move")
         if str(move.move_type) != ("in_invoice" if vendor else "out_invoice"):
             raise OdooWriteHandlerError("read-back document type differs")
         self.require_links(move, p, ("partner_id", "currency_id", "journal_id"))
-        expected_state = "posted" if p["posting_mode"] == "post" else "draft"
+        expected_state = "draft"
         if str(move.state) != expected_state:
             raise OdooWriteHandlerError("read-back document state differs")
         if str(move.date) != p["accounting_date"] or str(move.invoice_date) != p["invoice_date"]:
@@ -2300,8 +4157,13 @@ class OdooWriteHandlers:
         expected_reference = p["vendor_reference"] if vendor else p["reference"]
         if str(move.ref or "") != expected_reference:
             raise OdooWriteHandlerError("read-back document reference differs")
-        expected_binding = self.document_binding(
-            "vendor_bill" if vendor else "customer_invoice", p
+        kind = "vendor_bill" if vendor else "customer_invoice"
+        expected_binding = expected_document_binding or self.document_binding(
+            kind, p
+        )
+        expected_binding_v2 = (
+            expected_document_binding_v2
+            or self.document_binding_v2(kind, p)
         )
         if (
             str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
@@ -2309,12 +4171,27 @@ class OdooWriteHandlers:
         ):
             raise OdooWriteHandlerError("read-back document binding differs")
         if (
+            str(
+                getattr(
+                    move, "odoo_cli_v3_document_binding_v2", ""
+                )
+                or ""
+            )
+            != expected_binding_v2
+        ):
+            raise OdooWriteHandlerError(
+                "read-back canonical document binding differs"
+            )
+        if (
             str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
             != self.business_binding(
-                "vendor_bill" if vendor else "customer_invoice", p
+                kind, p
             )
         ):
             raise OdooWriteHandlerError("read-back document business binding differs")
+        self.assert_mail_thread_effects_absent(
+            move, company, label="read-back document"
+        )
         if _record_id(getattr(move, "invoice_payment_term_id", None)) is not None:
             raise OdooWriteHandlerError(
                 "read-back document retained an unapproved payment term"
@@ -2331,6 +4208,14 @@ class OdooWriteHandlers:
             currency=currency,
             is_refund=False,
         )
+        if (
+            expected_financial_preview is not None
+            and _canonical(_primitive(expected_financial_preview))
+            != _canonical(_primitive(financial_preview))
+        ):
+            raise OdooWriteHandlerError(
+                "read-back tax oracle differs from the approved preview"
+            )
         invoice_lines = [
             self.record("account.move.line", line_id, company)
             for line_id in _ids(move.invoice_line_ids)
@@ -2350,6 +4235,10 @@ class OdooWriteHandlers:
                 and _record_id(line.account_id) == approved["account_id"]
                 and _record_id(getattr(line, "product_id", None)) == approved["product_id"]
                 and _ids(line.tax_ids) == sorted(approved["tax_ids"])
+                and _ids(getattr(line, "tax_tag_ids", []))
+                == preview_by_reference[
+                    approved["line_reference"]
+                ]["base_tag_ids"]
                 and _decimal(line.quantity, "quantity") == _decimal(approved["quantity"], "quantity")
                 and _decimal(line.price_unit, "price_unit") == _decimal(approved["price_unit"], "price_unit")
             ]
@@ -2427,41 +4316,168 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "new document unexpectedly contains reconciliation state"
             )
-        expected_tax_amounts: dict[int, Decimal] = {}
+        company_currency = getattr(company, "currency_id", None)
+        company_currency_id = _record_id(company_currency)
+        if company_currency_id is None:
+            raise OdooWriteHandlerError(
+                "company currency is not configured"
+            )
+        if p["currency_id"] == company_currency_id:
+            invoice_currency_rate = Decimal("1")
+        else:
+            invoice_currency_rate = _decimal(
+                getattr(move, "invoice_currency_rate", None),
+                "invoice_currency_rate",
+            )
+            if invoice_currency_rate <= 0:
+                raise OdooWriteHandlerError(
+                    "invoice currency rate is invalid"
+                )
+
+        def currency_round(
+            value: Decimal, target_currency: Any, field: str
+        ) -> Decimal:
+            rounding = _decimal(
+                getattr(target_currency, "rounding", None),
+                f"{field} currency rounding",
+            )
+            if rounding <= 0:
+                raise OdooWriteHandlerError(
+                    f"{field} currency rounding is invalid"
+                )
+            return (
+                value / rounding
+            ).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * rounding
+
+        tax_direction = Decimal("1") if vendor else Decimal("-1")
+        expected_tax_lines: dict[
+            tuple[int, int, int, int | None, tuple[int, ...], tuple[int, ...]],
+            dict[str, Decimal],
+        ] = {}
         for line_preview in financial_preview["lines"]:
             for item in line_preview["taxes"]:
-                expected_tax_amounts[item["tax_id"]] = (
-                    expected_tax_amounts.get(item["tax_id"], Decimal("0"))
-                    + _decimal(item["amount"], "tax preview amount")
+                tax_key = (
+                    item["tax_id"],
+                    item["tax_repartition_line_id"],
+                    item["account_id"],
+                    item["group_tax_id"],
+                    tuple(item["tax_ids"]),
+                    tuple(item["tax_tag_ids"]),
                 )
-        expected_tax_amounts = {
-            tax_id: amount
-            for tax_id, amount in expected_tax_amounts.items()
-            if amount != 0
-        }
-        actual_tax_amounts: dict[int, Decimal] = {}
-        company_currency_id = _record_id(company.currency_id)
-        for line in tax_lines:
-            tax_id = _record_id(line.tax_line_id)
-            if tax_id is None:
-                raise OdooWriteHandlerError("read-back tax line has no tax identity")
-            if p["currency_id"] == company_currency_id:
-                amount = abs(_decimal(line.balance, "tax line balance"))
-            else:
-                amount = abs(
-                    _decimal(line.amount_currency, "tax line amount_currency")
+                expected = expected_tax_lines.setdefault(
+                    tax_key,
+                    {
+                        "amount_currency": Decimal("0"),
+                        "balance": Decimal("0"),
+                        "tax_base_amount": Decimal("0"),
+                    },
                 )
-            actual_tax_amounts[tax_id] = (
-                actual_tax_amounts.get(tax_id, Decimal("0")) + amount
+                tax_amount = _decimal(
+                    item["amount"], "tax preview amount"
+                )
+                tax_base = _decimal(item["base"], "tax preview base")
+                expected["amount_currency"] += tax_direction * tax_amount
+                expected["balance"] += tax_direction * currency_round(
+                    tax_amount / invoice_currency_rate,
+                    company_currency,
+                    "tax balance",
+                )
+                expected["tax_base_amount"] += tax_direction * currency_round(
+                    tax_base / invoice_currency_rate,
+                    company_currency,
+                    "tax base",
+                )
+        expected_tax_lines = {
+            key: values
+            for key, values in expected_tax_lines.items()
+            if (
+                currency_round(
+                    values["amount_currency"],
+                    currency,
+                    "tax amount_currency",
+                )
+                != 0
+                or currency_round(
+                    values["balance"],
+                    company_currency,
+                    "tax balance",
+                )
+                != 0
             )
-        if set(actual_tax_amounts) != set(expected_tax_amounts):
-            raise OdooWriteHandlerError("read-back tax line identities differ")
-        for tax_id, expected_amount in expected_tax_amounts.items():
+        }
+
+        expected_line_partner_id = (
+            _record_id(getattr(partner, "commercial_partner_id", None))
+            or p["partner_id"]
+        )
+        actual_tax_lines: dict[
+            tuple[int, int, int, int | None, tuple[int, ...], tuple[int, ...]],
+            Any,
+        ] = {}
+        for line in tax_lines:
+            tax_key = (
+                _record_id(getattr(line, "tax_line_id", None)),
+                _record_id(
+                    getattr(line, "tax_repartition_line_id", None)
+                ),
+                _record_id(getattr(line, "account_id", None)),
+                _record_id(getattr(line, "group_tax_id", None)),
+                tuple(_ids(getattr(line, "tax_ids", []))),
+                tuple(_ids(getattr(line, "tax_tag_ids", []))),
+            )
+            if (
+                None in tax_key[:3]
+                or str(getattr(line, "display_type", "")) != "tax"
+                or _record_id(getattr(line, "partner_id", None))
+                != expected_line_partner_id
+                or _record_id(getattr(line, "currency_id", None))
+                != p["currency_id"]
+                or getattr(line, "analytic_distribution", False)
+                not in (False, None, {})
+            ):
+                raise OdooWriteHandlerError(
+                    "read-back tax line accounting graph differs"
+                )
+            if tax_key in actual_tax_lines:
+                raise OdooWriteHandlerError(
+                    "read-back tax line accounting graph is ambiguous"
+                )
+            actual_tax_lines[tax_key] = line
+        if set(actual_tax_lines) != set(expected_tax_lines):
+            raise OdooWriteHandlerError(
+                "read-back tax repartition, account, or tag graph differs"
+            )
+        for tax_key, expected in expected_tax_lines.items():
+            line = actual_tax_lines[tax_key]
             self.assert_amount(
-                actual_tax_amounts[tax_id],
-                expected_amount,
+                line.amount_currency,
+                expected["amount_currency"],
                 currency,
-                f"tax line {tax_id} amount",
+                "tax line amount_currency",
+            )
+            self.assert_amount(
+                line.balance,
+                expected["balance"],
+                company_currency,
+                "tax line balance",
+            )
+            self.assert_amount(
+                line.debit,
+                max(expected["balance"], Decimal("0")),
+                company_currency,
+                "tax line debit",
+            )
+            self.assert_amount(
+                line.credit,
+                max(-expected["balance"], Decimal("0")),
+                company_currency,
+                "tax line credit",
+            )
+            self.assert_amount(
+                getattr(line, "tax_base_amount", None),
+                expected["tax_base_amount"],
+                company_currency,
+                "tax line base",
             )
         self.assert_amount(
             abs(move.amount_residual),
@@ -2479,10 +4495,16 @@ class OdooWriteHandlers:
         return [
             "record_exists", "company_matches", "links_match", "state_matches",
             "dates_match", "due_date_matches", "reference_matches",
-            "document_binding_matches", "business_binding_matches",
+            "document_binding_matches",
+            "document_binding_v2_matches",
+            "business_binding_matches",
+            "mail_activity_graph_empty",
             "payment_term_override_absent",
-            "line_references_match", "lines_match", "line_totals_match_preview",
-            "tax_total_matches", "tax_lines_match_preview",
+            "line_references_match", "lines_match",
+            "base_tax_tags_match_preview", "line_totals_match_preview",
+            "tax_total_matches",
+            "tax_repartition_account_tag_graph_matches_preview",
+            "tax_base_and_amount_graph_matches_preview",
             "document_total_matches", "payment_terms_match",
             "unpaid_residual_matches", "move_balanced", "record_graph_exact",
         ]
@@ -2494,10 +4516,28 @@ class OdooWriteHandlers:
         return self.verify_document(p, company, records, vendor=True)
 
     def precheck_refund(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
+        if p["posting_mode"] != "draft":
+            raise OdooWriteHandlerError(
+                "refund creation is draft-only until post-commit partner rank effects are auditable"
+            )
         origin = self.record("account.move", p["origin_move_id"], company, write=True)
         expected_type = "out_invoice" if p["refund_type"] == "customer_credit_note" else "in_invoice"
         if origin.state != "posted" or origin.move_type != expected_type:
             raise OdooWriteHandlerError("refund origin is not a compatible posted invoice")
+        if (
+            str(getattr(origin, "name", "") or "") in {"", "/"}
+            or getattr(origin, "posted_before", None) is not True
+            or str(getattr(origin, "auto_post", "")) != "no"
+            or getattr(origin, "auto_post_until", None)
+            not in {False, None}
+            or _record_id(
+                getattr(origin, "reversed_entry_id", None)
+            )
+            is not None
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin document identity or auto-post state is unsupported"
+            )
         origin_lines = self.checked_move_lines(origin, company)
         invoice_line_ids = _ids(getattr(origin, "invoice_line_ids", []))
         if not origin_lines or not invoice_line_ids or not set(invoice_line_ids).issubset(
@@ -2530,6 +4570,20 @@ class OdooWriteHandlers:
         currency = self.assert_currency(p["currency_id"], company, journal)
         if _record_id(origin.currency_id) != p["currency_id"]:
             raise OdooWriteHandlerError("refund currency differs from origin")
+        company_currency_id = _record_id(
+            getattr(company, "currency_id", None)
+        )
+        if (
+            company_currency_id is None
+            or p["currency_id"] != company_currency_id
+        ):
+            raise OdooWriteHandlerError(
+                "refund creation is restricted to company currency in this release"
+            )
+        if getattr(company, "account_storno", None) is not False:
+            raise OdooWriteHandlerError(
+                "refund creation is disabled for storno accounting companies"
+            )
         if (
             str(getattr(origin.journal_id, "type", ""))
             != ("sale" if expected_type == "out_invoice" else "purchase")
@@ -2540,6 +4594,19 @@ class OdooWriteHandlers:
         if partner_id is None:
             raise OdooWriteHandlerError("refund origin partner is unavailable")
         partner = self.check_partner(partner_id, company)
+        origin_commercial_partner_id = _record_id(
+            getattr(origin, "commercial_partner_id", None)
+        )
+        if (
+            origin_commercial_partner_id is None
+            or origin_commercial_partner_id
+            != _record_id(
+                getattr(partner, "commercial_partner_id", None)
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin commercial partner lineage differs"
+            )
         origin_date = _as_date(
             getattr(origin, "invoice_date", None) or getattr(origin, "date", None),
             "origin invoice date",
@@ -2558,28 +4625,106 @@ class OdooWriteHandlers:
         )
         if str(getattr(origin, "payment_state", "")) != "not_paid":
             raise OdooWriteHandlerError("refund origin is not fully unpaid")
-        unsafe_move_fields = (
-            "statement_line_id", "statement_id", "asset_id",
-            "deferred_move_ids", "deferred_original_move_ids",
-            "tax_cash_basis_rec_id", "tax_cash_basis_origin_move_id",
-            "reversed_entry_id", "reversal_move_ids",
+        unsafe_move_singular_fields = (
+            "auto_post_origin_id",
+            "origin_payment_id",
+            "statement_line_id",
+            "statement_id",
+            "tax_cash_basis_rec_id",
+            "tax_cash_basis_origin_move_id",
+            "asset_id",
+            "closing_return_id",
+            "transfer_model_id",
+            "purchase_id",
+            "debit_origin_id",
+            "invoice_pdf_report_id",
+            "invoice_vendor_bill_id",
+            "purchase_vendor_bill_id",
+            "ubl_cii_xml_id",
+            "l10n_es_edi_facturae_xml_id",
+            "signing_user",
+            "message_main_attachment_id",
         )
-        if any(_ids(getattr(origin, field, None)) for field in unsafe_move_fields):
+        unsafe_move_plural_fields = (
+            "payment_ids",
+            "matched_payment_ids",
+            "reconciled_payment_ids",
+            "tax_cash_basis_created_move_ids",
+            "reversal_move_ids",
+            "adjusting_entry_origin_move_ids",
+            "adjusting_entries_move_ids",
+            "exchange_diff_partial_ids",
+            "deferred_move_ids",
+            "deferred_original_move_ids",
+            "edi_document_ids",
+            "expense_ids",
+            "pos_order_ids",
+            "statement_line_ids",
+            "transaction_ids",
+            "authorized_transaction_ids",
+            "asset_ids",
+            "stock_move_ids",
+            "landed_costs_ids",
+            "debit_note_ids",
+            "attachment_ids",
+        )
+        if any(
+            _record_id(getattr(origin, field, None)) is not None
+            for field in unsafe_move_singular_fields
+        ) or any(
+            _ids(getattr(origin, field, []))
+            for field in unsafe_move_plural_fields
+        ):
             raise OdooWriteHandlerError(
                 "refund origin has existing accounting dependencies"
             )
+        if (
+            bool(getattr(origin, "signature", False))
+            or any(
+                _is_present(getattr(origin, field, False))
+                for field in (
+                    "access_token",
+                    "invoice_pdf_report_file",
+                    "l10n_es_edi_facturae_xml_file",
+                    "ubl_cii_xml_file",
+                )
+            )
+            or bool(getattr(origin, "is_move_sent", False))
+            or getattr(origin, "sending_data", False)
+            not in (False, None, {})
+            or bool(getattr(origin, "is_being_sent", False))
+            or getattr(origin, "invoice_source_email", False)
+            not in (False, None, "")
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin has EDI, OCR, sending, signature, or "
+                "attachment effects"
+            )
         for line in origin_lines:
             if (
-                bool(getattr(line, "reconciled", False))
-                or _record_id(getattr(line, "full_reconcile_id", None)) is not None
-                or _ids(getattr(line, "matched_debit_ids", []))
-                or _ids(getattr(line, "matched_credit_ids", []))
-                or _ids(getattr(line, "asset_ids", []))
-                or getattr(line, "deferred_start_date", None)
-                or getattr(line, "deferred_end_date", None)
+                _record_id(getattr(line, "move_id", None))
+                != origin.id
+                or _record_id(getattr(line, "company_id", None))
+                != company.id
+                or str(getattr(line, "parent_state", ""))
+                != "posted"
+                or _record_id(getattr(line, "currency_id", None))
+                != p["currency_id"]
+                or _record_id(getattr(line, "partner_id", None))
+                != origin_commercial_partner_id
+                or getattr(line, "is_storno", None) is not False
             ):
                 raise OdooWriteHandlerError(
-                    "refund origin has existing accounting dependencies"
+                    "refund origin complete journal item graph differs"
+                )
+            if self.refund_line_has_tax_lineage(line):
+                raise OdooWriteHandlerError(
+                    "refund origin tax lineage is outside the verified taxless scope"
+                )
+            if self.refund_line_has_external_effects(line):
+                raise OdooWriteHandlerError(
+                    "refund origin has accounting, sale, purchase, stock, "
+                    "analytic, attachment, or external line effects"
                 )
         if self.search_records(
             "account.partial.reconcile",
@@ -2613,16 +4758,51 @@ class OdooWriteHandlers:
         else:
             if approved_total > origin_total:
                 raise OdooWriteHandlerError("partial refund exceeds the origin total")
-        self.assert_open_date(company, p["refund_date"], "refund_date", journal=journal, taxes=True)
+        self.assert_open_date(
+            company,
+            p["refund_date"],
+            "refund_date",
+            journal=journal,
+            taxes=False,
+        )
         dependencies: list[tuple[str, Any]] = [
             ("res.company", company),
             ("res.partner", partner),
             ("account.journal", journal),
             ("res.currency", currency),
         ]
-        expected_use = "sale" if expected_type == "out_invoice" else "purchase"
+        origin_invoice_lines: list[Any] = []
         for line_id in invoice_line_ids:
             line = self.record("account.move.line", line_id, company)
+            origin_invoice_lines.append(line)
+            quantity = _decimal(
+                getattr(line, "quantity", None),
+                "refund origin line quantity",
+            )
+            price_unit = _decimal(
+                getattr(line, "price_unit", None),
+                "refund origin line price_unit",
+            )
+            price_subtotal = _decimal(
+                getattr(line, "price_subtotal", None),
+                "refund origin line price_subtotal",
+            )
+            price_total = _decimal(
+                getattr(line, "price_total", None),
+                "refund origin line price_total",
+            )
+            if (
+                str(getattr(line, "display_type", "") or "")
+                != "product"
+                or quantity <= 0
+                or price_unit < 0
+                or price_subtotal < 0
+                or price_total < 0
+            ):
+                raise OdooWriteHandlerError(
+                    "refund origin contains an unsupported structural or "
+                    "noncanonical invoice line"
+                )
             account_id = _record_id(getattr(line, "account_id", None))
             if account_id is None:
                 raise OdooWriteHandlerError(
@@ -2639,15 +4819,67 @@ class OdooWriteHandlers:
                 dependencies.extend(
                     self.document_product_dependencies(product, company)
                 )
-            taxes = self.check_taxes(
-                _ids(getattr(line, "tax_ids", [])), company, expected_use
+        stored_origin_document_binding = str(
+            getattr(
+                origin, "odoo_cli_v3_document_binding", ""
             )
-            dependencies.extend(
-                self.document_tax_dependencies(
-                    taxes, company, expected_use=expected_use
-                )
+            or ""
+        )
+        stored_origin_document_binding_v2 = str(
+            getattr(
+                origin, "odoo_cli_v3_document_binding_v2", ""
             )
+            or ""
+        )
+        stored_origin_business_binding = str(
+            getattr(
+                origin, "odoo_cli_v3_business_binding", ""
+            )
+            or ""
+        )
+        if not all(
+            self._valid_sha_binding(value)
+            for value in (
+                stored_origin_document_binding,
+                stored_origin_document_binding_v2,
+                stored_origin_business_binding,
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin lacks immutable V3 provenance"
+            )
+        origin_binding_dependencies, _origin_graph_parameters = (
+            self._assert_create_document_bindings_from_graph(
+                origin,
+                origin_lines,
+                company,
+                vendor=expected_type == "in_invoice",
+                expected_document_binding=(
+                    stored_origin_document_binding
+                ),
+                expected_document_binding_v2=(
+                    stored_origin_document_binding_v2
+                ),
+                expected_business_binding=(
+                    stored_origin_business_binding
+                ),
+                allowed_posting_modes=("draft", "post"),
+            )
+        )
+        dependencies.extend(origin_binding_dependencies)
+        self.assert_company_currency_taxless_document_amount_graph(
+            origin,
+            origin_lines,
+            invoice_line_ids,
+            currency,
+            company,
+            expected_move_type=expected_type,
+        )
         if p["refund_mode"] == "partial":
+            if any(line.get("tax_ids") for line in p["lines"]):
+                raise OdooWriteHandlerError(
+                    "partial refund tax lineage is outside the verified taxless scope"
+                )
             partial_dependencies = self.check_document_lines(
                 p["lines"], company, vendor=p["refund_type"] == "vendor_debit_note"
             )
@@ -2665,7 +4897,36 @@ class OdooWriteHandlers:
                 currency,
                 "partial refund total",
             )
+            preview_by_reference = {
+                item["line_reference"]: item
+                for item in financial_preview["lines"]
+            }
+            approved_refund_lines = [
+                partial_refund_line_from_approved(
+                    line,
+                    partner_id=origin_commercial_partner_id,
+                    currency_id=p["currency_id"],
+                    price_subtotal=preview_by_reference[
+                        line["line_reference"]
+                    ]["amount_untaxed"],
+                    price_total=preview_by_reference[
+                        line["line_reference"]
+                    ]["amount_total"],
+                )
+                for line in p["lines"]
+            ]
+            if not partial_refund_origin_line_relation_is_exact(
+                (
+                    partial_refund_line_from_odoo(line)
+                    for line in origin_invoice_lines
+                ),
+                approved_refund_lines,
+            ):
+                raise OdooWriteHandlerError(
+                    "partial refund origin line relation is not exact"
+                )
         binding = self.document_binding("refund", p)
+        binding_v2 = self.document_binding_v2("refund", p)
         business_binding = self.business_binding("refund", p)
         expected_refund_type = (
             "out_refund"
@@ -2690,6 +4951,19 @@ class OdooWriteHandlers:
             [
                 ("company_id", "=", company.id),
                 ("move_type", "=", expected_refund_type),
+                ("odoo_cli_v3_document_binding_v2", "=", binding_v2),
+            ],
+            company,
+            limit=1,
+        ):
+            raise OdooWriteHandlerError(
+                "business document already exists for the canonical approved refund"
+            )
+        if self.search_records(
+            "account.move",
+            [
+                ("company_id", "=", company.id),
+                ("move_type", "=", expected_refund_type),
                 ("odoo_cli_v3_business_binding", "=", business_binding),
             ],
             company,
@@ -2702,32 +4976,67 @@ class OdooWriteHandlers:
         return {
             "checks": [
                 "origin_posted", "origin_total", "origin_unpaid",
+                "origin_v3_provenance_reconstructable",
+                "company_currency_taxless_non_storno_scope",
                 "origin_dependency_graph_absent", "origin_graph_snapshotted",
-                "partial_total_exact", "acl", "company", "date",
+                "partial_total_exact",
+                *(
+                    ["partial_origin_line_relation_exact"]
+                    if p["refund_mode"] == "partial"
+                    else []
+                ),
+                "acl", "company", "date",
                 "dependency_graph", "business_identity_unique",
             ],
-            "before": self.snapshots(self.move_records(origin, company), company),
+            "before": self.snapshots(
+                self.move_records(origin, company),
+                company,
+                required_fields_by_model=(
+                    {
+                        "account.move.line": (
+                            _PARTIAL_REFUND_LINEAGE_SNAPSHOT_FIELDS
+                        )
+                    }
+                    if p["refund_mode"] == "partial"
+                    else None
+                ),
+            ),
             "dependencies": self.snapshots(
                 self.unique_records(dependencies), company
             ),
             "financial_preview": financial_preview,
             "document_binding": binding,
+            "document_binding_v2": binding_v2,
             "business_binding": business_binding,
         }
 
     def execute_refund(self, p, company, checked):
+        if p["posting_mode"] != "draft":
+            raise OdooWriteHandlerError(
+                "refund creation is draft-only until post-commit partner rank effects are auditable"
+            )
         origin = self.record(
             "account.move", p["origin_move_id"], company, write=True
         )
         wizard = self.create_model(
             "account.move.reversal", company,
-            context={"active_model": "account.move", "active_ids": [p["origin_move_id"]]},
+            context={
+                "active_model": "account.move",
+                "active_ids": [p["origin_move_id"]],
+                "tracking_disable": True,
+                "mail_create_nosubscribe": True,
+                "mail_create_nolog": True,
+                "mail_notrack": True,
+            },
         ).create({"date": p["refund_date"], "journal_id": p["journal_id"], "reason": p["reason"]})
         action = wizard.refund_moves()
         refund = self.record_from_action("account.move", action, company, write=True)
         refund_values: dict[str, Any] = {
             "odoo_cli_v3_reason": p["reason"],
             "odoo_cli_v3_document_binding": self.document_binding("refund", p),
+            "odoo_cli_v3_document_binding_v2": self.document_binding_v2(
+                "refund", p
+            ),
             "odoo_cli_v3_business_binding": self.business_binding("refund", p),
             "invoice_payment_term_id": False,
             "invoice_date_due": p["refund_date"],
@@ -2737,32 +5046,226 @@ class OdooWriteHandlers:
                 (5, 0, 0),
                 *self.document_line_values(p["lines"]),
             ]
-        refund.write(refund_values)
-        if p["posting_mode"] == "post" and refund.state != "posted":
-            refund.action_post()
-        if p["posting_mode"] == "draft" and refund.state != "draft":
+        refund.with_context(
+            tracking_disable=True,
+            mail_notrack=True,
+            mail_create_nolog=True,
+            skip_is_manually_modified=True,
+        ).write(refund_values)
+        if p["refund_mode"] == "full":
+            if refund.state != "draft":
+                raise OdooWriteHandlerError(
+                    "Odoo refund wizard did not return an editable draft"
+                )
+            self.assign_full_refund_invoice_lineage(
+                origin,
+                refund,
+                company,
+            )
+        if (
+            str(getattr(refund, "auto_post", "")) != "no"
+            or getattr(refund, "auto_post_until", None)
+            not in {False, None}
+        ):
+            raise OdooWriteHandlerError(
+                "Odoo refund wizard returned an auto-posting document"
+            )
+        if refund.state != "draft":
             raise OdooWriteHandlerError(
                 "Odoo refund wizard did not preserve the approved draft mode"
             )
-        if p["posting_mode"] == "post" and refund.state != "posted":
-            raise OdooWriteHandlerError("refund did not reach posted state")
+        self.assert_mail_thread_effects_absent(
+            refund,
+            company,
+            label="created refund",
+        )
+        trusted_before: dict[tuple[str, int], dict[str, Any]] = {}
+        for item in checked.get("before", []):
+            if (
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("model"), str)
+                or isinstance(item.get("record_id"), bool)
+                or not isinstance(item.get("record_id"), int)
+                or not isinstance(item.get("values"), dict)
+            ):
+                raise OdooWriteHandlerError(
+                    "approved refund origin snapshots are invalid"
+                )
+            trusted_before[
+                (item["model"], item["record_id"])
+            ] = dict(item["values"])
+        audit_message = self.assert_refund_origin_approval(
+            origin,
+            refund,
+            company,
+            trusted_before,
+        )
         records = self.unique_records(
-            [*self.move_records(origin, company), *self.move_records(refund, company)]
+            [
+                *self.move_records(origin, company),
+                *self.move_records(refund, company),
+                ("mail.message", audit_message),
+            ]
+        )
+        self.verify_refund(
+            p,
+            company,
+            records,
+            trusted_before,
         )
         return records, self.available_recovery(
             "acct.refund.create.v1",
-            (
-                "cancel_draft_refund_v1"
-                if p["posting_mode"] == "draft"
-                else "reverse_posted_refund_v1"
-            ),
+            "cancel_draft_refund_v1",
             records,
             action_keys={("account.move", refund.id)},
             guard_outcomes={
-                (model_name, record.id): "survive_exact"
-                for model_name, record in self.move_records(origin, company)
+                **{
+                    (model_name, record.id): "survive_exact"
+                    for model_name, record in self.move_records(origin, company)
+                },
+                ("mail.message", audit_message.id): "survive_exact",
             },
         )
+
+    @staticmethod
+    def refund_audit_snapshot_ids(
+        values: Mapping[str, Any],
+        field: str,
+    ) -> set[int]:
+        raw = values.get(field)
+        if (
+            field not in values
+            or not isinstance(raw, list)
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or item <= 0
+                for item in raw
+            )
+            or len(raw) != len(set(raw))
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin audit-message evidence is invalid"
+            )
+        return set(raw)
+
+    def assert_refund_origin_audit_message_delta(
+        self,
+        origin: Any,
+        refund: Any,
+        company: Any,
+        approved: Mapping[str, Any],
+        current: Mapping[str, Any],
+    ) -> Any:
+        before_messages = self.refund_audit_snapshot_ids(
+            approved, "message_ids"
+        )
+        current_messages = self.refund_audit_snapshot_ids(
+            current, "message_ids"
+        )
+        before_audit = self.refund_audit_snapshot_ids(
+            approved, "audit_trail_message_ids"
+        )
+        current_audit = self.refund_audit_snapshot_ids(
+            current, "audit_trail_message_ids"
+        )
+        new_messages = current_messages - before_messages
+        if (
+            not before_audit.issubset(before_messages)
+            or not current_audit.issubset(current_messages)
+            or len(new_messages) != 1
+            or current_messages != before_messages | new_messages
+            or current_audit != before_audit | new_messages
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin audit-message delta differs from the Odoo reversal"
+            )
+        message_id = next(iter(new_messages))
+        message = self.record(
+            "mail.message",
+            message_id,
+            company,
+            shared=True,
+        )
+        env_ref = getattr(self.context.env, "ref", None)
+        user = getattr(self.context.env, "user", None)
+        if not callable(env_ref) or user is None:
+            raise OdooWriteHandlerError(
+                "refund origin audit-message oracle is unavailable"
+            )
+        try:
+            note_subtype = env_ref("mail.mt_note")
+        except Exception as exc:
+            raise OdooWriteHandlerError(
+                "refund origin audit-message oracle is unavailable"
+            ) from exc
+        body = str(getattr(message, "body", "") or "")
+        refund_link = re.compile(
+            r"data-oe-model=['\"]account\.move['\"]\s+"
+            rf"data-oe-id=['\"]{refund.id}['\"]"
+        )
+        if (
+            str(getattr(message, "model", "") or "")
+            != "account.move"
+            or getattr(message, "res_id", None) != origin.id
+            or str(getattr(message, "message_type", "") or "")
+            != "notification"
+            or getattr(message, "is_internal", None) is not True
+            or _record_id(getattr(message, "subtype_id", None))
+            != _record_id(note_subtype)
+            or _record_id(getattr(message, "author_id", None))
+            != _record_id(getattr(user, "partner_id", None))
+            or _record_id(getattr(message, "create_uid", None))
+            != self.context.user_id
+            or _record_id(getattr(message, "write_uid", None))
+            != self.context.user_id
+            or _temporal(getattr(message, "create_date", None)) is None
+            or _temporal(getattr(message, "create_date", None))
+            != _temporal(getattr(message, "write_date", None))
+            or _record_id(
+                getattr(message, "author_guest_id", None)
+            )
+            is not None
+            or _record_id(
+                getattr(message, "mail_activity_type_id", None)
+            )
+            is not None
+            or _ids(getattr(message, "attachment_ids", []))
+            or _ids(getattr(message, "partner_ids", []))
+            or _record_id(getattr(message, "parent_id", None)) is not None
+            or _record_id(
+                getattr(message, "record_alias_domain_id", None)
+            )
+            is not None
+            or _record_id(
+                getattr(message, "record_company_id", None)
+            )
+            is not None
+            or bool(getattr(message, "email_add_signature", False))
+            or _is_present(
+                getattr(message, "email_layout_xmlid", False)
+            )
+            or _is_present(
+                getattr(message, "incoming_email_to", False)
+            )
+            or _is_present(
+                getattr(message, "incoming_email_cc", False)
+            )
+            or _is_present(
+                getattr(message, "outgoing_email_to", False)
+            )
+            or _record_id(
+                getattr(message, "mail_server_id", None)
+            )
+            is not None
+            or bool(getattr(message, "reply_to_force_new", False))
+            or _is_present(getattr(message, "subject", False))
+            or refund_link.search(body) is None
+        ):
+            raise OdooWriteHandlerError(
+                "refund origin audit message is not the exact Odoo reversal log"
+            )
+        return message
 
     def assert_refund_origin_approval(
         self,
@@ -2770,7 +5273,7 @@ class OdooWriteHandlers:
         refund: Any,
         company: Any,
         trusted_before: Mapping[tuple[str, int], dict[str, Any]] | None,
-    ) -> None:
+    ) -> Any:
         if not isinstance(trusted_before, Mapping):
             raise OdooWriteHandlerError("approved refund origin snapshots are missing")
         origin_records = self.move_records(origin, company)
@@ -2779,16 +5282,79 @@ class OdooWriteHandlers:
         }
         if set(trusted_before) != expected_keys:
             raise OdooWriteHandlerError("approved refund origin graph differs")
+        audit_message = None
         for model_name, record in origin_records:
             approved = trusted_before[(model_name, record.id)]
             if not isinstance(approved, dict):
                 raise OdooWriteHandlerError(
                     "approved refund origin snapshot is invalid"
                 )
-            current = self.snapshot(model_name, record, company)["values"]
+            current = self.snapshot(
+                model_name,
+                record,
+                company,
+                required_fields=(
+                    _PARTIAL_REFUND_LINEAGE_SNAPSHOT_FIELDS
+                    if model_name == "account.move.line"
+                    else ()
+                ),
+            )["values"]
             if model_name == "account.move":
                 approved = dict(approved)
                 current = dict(current)
+                audit_message = self.assert_refund_origin_audit_message_delta(
+                    origin,
+                    refund,
+                    company,
+                    approved,
+                    current,
+                )
+                projection_in_approved = (
+                    _MAIL_THREAD_PROJECTION_FIELD in approved
+                )
+                projection_in_current = (
+                    _MAIL_THREAD_PROJECTION_FIELD in current
+                )
+                if projection_in_approved != projection_in_current:
+                    raise OdooWriteHandlerError(
+                        "refund origin MailThread projection differs from approval"
+                    )
+                if projection_in_approved:
+                    self.assert_mail_thread_projection_delta(
+                        approved.pop(_MAIL_THREAD_PROJECTION_FIELD),
+                        current.pop(_MAIL_THREAD_PROJECTION_FIELD),
+                        origin,
+                        company,
+                        expected_message_id=audit_message.id,
+                    )
+                has_message_in_approved = "has_message" in approved
+                has_message_in_current = "has_message" in current
+                if has_message_in_approved != has_message_in_current:
+                    raise OdooWriteHandlerError(
+                        "refund origin message presence differs from approval"
+                    )
+                if has_message_in_approved:
+                    before_has_message = approved.pop("has_message")
+                    current_has_message = current.pop("has_message")
+                    if (
+                        type(before_has_message) is not bool
+                        or type(current_has_message) is not bool
+                        or before_has_message
+                        != bool(
+                            self.refund_audit_snapshot_ids(
+                                approved,
+                                "message_ids",
+                            )
+                        )
+                        or current_has_message is not True
+                    ):
+                        raise OdooWriteHandlerError(
+                            "refund origin message presence delta is invalid"
+                        )
+                approved.pop("message_ids")
+                current.pop("message_ids")
+                approved.pop("audit_trail_message_ids")
+                current.pop("audit_trail_message_ids")
                 approved_reversals = set(
                     _ids(approved.pop("reversal_move_ids", []))
                 )
@@ -2803,6 +5369,80 @@ class OdooWriteHandlers:
                 raise OdooWriteHandlerError(
                     "refund origin changed after approval"
                 )
+        if audit_message is None:
+            raise OdooWriteHandlerError(
+                "refund origin audit message is missing"
+            )
+        return audit_message
+
+    def assert_refund_payment_term_lineage(
+        self,
+        origin: Any,
+        refund: Any,
+        origin_lines: list[Any],
+        refund_lines: list[Any],
+        *,
+        currency_id: int,
+        expected_account_type: str,
+    ) -> Any:
+        origin_invoice_line_ids = set(
+            _ids(getattr(origin, "invoice_line_ids", []))
+        )
+        refund_invoice_line_ids = set(
+            _ids(getattr(refund, "invoice_line_ids", []))
+        )
+        origin_terms = [
+            line
+            for line in origin_lines
+            if line.id not in origin_invoice_line_ids
+        ]
+        refund_terms = [
+            line
+            for line in refund_lines
+            if line.id not in refund_invoice_line_ids
+        ]
+        if (
+            len(origin_terms) != 1
+            or len(refund_terms) != 1
+            or str(
+                getattr(origin_terms[0], "display_type", "") or ""
+            )
+            != "payment_term"
+            or str(
+                getattr(refund_terms[0], "display_type", "") or ""
+            )
+            != "payment_term"
+            or str(
+                getattr(
+                    origin_terms[0].account_id,
+                    "account_type",
+                    "",
+                )
+            )
+            != expected_account_type
+            or str(
+                getattr(
+                    refund_terms[0].account_id,
+                    "account_type",
+                    "",
+                )
+            )
+            != expected_account_type
+            or _record_id(origin_terms[0].account_id)
+            != _record_id(refund_terms[0].account_id)
+            or _record_id(
+                getattr(origin_terms[0], "currency_id", None)
+            )
+            != currency_id
+            or _record_id(
+                getattr(refund_terms[0], "currency_id", None)
+            )
+            != currency_id
+        ):
+            raise OdooWriteHandlerError(
+                "refund payment term account or currency lineage differs"
+            )
+        return refund_terms[0]
 
     def verify_refund(
         self,
@@ -2812,7 +5452,13 @@ class OdooWriteHandlers:
         trusted_before=None,
         *,
         require_origin_approval=True,
+        expected_document_binding: str | None = None,
+        expected_document_binding_v2: str | None = None,
     ):
+        if p["posting_mode"] != "draft":
+            raise OdooWriteHandlerError(
+                "refund creation is draft-only until post-commit partner rank effects are auditable"
+            )
         origin_moves = [
             record
             for model_name, record in records
@@ -2829,6 +5475,116 @@ class OdooWriteHandlers:
             )
         origin = origin_moves[0]
         refund = refund_moves[0]
+        self.assert_mail_thread_effects_absent(
+            refund,
+            company,
+            label="refund read-back",
+        )
+        company_currency_id = _record_id(
+            getattr(company, "currency_id", None)
+        )
+        if (
+            company_currency_id is None
+            or p["currency_id"] != company_currency_id
+            or getattr(company, "account_storno", None) is not False
+        ):
+            raise OdooWriteHandlerError(
+                "refund result is outside the company-currency non-storno scope"
+            )
+        origin_scope_lines = self.checked_move_lines(origin, company)
+        refund_scope_lines = self.checked_move_lines(refund, company)
+        if any(line.get("tax_ids") for line in p["lines"]) or any(
+            self.refund_line_has_tax_lineage(line)
+            for line in [*origin_scope_lines, *refund_scope_lines]
+        ):
+            raise OdooWriteHandlerError(
+                "refund tax lineage is outside the verified taxless scope"
+            )
+        origin_commercial_partner_id = _record_id(
+            getattr(origin, "commercial_partner_id", None)
+        )
+        refund_commercial_partner_id = _record_id(
+            getattr(refund, "commercial_partner_id", None)
+        )
+        origin_selected_commercial_partner_id = _record_id(
+            getattr(
+                getattr(origin, "partner_id", None),
+                "commercial_partner_id",
+                None,
+            )
+        )
+        refund_selected_commercial_partner_id = _record_id(
+            getattr(
+                getattr(refund, "partner_id", None),
+                "commercial_partner_id",
+                None,
+            )
+        )
+        if (
+            origin_commercial_partner_id is None
+            or origin_commercial_partner_id
+            != refund_commercial_partner_id
+            or origin_commercial_partner_id
+            != origin_selected_commercial_partner_id
+            or refund_commercial_partner_id
+            != refund_selected_commercial_partner_id
+        ):
+            raise OdooWriteHandlerError(
+                "refund commercial partner lineage differs"
+            )
+        for move, lines, expected_parent_state in (
+            (origin, origin_scope_lines, "posted"),
+            (refund, refund_scope_lines, "draft"),
+        ):
+            for line in lines:
+                if (
+                    _record_id(getattr(line, "move_id", None)) != move.id
+                    or _record_id(getattr(line, "company_id", None))
+                    != company.id
+                    or str(getattr(line, "parent_state", "") or "")
+                    != expected_parent_state
+                    or _record_id(getattr(line, "currency_id", None))
+                    != p["currency_id"]
+                    or _record_id(getattr(line, "partner_id", None))
+                    != origin_commercial_partner_id
+                    or getattr(line, "is_storno", None) is not False
+                ):
+                    raise OdooWriteHandlerError(
+                        "refund complete journal item identity differs"
+                    )
+                if self.refund_line_has_external_effects(line):
+                    raise OdooWriteHandlerError(
+                        "refund graph has accounting, sale, purchase, stock, "
+                        "analytic, attachment, or external line effects"
+                    )
+        self.assert_company_currency_taxless_document_amount_graph(
+            origin,
+            origin_scope_lines,
+            _ids(getattr(origin, "invoice_line_ids", [])),
+            self.assert_currency(
+                p["currency_id"],
+                company,
+                getattr(origin, "journal_id", None),
+            ),
+            company,
+            expected_move_type=str(getattr(origin, "move_type", "") or ""),
+        )
+        self.assert_company_currency_taxless_document_amount_graph(
+            refund,
+            refund_scope_lines,
+            _ids(getattr(refund, "invoice_line_ids", [])),
+            self.assert_currency(
+                p["currency_id"],
+                company,
+                getattr(refund, "journal_id", None),
+            ),
+            company,
+            expected_move_type=(
+                "out_refund"
+                if p["refund_type"] == "customer_credit_note"
+                else "in_refund"
+            ),
+        )
         expected_type = "out_refund" if p["refund_type"] == "customer_credit_note" else "in_refund"
         if refund.move_type != expected_type:
             raise OdooWriteHandlerError("read-back refund type differs")
@@ -2843,12 +5599,31 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError("read-back refund date differs")
         if str(getattr(refund, "odoo_cli_v3_reason", "") or "") != p["reason"]:
             raise OdooWriteHandlerError("read-back refund reason differs")
-        expected_binding = self.document_binding("refund", p)
+        expected_binding = (
+            expected_document_binding
+            or self.document_binding("refund", p)
+        )
+        expected_binding_v2 = (
+            expected_document_binding_v2
+            or self.document_binding_v2("refund", p)
+        )
         if (
             str(getattr(refund, "odoo_cli_v3_document_binding", "") or "")
             != expected_binding
         ):
             raise OdooWriteHandlerError("read-back refund binding differs")
+        if (
+            str(
+                getattr(
+                    refund, "odoo_cli_v3_document_binding_v2", ""
+                )
+                or ""
+            )
+            != expected_binding_v2
+        ):
+            raise OdooWriteHandlerError(
+                "read-back canonical refund binding differs"
+            )
         if (
             str(getattr(refund, "odoo_cli_v3_business_binding", "") or "")
             != self.business_binding("refund", p)
@@ -2868,9 +5643,33 @@ class OdooWriteHandlers:
         )
         currency = self.assert_currency(p["currency_id"], company, journal)
         self.assert_amount(abs(refund.amount_total), p["expected_total_amount"], currency, "refund total")
-        expected_state = "posted" if p["posting_mode"] == "post" else "draft"
-        if refund.state != expected_state:
+        if refund.state != "draft":
             raise OdooWriteHandlerError("read-back refund state differs")
+        if (
+            str(getattr(refund, "auto_post", "")) != "no"
+            or getattr(refund, "auto_post_until", None)
+            not in {False, None}
+            or getattr(refund, "is_manually_modified", None) is not False
+        ):
+            raise OdooWriteHandlerError(
+                "read-back refund auto-post or manual-modification state differs"
+            )
+        if (
+            getattr(refund, "name", None) not in {False, "/"}
+            or getattr(refund, "posted_before", None) is not False
+        ):
+            raise OdooWriteHandlerError(
+                "read-back draft refund is not pristine and recoverable"
+            )
+        self._assert_pristine_draft_document(
+            refund,
+            refund_scope_lines,
+            company,
+            expected_state="draft",
+            vendor=expected_type == "in_refund",
+            refund=True,
+            expected_origin_move_id=origin.id,
+        )
         if _record_id(getattr(refund, "partner_id", None)) != _record_id(
             getattr(origin, "partner_id", None)
         ):
@@ -2882,6 +5681,34 @@ class OdooWriteHandlers:
         if p["refund_mode"] == "partial":
             if len(invoice_lines) != len(p["lines"]):
                 raise OdooWriteHandlerError("partial refund line count differs")
+            origin_scope_by_id = {
+                line.id: line for line in origin_scope_lines
+            }
+            origin_invoice_line_ids = _ids(
+                getattr(origin, "invoice_line_ids", [])
+            )
+            if (
+                len(origin_scope_by_id) != len(origin_scope_lines)
+                or any(
+                    line_id not in origin_scope_by_id
+                    for line_id in origin_invoice_line_ids
+                )
+                or not partial_refund_origin_line_relation_is_exact(
+                    (
+                        partial_refund_line_from_odoo(
+                            origin_scope_by_id[line_id]
+                        )
+                        for line_id in origin_invoice_line_ids
+                    ),
+                    (
+                        partial_refund_line_from_odoo(line)
+                        for line in invoice_lines
+                    ),
+                )
+            ):
+                raise OdooWriteHandlerError(
+                    "read-back partial refund origin line relation is not exact"
+                )
             partner = self.check_partner(
                 _record_id(refund.partner_id), company
             )
@@ -2912,6 +5739,25 @@ class OdooWriteHandlers:
                     == _decimal(approved["quantity"], "quantity")
                     and _decimal(line.price_unit, "price_unit")
                     == _decimal(approved["price_unit"], "price_unit")
+                    and str(
+                        getattr(line, "display_type", "") or ""
+                    )
+                    == "product"
+                    and _record_id(
+                        getattr(line, "product_id", None)
+                    )
+                    is None
+                    and _record_id(
+                        getattr(line, "product_uom_id", None)
+                    )
+                    is None
+                    and _record_id(getattr(line, "parent_id", None))
+                    is None
+                    and _decimal(
+                        getattr(line, "discount", 0),
+                        "partial refund line discount",
+                    )
+                    == 0
                 ]
                 if len(matches) != 1:
                     raise OdooWriteHandlerError(
@@ -2931,6 +5777,48 @@ class OdooWriteHandlers:
                     currency,
                     "partial refund line total amount",
                 )
+                expected_line_amount = _decimal(
+                    preview["amount_total"],
+                    "partial refund line accounting amount",
+                )
+                expected_debit = (
+                    expected_line_amount
+                    if expected_type == "out_refund"
+                    else Decimal("0")
+                )
+                expected_credit = (
+                    expected_line_amount
+                    if expected_type == "in_refund"
+                    else Decimal("0")
+                )
+                expected_balance = (
+                    expected_line_amount
+                    if expected_type == "out_refund"
+                    else -expected_line_amount
+                )
+                for actual, expected, label in (
+                    (
+                        getattr(matched, "debit", None),
+                        expected_debit,
+                        "partial refund line debit",
+                    ),
+                    (
+                        getattr(matched, "credit", None),
+                        expected_credit,
+                        "partial refund line credit",
+                    ),
+                    (
+                        getattr(matched, "balance", None),
+                        expected_balance,
+                        "partial refund line balance",
+                    ),
+                    (
+                        getattr(matched, "amount_currency", None),
+                        expected_balance,
+                        "partial refund line amount_currency",
+                    ),
+                ):
+                    self.assert_amount(actual, expected, currency, label)
                 unused.remove(matched)
             if unused:
                 raise OdooWriteHandlerError(
@@ -2956,11 +5844,16 @@ class OdooWriteHandlers:
             )
         else:
             self.assert_linewise_reversal(origin, refund, company)
+            self.assert_full_refund_invoice_lineage(
+                origin,
+                refund,
+                company,
+            )
             if len(invoice_lines) != len(_ids(origin.invoice_line_ids)):
                 raise OdooWriteHandlerError(
                     "full refund invoice line graph differs from origin"
                 )
-        all_refund_lines = self.checked_move_lines(refund, company)
+        all_refund_lines = refund_scope_lines
         invoice_line_ids = {line.id for line in invoice_lines}
         tax_lines = [
             line
@@ -2968,22 +5861,71 @@ class OdooWriteHandlers:
             if line.id not in invoice_line_ids
             and _record_id(getattr(line, "tax_line_id", None)) is not None
         ]
-        term_lines = [
-            line
-            for line in all_refund_lines
-            if line.id not in invoice_line_ids and line not in tax_lines
-        ]
         expected_term_type = (
             "asset_receivable"
             if expected_type == "out_refund"
             else "liability_payable"
         )
-        if len(term_lines) != 1 or str(
-            getattr(term_lines[0].account_id, "account_type", "")
-        ) != expected_term_type:
-            raise OdooWriteHandlerError(
-                "read-back refund payment term account type or graph differs"
-            )
+        term_line = self.assert_refund_payment_term_lineage(
+            origin,
+            refund,
+            origin_scope_lines,
+            all_refund_lines,
+            currency_id=p["currency_id"],
+            expected_account_type=expected_term_type,
+        )
+        expected_term_amount = _decimal(
+            p["expected_total_amount"],
+            "refund payment term amount",
+        )
+        expected_term_debit = (
+            expected_term_amount
+            if expected_type == "in_refund"
+            else Decimal("0")
+        )
+        expected_term_credit = (
+            expected_term_amount
+            if expected_type == "out_refund"
+            else Decimal("0")
+        )
+        expected_term_balance = (
+            expected_term_amount
+            if expected_type == "in_refund"
+            else -expected_term_amount
+        )
+        for actual, expected, label in (
+            (
+                getattr(term_line, "debit", None),
+                expected_term_debit,
+                "refund payment term debit",
+            ),
+            (
+                getattr(term_line, "credit", None),
+                expected_term_credit,
+                "refund payment term credit",
+            ),
+            (
+                getattr(term_line, "balance", None),
+                expected_term_balance,
+                "refund payment term balance",
+            ),
+            (
+                getattr(term_line, "amount_currency", None),
+                expected_term_balance,
+                "refund payment term amount_currency",
+            ),
+            (
+                getattr(term_line, "amount_residual", None),
+                expected_term_balance,
+                "refund payment term residual",
+            ),
+            (
+                getattr(term_line, "amount_residual_currency", None),
+                expected_term_balance,
+                "refund payment term residual currency",
+            ),
+        ):
+            self.assert_amount(actual, expected, currency, label)
         if p["refund_mode"] == "partial":
             expected_tax_amounts: dict[int, Decimal] = {}
             for line_preview in financial_preview["lines"]:
@@ -3030,11 +5972,10 @@ class OdooWriteHandlers:
                     currency,
                     f"refund tax line {tax_id} amount",
                 )
-        term_line = term_lines[0]
         if (
             str(term_line.date_maturity) != p["refund_date"]
             or _record_id(getattr(term_line, "partner_id", None))
-            != _record_id(refund.partner_id)
+            != refund_commercial_partner_id
             or bool(getattr(term_line, "reconciled", False))
             or _record_id(getattr(term_line, "full_reconcile_id", None))
             is not None
@@ -3052,24 +5993,77 @@ class OdooWriteHandlers:
         )
         if str(getattr(refund, "payment_state", "not_paid")) != "not_paid":
             raise OdooWriteHandlerError("new refund payment state differs")
+        audit_message = None
         if require_origin_approval:
-            self.assert_refund_origin_approval(
+            audit_message = self.assert_refund_origin_approval(
                 origin, refund, company, trusted_before
+            )
+        audit_records = [
+            record
+            for model_name, record in records
+            if model_name == "mail.message"
+        ]
+        if require_origin_approval:
+            if (
+                len(audit_records) != 1
+                or audit_message is None
+                or audit_records[0].id != audit_message.id
+            ):
+                raise OdooWriteHandlerError(
+                    "refund result graph has no unique audit message"
+                )
+            allowed_models = {
+                "account.move",
+                "account.move.line",
+                "mail.message",
+            }
+        else:
+            if audit_records:
+                raise OdooWriteHandlerError(
+                    "refund eligibility graph unexpectedly contains an audit message"
+                )
+            allowed_models = {"account.move", "account.move.line"}
+        if any(model_name not in allowed_models for model_name, _record in records):
+            raise OdooWriteHandlerError(
+                "refund result graph contains an unsupported model"
             )
         self.assert_move_balanced(origin, company)
         self.assert_move_balanced(refund, company)
-        self.assert_exact_move_graph(records, [origin, refund], company)
+        self.assert_exact_move_graph(
+            [
+                (model_name, record)
+                for model_name, record in records
+                if model_name in {"account.move", "account.move.line"}
+            ],
+            [origin, refund],
+            company,
+        )
         checks = [
             "refund_type_matches", "origin_link_matches", "date_matches",
             "journal_matches", "currency_matches", "reason_matches",
-            "document_binding_matches", "business_binding_matches",
+            "document_binding_matches",
+            "document_binding_v2_matches",
+            "business_binding_matches",
             "payment_term_matches",
             "total_matches", "state_matches", "partial_lines_match",
-            "linewise_full_refund_exact", "unpaid_residual_matches",
+            "linewise_full_refund_exact",
+            "full_refund_lineage_references_match",
+            "company_currency_taxless_non_storno_scope",
+            "auto_post_and_manual_modification_absent",
+            "pristine_draft_external_effects_absent",
+            "payment_term_account_and_currency_lineage_match",
+            "unpaid_residual_matches",
             "move_balanced", "record_graph_exact",
         ]
+        if p["refund_mode"] == "partial":
+            checks.append("partial_origin_line_relation_exact")
         if require_origin_approval:
-            checks.append("origin_approval_matches")
+            checks.extend(
+                [
+                    "origin_approval_matches",
+                    "origin_reversal_audit_message_exact",
+                ]
+            )
         return checks
 
     @staticmethod
@@ -3237,6 +6231,10 @@ class OdooWriteHandlers:
         return binding
 
     def precheck_payment(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
+        raise OdooWriteHandlerError(
+            "payment registration is fail-closed until committed partner-rank "
+            "and target matched-payment effects are captured and verified exactly"
+        )
         partner = self.check_partner(p["partner_id"], company)
         journal = self.check_journal(p, company, {"bank", "cash", "credit"})
         currency = self.assert_currency(p["currency_id"], company, journal)
@@ -4983,6 +7981,16 @@ class OdooWriteHandlers:
         ]
 
     def precheck_reconciliation(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
+        if (
+            _decimal(p["tolerance_amount"], "tolerance_amount") != 0
+            or p["writeoff_account_id"] is not None
+            or p["writeoff_journal_id"] is not None
+            or p["writeoff_label"] is not None
+        ):
+            raise OdooWriteHandlerError(
+                "reconciliation write-off is fail-closed until its Odoo "
+                "result and recovery graphs are verified exactly"
+            )
         account = self.check_account(p["account_id"], company)
         if not getattr(account, "reconcile", False):
             raise OdooWriteHandlerError("account is not configured for reconciliation")
@@ -5127,6 +8135,16 @@ class OdooWriteHandlers:
         }
 
     def execute_reconciliation(self, p, company, checked):
+        if (
+            _decimal(p["tolerance_amount"], "tolerance_amount") != 0
+            or p["writeoff_account_id"] is not None
+            or p["writeoff_journal_id"] is not None
+            or p["writeoff_label"] is not None
+        ):
+            raise OdooWriteHandlerError(
+                "reconciliation write-off is fail-closed until its Odoo "
+                "result and recovery graphs are verified exactly"
+            )
         source_lines = [
             self.record("account.move.line", line_id, company, write=True)
             for line_id in p["line_ids"]
@@ -5313,6 +8331,10 @@ class OdooWriteHandlers:
                 "reconciliation created an unsupported cash-basis tax graph"
             )
         related_move_ids.update(move.id for move in caba_moves)
+        if related_move_ids:
+            raise OdooWriteHandlerError(
+                "reconciliation created an unsupported write-off move graph"
+            )
         related_moves = [
             self.record("account.move", move_id, company)
             for move_id in sorted(related_move_ids)
@@ -5361,16 +8383,12 @@ class OdooWriteHandlers:
                 model_name == "account.full.reconcile"
                 and record.id not in prior_full_ids
             )
-            or (
-                model_name == "account.move"
-                and record.id in related_move_ids
-            )
         }
         if prior_partial_ids or prior_full_ids:
             recovery = _recovery(
                 "manual_escalation",
                 _MANUAL_RECOVERY_METHODS[
-                    "undo_reconciliation_and_reverse_writeoff_v1"
+                    "undo_reconciliation_without_writeoff_v1"
                 ],
                 [
                     {"model": model_name, "record_id": record_id}
@@ -5380,7 +8398,7 @@ class OdooWriteHandlers:
         else:
             recovery = self.available_recovery(
                 "acct.reconciliation.apply.v1",
-                "undo_reconciliation_and_reverse_writeoff_v1",
+                "undo_reconciliation_without_writeoff_v1",
                 records,
                 action_keys=action_keys,
             )
@@ -6324,6 +9342,7 @@ class OdooWriteHandlers:
         *,
         adjustment: bool,
         raw_lock_dates: bool = True,
+        require_reversal_safe_accounts: bool = False,
     ) -> dict[str, Any]:
         if any(line.get("tax_ids") for line in p["lines"]):
             raise OdooWriteHandlerError(
@@ -6345,19 +9364,32 @@ class OdooWriteHandlers:
             ("account.journal", journal),
         ]
         for line in p["lines"]:
+            account = self.check_account(line["account_id"], company)
+            if require_reversal_safe_accounts:
+                self.assert_reversal_safe_account(
+                    account,
+                    label=(
+                        "period adjustment"
+                        if adjustment
+                        else "accrual"
+                    ),
+                )
             dependencies.append(
-                ("account.account", self.check_account(line["account_id"], company))
+                ("account.account", account)
             )
             if line["partner_id"] is not None:
                 dependencies.append(
                     ("res.partner", self.check_partner(line["partner_id"], company))
                 )
         self.create_model("account.move", company)
+        checks = [
+            "balanced", "date", "journal", "currency", "accounts",
+            "tax_graph_absent",
+        ]
+        if require_reversal_safe_accounts:
+            checks.append("reversal_safe_accounts")
         return {
-            "checks": [
-                "balanced", "date", "journal", "currency", "accounts",
-                "tax_graph_absent",
-            ],
+            "checks": checks,
             "before": [],
             "dependencies": self.snapshots(
                 self.unique_records(dependencies), company
@@ -6374,7 +9406,10 @@ class OdooWriteHandlers:
                 "accrual reversal_date must be future-dated for Odoo auto-post"
             )
         result = self.precheck_journal_entry(
-            p, company, adjustment=False
+            p,
+            company,
+            adjustment=False,
+            require_reversal_safe_accounts=True,
         )
         document_binding = self.document_binding("accrual", p)
         business_binding = self.business_binding("accrual", p)
@@ -6415,7 +9450,12 @@ class OdooWriteHandlers:
         return result
 
     def precheck_adjustment(self, p, company):
-        return self.precheck_journal_entry(p, company, adjustment=True)
+        return self.precheck_journal_entry(
+            p,
+            company,
+            adjustment=True,
+            require_reversal_safe_accounts=True,
+        )
 
     def precheck_journal_entry_create(
         self, p: dict[str, Any], company: Any
@@ -6602,6 +9642,20 @@ class OdooWriteHandlers:
         )
 
     @staticmethod
+    def document_binding_v2(
+        kind: str, parameters: Mapping[str, Any]
+    ) -> str:
+        if kind == "customer_invoice":
+            return customer_invoice_document_binding_v2(parameters)
+        if kind == "vendor_bill":
+            return vendor_bill_document_binding_v2(parameters)
+        if kind == "refund":
+            return refund_document_binding_v2(parameters)
+        raise OdooWriteHandlerError(
+            "unsupported canonical document binding kind"
+        )
+
+    @staticmethod
     def business_binding(kind: str, parameters: Mapping[str, Any]) -> str:
         if kind == "customer_invoice":
             return customer_invoice_business_binding(parameters)
@@ -6756,6 +9810,11 @@ class OdooWriteHandlers:
 
     def execute_journal_entry(self, p, company, *, accrual: bool):
         kind = "accrual" if accrual else "period_adjustment"
+        for line in p["lines"]:
+            self.assert_reversal_safe_account(
+                self.check_account(line["account_id"], company),
+                label=kind.replace("_", " "),
+            )
         values = {
             "move_type": "entry", "company_id": p["company_id"],
             "journal_id": p["journal_id"], "date": p["posting_date"],
@@ -6769,15 +9828,41 @@ class OdooWriteHandlers:
         if "period_end_date" in p:
             values["odoo_cli_v3_period_end_date"] = p["period_end_date"]
             values["odoo_cli_v3_reason"] = p["reason"]
-        move = self.create_model("account.move", company).create(values)
+        move = self.create_model(
+            "account.move",
+            company,
+            context={
+                "tracking_disable": True,
+                "mail_notrack": True,
+                "mail_create_nolog": True,
+                "skip_is_manually_modified": True,
+            },
+        ).create(values)
         self.require_created(move, "account.move", company)
         if p["posting_mode"] == "post":
-            move.action_post()
+            move.with_context(
+                tracking_disable=True,
+                mail_notrack=True,
+                mail_create_nolog=True,
+                skip_is_manually_modified=True,
+            ).action_post()
         records = self.move_records(move, company)
         if accrual and p["posting_mode"] == "post":
+            self.assert_mail_thread_effects_absent(
+                move,
+                company,
+                label="posted accrual before scheduled reversal",
+            )
             wizard = self.create_model(
                 "account.move.reversal", company,
-                context={"active_model": "account.move", "active_ids": [move.id]},
+                context={
+                    "active_model": "account.move",
+                    "active_ids": [move.id],
+                    "tracking_disable": True,
+                    "mail_create_nosubscribe": True,
+                    "mail_create_nolog": True,
+                    "mail_notrack": True,
+                },
             ).create({
                 "date": p["reversal_date"], "journal_id": p["journal_id"],
                 "reason": f"Scheduled reversal: {p['reference']}",
@@ -6785,7 +9870,12 @@ class OdooWriteHandlers:
             scheduled = self.record_from_action(
                 "account.move", wizard.reverse_moves(is_modify=False), company
             )
-            scheduled.write(
+            scheduled.with_context(
+                tracking_disable=True,
+                mail_notrack=True,
+                mail_create_nolog=True,
+                skip_is_manually_modified=True,
+            ).write(
                 {
                     "odoo_cli_v3_document_binding": self.document_binding(
                         "accrual_scheduled_reversal", p
@@ -6795,7 +9885,18 @@ class OdooWriteHandlers:
                     ),
                 }
             )
+            self.assert_mail_thread_effects_absent(
+                scheduled,
+                company,
+                label="created scheduled accrual reversal",
+            )
+            audit_message = self.assert_fresh_reversal_audit_message(
+                move,
+                scheduled,
+                company,
+            )
             records.extend(self.move_records(scheduled, company))
+            records.append(("mail.message", audit_message))
         records = self.unique_records(records)
         recovery = self.available_recovery(
             (
@@ -6965,15 +10066,49 @@ class OdooWriteHandlers:
             != expected_reversal_business_binding
         ):
             raise OdooWriteHandlerError("accrual business binding differs")
+        self.assert_mail_thread_effects_absent(
+            reversal,
+            company,
+            label="scheduled accrual reversal read-back",
+        )
+        audit_message = self.assert_fresh_reversal_audit_message(
+            origin,
+            reversal,
+            company,
+        )
+        audit_records = [
+            record
+            for model_name, record in records
+            if model_name == "mail.message"
+        ]
+        if (
+            len(audit_records) != 1
+            or audit_records[0].id != audit_message.id
+        ):
+            raise OdooWriteHandlerError(
+                "accrual result graph has no unique audit message"
+            )
         self.assert_linewise_reversal(origin, reversal, company)
         self.assert_move_balanced(reversal, company)
-        self.assert_exact_move_graph(records, [origin, reversal], company)
+        accounting_records = [
+            (model_name, record)
+            for model_name, record in records
+            if model_name in {"account.move", "account.move.line"}
+        ]
+        self.assert_exact_move_graph(
+            accounting_records,
+            [origin, reversal],
+            company,
+        )
+        if len(records) != len(accounting_records) + 1:
+            raise OdooWriteHandlerError("accrual result graph differs")
         return [
             *checks, "scheduled_reversal_exists",
             "scheduled_reversal_link_matches", "scheduled_reversal_date_matches",
             "scheduled_reversal_lines_exact", "scheduled_reversal_balanced",
             "document_bindings_match", "business_bindings_match",
-            "record_graph_exact",
+            "origin_audit_message_exact",
+            "scheduled_reversal_mail_thread_empty", "record_graph_exact",
         ]
 
     def verify_adjustment(self, p, company, records):
@@ -7035,6 +10170,10 @@ class OdooWriteHandlers:
         ]
 
     def precheck_deferred(self, p: dict[str, Any], company: Any) -> dict[str, Any]:
+        raise OdooWriteHandlerError(
+            "deferred generation is fail-closed until the source posting, "
+            "partner-rank, and complete generated schedule graph are verified exactly"
+        )
         source = self.record("account.move.line", p["source_move_line_id"], company, write=True)
         move = self.record("account.move", _record_id(source.move_id), company, write=True)
         expected_move_type = "in_invoice" if p["deferred_type"] == "expense" else "out_invoice"
@@ -7442,6 +10581,12 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "trusted recovery plan must be null for a normal move operation"
             )
+        if (
+            p.get("expected_document_binding_v2") is not None
+        ):
+            raise OdooWriteHandlerError(
+                "manual journal entry has no defined document binding V2"
+            )
         move = self.record("account.move", p["move_id"], company, write=True)
         line_ids = _ids(getattr(move, "line_ids", []))
         if not line_ids:
@@ -7502,6 +10647,10 @@ class OdooWriteHandlers:
             or not self._valid_sha_binding(
                 getattr(move, "odoo_cli_v3_business_binding", None)
             )
+            or getattr(
+                move, "odoo_cli_v3_document_binding_v2", None
+            )
+            not in {None, False, ""}
         ):
             raise OdooWriteHandlerError(
                 "manual journal entry immutable binding differs"
@@ -8103,6 +11252,7 @@ class OdooWriteHandlers:
         *,
         vendor: bool,
         expected_document_binding: str,
+        expected_document_binding_v2: str,
         expected_business_binding: str,
         allowed_posting_modes: tuple[str, ...] = ("draft",),
     ) -> tuple[list[tuple[str, Any]], dict[str, Any]]:
@@ -8115,11 +11265,19 @@ class OdooWriteHandlers:
         stored_document_binding = str(
             getattr(move, "odoo_cli_v3_document_binding", "") or ""
         )
+        stored_document_binding_v2 = str(
+            getattr(
+                move, "odoo_cli_v3_document_binding_v2", ""
+            )
+            or ""
+        )
         stored_business_binding = str(
             getattr(move, "odoo_cli_v3_business_binding", "") or ""
         )
         if (
             stored_document_binding != expected_document_binding
+            or stored_document_binding_v2
+            != expected_document_binding_v2
             or stored_business_binding != expected_business_binding
         ):
             raise OdooWriteHandlerError(
@@ -8140,8 +11298,8 @@ class OdooWriteHandlers:
         for posting_mode in allowed_posting_modes:
             candidate = {**parameters, "posting_mode": posting_mode}
             if (
-                self.document_binding(kind, candidate)
-                == stored_document_binding
+                self.document_binding_v2(kind, candidate)
+                == stored_document_binding_v2
                 and self.business_binding(kind, candidate)
                 == stored_business_binding
             ):
@@ -8161,6 +11319,7 @@ class OdooWriteHandlers:
         *,
         vendor: bool,
         expected_document_binding: str,
+        expected_document_binding_v2: str,
         expected_business_binding: str,
     ) -> list[tuple[str, Any]]:
         invoice_line_ids = _ids(getattr(refund, "invoice_line_ids", []))
@@ -8235,11 +11394,19 @@ class OdooWriteHandlers:
         stored_document_binding = str(
             getattr(refund, "odoo_cli_v3_document_binding", "") or ""
         )
+        stored_document_binding_v2 = str(
+            getattr(
+                refund, "odoo_cli_v3_document_binding_v2", ""
+            )
+            or ""
+        )
         stored_business_binding = str(
             getattr(refund, "odoo_cli_v3_business_binding", "") or ""
         )
         if (
             stored_document_binding != expected_document_binding
+            or stored_document_binding_v2
+            != expected_document_binding_v2
             or stored_business_binding != expected_business_binding
         ):
             raise OdooWriteHandlerError(
@@ -8248,8 +11415,8 @@ class OdooWriteHandlers:
         matches = [
             candidate
             for candidate in candidates
-            if self.document_binding("refund", candidate)
-            == stored_document_binding
+            if self.document_binding_v2("refund", candidate)
+            == stored_document_binding_v2
             and self.business_binding("refund", candidate)
             == stored_business_binding
         ]
@@ -8268,6 +11435,10 @@ class OdooWriteHandlers:
             company,
             refund_graph,
             require_origin_approval=False,
+            expected_document_binding=expected_document_binding,
+            expected_document_binding_v2=(
+                expected_document_binding_v2
+            ),
         )
         dependencies = self.check_document_lines(
             dependency_lines, company, vendor=vendor
@@ -8307,6 +11478,14 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "document posting move type is not fixed to its capability"
             )
+        if (
+            p["expected_payment_term_line_id"]
+            not in p["expected_line_ids"]
+        ):
+            raise OdooWriteHandlerError(
+                "document posting approved payment term line is outside "
+                "the complete line graph"
+            )
         move = self.record("account.move", p["move_id"], company, write=True)
         line_ids = _ids(getattr(move, "line_ids", []))
         if line_ids != p["expected_line_ids"]:
@@ -8334,6 +11513,9 @@ class OdooWriteHandlers:
                 vendor=vendor,
                 expected_document_binding=p[
                     "expected_document_binding"
+                ],
+                expected_document_binding_v2=p[
+                    "expected_document_binding_v2"
                 ],
                 expected_business_binding=p[
                     "expected_business_binding"
@@ -8459,9 +11641,35 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "document posting payment term graph differs"
             )
+        term_line = term_lines[0]
+        if (
+            term_line.id != p["expected_payment_term_line_id"]
+            or _record_id(getattr(term_line, "account_id", None))
+            != p["expected_payment_term_account_id"]
+            or str(getattr(term_line, "date_maturity", ""))
+            != p["expected_due_date"]
+        ):
+            raise OdooWriteHandlerError(
+                "document posting approved payment term line, account, "
+                "or due date differs"
+            )
+        term_account = self.check_account(
+            p["expected_payment_term_account_id"], company
+        )
+        if _record_id(term_account) != _record_id(term_line.account_id):
+            raise OdooWriteHandlerError(
+                "document posting approved payment term account differs"
+            )
         currency = self.assert_currency(
             p["expected_currency_id"], company, journal
         )
+        if (
+            _record_id(getattr(company, "currency_id", None))
+            != p["expected_currency_id"]
+        ):
+            raise OdooWriteHandlerError(
+                "document posting is fail-closed outside company currency"
+            )
         for field in (
             "amount_untaxed",
             "amount_tax",
@@ -8478,6 +11686,14 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "document posting target is not fully unpaid"
             )
+        self.assert_company_currency_taxless_document_amount_graph(
+            move,
+            lines,
+            invoice_line_ids,
+            currency,
+            company,
+            expected_move_type=expected_move_type,
+        )
         if self.search_records(
             "account.partial.reconcile",
             [("exchange_move_id", "=", move.id)],
@@ -8510,7 +11726,14 @@ class OdooWriteHandlers:
             *(("account.move.line", line) for line in lines),
         ]
         self.verify_document(
-            graph_parameters, company, move_records, vendor=vendor
+            graph_parameters,
+            company,
+            move_records,
+            vendor=vendor,
+            expected_document_binding=p["expected_document_binding"],
+            expected_document_binding_v2=p[
+                "expected_document_binding_v2"
+            ],
         )
         records = [*move_records, *partner_records]
         dependencies = self.unique_records(
@@ -8518,6 +11741,7 @@ class OdooWriteHandlers:
                 ("res.company", company),
                 ("account.journal", journal),
                 ("res.currency", currency),
+                ("account.account", term_account),
                 *line_dependencies,
             ]
         )
@@ -8537,6 +11761,8 @@ class OdooWriteHandlers:
                 "document_type_fixed_to_capability",
                 "complete_approved_line_graph",
                 "document_identity_amounts_and_bindings_match",
+                "company_currency_taxless_amount_graph_exact",
+                "payment_term_line_and_account_explicitly_bound",
                 "fully_unpaid_and_unreconciled",
                 "partner_and_commercial_partner_rank_zero_and_write_acl",
                 "line_partner_matching_and_deductibility_side_effects_absent",
@@ -8637,6 +11863,12 @@ class OdooWriteHandlers:
             *(("account.move.line", line_id) for line_id in p["expected_line_ids"]),
         }
         move = keyed.get(("account.move", p["move_id"]))
+        term_line = keyed.get(
+            (
+                "account.move.line",
+                p["expected_payment_term_line_id"],
+            )
+        )
         partner = keyed.get(("res.partner", p["expected_partner_id"]))
         commercial_partner_id = (
             _record_id(getattr(partner, "commercial_partner_id", None))
@@ -8654,6 +11886,7 @@ class OdooWriteHandlers:
         expected_keys.update(partner_keys)
         if (
             move is None
+            or term_line is None
             or partner is None
             or commercial_partner_id is None
             or len(keyed) != len(records)
@@ -8678,6 +11911,8 @@ class OdooWriteHandlers:
             != p["expected_journal_id"]
             or _record_id(getattr(move, "currency_id", None))
             != p["expected_currency_id"]
+            or _record_id(getattr(company, "currency_id", None))
+            != p["expected_currency_id"]
             or str(getattr(move, "invoice_date", ""))
             != p["expected_invoice_date"]
             or str(getattr(move, "date", ""))
@@ -8698,6 +11933,26 @@ class OdooWriteHandlers:
         ):
             raise OdooWriteHandlerError(
                 "posted document identity or binding differs"
+            )
+        term_before = before.get(
+            (
+                "account.move.line",
+                p["expected_payment_term_line_id"],
+            )
+        )
+        if (
+            not isinstance(term_before, Mapping)
+            or classic_read_many2one_id(term_before.get("account_id"))
+            != p["expected_payment_term_account_id"]
+            or _record_id(getattr(term_line, "account_id", None))
+            != p["expected_payment_term_account_id"]
+            or str(getattr(term_line, "display_type", "") or "")
+            != "payment_term"
+            or str(getattr(term_line, "date_maturity", ""))
+            != p["expected_due_date"]
+        ):
+            raise OdooWriteHandlerError(
+                "posted document payment term line or approved account differs"
             )
         move_before = before.get(("account.move", move.id))
         if (
@@ -8817,6 +12072,14 @@ class OdooWriteHandlers:
                 currency,
                 f"expected_{field}",
             )
+        self.assert_company_currency_taxless_document_amount_graph(
+            move,
+            [keyed[("account.move.line", line_id)] for line_id in p["expected_line_ids"]],
+            _ids(getattr(move, "invoice_line_ids", [])),
+            currency,
+            company,
+            expected_move_type=expected_move_type,
+        )
         self.assert_move_balanced(move, company)
         return [
             "existing_v3_document_posted_exactly",
@@ -8824,7 +12087,8 @@ class OdooWriteHandlers:
             "posted_before_set",
             "identity_amounts_dates_and_bindings_preserved",
             "business_and_tax_lines_unchanged",
-            "payment_term_graph_unchanged",
+            "company_currency_taxless_amount_graph_exact",
+            "payment_term_line_and_account_unchanged",
             "posting_delta_allowlist_matches",
             "partner_rank_side_effect_exact",
             "payment_reconciliation_and_external_effects_absent",
@@ -8867,29 +12131,42 @@ class OdooWriteHandlers:
             abs(move.amount_total), p["expected_total_amount"], currency,
             "reversal total",
         )
-        unsafe_move_fields = (
-            "statement_line_id", "statement_id", "asset_id",
-            "deferred_move_ids", "deferred_original_move_ids",
-            "tax_cash_basis_rec_id", "tax_cash_basis_origin_move_id",
-            "reversed_entry_id", "reversal_move_ids",
+        self.assert_reversal_safe_move(
+            move,
+            company,
+            label="reversal target",
+            expected_reversed_entry_id=None,
+            expected_reversal_move_ids=set(),
         )
-        if any(_ids(getattr(move, field, None)) for field in unsafe_move_fields):
-            raise OdooWriteHandlerError(
-                "reversal target has existing accounting dependencies"
-            )
+        account_dependencies: list[tuple[str, Any]] = []
+        line_references: list[str] = []
         for line in lines:
-            if (
-                bool(getattr(line, "reconciled", False))
-                or _record_id(getattr(line, "full_reconcile_id", None)) is not None
-                or _ids(getattr(line, "matched_debit_ids", []))
-                or _ids(getattr(line, "matched_credit_ids", []))
-                or _ids(getattr(line, "asset_ids", []))
-                or getattr(line, "deferred_start_date", None)
-                or getattr(line, "deferred_end_date", None)
-            ):
+            self.assert_reversal_safe_line(
+                line,
+                move,
+                company,
+                label="reversal target line",
+                allow_line_reference=True,
+            )
+            account_id = _record_id(getattr(line, "account_id", None))
+            if account_id is None:
                 raise OdooWriteHandlerError(
-                    "reversal target has existing accounting dependencies"
+                    "reversal target has an unbound account"
                 )
+            account = self.check_account(account_id, company)
+            self.assert_reversal_safe_account(
+                account, label="move reversal"
+            )
+            account_dependencies.append(("account.account", account))
+            line_reference = str(
+                getattr(line, "odoo_cli_v3_line_reference", "") or ""
+            )
+            if line_reference:
+                line_references.append(line_reference)
+        if len(line_references) != len(set(line_references)):
+            raise OdooWriteHandlerError(
+                "reversal target line references are not unique"
+            )
         if self.search_records(
             "account.partial.reconcile",
             [("exchange_move_id", "=", move.id)],
@@ -8904,36 +12181,80 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError(
                 "reversal target has existing exchange or CABA dependencies"
             )
-        has_taxes = any(
-            _ids(getattr(line, "tax_ids", []))
-            or _record_id(getattr(line, "tax_line_id", None)) is not None
-            for line in lines
-        )
         self.assert_open_date(
             company, p["reversal_date"], "reversal_date",
-            journal=journal, taxes=has_taxes,
+            journal=journal, taxes=False,
         )
         self.create_model("account.move.reversal", company)
         return {
             "checks": [
                 "target_posted_entry", "target_total", "journal_active_general",
                 "currency", "date", "dependency_graph_absent",
+                "reversal_safe_accounts", "account_dependencies_locked",
+                "plain_taxless_non_storno_line_graph",
                 "origin_graph_snapshotted",
             ],
             "before": self.snapshots(self.move_records(move, company), company),
+            "dependencies": self.snapshots(
+                self.unique_records(
+                    [
+                        ("res.company", company),
+                        ("account.journal", journal),
+                        ("res.currency", currency),
+                        *account_dependencies,
+                    ]
+                ),
+                company,
+            ),
         }
 
     def execute_reversal(self, p, company, checked):
         if p.get("posting_mode") != "post":
             raise OdooWriteHandlerError("posting_mode must be post for move reversal")
         origin = self.record("account.move", p["move_id"], company, write=True)
+        self.assert_reversal_safe_move(
+            origin,
+            company,
+            label="reversal target at execution",
+            expected_reversed_entry_id=None,
+            expected_reversal_move_ids=set(),
+        )
+        for line in self.checked_move_lines(origin, company, write=True):
+            self.assert_reversal_safe_line(
+                line,
+                origin,
+                company,
+                label="reversal target line at execution",
+                allow_line_reference=True,
+            )
+            account_id = _record_id(getattr(line, "account_id", None))
+            if account_id is None:
+                raise OdooWriteHandlerError(
+                    "reversal target has an unbound account"
+                )
+            self.assert_reversal_safe_account(
+                self.check_account(account_id, company),
+                label="move reversal",
+            )
         wizard = self.create_model(
             "account.move.reversal", company,
-            context={"active_model": "account.move", "active_ids": [p["move_id"]]},
+            context={
+                "active_model": "account.move",
+                "active_ids": [p["move_id"]],
+                "tracking_disable": True,
+                "mail_create_nosubscribe": True,
+                "mail_create_nolog": True,
+                "mail_notrack": True,
+            },
         ).create({"date": p["reversal_date"], "journal_id": p["journal_id"], "reason": p["reason"]})
         action = wizard.reverse_moves(is_modify=False)
         reversal = self.record_from_action("account.move", action, company, write=True)
-        reversal.write(
+        reversal.with_context(
+            tracking_disable=True,
+            mail_notrack=True,
+            mail_create_nolog=True,
+            skip_is_manually_modified=True,
+        ).write(
             {
                 "odoo_cli_v3_reason": p["reason"],
                 "odoo_cli_v3_document_binding": self.document_binding(
@@ -8942,10 +12263,75 @@ class OdooWriteHandlers:
             }
         )
         if reversal.state != "posted":
-            reversal.action_post()
+            reversal.with_context(
+                tracking_disable=True,
+                mail_notrack=True,
+                mail_create_nolog=True,
+                skip_is_manually_modified=True,
+            ).action_post()
         if reversal.state != "posted":
             raise OdooWriteHandlerError("reversal did not reach posted state")
-        records = [*self.move_records(origin, company), *self.move_records(reversal, company)]
+        self.assert_reversal_safe_move(
+            reversal,
+            company,
+            label="created reversal",
+            expected_reversed_entry_id=origin.id,
+            expected_reversal_move_ids=set(),
+        )
+        self.assert_mail_thread_effects_absent(
+            reversal,
+            company,
+            label="created reversal",
+        )
+        for line in self.checked_move_lines(reversal, company, write=True):
+            self.assert_reversal_safe_line(
+                line,
+                reversal,
+                company,
+                label="created reversal line",
+                allow_line_reference=False,
+            )
+            account_id = _record_id(getattr(line, "account_id", None))
+            if account_id is None:
+                raise OdooWriteHandlerError(
+                    "created reversal has an unbound account"
+                )
+            self.assert_reversal_safe_account(
+                self.check_account(account_id, company),
+                label="created move reversal",
+            )
+        self.assert_linewise_reversal(
+            origin,
+            reversal,
+            company,
+            include_plain_business_fields=True,
+        )
+        trusted_before: dict[tuple[str, int], dict[str, Any]] = {}
+        for item in checked.get("before", []):
+            if (
+                not isinstance(item, Mapping)
+                or not isinstance(item.get("model"), str)
+                or isinstance(item.get("record_id"), bool)
+                or not isinstance(item.get("record_id"), int)
+                or not isinstance(item.get("values"), dict)
+            ):
+                raise OdooWriteHandlerError(
+                    "approved reversal snapshots are invalid"
+                )
+            trusted_before[
+                (item["model"], item["record_id"])
+            ] = dict(item["values"])
+        audit_message = self.assert_approved_reversal_origin(
+            origin,
+            reversal,
+            company,
+            trusted_before,
+        )
+        records = [
+            *self.move_records(origin, company),
+            *self.move_records(reversal, company),
+            ("mail.message", audit_message),
+        ]
         records = self.unique_records(records)
         return records, self.available_recovery(
             "acct.move.reverse.v1",
@@ -8965,9 +12351,24 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError("approved reversal origin is missing")
         origin = origin_candidates[0]
         reversal = next(move for move in moves if move.id != origin.id)
-        self.assert_approved_reversal_origin(
-            origin, company, trusted_before
+        self.assert_mail_thread_effects_absent(
+            reversal,
+            company,
+            label="reversal read-back",
         )
+        audit_message = self.assert_approved_reversal_origin(
+            origin, reversal, company, trusted_before
+        )
+        audit_records = [
+            record for model, record in records if model == "mail.message"
+        ]
+        if (
+            len(audit_records) != 1
+            or audit_records[0].id != audit_message.id
+        ):
+            raise OdooWriteHandlerError(
+                "reversal result graph has no unique audit message"
+            )
         if (
             origin.state != "posted"
             or origin.move_type != "entry"
@@ -9003,15 +12404,56 @@ class OdooWriteHandlers:
             or getattr(reversal.journal_id, "active", True) is False
         ):
             raise OdooWriteHandlerError("reversal journal is not active and general")
-        self.assert_linewise_reversal(origin, reversal, company)
+        self.assert_reversal_safe_move(
+            reversal,
+            company,
+            label="reversal read-back",
+            expected_reversed_entry_id=origin.id,
+            expected_reversal_move_ids=set(),
+        )
+        self.assert_linewise_reversal(
+            origin,
+            reversal,
+            company,
+            include_plain_business_fields=True,
+        )
+        for move in (origin, reversal):
+            for line in self.checked_move_lines(move, company):
+                self.assert_reversal_safe_line(
+                    line,
+                    move,
+                    company,
+                    label="move reversal read-back line",
+                    allow_line_reference=move.id == origin.id,
+                )
+                account_id = _record_id(getattr(line, "account_id", None))
+                if account_id is None:
+                    raise OdooWriteHandlerError(
+                        "reversal read-back has an unbound account"
+                    )
+                self.assert_reversal_safe_account(
+                    self.check_account(account_id, company),
+                    label="move reversal read-back",
+                )
         self.assert_move_balanced(origin, company)
         self.assert_move_balanced(reversal, company)
-        self.assert_exact_move_graph(records, [origin, reversal], company)
+        accounting_records = [
+            (model, record)
+            for model, record in records
+            if model in {"account.move", "account.move.line"}
+        ]
+        self.assert_exact_move_graph(
+            accounting_records, [origin, reversal], company
+        )
+        if len(records) != len(accounting_records) + 1:
+            raise OdooWriteHandlerError("reversal result graph differs")
         return [
             "reversal_exists", "origin_link_matches", "date_matches",
             "journal_matches", "currency_matches", "reason_matches",
             "document_binding_matches", "total_matches", "state_matches",
             "origin_approval_matches", "linewise_reversal_exact",
+            "reversal_safe_accounts", "plain_taxless_non_storno_line_graph",
+            "reconciliation_graph_absent", "origin_audit_message_exact",
             "move_balanced", "record_graph_exact",
         ]
 
@@ -9062,6 +12504,7 @@ class OdooWriteHandlers:
         vendor: bool,
         refund: bool = False,
         expected_origin_move_id: int | None = None,
+        require_mail_thread_empty: bool = False,
     ) -> None:
         document_label = (
             ("vendor" if vendor else "customer") + " refund"
@@ -9088,6 +12531,12 @@ class OdooWriteHandlers:
         ):
             raise OdooWriteHandlerError(
                 f"recovery target is not a pristine V3 draft {document_label}"
+            )
+        if require_mail_thread_empty:
+            self.assert_mail_thread_effects_absent(
+                move,
+                company,
+                label=f"pristine V3 draft {document_label}",
             )
         journal = getattr(move, "journal_id", None)
         if (
@@ -9226,6 +12675,8 @@ class OdooWriteHandlers:
                 or str(getattr(line, "parent_state", "")) != expected_state
                 or bool(getattr(line, "reconciled", False))
                 or _record_id(getattr(line, "full_reconcile_id", None)) is not None
+                or getattr(line, "matching_number", False)
+                not in (False, None, "")
                 or _ids(getattr(line, "matched_debit_ids", []))
                 or _ids(getattr(line, "matched_credit_ids", []))
                 or _record_id(getattr(line, "statement_line_id", None)) is not None
@@ -9257,6 +12708,11 @@ class OdooWriteHandlers:
                 or getattr(line, "deferred_start_date", None) not in {None, False}
                 or getattr(line, "deferred_end_date", None) not in {None, False}
                 or str(getattr(line, "display_type", "")) == "cogs"
+                or _decimal(
+                    getattr(line, "deductible_amount", None),
+                    "recovery line deductible_amount",
+                )
+                != Decimal("100")
             ):
                 raise OdooWriteHandlerError(
                     "recovery line graph has reconciliation or external business effects"
@@ -9266,7 +12722,13 @@ class OdooWriteHandlers:
         self,
         parameters: Mapping[str, Any],
         company: Any,
-    ) -> tuple[Any, list[Any], list[tuple[str, Any]], bool]:
+    ) -> tuple[
+        Any,
+        list[Any],
+        list[tuple[str, Any]],
+        list[tuple[str, Any]],
+        bool,
+    ]:
         if self.context.trusted_recovery_plan is not None:
             raise OdooWriteHandlerError(
                 "trusted recovery plan must be null for draft cancellation"
@@ -9286,7 +12748,9 @@ class OdooWriteHandlers:
                 "draft cancellation requires a complete non-empty line graph"
             )
         lines = [
-            self.record("account.move.line", record_id, company)
+            self.record(
+                "account.move.line", record_id, company, write=True
+            )
             for record_id in line_ids
         ]
         self._assert_pristine_draft_document(
@@ -9296,20 +12760,37 @@ class OdooWriteHandlers:
             expected_state="draft",
             vendor=vendor,
         )
-        if (
-            str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
-            != parameters["expected_document_binding"]
-            or str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
-            != parameters["expected_business_binding"]
-        ):
-            raise OdooWriteHandlerError(
-                "draft cancellation immutable document binding differs"
+        line_dependencies, _graph_parameters = (
+            self._assert_create_document_bindings_from_graph(
+                move,
+                lines,
+                company,
+                vendor=vendor,
+                expected_document_binding=parameters[
+                    "expected_document_binding"
+                ],
+                expected_document_binding_v2=parameters[
+                    "expected_document_binding_v2"
+                ],
+                expected_business_binding=parameters[
+                    "expected_business_binding"
+                ],
             )
+        )
         records = [
             ("account.move", move),
             *(("account.move.line", line) for line in lines),
         ]
-        return move, lines, records, vendor
+        dependencies = self.unique_records(
+            [
+                ("res.company", company),
+                ("res.partner", move.partner_id),
+                ("account.journal", move.journal_id),
+                ("res.currency", move.currency_id),
+                *line_dependencies,
+            ]
+        )
+        return move, lines, records, dependencies, vendor
 
     def _execute_pristine_draft_cancel(
         self,
@@ -9355,7 +12836,9 @@ class OdooWriteHandlers:
     def precheck_draft_cancel(
         self, p: dict[str, Any], company: Any
     ) -> dict[str, Any]:
-        move, _lines, records, vendor = self._draft_cancel_graph(p, company)
+        _move, _lines, records, dependencies, vendor = (
+            self._draft_cancel_graph(p, company)
+        )
         return {
             "checks": [
                 "single_pristine_v3_draft_document",
@@ -9368,17 +12851,17 @@ class OdooWriteHandlers:
                 "no_payment_reconciliation_or_external_effects",
                 "fully_unpaid_residual_matches_total",
                 "complete_line_guard_graph",
-                "immutable_document_bindings_match",
+                "immutable_document_v1_v2_and_business_bindings_match",
                 "write_acl",
             ],
             "before": self.snapshots(records, company),
-            "dependencies": self.snapshots(
-                [("account.journal", move.journal_id)], company
-            ),
+            "dependencies": self.snapshots(dependencies, company),
         }
 
     def execute_draft_cancel(self, p, company, checked):
-        move, lines, records, vendor = self._draft_cancel_graph(p, company)
+        move, lines, records, _dependencies, vendor = (
+            self._draft_cancel_graph(p, company)
+        )
         return self._execute_pristine_draft_cancel(
             move,
             lines,
@@ -9421,12 +12904,27 @@ class OdooWriteHandlers:
             p["expected_move_type"] not in {"out_invoice", "in_invoice"}
             or str(getattr(move, "odoo_cli_v3_document_binding", "") or "")
             != p["expected_document_binding"]
+            or str(
+                getattr(move, "odoo_cli_v3_document_binding_v2", "") or ""
+            )
+            != p["expected_document_binding_v2"]
             or str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
             != p["expected_business_binding"]
         ):
             raise OdooWriteHandlerError(
                 "draft cancellation immutable document binding differs"
             )
+        self._assert_create_document_bindings_from_graph(
+            move,
+            lines,
+            company,
+            vendor=vendor,
+            expected_document_binding=p["expected_document_binding"],
+            expected_document_binding_v2=p[
+                "expected_document_binding_v2"
+            ],
+            expected_business_binding=p["expected_business_binding"],
+        )
         self._assert_recovery_exact_delta(
             move, lines, company, before, vendor=vendor
         )
@@ -9437,7 +12935,7 @@ class OdooWriteHandlers:
                 else "draft_customer_invoice_cancelled_exactly"
             ),
             "never_posted_evidence_preserved",
-            "document_and_business_bindings_preserved",
+            "document_v1_v2_and_business_bindings_preserved",
             "payment_reconciliation_and_external_links_absent",
             "unpaid_residual_and_payment_state_preserved",
             "line_guard_graph_matched_approved_allowed_delta",
@@ -9460,8 +12958,8 @@ class OdooWriteHandlers:
                 "write_acl",
             ]
         else:
-            move, lines, records, vendor = self._draft_cancel_graph(
-                p, company
+            move, lines, records, dependencies, vendor = (
+                self._draft_cancel_graph(p, company)
             )
             if _ids(move.line_ids) != sorted(p["expected_line_ids"]):
                 raise OdooWriteHandlerError(
@@ -9478,14 +12976,19 @@ class OdooWriteHandlers:
                 "no_payment_reconciliation_or_external_effects",
                 "fully_unpaid_residual_matches_total",
                 "complete_approved_line_guard_graph",
-                "immutable_document_bindings_match",
+                "immutable_document_v1_v2_and_business_bindings_match",
                 "write_acl",
             ]
         return {
             "checks": checks,
             "before": self.snapshots(records, company),
             "dependencies": self.snapshots(
-                [("account.journal", move.journal_id)], company
+                (
+                    [("account.journal", move.journal_id)]
+                    if p["expected_move_type"] == "entry"
+                    else dependencies
+                ),
+                company,
             ),
         }
 
@@ -9508,6 +13011,11 @@ class OdooWriteHandlers:
             != p["expected_document_binding"]
             or str(getattr(move, "odoo_cli_v3_business_binding", "") or "")
             != p["expected_business_binding"]
+            or p.get("expected_document_binding_v2") is not None
+            or getattr(
+                move, "odoo_cli_v3_document_binding_v2", None
+            )
+            not in {None, False, ""}
         ):
             raise OdooWriteHandlerError(
                 "cancelled manual journal entry graph or binding differs"
@@ -9563,8 +13071,8 @@ class OdooWriteHandlers:
 
     def execute_draft_cancel_v2(self, p, company, checked):
         if p["expected_move_type"] != "entry":
-            move, lines, records, vendor = self._draft_cancel_graph(
-                p, company
+            move, lines, records, _dependencies, vendor = (
+                self._draft_cancel_graph(p, company)
             )
             if _ids(move.line_ids) != sorted(p["expected_line_ids"]):
                 raise OdooWriteHandlerError(
@@ -9685,6 +13193,10 @@ class OdooWriteHandlers:
             )
         if not self._valid_sha_binding(
             getattr(origin, "odoo_cli_v3_document_binding", None)
+        ) or not self._valid_sha_binding(
+            getattr(
+                origin, "odoo_cli_v3_document_binding_v2", None
+            )
         ) or not self._valid_sha_binding(
             getattr(origin, "odoo_cli_v3_business_binding", None)
         ):
@@ -9926,6 +13438,9 @@ class OdooWriteHandlers:
                 expected_document_binding=p[
                     "expected_origin_document_binding"
                 ],
+                expected_document_binding_v2=p[
+                    "expected_origin_document_binding_v2"
+                ],
                 expected_business_binding=p[
                     "expected_origin_business_binding"
                 ],
@@ -9939,6 +13454,9 @@ class OdooWriteHandlers:
             company,
             vendor=vendor,
             expected_document_binding=p["expected_document_binding"],
+            expected_document_binding_v2=p[
+                "expected_document_binding_v2"
+            ],
             expected_business_binding=p["expected_business_binding"],
         )
         partner = self.check_partner(p["expected_partner_id"], company)
@@ -10492,6 +14010,10 @@ class OdooWriteHandlers:
                             or approved.get("expected_outcome")
                             != "survive_exact"
                         ),
+                        shared=(
+                            approved["model"]
+                            in _SHARED_SNAPSHOT_MODELS
+                        ),
                     )
                 reference = self.recovery_reference(
                     approved["model"],
@@ -10539,6 +14061,9 @@ class OdooWriteHandlers:
                         or approved.get("expected_outcome")
                         != "survive_exact"
                     ),
+                    shared=(
+                        approved["model"] in _SHARED_SNAPSHOT_MODELS
+                    ),
                 )
                 target = actions if role == "action" else guards
                 target.append((approved["model"], record))
@@ -10577,7 +14102,7 @@ class OdooWriteHandlers:
             ).items()
             if outcome == "absent"
         }
-        if method == "undo_reconciliation_and_reverse_writeoff_v1":
+        if method == "undo_reconciliation_without_writeoff_v1":
             tombstones.update(
                 (target["model"], target["record_id"])
                 for target in plan["action_targets"]
@@ -10608,11 +14133,7 @@ class OdooWriteHandlers:
                 "reverse_the_reversal_v1",
             }
             or (
-                method
-                in {
-                    "cancel_scheduled_and_reverse_accrual_origin_v1",
-                    "undo_reconciliation_and_reverse_writeoff_v1",
-                }
+                method == "cancel_scheduled_and_reverse_accrual_origin_v1"
                 and any(
                     target["model"] == "account.move"
                     for target in plan["action_targets"]
@@ -12234,6 +15755,19 @@ class OdooWriteHandlers:
             raise OdooWriteHandlerError("recovery plan origin differs")
         if plan["plan_digest"] != p["expected_recovery_plan_digest"]:
             raise OdooWriteHandlerError("recovery plan digest differs")
+        if (
+            plan["method"] == _RECONCILIATION_UNDO_METHOD
+            and any(
+                target.get("model") == "account.move"
+                for target in plan["action_targets"]
+                if isinstance(target, Mapping)
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "reconciliation write-off recovery is fail-closed; the "
+                "no-writeoff contract rejects account.move actions before "
+                "ORM access"
+            )
         self._validate_recovery_execution_guard(
             p,
             plan,
@@ -12311,6 +15845,11 @@ class OdooWriteHandlers:
             self._validate_recovery_execution_guard(
                 p, plan, company, current_references
             )
+            if plan["method"] in FAIL_CLOSED_RECOVERY_METHODS:
+                raise OdooWriteHandlerError(
+                    "trusted recovery method is fail-closed until Odoo reversal "
+                    "chatter and automatic reconciliation effects are captured exactly"
+                )
             self._precheck_recovery_create_acl(plan, company)
             checks = [
                 "receipt_derived_available_v2_plan",
@@ -12336,6 +15875,24 @@ class OdooWriteHandlers:
         plan = self.context.trusted_recovery_plan
         if not isinstance(plan, Mapping):
             raise OdooWriteHandlerError("trusted recovery plan is unavailable")
+        if plan["method"] in FAIL_CLOSED_RECOVERY_METHODS:
+            raise OdooWriteHandlerError(
+                "trusted recovery method is fail-closed until Odoo reversal "
+                "chatter and automatic reconciliation effects are captured exactly"
+            )
+        if (
+            plan["method"] == _RECONCILIATION_UNDO_METHOD
+            and any(
+                target.get("model") == "account.move"
+                for target in plan["action_targets"]
+                if isinstance(target, Mapping)
+            )
+        ):
+            raise OdooWriteHandlerError(
+                "reconciliation write-off recovery is fail-closed; the "
+                "no-writeoff contract rejects account.move actions before "
+                "ORM access"
+            )
         if plan["method"] in {
             DRAFT_CUSTOMER_INVOICE_RECOVERY_METHOD,
             DRAFT_VENDOR_BILL_RECOVERY_METHOD,
@@ -12461,6 +16018,32 @@ class OdooWriteHandlers:
                 bank_boundary[0],
                 bank_boundary[1],
                 result_records,
+            )
+        before = self.trusted_before_values(
+            {"before": checked.get("before")},
+            company,
+        )
+        inline_verification = self.verify_recovery(
+            p,
+            company,
+            result_records,
+            before,
+        )
+        if (
+            isinstance(inline_verification, tuple)
+            and len(inline_verification) == 2
+        ):
+            inline_checks, inline_tombstones = inline_verification
+        else:
+            inline_checks = inline_verification
+            inline_tombstones = frozenset()
+        if (
+            not isinstance(inline_checks, list)
+            or not inline_checks
+            or set(inline_tombstones) != set(result.tombstones)
+        ):
+            raise OdooWriteHandlerError(
+                "recovery inline exact verification differs from execution"
             )
         return (
             result_records,

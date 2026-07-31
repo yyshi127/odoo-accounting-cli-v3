@@ -105,7 +105,7 @@ _ALLOWED_MODELS = {
         {"account.move", "account.move.line", "res.partner"}
     ),
     "acct.refund.create.v1": frozenset(
-        {"account.move", "account.move.line"}
+        {"account.move", "account.move.line", "mail.message"}
     ),
     "acct.refund.draft_cancel.v1": frozenset(
         {"account.move", "account.move.line"}
@@ -161,7 +161,7 @@ _ALLOWED_MODELS = {
         {"account.asset", "account.move", "account.move.line"}
     ),
     "acct.accrual.create.v1": frozenset(
-        {"account.move", "account.move.line"}
+        {"account.move", "account.move.line", "mail.message"}
     ),
     "acct.deferred.create.v1": frozenset({"account.move", "account.move.line"}),
     "acct.period.adjustment_create.v1": frozenset(
@@ -174,7 +174,7 @@ _ALLOWED_MODELS = {
         {"account.move", "account.move.line"}
     ),
     "acct.move.reverse.v1": frozenset(
-        {"account.move", "account.move.line"}
+        {"account.move", "account.move.line", "mail.message"}
     ),
     "acct.move.draft_cancel.v1": frozenset(
         {"account.move", "account.move.line"}
@@ -192,6 +192,7 @@ _ALLOWED_MODELS = {
             "account.move.line",
             "account.partial.reconcile",
             "account.payment",
+            "mail.message",
         }
     ),
 }
@@ -360,7 +361,7 @@ def _index_company_bound_fresh_snapshots(
                 "fresh verification snapshot identity or company is invalid"
             )
         if (
-            key[0] != "account.full.reconcile"
+            key[0] not in {"account.full.reconcile", "mail.message"}
             and not _snapshot_company_bound(
                 values,
                 company_id,
@@ -373,6 +374,22 @@ def _index_company_bound_fresh_snapshots(
         fresh_by_key[key] = snapshot
         values_by_key[key] = values
     for key, values in values_by_key.items():
+        if key[0] == "mail.message":
+            res_id = values.get("res_id")
+            if (
+                values.get("model") != "account.move"
+                or type(res_id) is not int
+                or res_id <= 0
+                or not _snapshot_company_bound(
+                    values_by_key.get(("account.move", res_id), {}),
+                    company_id,
+                )
+            ):
+                raise WriteServiceError(
+                    "fresh mail.message snapshot is not bound to a "
+                    "company move graph"
+                )
+            continue
         if key[0] != "account.full.reconcile":
             continue
         for field_name, model_name in (
@@ -1109,6 +1126,24 @@ class DurableWriteService:
         ) -> bool:
             if key[0] == "res.partner":
                 return posting_partner_bound(key, values, phase_values)
+            if key[0] == "mail.message":
+                res_id = values.get("res_id")
+                return (
+                    operation.capability_id
+                    in {
+                        "acct.accrual.create.v1",
+                        "acct.move.reverse.v1",
+                        "acct.refund.create.v1",
+                        "acct.recovery.execute.v1",
+                    }
+                    and values.get("model") == "account.move"
+                    and type(res_id) is int
+                    and res_id > 0
+                    and _snapshot_company_bound(
+                        phase_values.get(("account.move", res_id), {}),
+                        operation.company_id,
+                    )
+                )
             if key[0] != "account.full.reconcile":
                 return _snapshot_company_bound(
                     values, operation.company_id
@@ -2278,9 +2313,9 @@ class DurableWriteService:
             or plan["recovery_capability_id"]
             != "acct.recovery.execute.v1"
             or plan["method"]
-            != "undo_reconciliation_and_reverse_writeoff_v1"
+            != "undo_reconciliation_without_writeoff_v1"
             or plan["oracle_id"]
-            != "undo_reconciliation_and_reverse_writeoff_exact_v1"
+            != "undo_reconciliation_without_writeoff_exact_v1"
             or contract.origin_capability_id != origin.capability_id
             or plan["requires_approval"] is not True
             or not isinstance(expected_plan_digest, str)

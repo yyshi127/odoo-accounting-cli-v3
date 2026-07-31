@@ -5,6 +5,10 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Mapping
 
+from .document_bindings import (
+    customer_invoice_document_binding_v2,
+    vendor_bill_document_binding_v2,
+)
 from .operations import canonical_json
 
 

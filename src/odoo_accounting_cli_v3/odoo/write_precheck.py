@@ -9,10 +9,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib
 import json
 import re
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Mapping, Protocol, TypeVar
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Iterable,
+    Mapping,
+    Protocol,
+    TypeVar,
+)
 
 from ..auth import authentication_request_digest, verify_request_context
 from ..contracts import validate_value
@@ -60,6 +69,28 @@ def run_rollback_only_precheck(root_env: Any, callback: Callable[[], _T]) -> _T:
         return completed.value
 
 
+def _default_metadata_execution_scope() -> ContextManager[None]:
+    """Load the private addon scope only inside an initialized Odoo registry."""
+
+    try:
+        module = importlib.import_module(METADATA_SCOPE_MODULE)
+        factory = getattr(module, "_accounting_metadata_execution_scope")
+    except (AttributeError, ImportError) as exc:
+        raise OdooWritePrecheckError(
+            "trusted accounting metadata scope is unavailable"
+        ) from exc
+    if not callable(factory):
+        raise OdooWritePrecheckError(
+            "trusted accounting metadata scope is unavailable"
+        )
+    scope = factory()
+    if not hasattr(scope, "__enter__") or not hasattr(scope, "__exit__"):
+        raise OdooWritePrecheckError(
+            "trusted accounting metadata scope is invalid"
+        )
+    return scope
+
+
 class WritePrecheckHandler(Protocol):
     def precheck(
         self, capability_id: str, parameters: dict[str, Any]
@@ -72,6 +103,9 @@ REQUEST_FIELDS = frozenset(
 CHANNELS = frozenset({"staged", "enabled"})
 ENVIRONMENTS = frozenset({"test", "sandbox", "production"})
 EXECUTOR_GROUP = "odoo_accounting_cli_v3_control.group_executor"
+METADATA_SCOPE_MODULE = (
+    "odoo.addons.odoo_accounting_cli_v3_control.models.execution_scope"
+)
 SHA256 = re.compile(r"[0-9a-f]{64}")
 HANDLER_CORE_FIELDS = frozenset(
     {"capability_id", "company_id", "parameters_digest", "checks"}
@@ -86,9 +120,9 @@ TRUSTED_PLAN_CAPABILITIES = frozenset(
         "acct.bank.statement_compensate.v1",
     }
 )
-RECONCILIATION_UNDO_METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
+RECONCILIATION_UNDO_METHOD = "undo_reconciliation_without_writeoff_v1"
 RECONCILIATION_UNDO_ORACLE = (
-    "undo_reconciliation_and_reverse_writeoff_exact_v1"
+    "undo_reconciliation_without_writeoff_exact_v1"
 )
 BANK_STATEMENT_COMPENSATE_METHOD = "post_compensating_bank_statement_v1"
 BANK_STATEMENT_COMPENSATE_ORACLE = (
@@ -389,6 +423,9 @@ def execute_write_precheck_from_odoo_shell(
     now: datetime | None = None,
     environment_factory: Callable[[Any, int, dict[str, Any]], Any] | None = None,
     handler_factory: Callable[..., WritePrecheckHandler] | None = None,
+    metadata_execution_scope_factory: (
+        Callable[[], ContextManager[Any]] | None
+    ) = None,
 ) -> dict[str, Any]:
     """Run one authenticated, policy-bound, read-only Odoo write precheck."""
 
@@ -491,21 +528,27 @@ def execute_write_precheck_from_odoo_shell(
             handler = handler_factory(
                 bound_env, context, observed_at, trusted_recovery_plan
             )
-        return run_rollback_only_precheck(
-            root_env,
-            lambda: canonical_precheck_evidence(
-                handler.precheck(capability_id, parameters),
-                capability_id=capability_id,
-                company_id=context.company_id,
-                parameters=parameters,
-                context=context,
-                actual_database_name=actual_database_name,
-                actual_database_uuid=actual_database_uuid,
-                capability_channel=capability_channel,
-                registry_sha256=actual_registry_sha256,
-                release_digest=release_sha256,
-            ),
+        metadata_scope_factory = (
+            metadata_execution_scope_factory
+            or _default_metadata_execution_scope
         )
+
+        def scoped_precheck() -> dict[str, Any]:
+            with metadata_scope_factory():
+                return canonical_precheck_evidence(
+                    handler.precheck(capability_id, parameters),
+                    capability_id=capability_id,
+                    company_id=context.company_id,
+                    parameters=parameters,
+                    context=context,
+                    actual_database_name=actual_database_name,
+                    actual_database_uuid=actual_database_uuid,
+                    capability_channel=capability_channel,
+                    registry_sha256=actual_registry_sha256,
+                    release_digest=release_sha256,
+                )
+
+        return run_rollback_only_precheck(root_env, scoped_precheck)
     except OdooWritePrecheckError:
         raise
     except Exception as exc:

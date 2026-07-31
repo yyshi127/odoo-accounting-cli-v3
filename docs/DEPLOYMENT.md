@@ -609,7 +609,25 @@ publication contract, not permission to replace it with ad hoc extraction.
    `odoo_addons/` directory to that sandbox process's add-ons path and install
    `odoo_accounting_cli_v3_control` from it. Do not copy the add-on into V2, Pi
    Bridge, a development directory, or a shared production add-ons tree. A
-   production Odoo configuration change requires separate authorization.
+   production Odoo configuration change requires separate authorization. If
+   the module is already installed, upgrade it from the same candidate release
+   and verify the database field
+   `account_move.odoo_cli_v3_document_binding_v2` and the candidate module
+   version before switching any CLI runtime. A manifest bump alone does not
+   upgrade the Odoo database; activating Dev260 first would fail safely on an
+   unknown field but would make the affected routes unavailable.
+
+   Dev260 also requires the candidate add-on's private
+   `_odoo_cli_v3_mail_thread_projection` implementation and its process-local
+   execution-scope guard. The exact CLI and add-on must be upgraded together:
+   an inactive scope, an ordinary RPC attempt, sudo, a different company, a
+   missing private method, or an incompatible projection schema fails closed.
+   Raw message, notification, and mail-queue details are handler-internal;
+   deployment logs and retained precheck evidence must contain only the
+   aggregate projection digest. Before any write staging, exercise the
+   500-record boundary and a concurrent external-chatter insert on the pinned
+   sandbox module graph and retain proof that the transaction refuses drift
+   without reporting success.
 
 Dev257's control add-on uses the same company-and-journal advisory-lock digest
 as the V3 bank-statement executor. It acquires that transaction lock before
@@ -1187,17 +1205,22 @@ receipts from a real Odoo 19 sandbox.
 
 `acct.move.draft_cancel.v1` is one of those closed capabilities: its registry
 `enabled_environments` is empty and these deployment instructions do not stage
-it. Its `expected_document_binding` and `expected_business_binding` must come
-from a trusted, ACL- and company-scoped read of the exact V3-created
+it. Its `expected_document_binding`, `expected_document_binding_v2`, and
+`expected_business_binding` must come from a trusted, ACL- and company-scoped
+read of the exact V3-created
 `account.move` fields `odoo_cli_v3_document_binding` and
-`odoo_cli_v3_business_binding`; Pi and users must not invent, recompute, or
-copy them from an untrusted business message. Before this write can be staged,
+`odoo_cli_v3_document_binding_v2` and `odoo_cli_v3_business_binding`; Pi and
+users must not invent, recompute, or copy them from an untrusted business
+message. Before this write can be staged,
 `acct.move.draft_cancel_eligibility.v1` must return the exact company, move ID,
-move type, both immutable bindings, and pristine-draft eligibility in a signed
-Odoo receipt. The candidate-read contract is registered for test staging only;
-its strict-schema, ACL, cross-company, and parameter-transit tests are retained.
-No real-sandbox Odoo eligibility receipt or automation-safety receipt exists
-yet, so draft cancellation remains disabled.
+move type, all three immutable bindings, and pristine-draft eligibility in a
+signed Odoo receipt. Legacy invoice/bill drafts without V2 fail closed and
+require a separately designed provenance migration; the runtime must not
+backfill V2 from the current graph. The candidate-read contract is registered
+for test staging only; its strict-schema, ACL, cross-company, and
+parameter-transit tests are retained. No real-sandbox Odoo eligibility receipt
+or automation-safety receipt exists yet, so draft cancellation remains
+disabled.
 
 The Dev259 document-lifecycle contracts add two eligibility reads and three
 writes. These arrows describe the required Pi/deployment workflow, not a
@@ -1212,7 +1235,7 @@ The reads are `contract_tested` and staged only for `test`; the writes are
 `declared`, unstaged, and disabled. None has a retained real-Odoo receipt.
 Before any selected write can enter sandbox planning, retain the exact signed
 eligibility response under the same release, registry, user, company, database,
-move IDs, line IDs, dates, amounts, and document/business bindings. Posting
+move IDs, line IDs, dates, amounts, and V1/V2/business bindings. Posting
 must verify the exact resulting posted graph. Refund cancellation must verify
 the cancelled refund plus an unchanged unique posted origin; it must never
 delete the refund. The write schemas do not currently carry an eligibility
@@ -1227,28 +1250,29 @@ postcommit graph. This bounded handling of the observed Odoo 19 side effect is
 not generally production-applicable to existing-ranked partners or unreviewed
 module extensions.
 
-The Dev259 eligibility oracle further returns `eligible:true` only for a
-complete productless, taxless, undiscounted financial graph with one
-receivable/payable maturity line. Taxed, product, discounted, and complex
-payment-term documents fail closed. Do not promote this bounded slice as full
-invoice, bill, or refund coverage.
+The document-post eligibility oracle and write handler return or proceed only
+for a complete company-currency, product-line, taxless, undiscounted financial
+graph with one receivable/payable maturity line. The eligibility result carries
+the exact Odoo-created payment-term line ID and account ID; approval snapshots
+lock both, and verification rejects any replacement, including a different
+account of the same type. Foreign-currency, taxed, non-product-line, discounted, and
+complex payment-term documents fail closed. Do not promote this bounded slice
+as full invoice, bill, or refund coverage.
 
-The eligibility check reconstructs a normalized graph and requires both hashes
-to match. For the refund origin, exactly one double-hash candidate must match:
-creation recorded `posting_mode:"post"`, or creation recorded
-`posting_mode:"draft"` while the current document is now posted. The draft
-candidate proves only the binding stored at creation. It does not record which
-later caller or entry point invoked `action_post`, and must not be cited as
-proof that the controlled posting capability performed the transition.
+Dev260 keeps the original V1 approved-source digest and adds
+`odoo_cli_v3_document_binding_v2`. New invoice, bill, and refund creates write
+V1, V2, and the business binding in one transaction. V2 normalizes decimal
+trailing zeros, tax-ID order, and line order while retaining the remaining
+approved document identity. Eligibility matches the current graph against V2
+plus the business binding; it does not reinterpret or overwrite V1.
 
-The current create-to-eligibility reconstruction may also reject an
-economically equivalent document because Odoo does not retain lexical decimal
-spelling such as `100` versus `100.00`, tax-ID order is normalized, and invoice
-lines are stably reordered by `line_reference`. The original create-v1 paths
-did not enforce one matching canonical representation for all three cases.
-Treat these as safe false negatives. A future versioned canonical
-binding/provenance migration, not a compatibility guess, is required before
-admitting affected records.
+The addon upgrade creates the V2 column and constraints but deliberately does
+not backfill old records. Upgrade it in a dedicated sandbox before any routing
+change. A V1-only record remains ineligible with an explicit provenance
+migration failure. This release has no migration write; do not update V2 by
+SQL, Odoo shell, or current-graph inference. For a refund origin, the matching
+draft/post V2 candidate still proves only the creation-time binding, not which
+later caller invoked `action_post`.
 
 The installed-module graph proves only that the module name/version set stayed
 stable; it is not a semantic override allowlist. Before staging or enabling any

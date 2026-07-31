@@ -22,10 +22,12 @@ where practical, then record actual execution evidence separately.
   `acct.multicurrency.balance_read.v1`,
   `acct.move.draft_cancel_eligibility.v1`,
   `acct.report.financial_read.v1`, `acct.tax.report_read.v1`,
-  `acct.multicompany.consolidated_read.v1`, and
-  `acct.diagnostics.operation_read.v1` are the ten trusted, statically
+  `acct.multicompany.consolidated_read.v1`,
+  `acct.move.document_post_eligibility.v1`,
+  `acct.refund.draft_cancel_eligibility.v1`, and
+  `acct.diagnostics.operation_read.v1` are the twelve trusted, statically
   admissible read-handler targets staged for the isolated `test` environment.
-  The first nine use the constrained Odoo read boundary; diagnostics uses only
+  The first eleven use the constrained Odoo read boundary; diagnostics uses only
   the trusted local write store.
 - The financial and tax report reads are fixed to posted entries,
   `all_report_eligible` journals, no requested line expansion, and the bound
@@ -33,12 +35,14 @@ where practical, then record actual execution evidence separately.
   PostgreSQL read-only transaction. Both remain `contract_tested` and
   `test`-staged only; neither is production-enabled.
 - No capability is enabled and no write capability is staged.
-- The current registry contains 20 write capabilities: the original 14-capability
+- The current registry contains 23 write capabilities: the original 14-capability
   baseline plus `acct.journal.entry_create.v1`, `acct.move.post.v1`, and
   `acct.move.draft_cancel.v2`, plus the narrowly scoped
   `acct.payment.cancel.v1` and the receipt-bound
   `acct.reconciliation.undo.v1` and
-  `acct.bank.statement_compensate.v1`. All six additions remain
+  `acct.bank.statement_compensate.v1`, plus
+  `acct.invoice.customer_post.v1`, `acct.bill.vendor_post.v1`, and
+  `acct.refund.draft_cancel.v1`. All nine additions remain
   `declared`, have no retained evidence receipts, and are neither staged nor
   enabled. `tests/test_phaseb_move_write_capability_closure.py` is an offline
   schema, semantics, idempotency, signed-failure, tamper, and dispatch test; it
@@ -62,7 +66,7 @@ where practical, then record actual execution evidence separately.
   swapped. Delete, subset/partial, reconciled, bank-matched, externally changed,
   or binding-mismatched origins fail closed. Current production-routed imports
   do not contain the required facade/available-plan provenance, so they are
-  ineligible. The `19.0.0.7.0` control add-on and V3 executor share one
+  ineligible. The `19.0.0.7.1` control add-on and V3 executor share one
   company-and-journal sequence lock for supported statement, line, linked
   move/journal-item, and reconciliation ORM mutations. Generic recovery obtains
   its graph and sequence locks in one sorted set before row locks. Execution
@@ -75,14 +79,20 @@ where practical, then record actual execution evidence separately.
   cases; Pi Bridge passed 141 tests with two Linux-only skips. No real
   two-connection Odoo concurrency test or sandbox write was performed, and the
   capability remains unstaged and disabled.
-- The three Phase B handlers currently scope `tracking_disable` to their Odoo
-  create/write/post call so uncontrolled mail-thread records cannot escape the
-  exact accounting graph. The signed V3 operation anchor and receipts are the
-  intended audit authority, but this is not yet promotion evidence. Before any
-  staging, real Odoo must prove the complete user/company/request/approval/move
-  trace (including `create_uid`, `write_uid`, `write_date`, immutable bindings,
-  control anchor, and signed receipts), and either explicitly accept suppressed
-  chatter or replace it with an exact verified mail tracking graph.
+- Dev260 keeps `tracking_disable` scoped to the controlled mutation and adds a
+  private, process-scoped projection of the bound move's messages,
+  notifications, and outgoing-mail queue. Normal RPC, sudo callers, inactive
+  execution scopes, and cross-company records are rejected before its narrow
+  privileged reads. Precheck evidence persists only an aggregate digest, not
+  hidden message counts, IDs, relation IDs, or text hashes. Refund, reversal,
+  and accrual paths allow exactly one standard Odoo audit log with the bound
+  create/write user and timestamps and reject any other graph delta. The raw
+  projection remains bounded at 500 records per graph class, 500 IDs per
+  relation, and 2,000 total relation edges; overflow fails closed without
+  truncation. These are source and fake-ORM controls, not promotion evidence.
+  Before staging, real Odoo must prove the complete
+  user/company/request/approval/move trace, exact audit-log behavior, module
+  boundary, and concurrent external-chatter behavior.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -357,8 +367,8 @@ requests across all enabled domains.
 
 ### Frozen F01-F05 scoring contract
 
-`tests/fixtures/pi_scenarios.v1.json` is the revision-6 frozen Chinese key
-scenario corpus. Its 38 scenarios cover every one of the 30 registered
+`tests/fixtures/pi_scenarios.v1.json` is the revision-11 frozen Chinese key
+scenario corpus. Its 43 scenarios cover every one of the 35 registered
 capabilities and the
 ordinary, ambiguous, adversarial, multi-company, multi-currency, and recovery
 classes. Environment-specific Odoo record IDs are named fixture bindings, so a
@@ -368,10 +378,11 @@ the frozen expectations.
 One scenario selects `acct.move.draft_cancel_eligibility.v1` to read the exact
 draft-cancel target, move type, line graph, and immutable bindings before any
 write. Two scenarios select `acct.move.draft_cancel.v1`, one for a customer
-draft invoice and one for a vendor draft bill. Each preserves all seven strict
+draft invoice and one for a vendor draft bill. Each preserves all eight strict
 input parameters through CLI input and preview and binds that same parameter
-digest to approval. Their document and business bindings model values returned
-by a trusted candidate read, never free-form values invented by Pi or the user.
+digest to approval. Their document V1, canonical document V2, and business
+bindings model values returned by a trusted candidate read, never free-form
+values invented by Pi or the user.
 
 The `acct.payment.cancel.v1` scenario is declared/offline only. It preserves
 all 17 strict parameters for one explicitly bound, unreconciled
@@ -440,8 +451,8 @@ release routing; substituting the raw outer registry-document SHA-256 is
 rejected.
 Missing scenarios remain in every applicable denominator and fail trace
 coverage. F01 passes only when the exact integer ratio is at least 95%; F02,
-F03, F04, and F05 require 100%. F03 covers only the 31 actually executed
-scenarios. F04 covers the 18 executed writes and requires one immutable
+F03, F04, and F05 require 100%. F03 covers only the 36 actually executed
+scenarios. F04 covers the 21 executed writes and requires one immutable
 operation/parameter/complete-preview approval binding, recomputable operation,
 precheck and preview digests, a requester distinct from the approver, and
 approval/execution inside the trace and approval validity windows. F05 requires every
@@ -490,7 +501,7 @@ The repository does not yet contain a complete trusted live producer for the
 v3 scenario-capture schema. The hardened `/chat` path does have a separate FD4
 stream generated from verified Broker calls and refuses any final JSON not
 supported by exactly one committed event. That terminal-answer control is not
-the full tool/event trace required for the 38-scenario gate. A production
+the full tool/event trace required for the 43-scenario gate. A production
 scenario producer must retain the complete trusted journal, wait for its
 defined terminal boundary and clean child exit, and correlate normalized events
 with Broker dispatch, independent approval, and Odoo receipts. It must never
@@ -643,8 +654,9 @@ At the current local development checkpoint:
   write/recovery receipt was produced; and
 - the normal approved `acct.move.draft_cancel.v1` path is separately registered
   but remains disabled and unstaged. Its expected document and business
-  bindings must be read from the exact V3-created `account.move` fields under
-  trusted user/company/ACL and signed Odoo receipt identity.
+  bindings, including canonical document V2, must be read from the exact
+  V3-created `account.move` fields under trusted user/company/ACL and signed
+  Odoo receipt identity. A legacy invoice or bill without V2 fails closed.
   `acct.move.draft_cancel_eligibility.v1` is now registered for test staging
   and covers strict schema, ACL, cross-company rejection, signed receipt, and Pi
   transit at the contract/fake-Odoo level. Before write staging it must still

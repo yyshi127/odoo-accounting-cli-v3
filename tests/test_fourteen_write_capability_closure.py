@@ -24,6 +24,7 @@ from odoo_accounting_cli_v3.draft_invoice_recovery import (
     DRAFT_VENDOR_BILL_RECOVERY_METHOD,
 )
 from odoo_accounting_cli_v3.odoo.recovery_actions import (
+    FAIL_CLOSED_RECOVERY_METHODS,
     RECOVERY_ACTION_METHODS,
     execute_recovery_action,
 )
@@ -115,7 +116,7 @@ CAPABILITY_MATRIX = (
     (
         "acct.reconciliation.apply.v1",
         "reconciliation",
-        ("undo_reconciliation_and_reverse_writeoff_v1",),
+        ("undo_reconciliation_without_writeoff_v1",),
     ),
     (
         "acct.asset.create.v1",
@@ -202,7 +203,7 @@ VALID_PARAMETERS = {
         "due_date": "2026-08-15",
         "currency_id": 12,
         "journal_id": 5,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "reference": "INV-1",
         "lines": [INVOICE_LINE],
         "idempotency_key": "idem-invoice",
@@ -215,7 +216,7 @@ VALID_PARAMETERS = {
         "due_date": "2026-08-15",
         "currency_id": 12,
         "journal_id": 6,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "vendor_reference": "BILL-1",
         "lines": [INVOICE_LINE],
         "idempotency_key": "idem-bill",
@@ -230,7 +231,7 @@ VALID_PARAMETERS = {
         "currency_id": 12,
         "expected_total_amount": "100.00",
         "reason": "Approved refund",
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "lines": [],
         "idempotency_key": "idem-refund",
     },
@@ -366,6 +367,7 @@ VALID_PARAMETERS = {
         "move_id": 1002,
         "expected_move_type": "out_invoice",
         "expected_document_binding": "c" * 64,
+        "expected_document_binding_v2": "e" * 64,
         "expected_business_binding": "d" * 64,
         "reason": "Cancel pristine draft",
         "idempotency_key": "idem-draft-cancel",
@@ -681,7 +683,7 @@ def test_twelve_origins_have_sixteen_paths_and_two_terminals_have_none(
         assert actual
 
 
-def test_every_recovery_contract_has_an_action_and_fresh_verifier_registration() -> None:
+def test_every_recovery_contract_remains_registered_but_blocked_actions_are_not_allowlisted() -> None:
     contract_methods = frozenset(RECOVERY_ACTION_CONTRACTS)
     specialized_draft_methods = frozenset(
         {
@@ -695,7 +697,9 @@ def test_every_recovery_contract_has_an_action_and_fresh_verifier_registration()
         len(contracts_for_capability(capability_id))
         for capability_id in CAPABILITY_IDS
     ) == 16
-    assert _RECOVERY_ACTIONS == contract_methods
+    assert _RECOVERY_ACTIONS == (
+        contract_methods - FAIL_CLOSED_RECOVERY_METHODS
+    )
     assert (
         RECOVERY_ACTION_METHODS | specialized_draft_methods
         == contract_methods

@@ -476,7 +476,7 @@ def test_historical_v1_and_nonavailable_v2_plans_are_not_executable():
         "reverse_posted_vendor_bill_v1",
         "cancel_and_unreconcile_payment_v1",
         "post_compensating_bank_statement_v1",
-        "undo_reconciliation_and_reverse_writeoff_v1",
+        "undo_reconciliation_without_writeoff_v1",
         "cancel_asset_and_reverse_schedule_v1",
         "reverse_depreciation_and_restore_schedule_v1",
         "cancel_scheduled_and_reverse_accrual_origin_v1",

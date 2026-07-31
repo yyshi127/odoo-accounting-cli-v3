@@ -73,6 +73,20 @@ _RECOVERY_BINDING_VERSION = 2
 _RECONCILIATION_UNDO_BINDING_EVENT_PREFIX = "reconciliation-undo-binding:"
 _RECONCILIATION_UNDO_BINDING_EVENT_TYPE = "reconciliation.undo.binding.created"
 _RECONCILIATION_UNDO_BINDING_VERSION = 1
+_CURRENT_RECONCILIATION_UNDO_PAIR = (
+    "undo_reconciliation_without_writeoff_v1",
+    "undo_reconciliation_without_writeoff_exact_v1",
+)
+_LEGACY_RECONCILIATION_UNDO_PAIR = (
+    "undo_reconciliation_and_reverse_writeoff_v1",
+    "undo_reconciliation_and_reverse_writeoff_exact_v1",
+)
+_READABLE_RECONCILIATION_UNDO_PAIRS = frozenset(
+    {
+        _CURRENT_RECONCILIATION_UNDO_PAIR,
+        _LEGACY_RECONCILIATION_UNDO_PAIR,
+    }
+)
 _BANK_STATEMENT_COMPENSATION_BINDING_EVENT_PREFIX = (
     "bank-statement-compensation-binding:"
 )
@@ -5290,10 +5304,8 @@ class SQLitePersistence:
             or plan["origin_operation_id"] != origin.operation_id
             or plan["recovery_capability_id"]
             != "acct.recovery.execute.v1"
-            or plan["method"]
-            != "undo_reconciliation_and_reverse_writeoff_v1"
-            or plan["oracle_id"]
-            != "undo_reconciliation_and_reverse_writeoff_exact_v1"
+            or (plan["method"], plan["oracle_id"])
+            not in _READABLE_RECONCILIATION_UNDO_PAIRS
             or plan["requires_approval"] is not True
             or not hmac.compare_digest(
                 plan["plan_digest"], expected_plan_digest

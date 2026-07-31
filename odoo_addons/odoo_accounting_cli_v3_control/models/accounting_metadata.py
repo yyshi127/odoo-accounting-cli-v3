@@ -12,6 +12,7 @@ _ACCOUNT_MOVE_METADATA_FIELDS = frozenset(
         "odoo_cli_v3_reason",
         "odoo_cli_v3_period_end_date",
         "odoo_cli_v3_document_binding",
+        "odoo_cli_v3_document_binding_v2",
         "odoo_cli_v3_business_binding",
     }
 )
@@ -65,6 +66,9 @@ class AccountMove(models.Model):
     odoo_cli_v3_document_binding = fields.Char(
         copy=False, index=True, readonly=True, size=64
     )
+    odoo_cli_v3_document_binding_v2 = fields.Char(
+        copy=False, index=True, readonly=True, size=64
+    )
     odoo_cli_v3_business_binding = fields.Char(
         copy=False, index=True, readonly=True, size=64
     )
@@ -72,6 +76,10 @@ class AccountMove(models.Model):
     _odoo_cli_v3_document_binding_unique = models.Constraint(
         "UNIQUE(company_id, move_type, odoo_cli_v3_document_binding)",
         "The V3 accounting document identity already exists in this company.",
+    )
+    _odoo_cli_v3_document_binding_v2_unique = models.Constraint(
+        "UNIQUE(company_id, move_type, odoo_cli_v3_document_binding_v2)",
+        "The V3 accounting document V2 identity already exists in this company.",
     )
     _odoo_cli_v3_business_binding_unique = models.Constraint(
         "UNIQUE(company_id, move_type, odoo_cli_v3_business_binding)",
@@ -85,6 +93,15 @@ class AccountMove(models.Model):
             if digest and _SHA256.fullmatch(digest) is None:
                 raise ValidationError(
                     "document binding must be lowercase SHA-256"
+                )
+
+    @api.constrains("odoo_cli_v3_document_binding_v2")
+    def _check_odoo_cli_v3_document_binding_v2(self):
+        for move in self:
+            digest = move.odoo_cli_v3_document_binding_v2
+            if digest and _SHA256.fullmatch(digest) is None:
+                raise ValidationError(
+                    "document binding V2 must be lowercase SHA-256"
                 )
 
     @api.constrains("odoo_cli_v3_business_binding")

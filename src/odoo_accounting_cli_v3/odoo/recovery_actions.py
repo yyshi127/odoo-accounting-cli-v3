@@ -71,6 +71,15 @@ _GENERIC_REVERSALS: Mapping[str, tuple[str, ...]] = {
     "reverse_posted_period_adjustment_v1": ("entry",),
     "reverse_the_reversal_v1": ("entry",),
 }
+FAIL_CLOSED_RECOVERY_METHODS = frozenset(
+    {
+        *_GENERIC_REVERSALS,
+        "cancel_asset_and_reverse_schedule_v1",
+        "reverse_depreciation_and_restore_schedule_v1",
+        "cancel_scheduled_and_reverse_accrual_origin_v1",
+        "reverse_deferred_source_and_schedule_v1",
+    }
+)
 _DRAFT_CANCELLATIONS: Mapping[str, tuple[str, ...]] = {
     "cancel_draft_refund_v1": ("out_refund", "in_refund"),
     "cancel_draft_period_adjustment_v1": ("entry",),
@@ -82,7 +91,7 @@ RECOVERY_ACTION_METHODS = frozenset(
         *_DRAFT_CANCELLATIONS,
         "cancel_and_unreconcile_payment_v1",
         "post_compensating_bank_statement_v1",
-        "undo_reconciliation_and_reverse_writeoff_v1",
+        "undo_reconciliation_without_writeoff_v1",
         "cancel_asset_and_reverse_schedule_v1",
         "reverse_depreciation_and_restore_schedule_v1",
         "cancel_scheduled_and_reverse_accrual_origin_v1",
@@ -331,6 +340,11 @@ class RecoveryActionExecutor:
             raise RecoveryActionError(
                 "recovery method is not executable by this action adapter"
             )
+        if method in FAIL_CLOSED_RECOVERY_METHODS:
+            raise RecoveryActionError(
+                "recovery method is fail-closed pending an exact Odoo "
+                "mutation and recovery evidence graph"
+            )
         contract = RECOVERY_ACTION_CONTRACTS.get(method)
         if contract is None:
             raise RecoveryActionError("recovery action contract is unavailable")
@@ -390,7 +404,7 @@ class RecoveryActionExecutor:
             result = self._execute_bank(
                 company, actions, guards, recovery_date, reason
             )
-        elif method == "undo_reconciliation_and_reverse_writeoff_v1":
+        elif method == "undo_reconciliation_without_writeoff_v1":
             result = self._execute_reconciliation(
                 company,
                 actions,
@@ -822,6 +836,10 @@ class RecoveryActionExecutor:
             raise RecoveryActionError(
                 "reverse-the-reversal target is not a reversal"
             )
+        raise RecoveryActionError(
+            "recovery method is fail-closed until Odoo reversal chatter "
+            "and automatic reconciliation effects are captured exactly"
+        )
         reversal = self._reverse_move(
             origin, company, recovery_date, reason
         )
@@ -1147,7 +1165,6 @@ class RecoveryActionExecutor:
             not in {
                 "account.partial.reconcile",
                 "account.full.reconcile",
-                "account.move",
             }
             for model, _record in actions
         ) or not any(
@@ -1179,39 +1196,15 @@ class RecoveryActionExecutor:
                     "reconciliation endpoint guard graph is incomplete"
                 )
             endpoint_lines[line_id] = line
-        writeoff_moves = [
-            record for model, record in actions if model == "account.move"
-        ]
-        writeoff_move_ids = {
-            _record_id(move) for move in writeoff_moves
-        }
-        if any(
-            str(getattr(move, "state", "")) != "posted"
-            or str(getattr(move, "move_type", "")) != "entry"
-            for move in writeoff_moves
-        ):
-            raise RecoveryActionError(
-                "reconciliation write-off move is invalid"
-            )
         endpoint_move_ids = {
             _record_id(getattr(line, "move_id", None))
             for line in endpoint_lines.values()
         }
-        if (
-            None in endpoint_move_ids
-            or None in writeoff_move_ids
-            or len(writeoff_move_ids) > 1
-            or not writeoff_move_ids.issubset(endpoint_move_ids)
-        ):
+        if None in endpoint_move_ids:
             raise RecoveryActionError(
-                "reconciliation write-off move graph is ambiguous"
+                "reconciliation source parent move graph is ambiguous"
             )
-        source_lines = [
-            line
-            for line in endpoint_lines.values()
-            if _record_id(getattr(line, "move_id", None))
-            not in writeoff_move_ids
-        ]
+        source_lines = list(endpoint_lines.values())
         if not source_lines:
             raise RecoveryActionError(
                 "reconciliation action identifies no source lines"
@@ -1240,12 +1233,6 @@ class RecoveryActionExecutor:
             )
         for line in sorted(source_lines, key=lambda item: _record_id(item) or 0):
             _public_method(line, "remove_move_reconcile")()
-        reversals = [
-            self._reverse_move(
-                move, company, recovery_date, reason
-            )
-            for move in writeoff_moves
-        ]
         survivors = self._surviving_records(
             (*actions, *guards), must_be_absent=tombstones
         )
@@ -1262,7 +1249,7 @@ class RecoveryActionExecutor:
             (
                 *survivors,
                 *self._move_graph(
-                    (*source_moves, *writeoff_moves, *reversals),
+                    source_moves,
                     company,
                 ),
             )
@@ -1274,21 +1261,9 @@ class RecoveryActionExecutor:
                 "source_lines_unreconciled_exactly",
                 "approved_reconcile_tombstones_absent",
                 "approved_surviving_reconcile_guards_retained",
-                (
-                    "writeoff_reversed_publicly"
-                    if writeoff_moves
-                    else "writeoff_not_applicable"
-                ),
-                (
-                    "recovery_date_applied"
-                    if writeoff_moves
-                    else "recovery_parameters_validated"
-                ),
-                (
-                    "recovery_reason_persisted"
-                    if writeoff_moves
-                    else "recovery_receipt_binding_required"
-                ),
+                "writeoff_absent_by_contract",
+                "recovery_parameters_validated",
+                "recovery_receipt_binding_required",
             ),
         )
 
@@ -1609,6 +1584,10 @@ class RecoveryActionExecutor:
             raise RecoveryActionError(
                 "deferred schedule guard graph is incomplete"
             )
+        raise RecoveryActionError(
+            "recovery method is fail-closed until Odoo reversal chatter "
+            "and automatic reconciliation effects are captured exactly"
+        )
         reversal = self._reverse_move(
             source, company, recovery_date, reason
         )

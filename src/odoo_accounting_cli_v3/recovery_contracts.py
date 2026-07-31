@@ -20,7 +20,9 @@ _CAPABILITY_ID = re.compile(
     r"acct\.[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*\.v[1-9][0-9]*"
 )
 _ACTION_NAME = re.compile(r"[a-z][a-z0-9_]*_v[1-9][0-9]*")
-_ACCOUNT_MODEL = re.compile(r"account\.[a-z][a-z0-9_.]*")
+_RECOVERY_MODEL = re.compile(
+    r"(?:account\.[a-z][a-z0-9_.]*|mail\.message)"
+)
 _EXECUTABLE_GUARD_OUTCOMES = frozenset(
     {"survive_exact", "survive_allowed_delta", "absent"}
 )
@@ -52,12 +54,12 @@ def _validate_model_set(value: object, field: str) -> None:
         type(value) is not frozenset
         or not value
         or any(
-            not _matches(_ACCOUNT_MODEL, model)
+            not _matches(_RECOVERY_MODEL, model)
             for model in value
         )
     ):
         raise RecoveryContractError(
-            f"{field} must be a non-empty frozen set of account.* models"
+            f"{field} must be a non-empty frozen set of supported recovery models"
         )
 
 
@@ -179,8 +181,8 @@ _CONTRACTS = (
         "cancel_draft_refund_v1",
         "cancel_draft_refund_exact_v1",
         action_models=("account.move",),
-        guard_models=("account.move", "account.move.line"),
-        result_models=("account.move", "account.move.line"),
+        guard_models=("account.move", "account.move.line", "mail.message"),
+        result_models=("account.move", "account.move.line", "mail.message"),
         allowed_guard_outcomes=("survive_exact", "survive_allowed_delta"),
     ),
     _contract(
@@ -188,8 +190,8 @@ _CONTRACTS = (
         "reverse_posted_refund_v1",
         "reverse_posted_refund_exact_v1",
         action_models=("account.move",),
-        guard_models=("account.move", "account.move.line"),
-        result_models=("account.move", "account.move.line"),
+        guard_models=("account.move", "account.move.line", "mail.message"),
+        result_models=("account.move", "account.move.line", "mail.message"),
         allowed_guard_outcomes=("survive_exact",),
     ),
     _contract(
@@ -240,10 +242,9 @@ _CONTRACTS = (
     ),
     _contract(
         "acct.reconciliation.apply.v1",
-        "undo_reconciliation_and_reverse_writeoff_v1",
-        "undo_reconciliation_and_reverse_writeoff_exact_v1",
+        "undo_reconciliation_without_writeoff_v1",
+        "undo_reconciliation_without_writeoff_exact_v1",
         action_models=(
-            "account.move",
             "account.partial.reconcile",
             "account.full.reconcile",
         ),

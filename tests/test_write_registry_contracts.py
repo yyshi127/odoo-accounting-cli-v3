@@ -154,13 +154,14 @@ EXPECTED_INPUT_FIELDS = {
     },
     "acct.move.draft_cancel.v1": {
         "company_id", "move_id", "expected_move_type",
-        "expected_document_binding", "expected_business_binding", "reason",
-        "idempotency_key",
+        "expected_document_binding", "expected_document_binding_v2",
+        "expected_business_binding", "reason", "idempotency_key",
     },
     "acct.move.draft_cancel.v2": {
         "company_id", "move_id", "expected_move_type",
-        "expected_document_binding", "expected_business_binding",
-        "expected_line_ids", "reason", "idempotency_key",
+        "expected_document_binding", "expected_document_binding_v2",
+        "expected_business_binding", "expected_line_ids", "reason",
+        "idempotency_key",
     },
     "acct.recovery.execute.v1": {
         "company_id", "origin_operation_id", "expected_recovery_plan_digest",
@@ -168,8 +169,11 @@ EXPECTED_INPUT_FIELDS = {
     },
     "acct.invoice.customer_post.v1": {
         "company_id", "move_id", "expected_move_type",
-        "expected_document_binding", "expected_business_binding",
+        "expected_document_binding", "expected_document_binding_v2",
+        "expected_business_binding",
         "expected_partner_id", "expected_journal_id", "expected_currency_id",
+        "expected_payment_term_line_id",
+        "expected_payment_term_account_id",
         "expected_invoice_date", "expected_accounting_date",
         "expected_due_date", "expected_reference",
         "expected_amount_untaxed", "expected_amount_tax",
@@ -178,8 +182,11 @@ EXPECTED_INPUT_FIELDS = {
     },
     "acct.bill.vendor_post.v1": {
         "company_id", "move_id", "expected_move_type",
-        "expected_document_binding", "expected_business_binding",
+        "expected_document_binding", "expected_document_binding_v2",
+        "expected_business_binding",
         "expected_partner_id", "expected_journal_id", "expected_currency_id",
+        "expected_payment_term_line_id",
+        "expected_payment_term_account_id",
         "expected_invoice_date", "expected_accounting_date",
         "expected_due_date", "expected_reference",
         "expected_amount_untaxed", "expected_amount_tax",
@@ -189,7 +196,9 @@ EXPECTED_INPUT_FIELDS = {
     "acct.refund.draft_cancel.v1": {
         "company_id", "move_id", "expected_move_type",
         "expected_origin_move_id", "expected_document_binding",
-        "expected_business_binding", "expected_origin_document_binding",
+        "expected_document_binding_v2", "expected_business_binding",
+        "expected_origin_document_binding",
+        "expected_origin_document_binding_v2",
         "expected_origin_business_binding", "expected_partner_id",
         "expected_journal_id", "expected_currency_id",
         "expected_refund_date", "expected_total_amount",
@@ -306,7 +315,7 @@ def _refund_line():
     return {
         "line_reference": "refund-line-1", "name": "Refund consulting",
         "account_id": 401, "quantity": "1", "price_unit": "100.00",
-        "tax_ids": [31],
+        "tax_ids": [],
     }
 
 
@@ -432,6 +441,7 @@ VALID_INPUTS = {
         "company_id": 7, "move_id": 702,
         "expected_move_type": "out_invoice",
         "expected_document_binding": "a" * 64,
+        "expected_document_binding_v2": "c" * 64,
         "expected_business_binding": "b" * 64,
         "reason": "Cancel duplicate pristine draft",
         "idempotency_key": "draft-cancel-1",
@@ -488,6 +498,7 @@ VALID_INPUTS = {
     "acct.move.draft_cancel.v2": {
         "company_id": 7, "move_id": 883, "expected_move_type": "entry",
         "expected_document_binding": "f" * 64,
+        "expected_document_binding_v2": None,
         "expected_business_binding": "0" * 64,
         "expected_line_ids": [2001, 2002],
         "reason": "Cancel duplicate pristine draft entry",
@@ -497,16 +508,20 @@ VALID_INPUTS = {
         "company_id": 7, "move_id": 901,
         "expected_move_type": "out_invoice",
         "expected_document_binding": "1" * 64,
+        "expected_document_binding_v2": "7" * 64,
         "expected_business_binding": "2" * 64,
         "expected_partner_id": 101, "expected_journal_id": 5,
-        "expected_currency_id": 12, "expected_invoice_date": "2026-07-15",
+        "expected_currency_id": 12,
+        "expected_payment_term_line_id": 9013,
+        "expected_payment_term_account_id": 1201,
+        "expected_invoice_date": "2026-07-15",
         "expected_accounting_date": "2026-07-15",
         "expected_due_date": "2026-08-15",
         "expected_reference": "INV-EXT-901",
         "expected_amount_untaxed": "100.00",
-        "expected_amount_tax": "10.00",
-        "expected_amount_total": "110.00",
-        "expected_amount_residual": "110.00",
+        "expected_amount_tax": "0.00",
+        "expected_amount_total": "100.00",
+        "expected_amount_residual": "100.00",
         "expected_line_ids": [9011, 9012, 9013],
         "reason": "Post the approved customer invoice",
         "idempotency_key": "post-customer-invoice-901",
@@ -515,16 +530,20 @@ VALID_INPUTS = {
         "company_id": 7, "move_id": 902,
         "expected_move_type": "in_invoice",
         "expected_document_binding": "3" * 64,
+        "expected_document_binding_v2": "8" * 64,
         "expected_business_binding": "4" * 64,
         "expected_partner_id": 102, "expected_journal_id": 6,
-        "expected_currency_id": 12, "expected_invoice_date": "2026-07-15",
+        "expected_currency_id": 12,
+        "expected_payment_term_line_id": 9023,
+        "expected_payment_term_account_id": 1202,
+        "expected_invoice_date": "2026-07-15",
         "expected_accounting_date": "2026-07-15",
         "expected_due_date": "2026-08-15",
         "expected_reference": "BILL-EXT-902",
         "expected_amount_untaxed": "100.00",
-        "expected_amount_tax": "10.00",
-        "expected_amount_total": "110.00",
-        "expected_amount_residual": "110.00",
+        "expected_amount_tax": "0.00",
+        "expected_amount_total": "100.00",
+        "expected_amount_residual": "100.00",
         "expected_line_ids": [9021, 9022, 9023],
         "reason": "Post the approved vendor bill",
         "idempotency_key": "post-vendor-bill-902",
@@ -534,8 +553,10 @@ VALID_INPUTS = {
         "expected_move_type": "out_refund",
         "expected_origin_move_id": 901,
         "expected_document_binding": "5" * 64,
+        "expected_document_binding_v2": "9" * 64,
         "expected_business_binding": "6" * 64,
         "expected_origin_document_binding": "1" * 64,
+        "expected_origin_document_binding_v2": "a" * 64,
         "expected_origin_business_binding": "2" * 64,
         "expected_partner_id": 101, "expected_journal_id": 5,
         "expected_currency_id": 12, "expected_refund_date": "2026-07-16",
@@ -870,6 +891,12 @@ def test_phase_b_draft_cancel_v2_contract_binds_supported_type_and_exact_line_se
         "type": "string", "minLength": 64, "maxLength": 64,
         "pattern": "^[0-9a-f]{64}$",
     }
+    assert properties["expected_document_binding_v2"] == {
+        "oneOf": [
+            properties["expected_document_binding"],
+            {"type": "null"},
+        ]
+    }
     assert properties["expected_business_binding"] == properties[
         "expected_document_binding"
     ]
@@ -1000,8 +1027,8 @@ def test_reconciliation_undo_contract_is_receipt_bound_and_disabled():
         assert phrase in description
     assert capability["verification"] == {
         "method": (
-            "read_back_receipt_bound_complete_reconciliation_graph_undo_"
-            "and_writeoff_reversal_v1"
+            "read_back_receipt_bound_complete_no_writeoff_reconciliation_"
+            "graph_undo_v1"
         ),
     }
     assert capability["recovery"] == {
@@ -1292,6 +1319,28 @@ def test_write_contracts_reject_zero_ids_blank_text_noncanonical_amounts_and_dup
 def test_domain_line_contracts_and_cross_field_inputs_are_explicit():
     writes = _writes()
 
+    for capability_id in (
+        "acct.invoice.customer_create.v1",
+        "acct.bill.vendor_create.v1",
+        "acct.refund.create.v1",
+    ):
+        assert writes[capability_id]["input_schema"]["properties"][
+            "posting_mode"
+        ] == {
+            "type": "string",
+            "enum": ["draft"],
+            "minLength": 5,
+            "maxLength": 5,
+            "pattern": "^draft$",
+        }
+        invalid_post = copy.deepcopy(VALID_INPUTS[capability_id])
+        invalid_post["posting_mode"] = "post"
+        with pytest.raises(ContractError):
+            validate_value(
+                invalid_post,
+                writes[capability_id]["input_schema"],
+            )
+
     invoice_line = writes["acct.invoice.customer_create.v1"]["input_schema"]["properties"]["lines"]["items"]
     assert set(invoice_line["properties"]) == {
         "line_reference", "name", "product_id", "account_id", "quantity",
@@ -1301,9 +1350,45 @@ def test_domain_line_contracts_and_cross_field_inputs_are_explicit():
 
     refund_lines = writes["acct.refund.create.v1"]["input_schema"]["properties"]["lines"]
     assert refund_lines["minItems"] == 0
+    assert refund_lines["items"]["properties"]["tax_ids"]["maxItems"] == 0
     assert set(refund_lines["items"]["properties"]) == {
         "line_reference", "name", "account_id", "quantity", "price_unit", "tax_ids",
     }
+    invalid_refund_tax = copy.deepcopy(
+        VALID_INPUTS["acct.refund.create.v1"]
+    )
+    invalid_refund_tax["lines"][0]["tax_ids"] = [31]
+    with pytest.raises(ContractError):
+        validate_value(
+            invalid_refund_tax,
+            writes["acct.refund.create.v1"]["input_schema"],
+        )
+
+    reconciliation = writes[
+        "acct.reconciliation.apply.v1"
+    ]["input_schema"]
+    assert reconciliation["properties"]["tolerance_amount"] == {
+        "type": "string",
+        "enum": ["0"],
+        "minLength": 1,
+        "maxLength": 1,
+        "pattern": "^0$",
+    }
+    for field in (
+        "writeoff_account_id",
+        "writeoff_journal_id",
+        "writeoff_label",
+    ):
+        assert reconciliation["properties"][field] == {"type": "null"}
+    invalid_writeoff = copy.deepcopy(
+        VALID_INPUTS["acct.reconciliation.apply.v1"]
+    )
+    invalid_writeoff["tolerance_amount"] = "0.01"
+    invalid_writeoff["writeoff_account_id"] = 99
+    invalid_writeoff["writeoff_journal_id"] = 4
+    invalid_writeoff["writeoff_label"] = "Difference"
+    with pytest.raises(ContractError):
+        validate_value(invalid_writeoff, reconciliation)
 
     bank_line = writes["acct.bank.statement_import.v1"]["input_schema"]["properties"]["lines"]["items"]
     assert writes["acct.bank.statement_import.v1"]["input_schema"]["properties"][
@@ -1419,8 +1504,8 @@ def test_period_reversal_and_recovery_metadata_do_not_overclaim_automation():
     }
     assert writes["acct.move.reverse.v1"]["verification"] == {
         "method": (
-            "read_back_approved_origin_unchanged_and_exact_reversal_graph_"
-            "links_lines_balances_binding_v1"
+            "read_back_approved_origin_exact_allowed_reversal_link_and_audit_"
+            "message_delta_and_exact_reversal_graph_lines_balances_binding_v1"
         )
     }
     assert writes["acct.move.reverse.v1"]["recovery"] == {
@@ -1433,8 +1518,8 @@ def test_period_reversal_and_recovery_metadata_do_not_overclaim_automation():
     ]
     assert draft_cancel["verification"] == {
         "method": (
-            "read_back_exact_pristine_draft_cancel_graph_bindings_and_"
-            "allowlisted_state_audit_delta_v1"
+            "read_back_exact_pristine_draft_cancel_graph_document_v1_v2_"
+            "business_bindings_and_allowlisted_audit_delta_v1"
         )
     }
     assert draft_cancel["recovery"] == {
@@ -1489,22 +1574,36 @@ def test_document_and_refund_metadata_match_strict_graph_verifiers_and_manual_re
         "acct.invoice.customer_create.v1",
         "acct.bill.vendor_create.v1",
     ):
-        assert writes[capability_id]["verification"]["method"].startswith(
-            "read_back_exact_move_lines_tax_preview_single_due_residual_"
+        assert writes[capability_id]["verification"] == {
+            "method": (
+                "read_back_exact_pristine_draft_move_lines_tax_preview_"
+                "single_due_residual_external_effect_absence_and_v1_v2_"
+                "business_bindings"
+            )
+        }
+    assert writes["acct.invoice.customer_create.v1"]["recovery"] == {
+        "method": (
+            "cancel_pristine_v3_draft_customer_invoice_v1_"
+            "test_or_sandbox_only"
         )
-        assert writes[capability_id]["recovery"]["method"].startswith(
-            "manual_escalation_until_exact_"
+    }
+    assert writes["acct.bill.vendor_create.v1"]["recovery"] == {
+        "method": (
+            "cancel_pristine_v3_draft_vendor_bill_v1_"
+            "test_or_sandbox_only"
         )
+    }
     refund = writes["acct.refund.create.v1"]
     assert refund["verification"] == {
         "method": (
-            "read_back_approved_origin_exact_refund_graph_lines_tax_due_"
-            "residual_and_bindings_v1"
+            "read_back_approved_origin_exact_company_currency_taxless_"
+            "non_storno_pristine_draft_refund_graph_commercial_partner_"
+            "lineage_residual_and_v1_v2_business_bindings"
         )
     }
-    assert refund["recovery"]["method"].startswith(
-        "manual_escalation_until_exact_refund_"
-    )
+    assert refund["recovery"] == {
+        "method": "cancel_draft_refund_v1_test_or_sandbox_only"
+    }
 
 
 def test_write_batch_limits_fit_the_precommit_audit_graph_budget():
@@ -1512,11 +1611,15 @@ def test_write_batch_limits_fit_the_precommit_audit_graph_budget():
     for capability_id in (
         "acct.invoice.customer_create.v1",
         "acct.bill.vendor_create.v1",
-        "acct.refund.create.v1",
     ):
         lines = writes[capability_id]["input_schema"]["properties"]["lines"]
         assert lines["maxItems"] == 32
         assert lines["items"]["properties"]["tax_ids"]["maxItems"] == 8
+    refund_lines = writes["acct.refund.create.v1"]["input_schema"][
+        "properties"
+    ]["lines"]
+    assert refund_lines["maxItems"] == 32
+    assert refund_lines["items"]["properties"]["tax_ids"]["maxItems"] == 0
     assert writes["acct.payment.register.v1"]["input_schema"]["properties"][
         "target_move_ids"
     ]["maxItems"] == 100
@@ -1600,17 +1703,21 @@ def test_registered_write_capabilities_are_bound_to_control_and_odoo_layers():
     assert registered_write_ids == set(WRITE_IDS)
     assert set(_ALLOWED_MODELS) == registered_write_ids
     assert ODOO_WRITE_CAPABILITIES == registered_write_ids
+    mail_message_capability_ids = {
+        capability_id
+        for capability_id, models in _ALLOWED_MODELS.items()
+        if "mail.message" in models
+    }
     for capability_id, models in _ALLOWED_MODELS.items():
         assert models, f"{capability_id} has no auditable Odoo model allowlist"
-        allowed_non_account_models = (
-            {"res.partner"}
-            if capability_id
-            in {
-                "acct.invoice.customer_post.v1",
-                "acct.bill.vendor_post.v1",
-            }
-            else set()
-        )
+        allowed_non_account_models = set()
+        if capability_id in {
+            "acct.invoice.customer_post.v1",
+            "acct.bill.vendor_post.v1",
+        }:
+            allowed_non_account_models.add("res.partner")
+        if capability_id in mail_message_capability_ids:
+            allowed_non_account_models.add("mail.message")
         assert {
             model
             for model in models

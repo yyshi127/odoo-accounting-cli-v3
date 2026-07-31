@@ -91,7 +91,7 @@ def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
         "account.move", "account.move.line",
     }
     assert _ALLOWED_MODELS["acct.refund.create.v1"] == {
-        "account.move", "account.move.line",
+        "account.move", "account.move.line", "mail.message",
     }
     for capability_id in (
         "acct.invoice.customer_post.v1",
@@ -338,6 +338,118 @@ def test_document_post_accepts_only_the_move_bound_shared_commercial_partner():
         )
 
 
+@pytest.mark.parametrize(
+    "capability_id",
+    (
+        "acct.accrual.create.v1",
+        "acct.move.reverse.v1",
+        "acct.refund.create.v1",
+        "acct.recovery.execute.v1",
+    ),
+)
+def test_reversal_writes_accept_only_audit_message_bound_to_company_move(
+    capability_id,
+):
+    operation = SimpleNamespace(
+        capability_id=capability_id,
+        company_id=7,
+        parameters={"move_id": 501},
+    )
+    move_values = {"company_id": [7, "Company"], "state": "posted"}
+    move_before = create_record_snapshot(
+        model="account.move",
+        record_id=501,
+        exists=True,
+        record_state="posted",
+        values=move_values,
+    )
+    move_after = create_record_snapshot(
+        model="account.move",
+        record_id=501,
+        exists=True,
+        record_state="posted",
+        values=move_values,
+    )
+    message_before = create_record_snapshot(
+        model="mail.message",
+        record_id=701,
+        exists=False,
+        record_state="absent",
+        values={},
+    )
+    message_after = create_record_snapshot(
+        model="mail.message",
+        record_id=701,
+        exists=True,
+        record_state="unknown",
+        values={
+            "model": "account.move",
+            "res_id": 501,
+            "message_type": "notification",
+        },
+    )
+    difference = create_difference(
+        before=[move_before, message_before],
+        after=[move_after, message_after],
+        changed_fields=["message_ids"],
+    )
+    records = {
+        (snapshot["model"], snapshot["record_id"]): {
+            "record_state": snapshot["record_state"],
+            "record_fingerprint": hashlib.sha256(
+                canonical_json(snapshot)
+            ).hexdigest(),
+        }
+        for snapshot in difference["after"]
+    }
+
+    DurableWriteService._validate_difference_binding(
+        difference,
+        operation=operation,
+        allowed_models=_ALLOWED_MODELS[operation.capability_id],
+        records_by_key=records,
+    )
+    assert set(
+        _index_company_bound_fresh_snapshots(
+            difference["after"], operation.company_id
+        )
+    ) == set(records)
+
+    tampered_message = create_record_snapshot(
+        model="mail.message",
+        record_id=701,
+        exists=True,
+        record_state="unknown",
+        values={
+            "model": "account.move",
+            "res_id": 999,
+            "message_type": "notification",
+        },
+    )
+    tampered = create_difference(
+        before=[move_before, message_before],
+        after=[move_after, tampered_message],
+        changed_fields=["message_ids"],
+    )
+    with pytest.raises(
+        WriteServiceError,
+        match="company-bound record|verifiable operation company binding",
+    ):
+        DurableWriteService._validate_difference_binding(
+            tampered,
+            operation=operation,
+            allowed_models=_ALLOWED_MODELS[operation.capability_id],
+            records_by_key=records,
+        )
+    with pytest.raises(
+        WriteServiceError,
+        match="mail.message snapshot.*company move graph",
+    ):
+        _index_company_bound_fresh_snapshots(
+            tampered["after"], operation.company_id
+        )
+
+
 def _capabilities():
     document = json.loads((ROOT / "registry" / "capabilities.json").read_text(encoding="utf-8"))
     for item in document["capabilities"]:
@@ -388,7 +500,7 @@ def _invoice_parameters(idempotency_key: str = "invoice-1") -> dict[str, object]
         "due_date": "2026-08-15",
         "currency_id": 12,
         "journal_id": 5,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "reference": "INV-SANDBOX-1",
         "lines": [
             {
@@ -424,6 +536,7 @@ def _draft_cancel_parameters(
         "move_id": move_id,
         "expected_move_type": "out_invoice",
         "expected_document_binding": "a" * 64,
+        "expected_document_binding_v2": "c" * 64,
         "expected_business_binding": "b" * 64,
         "reason": "Cancel an explicitly bound pristine draft invoice",
         "idempotency_key": idempotency_key,

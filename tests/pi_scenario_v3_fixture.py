@@ -270,6 +270,7 @@ def _string_for_pattern(pattern: str, path: str, seed: int) -> str:
         r"^[0-9a-f]{64}$": digest,
         r"^-?[0-9]+(?:\.[0-9]+)?$": str(seed),
         r"^[0-9]+(?:\.[0-9]+)?$": str(seed),
+        r"^0(?:\.0+)?$": "0",
         r"^.*$": f"value-{seed}",
         r"^.*\S.*$": f"value-{seed}",
         r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$": "2026-07-17",

@@ -5,4 +5,5 @@ from . import approval_client
 from . import approval_wizard
 from . import module_guard
 from . import operation
+from . import mail_thread_projection
 from . import session_client

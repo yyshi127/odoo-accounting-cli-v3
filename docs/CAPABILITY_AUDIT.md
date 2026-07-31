@@ -60,7 +60,9 @@ The two reads only prove local contract and test-channel integration. They have
 zero retained real-Odoo read receipts. The three writes have source handlers
 and control-plane contracts, but no retained real-Odoo write lifecycle
 receipts. Across the complete development inventory, source/contract
-implementation is 23/23 writes while real-Odoo write evidence remains 0/23.
+implementation is 23/23 writes; 21 reach capability-specific ORM prechecks,
+while payment registration and deferred creation fail closed before ORM
+access. Real-Odoo write evidence remains 0/23.
 These facts must not be restated as sandbox verification, production
 readiness, or Goal completion.
 
@@ -71,12 +73,15 @@ requires an exact value of `1` afterward. That closes the observed Odoo 19
 postcommit delta for this development slice; it is not general production
 coverage for existing-ranked partners or unreviewed module extensions.
 
-The eligibility oracle additionally admits only a complete productless,
-taxless, undiscounted financial graph with one receivable/payable maturity
-line. It deliberately rejects taxed, product, discounted, and complex
-payment-term documents until their exact Odoo 19 preview and post-action
-semantics are proved. This is a safe development boundary, not full accounting
-document coverage.
+The eligibility oracle and document-post handler additionally admit only a
+complete company-currency, product-line, taxless, undiscounted financial graph
+with one receivable/payable maturity line. Eligibility binds that exact
+Odoo-created line ID and account ID into the write parameters; precheck and
+post-action verification reject an alternate account even when it has the same
+receivable/payable type. Foreign-currency, taxed, non-product-line, discounted, and
+complex payment-term documents fail closed until their exact Odoo 19 semantics
+are proved. This is a safe development boundary, not full accounting document
+coverage.
 
 Within that boundary, a full refund must reproduce an exact linewise reversal,
 including immutable line references. A partial refund must stay within the
@@ -84,26 +89,29 @@ origin total and map every business line by one unique reference to an origin
 line with the same account, partner, currency, product and tax identity; its
 quantity, subtotal and total may not exceed the origin line.
 
-The posting eligibility read reconstructs one normalized canonical document
-graph and requires both its document and business SHA-256 bindings to match.
-The refund-cancellation eligibility read applies the same double-binding rule
-to the refund and its origin. For the already-posted origin, exactly one of two
-binding-shape candidates must match: creation recorded `posting_mode:"post"`,
-or creation recorded `posting_mode:"draft"` and the current document is now
-posted. The second candidate proves only the creation-time binding. It does not
-identify the later caller or entry point for `action_post`, so it is not proof
-that the separately controlled posting capability performed the transition.
+Dev260 retains `odoo_cli_v3_document_binding` as the immutable V1 digest of the
+exact approved source parameters and adds
+`odoo_cli_v3_document_binding_v2` as a separate versioned canonical graph
+digest. New customer invoices, vendor bills, and refunds write V1, V2, and the
+business binding together. V2 normalizes decimal trailing zeros, tax-ID order,
+and line order by unique `line_reference`; it rejects duplicate tax IDs and
+line references. It does not change the meaning of an existing V1 digest.
 
-This create-to-eligibility reconstruction deliberately fails closed. Odoo does
-not preserve source-level decimal spelling such as `100` versus `100.00`, tax
-ID order is normalized, and invoice lines are stably reordered by
-`line_reference`. The original create-v1 paths did not enforce one matching
-canonical representation for all three cases. A noncanonical V3 binding can
-therefore be rejected even when the business document is economically
-equivalent. This is a safety false negative, not proof of tampering. Such
-records remain ineligible until a future, versioned canonical
-binding/provenance migration can prove their source representation; the
-runtime must never guess a compatible legacy binding.
+The posting eligibility read validates the stored V1 digest shape, then
+reconstructs the Odoo graph and requires its V2 and business bindings to match.
+Refund-cancellation applies the same rule to both refund and origin. For the
+already-posted origin, exactly one V2 candidate must match: creation recorded
+`posting_mode:"post"`, or creation recorded `posting_mode:"draft"` and the
+current document is now posted. The second candidate proves only the
+creation-time binding; it does not identify the later caller or prove that the
+controlled posting capability performed the transition.
+
+Existing V1-only records are not automatically backfilled. A missing V2 value
+returns an explicit provenance-migration failure and remains ineligible. The
+current release contains no migration capability, so operators must not write
+or infer V2 directly from the current Odoo graph. A future migration must prove
+the original signed operation parameters and historical receipt/release before
+performing a separately approved, auditable update.
 
 An installed-module graph proves module name/version-set stability only. It
 does not semantically enumerate or approve overrides of `action_post`,

@@ -10,9 +10,12 @@ After an independently authorized driver installation, collect a deterministic
 manifest from the exact retained release:
 
 ```sh
+install -d -o root -g root -m 0700 \
+  /opt/odoo-accounting-cli-v3/tmp/<version>-<commit12>
 /usr/bin/python3 -I -B -X utf8 \
   /opt/odoo-accounting-cli-v3/releases/<release>/deployment/dev27/finalizer_runtime_gate.py \
-  collect --interpreter /usr/bin/python3 > /root/finalizer-runtime-manifest.json
+  collect --interpreter /usr/bin/python3 \
+  > /opt/odoo-accounting-cli-v3/tmp/<version>-<commit12>/finalizer-runtime-manifest.json
 ```
 
 Review and externally retain its SHA-256. Install the exact canonical JSON as

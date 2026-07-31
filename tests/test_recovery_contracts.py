@@ -49,9 +49,9 @@ EXPECTED = {
         "acct.bank.statement_import.v1",
         "post_compensating_bank_statement_exact_v1",
     ),
-    "undo_reconciliation_and_reverse_writeoff_v1": (
+    "undo_reconciliation_without_writeoff_v1": (
         "acct.reconciliation.apply.v1",
-        "undo_reconciliation_and_reverse_writeoff_exact_v1",
+        "undo_reconciliation_without_writeoff_exact_v1",
     ),
     "cancel_asset_and_reverse_schedule_v1": (
         "acct.asset.create.v1",
@@ -160,7 +160,7 @@ def test_each_contract_is_nonproduction_and_test_sandbox_only(method):
 
 
 @pytest.mark.parametrize("method", sorted(EXPECTED))
-def test_each_contract_has_nonempty_account_model_closures(method):
+def test_each_contract_has_nonempty_supported_model_closures(method):
     contract = RECOVERY_ACTION_CONTRACTS[method]
 
     for models in (
@@ -170,7 +170,10 @@ def test_each_contract_has_nonempty_account_model_closures(method):
     ):
         assert type(models) is frozenset
         assert models
-        assert all(model.startswith("account.") for model in models)
+        assert all(
+            model.startswith("account.") or model == "mail.message"
+            for model in models
+        )
         assert all(model == model.strip().lower() for model in models)
 
 

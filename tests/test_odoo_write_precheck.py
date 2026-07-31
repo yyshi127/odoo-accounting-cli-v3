@@ -3,13 +3,14 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from odoo_accounting_cli_v3.odoo import write_precheck
 from odoo_accounting_cli_v3.auth import sign_request_context
 from odoo_accounting_cli_v3.gateway import RequestContext
 from odoo_accounting_cli_v3.odoo.write_precheck import (
@@ -122,7 +123,7 @@ def _parameters(*, company_id=7):
         "due_date": "2026-08-15",
         "currency_id": 12,
         "journal_id": 5,
-        "posting_mode": "post",
+        "posting_mode": "draft",
         "reference": "INV-SANDBOX-1",
         "lines": [
             {
@@ -156,6 +157,7 @@ def _draft_cancel_parameters(*, company_id=7):
         "move_id": 501,
         "expected_move_type": "out_invoice",
         "expected_document_binding": "a" * 64,
+        "expected_document_binding_v2": "c" * 64,
         "expected_business_binding": "b" * 64,
         "reason": "Cancel duplicate pristine draft",
         "idempotency_key": "draft-cancel-501",
@@ -397,6 +399,7 @@ def _harness(*, groups=None, handler=None, su=False, user_companies=(7, 8)):
         "now": NOW,
         "environment_factory": lambda _cr, _uid, _context: bound,
         "handler_factory": lambda _env, _context, _now: selected_handler,
+        "metadata_execution_scope_factory": nullcontext,
     }
     return root, cr, selected_handler, kwargs
 
@@ -445,6 +448,69 @@ def test_success_returns_canonical_runtime_bound_handler_evidence_without_writes
     assert cr.commits == 0
     assert cr.savepoints == 1
     assert cr.rolled_back_savepoints == 1
+
+
+def test_trusted_metadata_scope_wraps_formal_precheck_only():
+    active = False
+    observations = []
+
+    @contextmanager
+    def metadata_scope():
+        nonlocal active
+        assert active is False
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    class ScopeHandler(Handler):
+        def precheck(self, capability_id, parameters):
+            observations.append(active)
+            return super().precheck(capability_id, parameters)
+
+    parameters = _parameters()
+    context = _context(parameters)
+    root, _cr, _handler, kwargs = _harness(handler=ScopeHandler())
+    kwargs["metadata_execution_scope_factory"] = metadata_scope
+
+    execute_write_precheck_from_odoo_shell(
+        root, _request(context, parameters), **kwargs
+    )
+
+    assert observations == [True]
+    assert active is False
+
+
+def test_default_metadata_scope_is_lazily_loaded_from_the_odoo_addon(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    active = False
+    imported = []
+
+    @contextmanager
+    def scope():
+        nonlocal active
+        active = True
+        try:
+            yield
+        finally:
+            active = False
+
+    monkeypatch.setattr(
+        write_precheck.importlib,
+        "import_module",
+        lambda name: (
+            imported.append(name)
+            or SimpleNamespace(_accounting_metadata_execution_scope=scope)
+        ),
+    )
+
+    with write_precheck._default_metadata_execution_scope():
+        assert active is True
+
+    assert active is False
+    assert imported == [write_precheck.METADATA_SCOPE_MODULE]
 
 
 def test_successful_precheck_cannot_leak_an_orm_side_effect():

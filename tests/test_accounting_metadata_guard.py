@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "odoo_addons" / "odoo_accounting_cli_v3_control" / "models"
 SCOPE = MODELS / "execution_scope.py"
 METADATA = MODELS / "accounting_metadata.py"
+MANIFEST = MODELS.parent / "__manifest__.py"
 
 
 class FakeValidationError(Exception):
@@ -21,6 +23,9 @@ class FakeValidationError(Exception):
 
 class FakeRecord(dict[str, Any]):
     def __getitem__(self, key: str) -> Any:
+        return self.get(key, False)
+
+    def __getattr__(self, key: str) -> Any:
         return self.get(key, False)
 
 
@@ -94,6 +99,7 @@ def _load_guard_modules(monkeypatch: pytest.MonkeyPatch):
 
 CASES = (
     ("AccountMove", "odoo_cli_v3_document_binding", "a" * 64),
+    ("AccountMove", "odoo_cli_v3_document_binding_v2", "f" * 64),
     ("AccountMoveLine", "odoo_cli_v3_line_reference", "line-1"),
     (
         "AccountPayment",
@@ -107,6 +113,85 @@ CASES = (
         "c" * 64,
     ),
 )
+
+
+def test_document_binding_v2_static_contract_and_addon_patch_version() -> None:
+    source = METADATA.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    manifest = ast.literal_eval(MANIFEST.read_text(encoding="utf-8"))
+    account_move = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AccountMove"
+    )
+    field_assignment = next(
+        node
+        for node in account_move.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "odoo_cli_v3_document_binding_v2"
+            for target in node.targets
+        )
+    )
+    assert isinstance(field_assignment.value, ast.Call)
+    assert isinstance(field_assignment.value.func, ast.Attribute)
+    assert field_assignment.value.func.attr == "Char"
+    field_options = {
+        keyword.arg: ast.literal_eval(keyword.value)
+        for keyword in field_assignment.value.keywords
+    }
+
+    assert '"odoo_cli_v3_document_binding_v2",' in source
+    assert field_options == {
+        "copy": False,
+        "index": True,
+        "readonly": True,
+        "size": 64,
+    }
+    assert (
+        "UNIQUE(company_id, move_type, odoo_cli_v3_document_binding_v2)"
+        in source
+    )
+    assert '@api.constrains("odoo_cli_v3_document_binding_v2")' in source
+    assert "document binding V2 must be lowercase SHA-256" in source
+    assert manifest["version"] == "19.0.0.7.1"
+
+
+def test_document_binding_v2_can_only_be_assigned_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scope, metadata = _load_guard_modules(monkeypatch)
+    field = "odoo_cli_v3_document_binding_v2"
+    value = "f" * 64
+
+    with scope._accounting_metadata_execution_scope():
+        created = metadata.AccountMove().create([{field: value}])
+        initially_empty = metadata.AccountMove([{field: False}])
+        assert initially_empty.write({field: value}) is True
+
+        for record in (created, initially_empty):
+            for replacement in (value, "e" * 64, False):
+                with pytest.raises(FakeValidationError, match="immutable"):
+                    record.write({field: replacement})
+
+
+def test_document_binding_v2_digest_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _scope, metadata = _load_guard_modules(monkeypatch)
+    field = "odoo_cli_v3_document_binding_v2"
+
+    metadata.AccountMove([{field: False}])._check_odoo_cli_v3_document_binding_v2()
+    metadata.AccountMove([{field: "f" * 64}])._check_odoo_cli_v3_document_binding_v2()
+    for invalid in ("f" * 63, "F" * 64, "not-a-digest"):
+        with pytest.raises(
+            FakeValidationError,
+            match="document binding V2 must be lowercase SHA-256",
+        ):
+            metadata.AccountMove(
+                [{field: invalid}]
+            )._check_odoo_cli_v3_document_binding_v2()
 
 
 @pytest.mark.parametrize("class_name,field_name,value", CASES)

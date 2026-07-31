@@ -76,11 +76,29 @@ _RECOVERY_LIFECYCLE_ADVANCING_ACTIONS = frozenset(
 )
 _RECONCILIATION_UNDO_CAPABILITY = "acct.reconciliation.undo.v1"
 _RECONCILIATION_ORIGIN_CAPABILITY = "acct.reconciliation.apply.v1"
-_RECONCILIATION_UNDO_METHOD = (
+_LEGACY_RECONCILIATION_UNDO_METHOD = (
     "undo_reconciliation_and_reverse_writeoff_v1"
 )
-_RECONCILIATION_UNDO_ORACLE = (
+_LEGACY_RECONCILIATION_UNDO_ORACLE = (
     "undo_reconciliation_and_reverse_writeoff_exact_v1"
+)
+_CURRENT_RECONCILIATION_UNDO_METHOD = (
+    "undo_reconciliation_without_writeoff_v1"
+)
+_CURRENT_RECONCILIATION_UNDO_ORACLE = (
+    "undo_reconciliation_without_writeoff_exact_v1"
+)
+_RECONCILIATION_UNDO_PAIRS = frozenset(
+    {
+        (
+            _LEGACY_RECONCILIATION_UNDO_METHOD,
+            _LEGACY_RECONCILIATION_UNDO_ORACLE,
+        ),
+        (
+            _CURRENT_RECONCILIATION_UNDO_METHOD,
+            _CURRENT_RECONCILIATION_UNDO_ORACLE,
+        ),
+    }
 )
 _RECONCILIATION_UNDO_PARAMETER_FIELDS = frozenset(
     {
@@ -1188,8 +1206,8 @@ class HistoricalReleaseRouter:
             plan["plan_version"] != 2
             or plan["origin_operation_id"] != origin.operation_id
             or plan["recovery_capability_id"] != "acct.recovery.execute.v1"
-            or plan["method"] != _RECONCILIATION_UNDO_METHOD
-            or plan["oracle_id"] != _RECONCILIATION_UNDO_ORACLE
+            or (plan["method"], plan["oracle_id"])
+            not in _RECONCILIATION_UNDO_PAIRS
             or plan["requires_approval"] is not True
             or not hmac.compare_digest(
                 plan["plan_digest"], expected_plan_digest

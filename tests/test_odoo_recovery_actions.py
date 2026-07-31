@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from odoo_accounting_cli_v3.odoo.recovery_actions import (
+    FAIL_CLOSED_RECOVERY_METHODS,
     RECOVERY_ACTION_METHODS,
     RecoveryActionError,
     RecoveryActionExecutor,
@@ -368,64 +369,24 @@ def run(adapter, method, actions, guards):
 
 
 @pytest.mark.parametrize(
-    ("method", "move_type"),
-    [
-        ("reverse_posted_customer_invoice_v1", "out_invoice"),
-        ("reverse_posted_vendor_bill_v1", "in_invoice"),
-        ("reverse_posted_refund_v1", "out_refund"),
-        ("reverse_posted_refund_v1", "in_refund"),
-        ("reverse_posted_period_adjustment_v1", "entry"),
-        ("reverse_the_reversal_v1", "entry"),
-    ],
+    "method", sorted(FAIL_CLOSED_RECOVERY_METHODS)
 )
-def test_public_reversal_methods_return_exact_posted_linked_receipt(
-    method, move_type
-):
+def test_all_blocked_methods_fail_closed_before_input_or_orm_access(method):
     adapter = FakeAdapter()
-    values = (
-        {"reversed_entry_id": FakeRecord(777)}
-        if method == "reverse_the_reversal_v1"
-        else {}
-    )
-    origin = adapter.make_move(
-        100, move_type=move_type, line_count=2, **values
-    )
 
-    result = run(
-        adapter,
-        method,
-        [("account.move", origin)],
-        [("account.move.line", line) for line in origin.line_ids],
-    )
-
-    reversals = [
-        record
-        for model, record in result.records
-        if model == "account.move" and record.id != origin.id
-    ]
-    assert len(reversals) == 1
-    assert reversals[0].state == "posted"
-    assert reversals[0].reversed_entry_id is origin
-    assert reversals[0].odoo_cli_v3_reason == "Approved recovery"
-    assert reversals[0]._write_calls == [
-        {"odoo_cli_v3_reason": "Approved recovery"}
-    ]
-    assert result.tombstones == frozenset()
-    assert adapter.reverse_calls == [
-        {
-            "context": {
-                "active_model": "account.move",
-                "active_ids": [origin.id],
-            },
-            "values": {
-                "date": "2026-07-29",
-                "journal_id": adapter.journal.id,
-                "reason": "Approved recovery",
-            },
-            "is_modify": False,
-        }
-    ]
-    assert "public_reversal_wizard" in result.checks
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
+        execute_recovery_action(
+            adapter,
+            method,
+            company=adapter.company,
+            action_records=(),
+            guard_records=(),
+            guard_outcomes={},
+            recovery_date="not-a-date",
+            reason="",
+        )
+    assert adapter.create_calls == []
+    assert adapter.reverse_calls == []
 
 
 @pytest.mark.parametrize(
@@ -739,7 +700,9 @@ def reconciliation_harness(*, writeoff):
 
 
 @pytest.mark.parametrize("writeoff", [False, True])
-def test_reconciliation_derives_sources_from_bound_writeoff_actions(writeoff):
+def test_reconciliation_undo_rejects_writeoff_or_executes_no_writeoff_graph(
+    writeoff,
+):
     (
         adapter,
         source_a,
@@ -751,30 +714,39 @@ def test_reconciliation_derives_sources_from_bound_writeoff_actions(writeoff):
         guards,
     ) = reconciliation_harness(writeoff=writeoff)
 
+    if writeoff:
+        with pytest.raises(
+            RecoveryActionError,
+            match="outside its contract",
+        ):
+            run(
+                adapter,
+                "undo_reconciliation_without_writeoff_v1",
+                actions,
+                guards,
+            )
+        assert source_a.line_ids[0]._remove_calls == 0
+        assert source_b.line_ids[0]._remove_calls == 0
+        assert adapter.reverse_calls == []
+        return
+
     result = run(
         adapter,
-        "undo_reconciliation_and_reverse_writeoff_v1",
+        "undo_reconciliation_without_writeoff_v1",
         actions,
         guards,
     )
 
     assert source_a.line_ids[0]._remove_calls == 1
-    assert source_b.line_ids[0]._remove_calls == (0 if writeoff else 1)
+    assert source_b.line_ids[0]._remove_calls == 1
     assert result.tombstones == frozenset(
         {
             ("account.partial.reconcile", partial.id),
             ("account.full.reconcile", full.id),
         }
     )
-    if writeoff:
-        assert len(adapter.reverse_calls) == 1
-        assert adapter.reverse_calls[0]["context"]["active_ids"] == [
-            writeoff_move.id
-        ]
-        assert "writeoff_reversed_publicly" in result.checks
-    else:
-        assert adapter.reverse_calls == []
-        assert "writeoff_not_applicable" in result.checks
+    assert adapter.reverse_calls == []
+    assert "writeoff_absent_by_contract" in result.checks
 
 
 def test_reconciliation_retains_prior_survive_exact_reconcile_guards():
@@ -801,7 +773,7 @@ def test_reconciliation_retains_prior_survive_exact_reconcile_guards():
         ]
     )
     outcomes = guard_outcomes_for(
-        "undo_reconciliation_and_reverse_writeoff_v1", guards
+        "undo_reconciliation_without_writeoff_v1", guards
     )
     outcomes[("account.partial.reconcile", prior_partial.id)] = (
         "survive_exact"
@@ -810,7 +782,7 @@ def test_reconciliation_retains_prior_survive_exact_reconcile_guards():
 
     result = execute_recovery_action(
         adapter,
-        "undo_reconciliation_and_reverse_writeoff_v1",
+        "undo_reconciliation_without_writeoff_v1",
         company=adapter.company,
         action_records=actions,
         guard_records=guards,
@@ -859,37 +831,25 @@ def asset_harness():
     return adapter, asset, draft, posted, guards
 
 
-def test_asset_cancel_tombstones_draft_schedule_and_reads_posted_reversal():
+def test_asset_recovery_fails_closed_without_mutating_schedule():
     adapter, asset, draft, posted, guards = asset_harness()
 
-    result = run(
-        adapter,
-        "cancel_asset_and_reverse_schedule_v1",
-        [("account.asset", asset)],
-        guards,
-    )
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
+        run(
+            adapter,
+            "cancel_asset_and_reverse_schedule_v1",
+            [("account.asset", asset)],
+            guards,
+        )
 
-    assert asset.state == "cancelled"
-    assert result.tombstones == frozenset(
-        {
-            ("account.move", draft.id),
-            *(
-                ("account.move.line", line.id)
-                for line in draft.line_ids
-            ),
-        }
-    )
-    assert len(posted.reversal_move_ids) == 1
-    assert posted.reversal_move_ids[0].state == "posted"
-    assert (
-        posted.reversal_move_ids[0].odoo_cli_v3_reason
-        == "Approved recovery"
-    )
-    assert "posted_schedule_reversed" in result.checks
-    assert "asset_schedule_reversal_reason_persisted" in result.checks
+    assert asset.state == "open"
+    assert asset.depreciation_move_ids == [draft, posted]
+    assert draft.state == "draft"
+    assert posted.reversal_move_ids == []
+    assert adapter.reverse_calls == []
 
 
-def test_depreciation_uses_public_reversal_and_retains_asset_schedule():
+def test_depreciation_recovery_fails_closed_without_mutating_schedule():
     adapter = FakeAdapter()
     asset = adapter.add(
         "account.asset",
@@ -904,22 +864,23 @@ def test_depreciation_uses_public_reversal_and_retains_asset_schedule():
     )
     asset.depreciation_move_ids = [move]
 
-    result = run(
-        adapter,
-        "reverse_depreciation_and_restore_schedule_v1",
-        [("account.move", move)],
-        [
-            ("account.asset", asset),
-            *(("account.move.line", line) for line in move.line_ids),
-        ],
-    )
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
+        run(
+            adapter,
+            "reverse_depreciation_and_restore_schedule_v1",
+            [("account.move", move)],
+            [
+                ("account.asset", asset),
+                *(("account.move.line", line) for line in move.line_ids),
+            ],
+        )
 
     assert asset.depreciation_move_ids == [move]
-    assert len(adapter.reverse_calls) == 1
-    assert "asset_schedule_restored" in result.checks
+    assert move.reversal_move_ids == []
+    assert adapter.reverse_calls == []
 
 
-def test_accrual_cancels_future_schedule_then_reverses_origin():
+def test_accrual_recovery_fails_closed_without_mutating_schedule():
     adapter = FakeAdapter()
     origin = adapter.make_move(700, line_count=2)
     scheduled = adapter.make_move(
@@ -931,23 +892,23 @@ def test_accrual_cancels_future_schedule_then_reverses_origin():
         auto_post="at_date",
     )
 
-    result = run(
-        adapter,
-        "cancel_scheduled_and_reverse_accrual_origin_v1",
-        [("account.move", origin), ("account.move", scheduled)],
-        [
-            *(("account.move.line", line) for line in origin.line_ids),
-            *(("account.move.line", line) for line in scheduled.line_ids),
-        ],
-    )
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
+        run(
+            adapter,
+            "cancel_scheduled_and_reverse_accrual_origin_v1",
+            [("account.move", origin), ("account.move", scheduled)],
+            [
+                *(("account.move.line", line) for line in origin.line_ids),
+                *(("account.move.line", line) for line in scheduled.line_ids),
+            ],
+        )
 
-    assert scheduled.state == "cancel"
-    assert len(adapter.reverse_calls) == 1
-    assert adapter.reverse_calls[0]["context"]["active_ids"] == [origin.id]
-    assert "future_scheduled_accrual_cancelled" in result.checks
+    assert scheduled.state == "draft"
+    assert origin.reversal_move_ids == []
+    assert adapter.reverse_calls == []
 
 
-def test_deferred_reverses_source_and_requires_compensating_schedule():
+def test_deferred_recovery_fails_closed_before_source_reversal():
     adapter = FakeAdapter()
     source = adapter.make_move(
         800, move_type="in_invoice", line_count=2
@@ -957,25 +918,17 @@ def test_deferred_reverses_source_and_requires_compensating_schedule():
     )
     source.deferred_move_ids = [scheduled]
 
-    result = run(
-        adapter,
-        "reverse_deferred_source_and_schedule_v1",
-        [("account.move", source)],
-        [
-            *(("account.move.line", line) for line in source.line_ids),
-            *graph(scheduled),
-        ],
-    )
-
-    reversals = [
-        record
-        for model, record in result.records
-        if model == "account.move"
-        and getattr(record, "reversed_entry_id", None) is source
-    ]
-    assert len(reversals) == 1
-    assert reversals[0].deferred_move_ids
-    assert "compensating_deferred_schedule_created" in result.checks
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
+        run(
+            adapter,
+            "reverse_deferred_source_and_schedule_v1",
+            [("account.move", source)],
+            [
+                *(("account.move.line", line) for line in source.line_ids),
+                *graph(scheduled),
+            ],
+        )
+    assert adapter.reverse_calls == []
 
 
 def test_catalog_coverage_excludes_only_two_specialized_invoice_bill_actions():
@@ -1003,12 +956,14 @@ def test_catalog_coverage_excludes_only_two_specialized_invoice_bill_actions():
 )
 def test_input_date_and_reason_are_strict(recovery_date, reason, message):
     adapter = FakeAdapter()
-    origin = adapter.make_move(1000, move_type="out_invoice")
+    origin = adapter.make_move(
+        1000, state="draft", move_type="out_refund"
+    )
 
     with pytest.raises(RecoveryActionError, match=message):
         execute_recovery_action(
             adapter,
-            "reverse_posted_customer_invoice_v1",
+            "cancel_draft_refund_v1",
             company=adapter.company,
             action_records=[("account.move", origin)],
             guard_records=[
@@ -1028,14 +983,16 @@ def test_input_date_and_reason_are_strict(recovery_date, reason, message):
     [
         {},
         {("account.move.line", 999999): "survive_exact"},
-        {("account.move.line", 9001): "survive_allowed_delta"},
+        {("account.move.line", 9001): "survive_exact"},
         {("account.move.line", 9001): "absent"},
         {("account.move.line", 9001): "unknown"},
     ],
 )
 def test_guard_outcomes_must_exactly_cover_guards_and_match_contract(outcomes):
     adapter = FakeAdapter()
-    origin = adapter.make_move(1800, move_type="out_invoice")
+    origin = adapter.make_move(
+        1800, state="draft", move_type="entry"
+    )
     line = origin.line_ids[0]
     normalized = {
         (model, line.id if record_id == 9001 else record_id): outcome
@@ -1045,7 +1002,7 @@ def test_guard_outcomes_must_exactly_cover_guards_and_match_contract(outcomes):
     with pytest.raises(RecoveryActionError, match="guard_outcomes"):
         execute_recovery_action(
             adapter,
-            "reverse_posted_customer_invoice_v1",
+            "cancel_draft_period_adjustment_v1",
             company=adapter.company,
             action_records=[("account.move", origin)],
             guard_records=[("account.move.line", line)],
@@ -1055,7 +1012,7 @@ def test_guard_outcomes_must_exactly_cover_guards_and_match_contract(outcomes):
         )
 
 
-def test_asset_rejects_tombstone_outcome_that_does_not_match_draft_schedule():
+def test_asset_fail_closed_precedes_guard_outcome_validation():
     adapter, asset, _draft, _posted, guards = asset_harness()
     outcomes = guard_outcomes_for(
         "cancel_asset_and_reverse_schedule_v1", guards
@@ -1067,7 +1024,7 @@ def test_asset_rejects_tombstone_outcome_that_does_not_match_draft_schedule():
     )
     outcomes[draft_move_key] = "survive_exact"
 
-    with pytest.raises(RecoveryActionError, match="tombstone outcomes"):
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
         execute_recovery_action(
             adapter,
             "cancel_asset_and_reverse_schedule_v1",
@@ -1109,14 +1066,14 @@ def test_executor_rejects_methods_owned_by_specialized_or_unknown_paths(method):
         ("posted", "in_invoice"),
     ],
 )
-def test_customer_invoice_reversal_rejects_wrong_state_or_type(
+def test_customer_invoice_reversal_fail_closed_precedes_state_or_type(
     state, move_type
 ):
     adapter = FakeAdapter()
     move = adapter.make_move(
         1200, state=state, move_type=move_type
     )
-    with pytest.raises(RecoveryActionError, match="state or type"):
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
         run(
             adapter,
             "reverse_posted_customer_invoice_v1",
@@ -1127,19 +1084,21 @@ def test_customer_invoice_reversal_rejects_wrong_state_or_type(
 
 def test_wrong_action_model_and_action_guard_overlap_are_rejected():
     adapter = FakeAdapter()
-    move = adapter.make_move(1300, move_type="out_invoice")
+    move = adapter.make_move(
+        1300, state="draft", move_type="out_refund"
+    )
     line = move.line_ids[0]
     with pytest.raises(RecoveryActionError, match="outside its contract"):
         run(
             adapter,
-            "reverse_posted_customer_invoice_v1",
+            "cancel_draft_refund_v1",
             [("account.move.line", line)],
             [("account.move", move)],
         )
     with pytest.raises(RecoveryActionError, match="overlap"):
         run(
             adapter,
-            "reverse_posted_customer_invoice_v1",
+            "cancel_draft_refund_v1",
             [("account.move", move)],
             [("account.move", move)],
         )
@@ -1147,12 +1106,14 @@ def test_wrong_action_model_and_action_guard_overlap_are_rejected():
 
 def test_duplicate_and_absent_input_records_are_rejected():
     adapter = FakeAdapter()
-    move = adapter.make_move(1400, move_type="out_invoice")
+    move = adapter.make_move(
+        1400, state="draft", move_type="out_refund"
+    )
     line = move.line_ids[0]
     with pytest.raises(RecoveryActionError, match="duplicate"):
         run(
             adapter,
-            "reverse_posted_customer_invoice_v1",
+            "cancel_draft_refund_v1",
             [("account.move", move), ("account.move", move)],
             [("account.move.line", line)],
         )
@@ -1160,7 +1121,7 @@ def test_duplicate_and_absent_input_records_are_rejected():
     with pytest.raises(RecoveryActionError, match="absent"):
         run(
             adapter,
-            "reverse_posted_customer_invoice_v1",
+            "cancel_draft_refund_v1",
             [("account.move", move)],
             [("account.move.line", line)],
         )
@@ -1178,17 +1139,18 @@ def test_duplicate_and_absent_input_records_are_rejected():
         {"res_id": 9999, "res_ids": [9999, 10000]},
     ],
 )
-def test_reversal_rejects_ambiguous_action_receipts(receipt):
+def test_fail_closed_reversal_never_consumes_an_action_receipt(receipt):
     adapter = FakeAdapter()
     move = adapter.make_move(1500, move_type="out_invoice")
     adapter.action_override = receipt
-    with pytest.raises(RecoveryActionError, match="receipt"):
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
         run(
             adapter,
             "reverse_posted_customer_invoice_v1",
             [("account.move", move)],
             [("account.move.line", move.line_ids[0])],
         )
+    assert adapter.reverse_calls == []
 
 
 def test_payment_rejects_incomplete_exact_move_line_graph():
@@ -1245,7 +1207,7 @@ def test_bank_rejects_original_graph_mutation_and_incomplete_lines():
         )
 
 
-def test_reconciliation_rejects_unbound_or_ambiguous_writeoff_action():
+def test_reconciliation_rejects_account_move_action_outside_contract():
     (
         adapter,
         _source_a,
@@ -1258,23 +1220,26 @@ def test_reconciliation_rejects_unbound_or_ambiguous_writeoff_action():
     ) = reconciliation_harness(writeoff=False)
     unrelated = adapter.make_move(1600)
     actions.insert(0, ("account.move", unrelated))
-    with pytest.raises(RecoveryActionError, match="ambiguous"):
+    with pytest.raises(
+        RecoveryActionError,
+        match="outside its contract",
+    ):
         run(
             adapter,
-            "undo_reconciliation_and_reverse_writeoff_v1",
+            "undo_reconciliation_without_writeoff_v1",
             actions,
             guards,
         )
 
 
-def test_asset_rejects_missing_schedule_line_and_missing_posted_reversal():
+def test_asset_fail_closed_precedes_schedule_graph_validation():
     adapter, asset, draft, _posted, guards = asset_harness()
     guards = [
         item
         for item in guards
         if item != ("account.move.line", draft.line_ids[0])
     ]
-    with pytest.raises(RecoveryActionError, match="line graph"):
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
         run(
             adapter,
             "cancel_asset_and_reverse_schedule_v1",
@@ -1292,7 +1257,7 @@ def test_asset_rejects_missing_schedule_line_and_missing_posted_reversal():
         asset.depreciation_move_ids = [posted]
 
     asset._asset_cancel_callback = cancel_without_reversal
-    with pytest.raises(RecoveryActionError, match="gained no reversal"):
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
         run(
             adapter,
             "cancel_asset_and_reverse_schedule_v1",
@@ -1301,12 +1266,12 @@ def test_asset_rejects_missing_schedule_line_and_missing_posted_reversal():
         )
 
 
-def test_deferred_rejects_missing_generated_schedule_guard():
+def test_deferred_fail_closed_precedes_generated_schedule_validation():
     adapter = FakeAdapter()
     source = adapter.make_move(1700, move_type="out_invoice")
     scheduled = adapter.make_move(1701, state="draft")
     source.deferred_move_ids = [scheduled]
-    with pytest.raises(RecoveryActionError, match="guard graph"):
+    with pytest.raises(RecoveryActionError, match="fail-closed"):
         run(
             adapter,
             "reverse_deferred_source_and_schedule_v1",

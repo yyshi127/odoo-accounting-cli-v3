@@ -26,8 +26,10 @@ from ..draft_invoice_recovery import (
     classic_read_many2one_id,
     customer_invoice_business_binding,
     customer_invoice_document_binding,
+    customer_invoice_document_binding_v2,
     vendor_bill_business_binding,
     vendor_bill_document_binding,
+    vendor_bill_document_binding_v2,
 )
 from ..domain.write_semantics import validate_write_semantics
 from ..gateway import RequestContext
@@ -57,6 +59,8 @@ from ..write_protocol import (
     trusted_result_to_mapping,
 )
 from ..write_receipts import (
+    MAX_SNAPSHOT_VALUES_JSON_BYTES,
+    MAX_SNAPSHOT_VALUES_JSON_CHARS,
     WriteReceiptError,
     create_difference,
     create_record_snapshot,
@@ -145,7 +149,6 @@ CHANNELS = frozenset({"staged", "enabled"})
 SHA256 = re.compile(r"[0-9a-f]{64}")
 ODOO_MODEL = re.compile(r"[a-z][a-z0-9_.]{1,127}")
 MAX_AUDIT_RECORDS = 900
-MAX_SNAPSHOT_VALUES_JSON_CHARS = 65_536
 EXISTING_HANDLER_SNAPSHOT_FIELDS = frozenset(
     {
         "model",
@@ -185,9 +188,9 @@ TRUSTED_PLAN_CAPABILITIES = frozenset(
         "acct.bank.statement_compensate.v1",
     }
 )
-RECONCILIATION_UNDO_METHOD = "undo_reconciliation_and_reverse_writeoff_v1"
+RECONCILIATION_UNDO_METHOD = "undo_reconciliation_without_writeoff_v1"
 RECONCILIATION_UNDO_ORACLE = (
-    "undo_reconciliation_and_reverse_writeoff_exact_v1"
+    "undo_reconciliation_without_writeoff_exact_v1"
 )
 BANK_STATEMENT_COMPENSATE_METHOD = "post_compensating_bank_statement_v1"
 BANK_STATEMENT_COMPENSATE_ORACLE = (
@@ -885,7 +888,12 @@ def _raw_snapshot(
         or not hmac.compare_digest(value["values_digest"], _digest(values))
     ):
         raise OdooWriteBootstrapError("handler snapshot binding is invalid")
-    if len(canonical_json(values).decode("utf-8")) > MAX_SNAPSHOT_VALUES_JSON_CHARS:
+    canonical_values = canonical_json(values)
+    if (
+        len(canonical_values.decode("utf-8"))
+        > MAX_SNAPSHOT_VALUES_JSON_CHARS
+        or len(canonical_values) > MAX_SNAPSHOT_VALUES_JSON_BYTES
+    ):
         raise OdooWriteBootstrapError(
             "handler snapshot exceeds the auditable values limit"
         )
@@ -1053,6 +1061,13 @@ def _assert_available_draft_document_snapshot(
         if vendor
         else customer_invoice_document_binding(operation.parameters)
     )
+    expected_document_binding_v2 = (
+        vendor_bill_document_binding_v2(operation.parameters)
+        if vendor
+        else customer_invoice_document_binding_v2(
+            operation.parameters
+        )
+    )
     expected_business_binding = (
         vendor_bill_business_binding(operation.parameters)
         if vendor
@@ -1180,6 +1195,7 @@ def _assert_available_draft_document_snapshot(
         "write_uid",
         "write_date",
         "odoo_cli_v3_document_binding",
+        "odoo_cli_v3_document_binding_v2",
         "odoo_cli_v3_business_binding",
     }
     try:
@@ -1221,6 +1237,8 @@ def _assert_available_draft_document_snapshot(
         or action_values.get("is_manually_modified") is not False
         or action_values.get("odoo_cli_v3_document_binding")
         != expected_document_binding
+        or action_values.get("odoo_cli_v3_document_binding_v2")
+        != expected_document_binding_v2
         or action_values.get("odoo_cli_v3_business_binding")
         != expected_business_binding
     ):
@@ -2409,10 +2427,10 @@ def execute_write_from_odoo_shell(
             trusted_recovery_plan,
             module_graph,
         )
-        try:
-            live_precheck = run_rollback_only_precheck(
-                root_env,
-                lambda: canonical_precheck_evidence(
+
+        def scoped_live_precheck() -> dict[str, Any]:
+            with metadata_scope_factory():
+                return canonical_precheck_evidence(
                     handler.precheck(
                         operation.capability_id, operation.parameters
                     ),
@@ -2425,7 +2443,12 @@ def execute_write_from_odoo_shell(
                     capability_channel=capability_channel,
                     registry_sha256=expected_registry_digest,
                     release_digest=release_digest,
-                ),
+                )
+
+        try:
+            live_precheck = run_rollback_only_precheck(
+                root_env,
+                scoped_live_precheck,
             )
         except Exception as exc:
             return approved_response(_record_no_effect_failure(
@@ -2512,20 +2535,7 @@ def execute_write_from_odoo_shell(
             try:
                 locked_live_precheck = run_rollback_only_precheck(
                     root_env,
-                    lambda: canonical_precheck_evidence(
-                        handler.precheck(
-                            operation.capability_id, operation.parameters
-                        ),
-                        capability_id=operation.capability_id,
-                        company_id=operation.company_id,
-                        parameters=operation.parameters,
-                        context=context,
-                        actual_database_name=actual_database_name,
-                        actual_database_uuid=actual_database_uuid,
-                        capability_channel=capability_channel,
-                        registry_sha256=expected_registry_digest,
-                        release_digest=release_digest,
-                    ),
+                    scoped_live_precheck,
                 )
             except Exception as exc:
                 return approved_response(_record_no_effect_failure(
@@ -2647,21 +2657,25 @@ def execute_write_from_odoo_shell(
                 trusted_recovery_plan,
                 verification_module_graph,
             )
-            raw_verification = handler.verify(
-                operation.capability_id,
-                operation.parameters,
-                {
-                    "capability_id": operation.capability_id,
-                    "company_id": operation.company_id,
-                    "parameters_digest": _digest(operation.parameters),
-                    "module_graph": execution_evidence.get("module_graph"),
-                    "records": [
-                        {"model": item["model"], "record_id": item["record_id"]}
-                        for item in execution_evidence["odoo_records"]
-                    ],
-                    "before": execution_evidence["difference"]["before"],
-                },
-            )
+            with metadata_scope_factory():
+                raw_verification = handler.verify(
+                    operation.capability_id,
+                    operation.parameters,
+                    {
+                        "capability_id": operation.capability_id,
+                        "company_id": operation.company_id,
+                        "parameters_digest": _digest(operation.parameters),
+                        "module_graph": execution_evidence.get("module_graph"),
+                        "records": [
+                            {
+                                "model": item["model"],
+                                "record_id": item["record_id"],
+                            }
+                            for item in execution_evidence["odoo_records"]
+                        ],
+                        "before": execution_evidence["difference"]["before"],
+                    },
+                )
             verification_observed_at = phase_time()
             verification_evidence = _verification_evidence(
                 verifying_operation,

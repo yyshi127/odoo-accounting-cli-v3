@@ -33,6 +33,14 @@ CURRENT_RELEASE = "a" * 64
 CURRENT_REGISTRY = "b" * 64
 OLD_RELEASE = "c" * 64
 OLD_REGISTRY = "d" * 64
+LEGACY_RECONCILIATION_UNDO_PAIR = (
+    "undo_reconciliation_and_reverse_writeoff_v1",
+    "undo_reconciliation_and_reverse_writeoff_exact_v1",
+)
+CURRENT_RECONCILIATION_UNDO_PAIR = (
+    "undo_reconciliation_without_writeoff_v1",
+    "undo_reconciliation_without_writeoff_exact_v1",
+)
 
 
 def _test_effect_finalizer_preconnector(
@@ -184,6 +192,7 @@ class FakeStore:
         self.undo_bindings: dict[str, Any] = {}
         self.bank_compensation_bindings: dict[str, Any] = {}
         self.final_receipts: dict[str, tuple[Any, ...]] = {}
+        self.reconciliation_pairs: dict[str, tuple[str, str]] = {}
 
     def get_operation(self, operation_id: str) -> FakeOperation:
         try:
@@ -254,11 +263,19 @@ class FakeStore:
                 },
             )
         if operation.capability_id == "acct.reconciliation.apply.v1":
+            method, oracle_id = self.reconciliation_pairs.get(
+                operation_id,
+                (
+                    LEGACY_RECONCILIATION_UNDO_PAIR
+                    if operation.release_digest == OLD_RELEASE
+                    else CURRENT_RECONCILIATION_UNDO_PAIR
+                ),
+            )
             return create_recovery_plan_v2(
                 origin_operation_id=operation_id,
                 recovery_capability_id="acct.recovery.execute.v1",
                 status="available",
-                method="undo_reconciliation_and_reverse_writeoff_v1",
+                method=method,
                 requires_approval=True,
                 action_targets=[
                     {
@@ -279,9 +296,7 @@ class FakeStore:
                         "record_state": "active",
                     }
                 ],
-                oracle_id=(
-                    "undo_reconciliation_and_reverse_writeoff_exact_v1"
-                ),
+                oracle_id=oracle_id,
                 parameters={
                     "company_id": operation.company_id,
                     "full_reconcile_id": 100,
@@ -1912,16 +1927,27 @@ def test_direct_recovery_capability_prepare_is_rejected_before_child(
     assert called is False
 
 
+@pytest.mark.parametrize(
+    "release_digest,registry_digest,route_name",
+    [
+        (OLD_RELEASE, OLD_REGISTRY, "old"),
+        (CURRENT_RELEASE, CURRENT_REGISTRY, "current"),
+    ],
+)
 def test_reconciliation_undo_prepare_is_pinned_to_origin_retained_release(
     monkeypatch: pytest.MonkeyPatch,
     router_files: tuple[Path, dict[str, Any], dict[str, Any]],
+    release_digest: str,
+    registry_digest: str,
+    route_name: str,
 ) -> None:
-    manifest, _current, old = router_files
+    manifest, current, old = router_files
+    route = {"current": current, "old": old}[route_name]
     store = FakeStore()
     origin = FakeOperation(
         "op-reconciliation-origin",
-        OLD_RELEASE,
-        OLD_REGISTRY,
+        release_digest,
+        registry_digest,
         capability_id="acct.reconciliation.apply.v1",
     )
     store.operations[origin.operation_id] = origin
@@ -1936,8 +1962,8 @@ def test_reconciliation_undo_prepare_is_pinned_to_origin_retained_release(
             request_id=child_request["request_id"],
             capability_id=child_request["capability_id"],
             parameters=child_request["parameters"],
-            release_digest=OLD_RELEASE,
-            registry_digest=OLD_REGISTRY,
+            release_digest=release_digest,
+            registry_digest=registry_digest,
         )
         store.operations[undo.operation_id] = undo
         receipt = store.receipt(
@@ -1951,8 +1977,8 @@ def test_reconciliation_undo_prepare_is_pinned_to_origin_retained_release(
             _response(
                 "operation.prepare",
                 operation_id=undo.operation_id,
-                release_digest=OLD_RELEASE,
-                registry_digest=OLD_REGISTRY,
+                release_digest=release_digest,
+                registry_digest=registry_digest,
             ),
         )
 
@@ -1966,10 +1992,10 @@ def test_reconciliation_undo_prepare_is_pinned_to_origin_retained_release(
     response = router.dispatch("operation.prepare", request)
 
     assert response["data"]["operation_id"] == request["operation_id"]
-    assert calls == [[old["executable_path"], "operation", "prepare"]]
+    assert calls == [[route["executable_path"], "operation", "prepare"]]
     durable = store.operations[request["operation_id"]]
-    assert durable.release_digest == OLD_RELEASE
-    assert durable.registry_digest == OLD_REGISTRY
+    assert durable.release_digest == release_digest
+    assert durable.registry_digest == registry_digest
 
 
 def test_reconciliation_undo_has_no_current_release_fallback(

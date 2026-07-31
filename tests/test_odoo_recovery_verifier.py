@@ -375,6 +375,90 @@ def test_draft_cancellation_uses_fresh_exact_delta_oracle(
     assert not case.adapter.linewise_reads
 
 
+def test_refund_draft_cancellation_preserves_bound_audit_message_exactly():
+    case = Case("cancel_draft_refund_v1")
+    origin = make_move(case, 9, move_type="out_invoice")
+    refund = make_move(
+        case,
+        10,
+        state="draft",
+        move_type="out_refund",
+        reversed_entry_id=origin,
+    )
+    origin.reversal_move_ids = [refund]
+    audit_message = case.add(
+        "mail.message",
+        90,
+        res_id=origin.id,
+        body="bound reversal audit",
+        message_type="notification",
+    )
+    audit_message.model = "account.move"
+    case.approve(
+        [refund],
+        [
+            *((line, "survive_allowed_delta") for line in refund.line_ids),
+            (origin, "survive_exact"),
+            *((line, "survive_exact") for line in origin.line_ids),
+            (audit_message, "survive_exact"),
+        ],
+    )
+    refund.state = "cancel"
+    for line in refund.line_ids:
+        line.parent_state = "cancel"
+
+    checks = case.verify()
+
+    assert "fresh_result_graph_unique_and_complete" in checks
+    assert ("mail.message", audit_message.id) in case.adapter.snapshot_reads
+
+    audit_message.body = "tampered audit"
+    with pytest.raises(
+        RecoveryVerificationError,
+        match="survive_exact guard changed",
+    ):
+        case.verify()
+
+
+def test_refund_recovery_rejects_audit_message_outside_result_move_graph():
+    case = Case("cancel_draft_refund_v1")
+    origin = make_move(case, 9, move_type="out_invoice")
+    refund = make_move(
+        case,
+        10,
+        state="draft",
+        move_type="out_refund",
+        reversed_entry_id=origin,
+    )
+    origin.reversal_move_ids = [refund]
+    audit_message = case.add(
+        "mail.message",
+        90,
+        res_id=999,
+        body="unbound reversal audit",
+        message_type="notification",
+    )
+    audit_message.model = "account.move"
+    case.approve(
+        [refund],
+        [
+            *((line, "survive_allowed_delta") for line in refund.line_ids),
+            (origin, "survive_exact"),
+            *((line, "survive_exact") for line in origin.line_ids),
+            (audit_message, "survive_exact"),
+        ],
+    )
+    refund.state = "cancel"
+    for line in refund.line_ids:
+        line.parent_state = "cancel"
+
+    with pytest.raises(
+        RecoveryVerificationError,
+        match="audit message is not bound",
+    ):
+        case.verify()
+
+
 @pytest.mark.parametrize(
     ("method", "move_type", "outcome"),
     [
@@ -941,7 +1025,7 @@ def test_bank_without_foreign_currency_requires_zero_source_amount_currency():
 def make_reconciliation_case(
     *, writeoff: bool
 ) -> tuple[Case, dict[str, Record]]:
-    case = Case("undo_reconciliation_and_reverse_writeoff_v1")
+    case = Case("undo_reconciliation_without_writeoff_v1")
     debit_move = make_move(case, 20)
     debit_line = debit_move.line_ids[0]
     if writeoff:
@@ -1015,20 +1099,23 @@ def make_reconciliation_case(
 
 
 @pytest.mark.parametrize("writeoff", [False, True])
-def test_reconciliation_recovery_freshly_proves_unlink_residual_and_writeoff(
+def test_reconciliation_recovery_rejects_writeoff_or_proves_no_writeoff_undo(
     writeoff
 ):
     case, records = make_reconciliation_case(writeoff=writeoff)
 
+    if writeoff:
+        with pytest.raises(
+            RecoveryVerificationError,
+            match="outside its contract",
+        ):
+            case.verify()
+        return
+
     checks = case.verify()
 
     assert "reconciliation_source_residuals_fresh_restored" in checks
-    expected = (
-        "reconciliation_writeoff_fresh_reversed"
-        if writeoff
-        else "reconciliation_writeoff_not_applicable"
-    )
-    assert expected in checks
+    assert "reconciliation_writeoff_fresh_absent_by_contract" in checks
     assert set(case.adapter.absence_reads) == {
         ("account.partial.reconcile", records["partial"].id),
         ("account.full.reconcile", records["full"].id),
