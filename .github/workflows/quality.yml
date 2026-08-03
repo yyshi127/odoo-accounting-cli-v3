@@ -824,6 +824,8 @@ jobs:
         run: |
           node --check bootstrap.mjs
           node --check create-runtime-binding.mjs
+          node --check final-evidence.mjs
+          node --check final-result-delivery.mjs
           node --check release-binding.mjs
           node --check server.mjs
           node --check tool-policy.mjs
@@ -876,6 +878,31 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e ".[test]"
+      - name: Verify the SSHSIG production boundary as Linux root
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev262-sshsig-root.xml"
+          sudo "$(command -v python)" -m pytest -q -p no:cacheprovider \
+            --junitxml="$report" \
+            tests/test_sshsig.py
+          sudo "$(command -v python)" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          skipped = root.findall(".//skipped")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          if len(tests) != 16 or skipped or failures or errors:
+              raise SystemExit(
+                  "Dev262 SSHSIG root gate did not execute exactly 16 tests: "
+                  f"tests={len(tests)} skipped={len(skipped)} "
+                  f"failures={len(failures)} errors={len(errors)}"
+              )
+          print("dev262_sshsig_root_tests=16")
+          PY
       - name: Verify the tracked dev8 tool manifest and embedded Python
         run: python deployment/dev8/check_toolchain.py
       - name: Verify the exact dev15 toolchain manifest
@@ -1823,6 +1850,8 @@ jobs:
               broker_audit,
               historical_router,
               odoo_approver_authorizer,
+              read_evidence_index,
+              sshsig,
               systemd_activation,
               trusted_approval_uds,
               trusted_authority,
@@ -1834,6 +1863,7 @@ jobs:
               trusted_broker_uds,
               trusted_idempotency,
               trusted_read,
+              trusted_result_delivery,
               trusted_response_verifier,
               trusted_session_mint_uds,
               trusted_session_sqlite,
@@ -1881,6 +1911,8 @@ jobs:
               broker_audit,
               historical_router,
               odoo_approver_authorizer,
+              read_evidence_index,
+              sshsig,
               systemd_activation,
               trusted_approval_uds,
               trusted_authority,
@@ -1892,6 +1924,7 @@ jobs:
               trusted_broker_uds,
               trusted_idempotency,
               trusted_read,
+              trusted_result_delivery,
               trusted_response_verifier,
               trusted_session_mint_uds,
               trusted_session_sqlite,

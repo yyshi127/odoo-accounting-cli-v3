@@ -318,21 +318,26 @@ counts. Only that passing, attested standalone check should be supplied to the
 final aggregate gate; zero-trace and unsigned self-reported summaries fail
 closed.
 
-The check retains the absolute attestation-key path so downstream verification
-does not have to trust the check document's booleans. Both `goal-readiness` and
-`final-evidence-manifest-check` reopen that key file, reconstruct the exact
-claims, and verify the purpose-separated HMAC. On the Linux deployment path the
-file must be a canonical regular non-symlink, root-owned, and not group/world
-writable; every ancestor must be a root-owned non-symlink directory that is not
-group/world writable. The reader uses `O_NOFOLLOW`, compares path/opened-file
-identity before and after a bounded read, and rejects duplicate JSON keys and
-invalid numeric constants. A moved/replaced path, untrusted key ID, changed
-claim, or forged signature fails closed.
+The check retains the absolute attestation-key path as an equality assertion,
+not as a downstream key selector. Both `goal-readiness` and
+`final-evidence-manifest-check` derive the one permitted path from the executing
+release --
+`/etc/odoo-accounting-cli-v3/trust/pi-evidence/<executing-release>/attestation-keys.json`
+-- require the retained path to match it exactly, reopen that derived path,
+reconstruct the exact claims, and verify the purpose-separated HMAC. On the
+Linux deployment path the file must be a canonical, single-link, regular
+non-symlink, root-owned, and exactly mode `0400` or `0600`; every ancestor must
+be a root-owned non-symlink directory that is not group/world writable. The
+reader uses `O_NOFOLLOW`, compares path/opened-file identity before and after a
+bounded read, and rejects duplicate JSON keys and invalid numeric constants. A
+moved/replaced path, old-release path, untrusted key ID, changed claim, or forged
+signature fails closed.
 
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
 "$RELEASE_DIR/bin/odoo-accounting-cli-v3" evidence goal-readiness \
   --current-path /opt/odoo-accounting-cli-v3/current \
+  --read-evidence-index /var/lib/odoo-accounting-cli-v3/evidence/<RUN_ID>/read-evidence-index.json \
   --pi-scenario-report <REPORT_JSON> \
   --pi-scenario-report-check <PI_SCENARIO_REPORT_CHECK_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \

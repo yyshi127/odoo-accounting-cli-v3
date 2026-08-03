@@ -13,7 +13,7 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-The current Dev261 development baseline registers 35 capabilities: 12 reads
+The current Dev262 development baseline registers 35 capabilities: 12 reads
 and 23 writes. The reads are staged only for `test`; no capability is enabled
 or production-routed. All 23 writes have concrete source paths, 21 can reach
 capability-specific ORM prechecks, and payment registration plus deferred
@@ -30,6 +30,28 @@ capability is yet marked enabled or routed through Pi. No write capability is
 staged or enabled;
 sandbox and production remain closed until their approval, idempotency,
 verification, recovery, and evidence gates pass.
+
+Dev262 retains `read-evidence-index.v2` only as a legacy structural-audit
+format. Its checker strictly reopens the frozen source bundle and validates the
+shape and internal bindings of `accounting_oracle`, `live_odoo`, `pi_e2e`,
+`release_identity`, and `security_negative` bodies. That is useful tamper and
+regression coverage, but it is not an external trust decision: the checker can
+read the HMAC signing secrets, and the collector/verifier identities are labels
+rather than independently held public-key identities. A v2 result must report
+`external_read_evidence_verified:false` and
+`goal_evidence_admissible:false`, regardless of its structural result.
+
+Dev262 also introduces a Linux-only SSHSIG verification foundation for the
+future public-key evidence path. It requires root-managed paths, pins the
+`ssh-keygen` executable and all trust/signature inputs by SHA-256, keeps them
+open, and invokes `ssh-keygen -Y verify` only through inherited
+`/proc/self/fd` descriptors with a fixed Ed25519 principal, namespace, and
+revocation file. Unsupported hosts fail closed. It does not yet connect that
+foundation to a v3 active-admission record,
+collector and verifier role signatures, externally bound scope/authentication,
+or real raw Odoo, PostgreSQL-oracle and Pi evidence. No Dev262 12-by-5 target
+bundle or active admission exists. All 12 reads therefore remain
+`contract_tested`, test-staged, not enabled, and not Goal-evidence ready.
 
 Dev257 adds the declared, disabled
 `acct.bank.statement_compensate.v1` contract. It preserves a completed,
@@ -162,11 +184,14 @@ Pi scenario acceptance does not trust a retained report's own passing fields.
 `evidence pi-scenario-report-check` recomputes it from the original raw trace,
 the independent capture binding, root-managed authorities, and the routed
 release/registry, then emits a purpose-separated HMAC recomputation
-attestation. `goal-readiness` and `final-evidence-manifest-check` independently
-reopen the retained trusted-key path and verify that attestation and its exact
-claims. Zero-trace, unsigned self-reported, or forged checks fail closed. On the
-Linux deployment path, the key file must be an absolute canonical root-owned
-non-symlink, must not be group/world writable, and all ancestors must be
+attestation. `goal-readiness` and `final-evidence-manifest-check` derive the
+only accepted key path from the executing release as
+`/etc/odoo-accounting-cli-v3/trust/pi-evidence/<release>/attestation-keys.json`;
+the retained path must match exactly and cannot select another key file. They
+then verify that attestation and its exact claims. Zero-trace, unsigned
+self-reported, forged, or alternate-key-path checks fail closed. On the Linux
+deployment path, the key file must be an absolute canonical root-owned,
+single-link non-symlink with exact mode `0400` or `0600`, and all ancestors must be
 root-owned directories that are not group/world writable; verification also
 uses no-follow, open-file identity, before/after identity, and bounded-read
 checks. The contract-tested FD4 terminal-answer boundary is not the complete

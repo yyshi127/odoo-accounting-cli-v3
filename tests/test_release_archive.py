@@ -269,6 +269,24 @@ DEV251_REPORT_READ_EVIDENCE_RELEASE_MEMBERS = frozenset(
         "tests/test_dev251_report_read_evidence.py",
     }
 )
+DEV262_READ_EVIDENCE_INDEX_RELEASE_MEMBERS = frozenset(
+    {
+        ".github/workflows/quality.yml",
+        "README.md",
+        "VERSION",
+        "docs/DEPLOYMENT.md",
+        "docs/PI_SCENARIO_ACCEPTANCE.md",
+        "docs/READ_EVIDENCE_INDEX.md",
+        "src/odoo_accounting_cli_v3/cli.py",
+        "src/odoo_accounting_cli_v3/read_evidence_index.py",
+        "src/odoo_accounting_cli_v3/sshsig.py",
+        "tests/TEST.md",
+        "tests/test_cli_evidence.py",
+        "tests/test_read_evidence_index.py",
+        "tests/test_release_archive.py",
+        "tests/test_sshsig.py",
+    }
+)
 EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3-effect-finalizer",
@@ -451,6 +469,7 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
     | DEV27_FINALIZER_RUNTIME_GATE_RELEASE_MEMBERS
     | DEV29_READ_EVIDENCE_RELEASE_MEMBERS
     | DEV251_REPORT_READ_EVIDENCE_RELEASE_MEMBERS
+    | DEV262_READ_EVIDENCE_INDEX_RELEASE_MEMBERS
     | EFFECT_FINALIZER_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
@@ -459,6 +478,11 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
 
 
 class ReleaseArchiveTest(unittest.TestCase):
+    def test_dev262_read_evidence_verifier_is_in_the_release(self) -> None:
+        for name in DEV262_READ_EVIDENCE_INDEX_RELEASE_MEMBERS:
+            self.assertTrue((PROJECT_ROOT / name).is_file(), name)
+            self.assertIn(name, REQUIRED_WRITE_RELEASE_MEMBERS)
+
     def test_pi_evidence_runtime_is_a_required_release_member(self) -> None:
         name = "src/odoo_accounting_cli_v3/pi_evidence.py"
 

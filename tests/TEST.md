@@ -93,6 +93,37 @@ where practical, then record actual execution evidence separately.
   Before staging, real Odoo must prove the complete
   user/company/request/approval/move trace, exact audit-log behavior, module
   boundary, and concurrent external-chatter behavior.
+- Dev262 adds a legacy structural read-evidence checker for all 12 registered
+  reads. The v2 index has the exact sorted capability inventory and five
+  purpose-separated artifact/attestation pairs per capability. The caller may
+  choose only the index; the executing release derives a root-owned trust anchor
+  that pins the runtime, private release-specific keys, five verifier identities,
+  and one exact database/company/user/principal/environment scope. Tests prove
+  rejection of missing, extra, duplicate, or reordered entries; release,
+  registry, contract, scope, runtime, source-bundle, digest, receipt, and HMAC
+  drift; cross-purpose/reused keys; empty or self-asserted evidence; unsafe
+  ownership/modes, links, hard links, paths and source file sets; receipt count,
+  time or replay drift; oracle/result or read-only witness drift; Pi selection,
+  parameter, event or result drift; and any missing security rejection or write.
+  The trusted roots are fixed below `/opt`, `/var/lib`, and `/etc`, never
+  `/root`. This is not an external trust boundary: the checker reads the HMAC
+  signing/receipt secrets, role identities remain labels, collection time lacks
+  active admission, and the exact scope/auth token is not externally attested.
+  Even a structurally passing v2 check must return
+  `external_read_evidence_verified:false` and
+  `goal_evidence_admissible:false`.
+- Dev262 also adds the isolated Linux SSHSIG public-verification foundation.
+  Non-Linux hosts test canonical parsing and fail-closed rejection only; they
+  cannot return `verified:true`. Linux tests cover a real
+  `ssh-keygen -Y verify` subprocess, exact stdin bytes,
+  principal/namespace/key/signature/revocation separation, digest pins,
+  root-managed path policy, inherited `/proc/self/fd` inputs, and
+  change-use-restore resistance. The module has not yet been connected to a v3
+  active admission, collector/verifier role signatures, live scope/auth
+  decisions, raw Odoo/SQL/Pi evidence adapters, or a v3 target-host admission
+  bundle. Passing either test set does not prove real Odoo/accounting
+  correctness, enable a read, authorize production, or make read/Goal evidence
+  ready.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -511,11 +542,13 @@ The retained scenario report is not accepted on its own assertions.
 `evidence pi-scenario-report-check` must reproduce it exactly from the raw trace,
 independent capture binding, trusted authorities, and routed release/registry,
 then emit the purpose-separated HMAC recomputation attestation.
-`goal-readiness` and `final-evidence-manifest-check` independently reopen the
-retained key path, reconstruct the bound claims, and verify that signature; the
-final checker also cross-binds the report, trace check, recomputation check, and
-Goal report. The production key path must be absolute, canonical, root-owned,
-non-symlink, and non-group/world-writable, with equally root-managed ancestors;
+`goal-readiness` and `final-evidence-manifest-check` independently derive
+`/etc/odoo-accounting-cli-v3/trust/pi-evidence/<release>/attestation-keys.json`,
+reject a retained report that names any other key path, reconstruct the bound
+claims, and verify that signature; the final checker also cross-binds the
+report, trace check, recomputation check, and Goal report. The production key
+path must be absolute, canonical, root-owned, single-link, non-symlink, and
+exactly mode `0400` or `0600`, with equally root-managed ancestors;
 no-follow, open-file identity, before/after identity, and bounded-read checks
 apply. Tests must keep zero traces, unsigned self-reports, changed claims, path
 replacement, and forged signatures fail closed.
@@ -737,8 +770,8 @@ At the current local development checkpoint:
   Registry-embedded evidence receipt claims cannot satisfy final Goal evidence:
   current-release receipt hashes would self-reference both the registry digest
   and release manifest, and their metadata alone does not independently verify
-  artifacts or signatures. Until a release-external, independently verified
-  read-evidence index covers all ten capabilities, dev250 reports zero
+  artifacts or signatures. Until a publicly verifiable v3 read-evidence index
+  with active admission covers all ten capabilities, dev250 reports zero
   completion-ready reads and keeps Goal readiness false. The final evidence
   manifest now revalidates this report against the installed registry/handler
   set and rejects an unready, stale, inconsistent, or incomplete Goal report.
@@ -771,7 +804,8 @@ At the current local development checkpoint:
   translation now uses the constrained Odoo read executor, while operation
   diagnostics uses the trusted local persistence reader and never enters the
   Odoo executor. Static readiness is therefore 10/10, but all ten still lack
-  independent exact-release Goal evidence and remain test-staged only.
+  publicly verifiable v3 exact-release Goal evidence with active admission and
+  remain test-staged only.
 
 The 2026-07-22 Dev29 pre-release worktree validation executed 4,289 tests:
 4,017 passed, 272 platform/external-environment cases skipped, and none failed

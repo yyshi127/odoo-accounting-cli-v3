@@ -76,10 +76,13 @@ Before using the report in `goal-readiness`, run
 `evidence pi-scenario-report-check` against the routed release and retain its
 read-only JSON output with the release evidence. That output contains a
 purpose-specific HMAC recomputation attestation made with the trusted trace
-attestation key. Keep the key JSON under a canonical root-owned,
-non-group/world-writable path whose ancestors are also root managed; the later
-aggregate and final-manifest checks reopen it with no-follow and file-identity
-checks before accepting the attestation. A report or check JSON that merely
+attestation key. Keep the key JSON at the exact release-derived path
+`/etc/odoo-accounting-cli-v3/trust/pi-evidence/<release>/attestation-keys.json`.
+It must be a root-owned single-link regular file with exact mode `0400` or
+`0600`, with root-managed ancestors. The later aggregate and final-manifest
+checks derive that path
+independently, require the retained path to match it, and reopen the file with
+no-follow and file-identity checks. A report or check JSON that merely
 self-declares passing gates is not accepted.
 Before generating that report, run `evidence pi-trace-capture-check` on the
 normalized trace capture, trusted attestation key file, and independent
@@ -97,10 +100,13 @@ aggregate non-authorizing check:
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
 V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+READ_EVIDENCE_INDEX=/var/lib/odoo-accounting-cli-v3/evidence/<RUN_ID>/read-evidence-index.json
 "$V3_CLI" evidence read-capabilities-readiness \
+  --read-evidence-index "$READ_EVIDENCE_INDEX" \
   > <READ_CAPABILITIES_READINESS_JSON>
 "$V3_CLI" evidence goal-readiness \
   --current-path /opt/odoo-accounting-cli-v3/current \
+  --read-evidence-index "$READ_EVIDENCE_INDEX" \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --pi-scenario-report-check <PI_SCENARIO_REPORT_CHECK_JSON> \
   --sandbox-onboarding-receipt <SANDBOX_ONBOARDING_READINESS_JSON> \
@@ -121,21 +127,42 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
   --expected-registry-digest <REGISTRY_DIGEST>
 ```
 
+The Dev262 `read-evidence-index.v2` input in this example is diagnostic only.
+Even when every legacy structural check passes, it must contribute
+`external_read_evidence_verified:false` and
+`goal_evidence_admissible:false`; consequently the aggregate must remain
+blocked. Do not treat this command sequence as a read or Goal promotion
+procedure.
+
+The five `--expected-*` release fields are assertions against the identity of
+the executing release; they cannot select another release's evidence. The
+command also requires its own resolved release directory to equal the release
+targeted by `current`, before capacity or retained-evidence checks run.
+
 This command performs no Odoo or PostgreSQL write. It aggregates blockers from
 the current-route gate, live filesystem capacity recheck, supplied PostgreSQL
 catalog observations for the expected sandbox database name, `registry audit`,
 read capability and static write readiness, the retained Pi scenario report,
 the retained sandbox onboarding receipt, the retained sandbox provision
 authorization record, and the retained write-pipeline readiness report. The
-read gate requires every registered read capability to have a reviewed trusted
-handler, a strict `page.total_count`, the exact `read_receipt_v2` contract, a
-test execution route, and an external independently verified evidence index
+future admissible read gate requires every registered read capability to have
+a reviewed trusted handler, a strict `page.total_count`, the exact
+`read_receipt_v2` contract, a test execution route, and a
+public-key-verifiable evidence index
 covering exact-release `live_odoo`, `accounting_oracle`, `pi_e2e`,
 `release_identity`, and `security_negative` artifacts. Registry-embedded
 receipt metadata is diagnostic only: it cannot authorize Goal completion
-because it is neither an independent artifact verification nor a constructible
-current-release trust anchor. Dev250 therefore keeps final read-evidence
-readiness false until the external read-evidence verifier/index is implemented.
+because it is neither an independent artifact verification nor a trusted
+current-release evidence input. Dev262's HMAC v2 implementation is only the
+legacy structural audit described in `docs/READ_EVIDENCE_INDEX.md`; its
+root-derived key paths and internally consistent scope do not make it externally
+admissible. The new Linux root-managed, pinned-FD SSHSIG public verification
+module is foundation only. Read
+Goal readiness remains false until a later v3 contract adds an active signed
+admission, independently held collector/verifier role signatures, externally
+bound runtime scope and authentication decisions, adapters for the real raw
+Odoo/SQL/Pi evidence, and a complete target-host evidence run. A copied
+readiness JSON or a structurally passing v2 index cannot replace those sources.
 Contract-tested handlers remain executable only in their staged channel. If a
 write evidence index is supplied, the aggregate also cross-checks it against
 the retained write-pipeline report for
@@ -247,9 +274,11 @@ Assemble and validate the retained handoff manifest with:
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
 V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
+FINAL_EVIDENCE_DIR=/var/lib/odoo-accounting-cli-v3/final-evidence/<RUN_ID>
+install -d -m 0700 -o root -g root "$FINAL_EVIDENCE_DIR"
 "$V3_CLI" evidence final-evidence-manifest-assemble \
   --current-path /opt/odoo-accounting-cli-v3/current \
-  --output-file <FINAL_EVIDENCE_MANIFEST_JSON> \
+  --output-file "$FINAL_EVIDENCE_DIR/final-evidence-manifest.json" \
   --pi-trace-capture-check <PI_TRACE_CAPTURE_CHECK_JSON> \
   --pi-scenario-report <PI_GATE_REPORT_JSON> \
   --pi-scenario-report-check <PI_SCENARIO_REPORT_CHECK_JSON> \
@@ -273,9 +302,25 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
   --expected-registry-digest <REGISTRY_DIGEST>
 ```
 
-The assembler writes canonical JSON with artifact paths and SHA-256 values,
-then immediately reuses the same validation path as the checker. It refuses to
-overwrite an existing manifest unless `--overwrite` is supplied.
+The output parent must already exist; the assembler deliberately refuses to
+create or chmod it. Production deployments must use a canonical, root-owned,
+non-symlink directory with a root-owned ancestor chain that is not group/world
+writable. The POSIX checker also accepts the effective user's ownership for
+non-root test operation, and permits a root-owned sticky shared directory such
+as `/tmp` only as a non-leaf ancestor; the output parent itself receives no
+sticky-directory exception. This keeps caller-controlled output paths outside
+the publication trust boundary.
+
+The assembler snapshots every source once, writes a new private staging tree,
+publishes a unique read-only bundle, validates that candidate with the same
+checker path, and only then atomically publishes the canonical manifest. It
+never edits a previously published bundle in place and refuses to replace an
+existing manifest unless `--overwrite` is supplied. If a post-publication
+directory durability sync fails, or publication is interrupted with an
+indeterminate outcome, the command reports failure but conservatively retains
+the complete bundle. A pre-publication interruption may therefore leave an
+unreferenced bundle for operator review, but a published manifest must never
+point at deleted artifacts.
 
 To independently recheck an already assembled manifest, run:
 
@@ -297,10 +342,12 @@ PostgreSQL. They do not make a business-success claim; they only prove that the
 final review packet is complete, untampered, and bound to the exact deployed
 release before a human production promotion review.
 Neither `goal-readiness` nor `final-evidence-manifest-check` accepts the
-recomputation check's booleans by assertion. Each reopens the root-managed key
-path retained by `pi-scenario-report-check`, reconstructs the exact
+recomputation check's booleans by assertion. Each derives the fixed key path
+`/etc/odoo-accounting-cli-v3/trust/pi-evidence/<executing-release>/attestation-keys.json`,
+requires the retained path to match it exactly, reconstructs the exact
 report/trace/capture/release claims, and verifies the purpose-separated HMAC
-signature. The final manifest checker additionally cross-binds the raw report,
+signature. A retained report therefore cannot choose an old or test key file.
+The final manifest checker additionally cross-binds the raw report,
 trace-capture check, recomputation check, and Goal report. Missing keys,
 zero-trace reports, self-reported checks, changed claims, or forged signatures
 therefore fail closed.
@@ -685,7 +732,8 @@ The command always renders `environment:sandbox` and
 root-managed install actions, and keeps `business_succeeded:false`. It does not
 create secrets, write `/etc`, open Odoo, or prove a real read result. A
 generated plan becomes usable only after the installed file is reloaded by the
-exact release and the read evidence gates below pass.
+exact release and the future v3 public-key admission and real-evidence gates
+below pass. A legacy v2 structural result cannot satisfy this condition.
 When `--measure-existing-files` is used, the command computes SHA-256 digests
 from the supplied local paths. If an operator also supplies a digest and it does
 not match the measured file, the plan remains non-configurable and reports a

@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import hashlib
 import hmac
+import math
 import os
 import re
 import shutil
+import stat
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -41,6 +43,11 @@ from .receipts import (
     ReceiptError,
     verify_read_receipt,
 )
+from .read_evidence_index import (
+    REQUIRED_EVIDENCE_KINDS,
+    ReadEvidenceIndexError,
+    verify_read_evidence_index,
+)
 from .registry import (
     PRODUCTION_READ_EVIDENCE,
     Capability,
@@ -66,6 +73,9 @@ DEFAULT_SANDBOX_WRITE_STATE = Path(
 )
 DEFAULT_SANDBOX_READ_STATE_ROOT = Path("/var/lib/odoo-accounting-cli-v3/sandbox/read")
 DEFAULT_SANDBOX_READ_SECRET_ROOT = Path("/etc/odoo-accounting-cli-v3/secrets/sandbox")
+DEFAULT_PI_RECOMPUTATION_ATTESTATION_KEYS_PARENT = Path(
+    "/etc/odoo-accounting-cli-v3/trust/pi-evidence"
+)
 PI_SCENARIO_REPORT_SCHEMA = "odoo-accounting-cli-v3.pi-gate-report.v3"
 PI_SCENARIO_REQUIRED_GATES = ("F01", "F02", "F03", "F04", "F05")
 PI_RECOMPUTATION_ATTESTATION_SCHEMA = (
@@ -100,6 +110,10 @@ PI_CAPTURE_BINDING_FIELDS = (
     "system_prompt_sha256",
     "tool_set_sha256",
 )
+ADMISSIBLE_READ_EVIDENCE_INDEX_SCHEMA = (
+    "odoo-accounting-cli-v3.read-evidence-index.v3"
+)
+ADMISSIBLE_READ_EVIDENCE_PROTOCOL = "sshsig-v3"
 
 
 def _json(value: Any) -> str:
@@ -532,6 +546,8 @@ def _pi_scenario_acceptance_report_status(
     *,
     command: str,
     expected_release_identity: dict[str, Any],
+    retained_document: dict[str, Any] | None = None,
+    retained_sha256: str | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if pi_scenario_report is None:
@@ -543,18 +559,23 @@ def _pi_scenario_acceptance_report_status(
             "scenario_acceptance_ready": False,
             "summary": None,
         }
-    try:
-        raw = pi_scenario_report.read_bytes()
-    except OSError as exc:
+    if retained_document is None and retained_sha256 is None:
+        report, _raw, report_sha256, _identity = _read_final_json_snapshot(
+            pi_scenario_report,
+            command=command,
+            label="Pi scenario acceptance report",
+            maximum=_MAX_FINAL_EVIDENCE_ARTIFACT_BYTES,
+        )
+    elif type(retained_document) is dict and isinstance(retained_sha256, str):
+        report = retained_document
+        report_sha256 = retained_sha256
+    else:
         raise CliFailure(
             command=command,
             code="retained_report_rejected",
-            message="The retained Pi scenario acceptance report is unavailable.",
+            message="The retained Pi scenario acceptance snapshot is incomplete.",
             exit_code=5,
-        ) from exc
-    report = _load_retained_json_report(
-        pi_scenario_report, command=command, label="Pi scenario acceptance"
-    )
+        )
     gates = report.get("gates")
     coverage = report.get("trace_coverage")
     capture = report.get("capture")
@@ -729,7 +750,7 @@ def _pi_scenario_acceptance_report_status(
     return {
         "blockers": sorted(set(blockers)),
         "report_path": str(pi_scenario_report),
-        "report_sha256": _sha256_bytes(raw),
+        "report_sha256": report_sha256,
         "scenario_acceptance_ready": not blockers,
         "summary": {
             "acceptance_passed": report.get("acceptance_passed"),
@@ -844,12 +865,56 @@ def _load_root_managed_pi_attestation_keys(
     path: Path,
 ) -> dict[str, bytes]:
     try:
-        raw, _identity = _read_trusted_file(
+        before = path.lstat()
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or before.st_nlink != 1
+            or (
+                os.name == "posix"
+                and stat.S_IMODE(before.st_mode) not in {0o400, 0o600}
+            )
+        ):
+            raise ValueError("Pi recomputation attestation keys are not private")
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_nlink,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        raw, opened_identity = _read_trusted_file(
             path,
             "Pi recomputation attestation keys",
             maximum=1024 * 1024,
             require_root_owner=True,
         )
+        after = path.lstat()
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mode,
+            after.st_nlink,
+            after.st_uid,
+            after.st_gid,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if (
+            opened_identity != (before.st_dev, before.st_ino)
+            or after_identity != before_identity
+            or not stat.S_ISREG(after.st_mode)
+            or stat.S_ISLNK(after.st_mode)
+            or after.st_nlink != 1
+        ):
+            raise ValueError(
+                "Pi recomputation attestation keys changed while they were read"
+            )
 
         def reject_duplicate_keys(
             pairs: list[tuple[str, Any]],
@@ -872,10 +937,29 @@ def _load_root_managed_pi_attestation_keys(
         return gate.load_attestation_keys(document)
     except HistoricalRouterError as exc:
         raise ValueError(str(exc)) from exc
-    except (TypeError, UnicodeError, ValueError) as exc:
+    except (OSError, TypeError, UnicodeError, ValueError) as exc:
         raise ValueError(
             "Pi recomputation attestation keys are invalid"
         ) from exc
+
+
+def _pi_recomputation_attestation_keys_path(
+    expected_release_identity: dict[str, Any],
+) -> Path:
+    release = expected_release_identity.get("release")
+    if (
+        not isinstance(release, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", release) is None
+        or not DEFAULT_PI_RECOMPUTATION_ATTESTATION_KEYS_PARENT.is_absolute()
+    ):
+        raise ValueError("Pi recomputation release identity is invalid")
+    return Path(
+        os.path.abspath(
+            DEFAULT_PI_RECOMPUTATION_ATTESTATION_KEYS_PARENT
+            / release
+            / "attestation-keys.json"
+        )
+    )
 
 
 def _pi_recomputation_check_status(
@@ -884,6 +968,8 @@ def _pi_recomputation_check_status(
     pi_scenario_status: dict[str, Any],
     command: str,
     expected_release_identity: dict[str, Any],
+    retained_document: dict[str, Any] | None = None,
+    retained_sha256: str | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     if pi_scenario_report_check is None:
@@ -896,12 +982,22 @@ def _pi_recomputation_check_status(
             "check_sha256": None,
             "recomputation_ready": False,
         }
+    check_sha256: str | None = None
     try:
-        check = _load_retained_json_report(
-            pi_scenario_report_check,
-            command=command,
-            label="Pi scenario recomputation check",
-        )
+        if retained_document is None and retained_sha256 is None:
+            check, _raw, check_sha256, _identity = _read_final_json_snapshot(
+                pi_scenario_report_check,
+                command=command,
+                label="Pi scenario recomputation check",
+                maximum=_MAX_FINAL_EVIDENCE_ARTIFACT_BYTES,
+            )
+        elif type(retained_document) is dict and isinstance(retained_sha256, str):
+            check = retained_document
+            check_sha256 = retained_sha256
+        else:
+            raise ValueError(
+                "Pi scenario recomputation check snapshot is incomplete"
+            )
         data = check.get("data")
         if (
             set(check)
@@ -940,10 +1036,17 @@ def _pi_recomputation_check_status(
             raise ValueError(
                 "Pi recomputation attestation keys path is unavailable"
             )
+        trusted_key_path = _pi_recomputation_attestation_keys_path(
+            expected_release_identity
+        )
+        if key_path_value != str(trusted_key_path):
+            raise ValueError(
+                "Pi recomputation attestation keys path is not the release trust path"
+            )
         gate = _load_pi_scenario_gate()
         trusted_keys = _load_root_managed_pi_attestation_keys(
             gate,
-            Path(key_path_value),
+            trusted_key_path,
         )
         attestation = data.get("recomputation_attestation")
         if (
@@ -1073,11 +1176,7 @@ def _pi_recomputation_check_status(
         "attestation_verified": not blockers,
         "blockers": sorted(set(blockers)),
         "check_path": str(pi_scenario_report_check),
-        "check_sha256": (
-            _sha256_file(pi_scenario_report_check)
-            if pi_scenario_report_check.is_file()
-            else None
-        ),
+        "check_sha256": check_sha256,
         "recomputation_ready": not blockers,
     }
 
@@ -1585,6 +1684,10 @@ def _target_capacity_recheck_report_status(
 
 
 FINAL_EVIDENCE_MANIFEST_SCHEMA = "odoo-accounting-cli-v3.final-evidence-manifest.v2"
+_MAX_FINAL_EVIDENCE_MANIFEST_BYTES = 2 * 1024 * 1024
+_MAX_FINAL_EVIDENCE_ARTIFACT_BYTES = 16 * 1024 * 1024
+_MAX_FINAL_EVIDENCE_JSON_DEPTH = 64
+_MAX_FINAL_EVIDENCE_JSON_NODES = 250_000
 FINAL_EVIDENCE_ARTIFACT_COMMANDS = {
     "goal_readiness_report": "evidence.goal-readiness",
     "pi_scenario_report_check": "evidence.pi-scenario-report-check",
@@ -1918,18 +2021,365 @@ GOAL_REMEDIATION_ACTIONS = (
 
 def _manifest_artifact_reference(manifest_path: Path, artifact_path: Path) -> str:
     try:
-        return artifact_path.resolve().relative_to(manifest_path.parent.resolve()).as_posix()
-    except ValueError:
-        return str(artifact_path)
+        return artifact_path.relative_to(manifest_path.parent).as_posix()
+    except ValueError as exc:
+        raise ValueError("final evidence artifact is outside the manifest root") from exc
 
 
 def _manifest_artifact_path(manifest_path: Path, value: Any) -> Path | None:
-    if not isinstance(value, str) or not value:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 4096
+        or "\x00" in value
+        or "\\" in value
+        or ":" in value
+    ):
         return None
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return manifest_path.parent / path
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != value
+    ):
+        return None
+    return manifest_path.parent.joinpath(*relative.parts)
+
+
+def _check_final_json_complexity(value: Any) -> None:
+    pending: list[tuple[Any, int]] = [(value, 1)]
+    nodes = 0
+    while pending:
+        current, depth = pending.pop()
+        nodes += 1
+        if nodes > _MAX_FINAL_EVIDENCE_JSON_NODES:
+            raise ValueError("retained final evidence JSON exceeds its node limit")
+        if depth > _MAX_FINAL_EVIDENCE_JSON_DEPTH:
+            raise ValueError("retained final evidence JSON exceeds its depth limit")
+        if type(current) is list:
+            pending.extend((item, depth + 1) for item in current)
+        elif type(current) is dict:
+            for key, item in current.items():
+                if type(key) is not str:
+                    raise ValueError("retained final evidence JSON key is invalid")
+                pending.append((key, depth + 1))
+                pending.append((item, depth + 1))
+        elif type(current) is float and not math.isfinite(current):
+            raise ValueError("retained final evidence JSON number is not finite")
+
+
+def _read_final_json_snapshot(
+    path: Path,
+    *,
+    command: str,
+    label: str,
+    maximum: int,
+) -> tuple[dict[str, Any], bytes, str, tuple[int, int, int, int, int]]:
+    snapshot_path = Path(os.path.abspath(path))
+    try:
+        raw, identity = _read_trusted_file(
+            snapshot_path,
+            label,
+            maximum=maximum,
+            require_root_owner=False,
+        )
+        metadata = snapshot_path.lstat()
+        if (
+            (metadata.st_dev, metadata.st_ino) != identity
+            or metadata.st_nlink != 1
+        ):
+            raise ValueError(f"{label} must be a stable single-link file")
+        document = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_non_finite_json,
+        )
+        if type(document) is not dict:
+            raise ValueError(f"{label} must be a JSON object")
+        _check_final_json_complexity(document)
+    except (
+        HistoricalRouterError,
+        OSError,
+        RecursionError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+    ) as exc:
+        raise CliFailure(
+            command=command,
+            code="retained_report_rejected",
+            message=f"The retained {label} is unavailable or invalid JSON.",
+            exit_code=5,
+        ) from exc
+    snapshot_identity = (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+    return document, raw, _sha256_bytes(raw), snapshot_identity
+
+
+def _recheck_final_file_snapshot(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int, int, int, int],
+    expected_sha256: str,
+    maximum: int,
+    command: str,
+    label: str,
+) -> None:
+    snapshot_path = Path(os.path.abspath(path))
+    try:
+        raw, identity = _read_trusted_file(
+            snapshot_path,
+            label,
+            maximum=maximum,
+            require_root_owner=False,
+        )
+        metadata = snapshot_path.lstat()
+        observed_identity = (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+        if (
+            identity != expected_identity[:2]
+            or observed_identity != expected_identity
+            or metadata.st_nlink != 1
+            or not hmac.compare_digest(_sha256_bytes(raw), expected_sha256)
+        ):
+            raise ValueError(f"{label} changed after snapshot")
+    except (HistoricalRouterError, OSError, ValueError) as exc:
+        raise CliFailure(
+            command=command,
+            code="retained_report_rejected",
+            message=f"The retained {label} changed after snapshot.",
+            exit_code=5,
+        ) from exc
+
+
+def _write_final_snapshot_exclusive(path: Path, raw: bytes) -> None:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if os.name == "posix":
+            os.fchmod(descriptor, 0o600)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_nlink != 1
+            or (
+                os.name == "posix"
+                and stat.S_IMODE(opened.st_mode) != 0o600
+            )
+        ):
+            raise OSError("final evidence destination is not a single-link file")
+        view = memoryview(raw)
+        written = 0
+        while written < len(view):
+            count = os.write(descriptor, view[written:])
+            if count <= 0:
+                raise OSError("final evidence snapshot write did not progress")
+            written += count
+        os.fsync(descriptor)
+        completed = os.fstat(descriptor)
+        if (
+            (completed.st_dev, completed.st_ino)
+            != (opened.st_dev, opened.st_ino)
+            or completed.st_nlink != 1
+            or completed.st_size != len(raw)
+        ):
+            raise OSError("final evidence snapshot changed while it was written")
+    finally:
+        os.close(descriptor)
+    retained = path.lstat()
+    if (
+        (retained.st_dev, retained.st_ino) != (opened.st_dev, opened.st_ino)
+        or retained.st_nlink != 1
+        or path.is_symlink()
+    ):
+        raise OSError("final evidence snapshot path changed after it was written")
+
+
+def _create_private_final_directory(path: Path) -> None:
+    path.mkdir(mode=0o700)
+    if os.name == "posix":
+        path.chmod(0o700)
+    metadata = path.lstat()
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or path.is_symlink()
+        or (
+            os.name == "posix"
+            and stat.S_IMODE(metadata.st_mode) != 0o700
+        )
+    ):
+        raise OSError("final evidence staging directory is unsafe")
+
+
+def _prepare_final_output_parent(path: Path, *, command: str) -> None:
+    try:
+        if not os.path.lexists(path):
+            raise OSError("final evidence output directory must already exist")
+        metadata = path.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or path.is_symlink()
+            or Path(os.path.abspath(path.resolve(strict=True))) != path
+        ):
+            raise OSError("final evidence output directory is unsafe")
+        if os.name == "posix":
+            effective_uid = os.geteuid()
+            current = path
+            while True:
+                ancestor = current.lstat()
+                mode = stat.S_IMODE(ancestor.st_mode)
+                shared_sticky_root = (
+                    current != path
+                    and ancestor.st_uid == 0
+                    and mode & stat.S_ISVTX
+                )
+                if (
+                    not stat.S_ISDIR(ancestor.st_mode)
+                    or stat.S_ISLNK(ancestor.st_mode)
+                    or ancestor.st_uid not in {0, effective_uid}
+                    or (mode & 0o022 and not shared_sticky_root)
+                ):
+                    raise OSError(
+                        "final evidence output directory ancestors are unsafe"
+                    )
+                if current.parent == current:
+                    break
+                current = current.parent
+    except (OSError, RuntimeError) as exc:
+        raise CliFailure(
+            command=command,
+            code="final_evidence_manifest_rejected",
+            message="The final evidence output directory is unavailable or unsafe.",
+            exit_code=5,
+        ) from exc
+
+
+def _fsync_final_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _fsync_final_file(path: Path) -> None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _make_final_bundle_read_only(bundle_root: Path) -> None:
+    if os.name != "posix":
+        return
+    files: list[Path] = []
+    directories: list[Path] = []
+    for path in bundle_root.rglob("*"):
+        metadata = path.lstat()
+        if stat.S_ISREG(metadata.st_mode) and not path.is_symlink():
+            files.append(path)
+        elif stat.S_ISDIR(metadata.st_mode) and not path.is_symlink():
+            directories.append(path)
+        else:
+            raise OSError("final evidence bundle contains an unsafe entry")
+    for path in files:
+        path.chmod(0o400)
+        _fsync_final_file(path)
+    for path in sorted(directories, key=lambda item: len(item.parts), reverse=True):
+        path.chmod(0o500)
+    bundle_root.chmod(0o500)
+
+
+def _remove_final_transaction_path(path: Path | None, parent: Path) -> None:
+    if path is None or path.parent != parent or not os.path.lexists(path):
+        return
+    if path.is_symlink() or not path.is_dir():
+        path.unlink(missing_ok=True)
+        return
+    if os.name == "posix":
+        for child in path.rglob("*"):
+            if child.is_dir() and not child.is_symlink():
+                child.chmod(0o700)
+            elif not child.is_symlink():
+                child.chmod(0o600)
+        path.chmod(0o700)
+    shutil.rmtree(path)
+
+
+class _FinalManifestPublishedError(OSError):
+    """Raised when publication succeeded but a later durability check failed."""
+
+
+def _publish_final_manifest(
+    candidate: Path,
+    output_file: Path,
+    *,
+    overwrite: bool,
+) -> None:
+    candidate_metadata = candidate.lstat()
+    if (
+        not stat.S_ISREG(candidate_metadata.st_mode)
+        or candidate.is_symlink()
+        or candidate_metadata.st_nlink != 1
+    ):
+        raise OSError("final evidence manifest candidate is unsafe")
+    published = False
+    try:
+        if overwrite:
+            os.replace(candidate, output_file)
+        else:
+            os.link(candidate, output_file)
+        published = True
+        if not overwrite:
+            candidate.unlink()
+        published_metadata = output_file.lstat()
+        if (
+            not stat.S_ISREG(published_metadata.st_mode)
+            or output_file.is_symlink()
+            or published_metadata.st_nlink != 1
+            or (published_metadata.st_dev, published_metadata.st_ino)
+            != (candidate_metadata.st_dev, candidate_metadata.st_ino)
+        ):
+            raise OSError("final evidence manifest publication is not stable")
+        _fsync_final_directory(output_file.parent)
+    except OSError as exc:
+        if published:
+            raise _FinalManifestPublishedError(
+                "final evidence manifest was published before validation failed"
+            ) from exc
+        raise
 
 
 def _command_template_placeholders(command_args_template: Any) -> list[str]:
@@ -2290,12 +2740,13 @@ def _sandbox_prerequisite_handoff_check_report(
 def _final_evidence_manifest_document(
     artifact_paths: dict[str, Path],
     *,
+    artifact_sha256: dict[str, str],
     manifest_path: Path,
     release_identity: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "artifact_sha256": {
-            name: _sha256_file(artifact_paths[name])
+            name: artifact_sha256[name]
             for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS
         },
         "artifacts": {
@@ -2348,6 +2799,25 @@ def _assert_final_checker_is_routed(
         )
 
 
+def _assert_expected_release_identity_matches_executing(
+    identity: dict[str, Any],
+    supplied: dict[str, str | None],
+    *,
+    command: str,
+    code: str,
+) -> None:
+    if any(
+        expected is not None and expected != identity.get(field)
+        for field, expected in supplied.items()
+    ):
+        raise CliFailure(
+            command=command,
+            code=code,
+            message="The expected release identity does not match the executing release.",
+            exit_code=5,
+        )
+
+
 def _final_evidence_manifest_report(
     manifest_path: Path,
     *,
@@ -2355,12 +2825,15 @@ def _final_evidence_manifest_report(
     expected_release_identity: dict[str, Any],
 ) -> dict[str, Any]:
     blockers: list[str] = []
-    try:
-        manifest = _load_retained_json_report(
-            manifest_path, command=command, label="final evidence manifest"
+    manifest_path = Path(os.path.abspath(manifest_path))
+    manifest, _manifest_raw, manifest_sha256, manifest_identity = (
+        _read_final_json_snapshot(
+            manifest_path,
+            command=command,
+            label="final evidence manifest",
+            maximum=_MAX_FINAL_EVIDENCE_MANIFEST_BYTES,
         )
-    except CliFailure:
-        raise
+    )
     artifacts = manifest.get("artifacts")
     artifact_sha256 = manifest.get("artifact_sha256")
     release_identity = manifest.get("release_identity")
@@ -2407,6 +2880,11 @@ def _final_evidence_manifest_report(
 
     artifact_reports: dict[str, Any] = {}
     artifact_documents: dict[str, dict[str, Any]] = {}
+    artifact_identities: dict[tuple[int, int, int, int, int], str] = {}
+    artifact_snapshots: dict[
+        str, tuple[Path, tuple[int, int, int, int, int], str]
+    ] = {}
+    pi_scenario_status: dict[str, Any] | None = None
     for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS:
         raw_path = artifacts.get(name)
         artifact_path = _manifest_artifact_path(manifest_path, raw_path)
@@ -2415,19 +2893,30 @@ def _final_evidence_manifest_report(
         document: Any = None
         if artifact_path is None:
             artifact_blockers.append("artifact path is invalid")
-        elif not artifact_path.is_file():
-            artifact_blockers.append("artifact file is unavailable")
         else:
-            digest = _sha256_file(artifact_path)
-            if artifact_sha256.get(name) != digest:
-                artifact_blockers.append("artifact SHA-256 does not match manifest")
             try:
-                document = _load_retained_json_report(
-                    artifact_path, command=command, label=f"final evidence artifact {name}"
+                document, _raw, digest, identity = _read_final_json_snapshot(
+                    artifact_path,
+                    command=command,
+                    label=f"final evidence artifact {name}",
+                    maximum=_MAX_FINAL_EVIDENCE_ARTIFACT_BYTES,
                 )
-            except CliFailure as exc:
+            except CliFailure:
                 artifact_blockers.append("artifact is unavailable or invalid JSON")
                 document = None
+            else:
+                artifact_snapshots[name] = (artifact_path, identity, digest)
+                previous_name = artifact_identities.get(identity)
+                if previous_name is not None:
+                    artifact_blockers.append(
+                        f"artifact file identity is already used by {previous_name}"
+                    )
+                else:
+                    artifact_identities[identity] = name
+                if artifact_sha256.get(name) != digest:
+                    artifact_blockers.append(
+                        "artifact SHA-256 does not match manifest"
+                    )
         expected_command = FINAL_EVIDENCE_ARTIFACT_COMMANDS.get(name)
         if expected_command is not None and isinstance(document, dict):
             if document.get("command") != expected_command:
@@ -2441,7 +2930,10 @@ def _final_evidence_manifest_report(
                 artifact_path,
                 command=command,
                 expected_release_identity=expected_release_identity,
+                retained_document=document,
+                retained_sha256=digest,
             )
+            pi_scenario_status = retained_status
             if retained_status["scenario_acceptance_ready"] is not True:
                 artifact_blockers.append("Pi scenario report is not acceptance-ready")
         if name in {"pi_scenario_report_check", "pi_trace_capture_check"}:
@@ -2640,12 +3132,27 @@ def _final_evidence_manifest_report(
                     artifact_blockers.append(
                         "read capabilities readiness report must not authorize production"
                     )
+                retained_external = data.get("external_read_evidence")
+                reverified_external = None
+                if isinstance(retained_external, dict):
+                    index_path = retained_external.get("index_path")
+                    if (
+                        isinstance(index_path, str)
+                        and index_path
+                        and isinstance(retained_release_identity, dict)
+                    ):
+                        reverified_external = _external_read_evidence_report(
+                            Path(index_path),
+                            expected_release_identity=retained_release_identity,
+                            capabilities=_load_capabilities(),
+                        )
                 try:
                     expected_read_report = _read_capabilities_readiness_report(
                         _load_capabilities(),
                         trusted_read_handlers=_load_read_capability_implementation(
                             command
                         ),
+                        external_evidence_report=reverified_external,
                     )
                 except CliFailure:
                     expected_read_report = None
@@ -2815,8 +3322,7 @@ def _final_evidence_manifest_report(
         blockers.append("Pi final evidence artifacts cannot be cross-bound")
 
     raw_pi_report_path = _manifest_artifact_path(
-        manifest_path,
-        artifacts.get("pi_scenario_report"),
+        manifest_path, artifacts.get("pi_scenario_report")
     )
     report_check_path = _manifest_artifact_path(
         manifest_path,
@@ -2827,21 +3333,60 @@ def _final_evidence_manifest_report(
             "Pi final evidence trusted recomputation artifacts are unavailable"
         )
     else:
-        raw_pi_status = _pi_scenario_acceptance_report_status(
-            raw_pi_report_path,
+        raw_pi_status = pi_scenario_status
+        report_check_document = artifact_documents.get("pi_scenario_report_check")
+        report_check_sha256 = artifact_reports.get(
+            "pi_scenario_report_check", {}
+        ).get("sha256")
+        if (
+            raw_pi_status is None
+            or not isinstance(report_check_document, dict)
+            or not isinstance(report_check_sha256, str)
+        ):
+            blockers.append(
+                "Pi final evidence trusted recomputation snapshots are unavailable"
+            )
+        else:
+            recomputation_status = _pi_recomputation_check_status(
+                report_check_path,
+                pi_scenario_status=raw_pi_status,
+                command=command,
+                expected_release_identity=expected_release_identity,
+                retained_document=report_check_document,
+                retained_sha256=report_check_sha256,
+            )
+            if recomputation_status["recomputation_ready"] is not True:
+                blockers.extend(
+                    "Pi trusted recomputation: " + item
+                    for item in recomputation_status["blockers"]
+                )
+
+    try:
+        _recheck_final_file_snapshot(
+            manifest_path,
+            expected_identity=manifest_identity,
+            expected_sha256=manifest_sha256,
+            maximum=_MAX_FINAL_EVIDENCE_MANIFEST_BYTES,
             command=command,
-            expected_release_identity=expected_release_identity,
+            label="final evidence manifest",
         )
-        recomputation_status = _pi_recomputation_check_status(
-            report_check_path,
-            pi_scenario_status=raw_pi_status,
-            command=command,
-            expected_release_identity=expected_release_identity,
-        )
-        if recomputation_status["recomputation_ready"] is not True:
-            blockers.extend(
-                "Pi trusted recomputation: " + item
-                for item in recomputation_status["blockers"]
+    except CliFailure:
+        blockers.append("final evidence manifest changed after snapshot")
+    for name, (artifact_path, identity, digest) in artifact_snapshots.items():
+        try:
+            _recheck_final_file_snapshot(
+                artifact_path,
+                expected_identity=identity,
+                expected_sha256=digest,
+                maximum=_MAX_FINAL_EVIDENCE_ARTIFACT_BYTES,
+                command=command,
+                label=f"final evidence artifact {name}",
+            )
+        except CliFailure:
+            change_blocker = "artifact changed after snapshot"
+            blockers.append(f"{name}: {change_blocker}")
+            artifact_reports[name]["blockers"] = sorted(
+                set([*artifact_reports[name]["blockers"], change_blocker])
             )
 
     return {
@@ -2850,7 +3395,7 @@ def _final_evidence_manifest_report(
         "blockers": sorted(set(blockers)),
         "final_evidence_manifest_ready": not blockers,
         "manifest_path": str(manifest_path),
-        "manifest_sha256": _sha256_file(manifest_path),
+        "manifest_sha256": manifest_sha256,
         "production_promotion_allowed": False,
         "real_odoo_write_performed": False,
         "release_identity": expected_release_identity,
@@ -4960,10 +5505,50 @@ def _load_read_capability_implementation(command: str) -> dict[str, str]:
     }
 
 
+def _read_capability_contracts(
+    capabilities: tuple[Capability, ...],
+) -> dict[str, str]:
+    return {
+        capability.id: _sha256_json(capability.data)
+        for capability in sorted(capabilities, key=lambda item: item.id)
+        if capability.data["access"] == "read"
+    }
+
+
+def _external_read_evidence_report(
+    evidence_index: Path | None,
+    *,
+    expected_release_identity: dict[str, Any],
+    capabilities: tuple[Capability, ...],
+) -> dict[str, Any] | None:
+    if evidence_index is None:
+        return None
+    try:
+        report = verify_read_evidence_index(
+            evidence_index,
+            expected_release_identity=expected_release_identity,
+            expected_capability_contracts=_read_capability_contracts(capabilities),
+        )
+    except ReadEvidenceIndexError as exc:
+        return {
+            "blockers": [str(exc)],
+            "capabilities": [],
+            "external_read_evidence_verified": False,
+            "index_path": str(evidence_index),
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+        }
+    return {
+        **report,
+        "blockers": list(report.get("blockers", [])),
+    }
+
+
 def _read_capability_readiness_report(
     capability: Capability,
     *,
     trusted_read_handlers: dict[str, str],
+    external_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data = capability.data
     output_schema = data["output_schema"]
@@ -5041,8 +5626,20 @@ def _read_capability_readiness_report(
             if isinstance(receipt.get("kind"), str)
         }
     )
+    external_evidence_kinds = (
+        external_evidence.get("verified_evidence_kinds", [])
+        if isinstance(external_evidence, dict)
+        else []
+    )
+    external_read_evidence_verified = (
+        isinstance(external_evidence, dict)
+        and external_evidence.get("capability_id") == capability.id
+        and external_evidence.get("verified") is True
+        and external_evidence_kinds == list(REQUIRED_EVIDENCE_KINDS)
+    )
     missing_goal_evidence_kinds = sorted(
-        PRODUCTION_READ_EVIDENCE - set(registry_claimed_receipt_kinds)
+        PRODUCTION_READ_EVIDENCE
+        - (set(registry_claimed_receipt_kinds) | set(external_evidence_kinds))
     )
     routed_environments = set(data.get("staged_environments", [])) | set(
         data.get("enabled_environments", [])
@@ -5089,10 +5686,12 @@ def _read_capability_readiness_report(
         for name, ready in checks.items()
         if ready is not True
     ]
-    goal_evidence_blockers = [
-        "trusted external read evidence has not been independently verified"
-    ]
-    goal_evidence_ready = False
+    goal_evidence_blockers = (
+        []
+        if external_read_evidence_verified
+        else ["trusted external read evidence has not been independently verified"]
+    )
+    goal_evidence_ready = external_read_evidence_verified
     trusted_read_admissible = not blockers
     return {
         "blockers": blockers,
@@ -5104,7 +5703,7 @@ def _read_capability_readiness_report(
             "staged_environments": data.get("staged_environments", []),
         },
         "checks": checks,
-        "external_read_evidence_verified": False,
+        "external_read_evidence_verified": external_read_evidence_verified,
         "goal_evidence_blockers": goal_evidence_blockers,
         "goal_evidence_ready": goal_evidence_ready,
         "missing_goal_evidence_kinds": missing_goal_evidence_kinds,
@@ -5125,15 +5724,32 @@ def _read_capabilities_readiness_report(
     capabilities: tuple[Capability, ...],
     *,
     trusted_read_handlers: dict[str, str],
+    external_evidence_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     read_capabilities = sorted(
         (item for item in capabilities if item.data["access"] == "read"),
         key=lambda item: item.id,
     )
+    external_entries = (
+        {
+            item["capability_id"]: item
+            for item in external_evidence_report.get("capabilities", [])
+            if isinstance(item, dict) and isinstance(item.get("capability_id"), str)
+        }
+        if isinstance(external_evidence_report, dict)
+        and external_evidence_report.get("external_read_evidence_verified") is True
+        and external_evidence_report.get("goal_evidence_admissible") is True
+        and external_evidence_report.get("evidence_protocol")
+        == ADMISSIBLE_READ_EVIDENCE_PROTOCOL
+        and external_evidence_report.get("index_kind")
+        == ADMISSIBLE_READ_EVIDENCE_INDEX_SCHEMA
+        else {}
+    )
     reports = [
         _read_capability_readiness_report(
             capability,
             trusted_read_handlers=trusted_read_handlers,
+            external_evidence=external_entries.get(capability.id),
         )
         for capability in read_capabilities
     ]
@@ -5179,10 +5795,32 @@ def _read_capabilities_readiness_report(
         blockers.append(
             "not every registered read capability is statically admissible for trusted execution"
         )
-    if reports:
+    if reports and goal_evidence_unready_ids:
         blockers.append(
             "trusted external read evidence is not independently verified for every registered read capability"
         )
+    external_verifier_ready = (
+        isinstance(external_evidence_report, dict)
+        and external_evidence_report.get("external_read_evidence_verified") is True
+        and external_evidence_report.get("goal_evidence_admissible") is True
+        and external_evidence_report.get("evidence_protocol")
+        == ADMISSIBLE_READ_EVIDENCE_PROTOCOL
+        and external_evidence_report.get("index_kind")
+        == ADMISSIBLE_READ_EVIDENCE_INDEX_SCHEMA
+        and not external_evidence_report.get("blockers")
+    )
+    if isinstance(external_evidence_report, dict):
+        blockers.extend(external_evidence_report.get("blockers", []))
+    read_static_ready = (
+        bool(reports)
+        and not unready_ids
+        and not missing_required_read_capability_ids
+    )
+    read_goal_ready = (
+        read_static_ready
+        and external_verifier_ready
+        and len(goal_evidence_ready_ids) == len(reports)
+    )
     return {
         "admissible_count": len(admissible_ids),
         "admissible_ids": admissible_ids,
@@ -5190,17 +5828,14 @@ def _read_capabilities_readiness_report(
         "capabilities": reports,
         "completion_ready_count": len(completion_ready_ids),
         "completion_ready_ids": completion_ready_ids,
-        "external_read_evidence_verifier_ready": False,
+        "external_read_evidence": external_evidence_report,
+        "external_read_evidence_verifier_ready": external_verifier_ready,
         "goal_evidence_ready_count": len(goal_evidence_ready_ids),
         "goal_evidence_ready_ids": goal_evidence_ready_ids,
         "goal_evidence_unready_capability_ids": goal_evidence_unready_ids,
         "production_promotion_allowed": False,
-        "read_goal_readiness_ready": False,
-        "read_static_readiness_ready": (
-            bool(reports)
-            and not unready_ids
-            and not missing_required_read_capability_ids
-        ),
+        "read_goal_readiness_ready": read_goal_ready,
+        "read_static_readiness_ready": read_static_ready,
         "real_odoo_write_performed": False,
         "registered_read_capability_ids": registered_read_capability_ids,
         "missing_required_read_capability_ids": (
@@ -5318,17 +5953,63 @@ def _write_capability_readiness_report(
     }
 
 
+@evidence_group.command("read-evidence-index-check")
+@click.option(
+    "--evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False),
+    required=True,
+    help="Canonical exact-release external read evidence index.",
+)
+def evidence_read_evidence_index_check(evidence_index: Path) -> None:
+    """Independently verify every external read evidence artifact."""
+
+    command = "evidence.read-evidence-index-check"
+    identity = _load_release_identity(command=command)
+    capabilities = _load_capabilities()
+    try:
+        report = verify_read_evidence_index(
+            evidence_index,
+            expected_release_identity=identity,
+            expected_capability_contracts=_read_capability_contracts(capabilities),
+        )
+    except ReadEvidenceIndexError as exc:
+        raise CliFailure(
+            command=command,
+            code="read_evidence_index_rejected",
+            message=str(exc),
+            exit_code=5,
+        ) from exc
+    _success(
+        command,
+        report,
+        business_succeeded=False,
+    )
+
+
 @evidence_group.command("read-capabilities-readiness")
-def evidence_read_capabilities_readiness() -> None:
+@click.option(
+    "--read-evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Canonical exact-release external read evidence index.",
+)
+def evidence_read_capabilities_readiness(
+    read_evidence_index: Path | None,
+) -> None:
     """Check trusted execution readiness for every registered read capability."""
 
     command = "evidence.read-capabilities-readiness"
     identity = _load_release_identity(command=command)
     capabilities = _load_capabilities()
     trusted_read_handlers = _load_read_capability_implementation(command)
+    external_evidence = _external_read_evidence_report(
+        read_evidence_index,
+        expected_release_identity=identity,
+        capabilities=capabilities,
+    )
     report = _read_capabilities_readiness_report(
         capabilities,
         trusted_read_handlers=trusted_read_handlers,
+        external_evidence_report=external_evidence,
     )
     _success(
         command,
@@ -6243,7 +6924,42 @@ def evidence_final_evidence_manifest_assemble(
     """Assemble and validate the final retained V3 evidence manifest."""
 
     command = "evidence.final-evidence-manifest-assemble"
-    if output_file.exists() and not overwrite:
+    identity = _load_release_identity(command=command)
+    supplied_release_identity = {
+        "commit": expected_commit,
+        "manifest_sha256": expected_manifest_sha256,
+        "package_sha256": expected_package_sha256,
+        "registry_digest": expected_registry_digest,
+        "release": expected_release,
+    }
+    _assert_expected_release_identity_matches_executing(
+        identity,
+        supplied_release_identity,
+        command=command,
+        code="final_evidence_checker_release_mismatch",
+    )
+    expected_release_identity = {
+        field: identity[field]
+        for field in (
+            "commit",
+            "manifest_sha256",
+            "package_sha256",
+            "registry_digest",
+            "release",
+        )
+    }
+    route_report = _current_route_report(
+        current_path,
+        command=command,
+        expected_release=expected_release_identity["release"],
+        expected_commit=expected_release_identity["commit"],
+        expected_manifest_sha256=expected_release_identity["manifest_sha256"],
+        expected_package_sha256=expected_release_identity["package_sha256"],
+        expected_registry_digest=expected_release_identity["registry_digest"],
+    )
+    _assert_final_checker_is_routed(route_report, command=command)
+    output_file = Path(os.path.abspath(output_file))
+    if os.path.lexists(output_file) and not overwrite:
         raise CliFailure(
             command=command,
             code="final_evidence_manifest_exists",
@@ -6268,69 +6984,129 @@ def evidence_final_evidence_manifest_assemble(
         "write_evidence_index": write_evidence_index,
         "write_pipeline_report": write_pipeline_report,
     }
-    duplicate_paths = sorted(
-        {
-            str(path)
-            for path in artifact_paths.values()
-            if sum(1 for candidate in artifact_paths.values() if candidate == path) > 1
+    source_snapshots: dict[str, tuple[bytes, str]] = {}
+    source_identities: dict[tuple[int, int, int, int, int], str] = {}
+    for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS:
+        try:
+            _document, raw, digest, identity = _read_final_json_snapshot(
+                artifact_paths[name],
+                command=command,
+                label=f"final evidence source artifact {name}",
+                maximum=_MAX_FINAL_EVIDENCE_ARTIFACT_BYTES,
+            )
+        except CliFailure as exc:
+            raise CliFailure(
+                command=command,
+                code="final_evidence_manifest_rejected",
+                message="The final evidence manifest references an unavailable or unsafe artifact.",
+                exit_code=5,
+            ) from exc
+        if identity in source_identities:
+            raise CliFailure(
+                command=command,
+                code="final_evidence_manifest_rejected",
+                message="The final evidence manifest cannot reference duplicate artifacts.",
+                exit_code=5,
+            )
+        source_identities[identity] = name
+        source_snapshots[name] = (raw, digest)
+    output_parent = output_file.parent
+    _prepare_final_output_parent(output_parent, command=command)
+    transaction_id = uuid.uuid4().hex
+    staging_root = output_parent / f".final-evidence-{transaction_id}.staging"
+    final_bundle_root = output_parent / f"final-evidence-bundle-{transaction_id}"
+    candidate_manifest = (
+        output_parent / f".final-evidence-{transaction_id}.manifest.tmp"
+    )
+    retain_bundle = False
+    report: dict[str, Any]
+    try:
+        _create_private_final_directory(staging_root)
+        staging_artifact_root = staging_root / "artifacts"
+        _create_private_final_directory(staging_artifact_root)
+        staged_artifact_sha256: dict[str, str] = {}
+        for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS:
+            raw, digest = source_snapshots[name]
+            _write_final_snapshot_exclusive(
+                staging_artifact_root / f"{name}.json", raw
+            )
+            staged_artifact_sha256[name] = digest
+        _fsync_final_directory(staging_artifact_root)
+        _fsync_final_directory(staging_root)
+        _make_final_bundle_read_only(staging_root)
+        _fsync_final_directory(staging_artifact_root)
+        _fsync_final_directory(staging_root)
+        if os.path.lexists(final_bundle_root):
+            raise OSError("final evidence bundle destination already exists")
+        os.rename(staging_root, final_bundle_root)
+        _fsync_final_directory(output_parent)
+
+        final_artifact_paths = {
+            name: final_bundle_root / "artifacts" / f"{name}.json"
+            for name in FINAL_EVIDENCE_REQUIRED_ARTIFACTS
         }
-    )
-    if duplicate_paths:
+        manifest = _final_evidence_manifest_document(
+            final_artifact_paths,
+            artifact_sha256=staged_artifact_sha256,
+            manifest_path=candidate_manifest,
+            release_identity=expected_release_identity,
+        )
+        _write_final_snapshot_exclusive(
+            candidate_manifest, (_json(manifest) + "\n").encode("utf-8")
+        )
+        report = _final_evidence_manifest_report(
+            candidate_manifest,
+            command=command,
+            expected_release_identity=expected_release_identity,
+        )
+        blockers = list(report["blockers"])
+        if not route_report["current_route_ready"]:
+            blockers.append("current release route is not ready")
+        report["blockers"] = sorted(set(blockers))
+        report["final_evidence_manifest_ready"] = not blockers
+        report["route"] = route_report
+        report["manifest_path"] = str(output_file)
+        report["manifest_created"] = False
+        if not blockers:
+            if os.name == "posix":
+                candidate_manifest.chmod(0o400)
+                _fsync_final_file(candidate_manifest)
+            # Once publication is attempted, an asynchronous interruption can
+            # arrive after the filesystem change but before the callee records
+            # that it succeeded. Conservatively retain the immutable bundle;
+            # known pre-publication failures below may safely release it.
+            retain_bundle = True
+            try:
+                _publish_final_manifest(
+                    candidate_manifest,
+                    output_file,
+                    overwrite=overwrite,
+                )
+            except FileExistsError as exc:
+                retain_bundle = False
+                raise CliFailure(
+                    command=command,
+                    code="final_evidence_manifest_exists",
+                    message="The final evidence manifest output already exists.",
+                    exit_code=5,
+                ) from exc
+            except _FinalManifestPublishedError:
+                raise
+            report["manifest_created"] = True
+    except CliFailure:
+        raise
+    except OSError as exc:
         raise CliFailure(
             command=command,
             code="final_evidence_manifest_rejected",
-            message="The final evidence manifest cannot reference duplicate artifacts.",
+            message="The final evidence manifest could not be assembled safely.",
             exit_code=5,
-        )
-    missing_artifacts = sorted(
-        name for name, path in artifact_paths.items() if not path.is_file()
-    )
-    if missing_artifacts:
-        raise CliFailure(
-            command=command,
-            code="final_evidence_manifest_rejected",
-            message="The final evidence manifest references unavailable artifacts.",
-            exit_code=5,
-        )
-    route_report = _current_route_report(
-        current_path,
-        command=command,
-        expected_release=expected_release,
-        expected_commit=expected_commit,
-        expected_manifest_sha256=expected_manifest_sha256,
-        expected_package_sha256=expected_package_sha256,
-        expected_registry_digest=expected_registry_digest,
-    )
-    _assert_final_checker_is_routed(route_report, command=command)
-    expected_release_identity = {
-        "commit": expected_commit or route_report["route_identity"].get("commit"),
-        "manifest_sha256": expected_manifest_sha256
-        or route_report["route_identity"].get("manifest_sha256"),
-        "package_sha256": expected_package_sha256
-        or route_report["route_identity"].get("package_sha256"),
-        "registry_digest": expected_registry_digest
-        or route_report["route_identity"].get("registry_digest"),
-        "release": expected_release or route_report["route_identity"].get("release"),
-    }
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    manifest = _final_evidence_manifest_document(
-        artifact_paths,
-        manifest_path=output_file,
-        release_identity=expected_release_identity,
-    )
-    output_file.write_text(_json(manifest) + "\n", encoding="utf-8")
-    report = _final_evidence_manifest_report(
-        output_file,
-        command=command,
-        expected_release_identity=expected_release_identity,
-    )
-    blockers = list(report["blockers"])
-    if not route_report["current_route_ready"]:
-        blockers.append("current release route is not ready")
-    report["blockers"] = sorted(set(blockers))
-    report["final_evidence_manifest_ready"] = not blockers
-    report["route"] = route_report
-    report["manifest_created"] = report["final_evidence_manifest_ready"]
+        ) from exc
+    finally:
+        _remove_final_transaction_path(candidate_manifest, output_parent)
+        _remove_final_transaction_path(staging_root, output_parent)
+        if not retain_bundle:
+            _remove_final_transaction_path(final_bundle_root, output_parent)
     _success(command, report, business_succeeded=False)
 
 
@@ -6365,26 +7141,40 @@ def evidence_final_evidence_manifest_check(
     """Validate the final retained V3 evidence handoff manifest."""
 
     command = "evidence.final-evidence-manifest-check"
+    identity = _load_release_identity(command=command)
+    supplied_release_identity = {
+        "commit": expected_commit,
+        "manifest_sha256": expected_manifest_sha256,
+        "package_sha256": expected_package_sha256,
+        "registry_digest": expected_registry_digest,
+        "release": expected_release,
+    }
+    _assert_expected_release_identity_matches_executing(
+        identity,
+        supplied_release_identity,
+        command=command,
+        code="final_evidence_checker_release_mismatch",
+    )
+    expected_release_identity = {
+        field: identity[field]
+        for field in (
+            "commit",
+            "manifest_sha256",
+            "package_sha256",
+            "registry_digest",
+            "release",
+        )
+    }
     route_report = _current_route_report(
         current_path,
         command=command,
-        expected_release=expected_release,
-        expected_commit=expected_commit,
-        expected_manifest_sha256=expected_manifest_sha256,
-        expected_package_sha256=expected_package_sha256,
-        expected_registry_digest=expected_registry_digest,
+        expected_release=expected_release_identity["release"],
+        expected_commit=expected_release_identity["commit"],
+        expected_manifest_sha256=expected_release_identity["manifest_sha256"],
+        expected_package_sha256=expected_release_identity["package_sha256"],
+        expected_registry_digest=expected_release_identity["registry_digest"],
     )
     _assert_final_checker_is_routed(route_report, command=command)
-    expected_release_identity = {
-        "commit": expected_commit or route_report["route_identity"].get("commit"),
-        "manifest_sha256": expected_manifest_sha256
-        or route_report["route_identity"].get("manifest_sha256"),
-        "package_sha256": expected_package_sha256
-        or route_report["route_identity"].get("package_sha256"),
-        "registry_digest": expected_registry_digest
-        or route_report["route_identity"].get("registry_digest"),
-        "release": expected_release or route_report["route_identity"].get("release"),
-    }
     report = _final_evidence_manifest_report(
         manifest_file,
         command=command,
@@ -6400,6 +7190,11 @@ def evidence_final_evidence_manifest_check(
 
 
 @evidence_group.command("goal-readiness")
+@click.option(
+    "--read-evidence-index",
+    type=click.Path(path_type=Path, dir_okay=False),
+    help="Canonical exact-release external read evidence index.",
+)
 @click.option(
     "--pi-scenario-report",
     type=click.Path(path_type=Path, dir_okay=False),
@@ -6500,6 +7295,7 @@ def evidence_final_evidence_manifest_check(
     help="UTC timestamp used for deterministic sandbox authorization validation.",
 )
 def evidence_goal_readiness(
+    read_evidence_index: Path | None,
     pi_scenario_report: Path | None,
     pi_scenario_report_check: Path | None,
     sandbox_onboarding_receipt: Path | None,
@@ -6528,12 +7324,32 @@ def evidence_goal_readiness(
 
     command = "evidence.goal-readiness"
     identity = _load_release_identity(command=command)
+    supplied_release_identity = {
+        "commit": expected_commit,
+        "manifest_sha256": expected_manifest_sha256,
+        "package_sha256": expected_package_sha256,
+        "registry_digest": expected_registry_digest,
+        "release": expected_release,
+    }
+    if any(
+        supplied is not None and supplied != identity.get(field)
+        for field, supplied in supplied_release_identity.items()
+    ):
+        raise CliFailure(
+            command=command,
+            code="goal_readiness_release_identity_mismatch",
+            message="The expected release identity does not match the executing release.",
+            exit_code=5,
+        )
     expected_release_identity = {
-        "commit": expected_commit or identity["commit"],
-        "manifest_sha256": expected_manifest_sha256 or identity["manifest_sha256"],
-        "package_sha256": expected_package_sha256 or identity["package_sha256"],
-        "registry_digest": expected_registry_digest or identity["registry_digest"],
-        "release": expected_release or identity["release"],
+        field: identity[field]
+        for field in (
+            "commit",
+            "manifest_sha256",
+            "package_sha256",
+            "registry_digest",
+            "release",
+        )
     }
     route_report = _current_route_report(
         current_path,
@@ -6544,6 +7360,7 @@ def evidence_goal_readiness(
         expected_package_sha256=expected_release_identity["package_sha256"],
         expected_registry_digest=expected_release_identity["registry_digest"],
     )
+    _assert_final_checker_is_routed(route_report, command=command)
     try:
         capacity_report = _target_capacity_recheck_report(
             capacity_path,
@@ -6568,9 +7385,22 @@ def evidence_goal_readiness(
     capabilities = _load_capabilities()
     registry_report = _registry_audit_report(capabilities)
     trusted_read_handlers = _load_read_capability_implementation(command)
+    external_read_evidence = _external_read_evidence_report(
+        read_evidence_index,
+        expected_release_identity={
+            **identity,
+            "commit": expected_release_identity["commit"],
+            "manifest_sha256": expected_release_identity["manifest_sha256"],
+            "package_sha256": expected_release_identity["package_sha256"],
+            "registry_digest": expected_release_identity["registry_digest"],
+            "release": expected_release_identity["release"],
+        },
+        capabilities=capabilities,
+    )
     read_capabilities_report = _read_capabilities_readiness_report(
         capabilities,
         trusted_read_handlers=trusted_read_handlers,
+        external_evidence_report=external_read_evidence,
     )
     write_capabilities = sorted(
         (item for item in capabilities if item.data["access"] == "write"),

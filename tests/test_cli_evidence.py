@@ -119,10 +119,45 @@ def test_cli_readiness_fixtures_are_the_exact_current_capability_inventory():
     assert len(WRITE_CAPABILITY_IDS) == EXPECTED_WRITE_CAPABILITY_COUNT
     assert READ_CAPABILITY_IDS == sorted(set(READ_CAPABILITY_IDS))
     assert WRITE_CAPABILITY_IDS == sorted(set(WRITE_CAPABILITY_IDS))
+    external = _ready_read_capabilities_report()["external_read_evidence"]
+    assert external["external_read_evidence_verified"] is True
+    assert external["goal_evidence_admissible"] is True
+    assert external["evidence_protocol"] == "sshsig-v3"
+    assert external["index_kind"] == (
+        "odoo-accounting-cli-v3.read-evidence-index.v3"
+    )
+    expected_identity = _final_evidence_test_identity()
+    identity_fields = (
+        "commit",
+        "manifest_sha256",
+        "package_sha256",
+        "registry_digest",
+        "release",
+    )
+    assert external["release_identity"] == {
+        field: expected_identity[field] for field in identity_fields
+    }
+    release = expected_identity["release"]
+    assert f"/{release}/" in external["attestation_keys_path"]
+    assert external["read_runtime_config_path"].endswith(
+        f"/{release}.read-runtime.json"
+    )
+    assert external["trust_anchor_path"].endswith(
+        f"/{release}.read-evidence-v3.json"
+    )
 
 
 @pytest.fixture(autouse=True)
-def _test_pi_recomputation_key_loader_for_non_root_posix(monkeypatch):
+def _test_pi_recomputation_key_loader_for_non_root_posix(
+    monkeypatch,
+    tmp_path: Path,
+):
+    monkeypatch.setattr(
+        cli_module,
+        "DEFAULT_PI_RECOMPUTATION_ATTESTATION_KEYS_PARENT",
+        (tmp_path / "pi-recomputation-trust").resolve(),
+        raising=False,
+    )
     os_module = __import__("os")
     if (
         os_module.name != "posix"
@@ -141,7 +176,19 @@ def _test_pi_recomputation_key_loader_for_non_root_posix(monkeypatch):
     )
 
 
-def _ready_read_capabilities_report() -> dict:
+def _ready_read_capabilities_report(
+    release_identity: dict | None = None,
+) -> dict:
+    if release_identity is None:
+        release_identity = _final_evidence_test_identity()
+    release = release_identity["release"]
+    identity_fields = (
+        "commit",
+        "manifest_sha256",
+        "package_sha256",
+        "registry_digest",
+        "release",
+    )
     capabilities = [
         {
             "blockers": [],
@@ -185,6 +232,53 @@ def _ready_read_capabilities_report() -> dict:
         "capabilities": capabilities,
         "completion_ready_count": len(READ_CAPABILITY_IDS),
         "completion_ready_ids": READ_CAPABILITY_IDS,
+        "external_read_evidence": {
+            "attestation_keys_path": (
+                "/etc/odoo-accounting-cli-v3/trust/read-evidence-v3/"
+                f"{release}/attestation-keys.json"
+            ),
+            "attestation_keys_sha256": "5" * 64,
+            "blockers": [],
+            "capabilities": [
+                {
+                    "capability_id": capability_id,
+                    "verified": True,
+                    "verified_evidence_kinds": READ_GOAL_EVIDENCE_KINDS,
+                }
+                for capability_id in READ_CAPABILITY_IDS
+            ],
+            "evidence_protocol": "sshsig-v3",
+            "evidence_root": (
+                "/var/lib/odoo-accounting-cli-v3/read-evidence-v3/test-run"
+            ),
+            "external_read_evidence_verified": True,
+            "goal_evidence_admissible": True,
+            "index_kind": "odoo-accounting-cli-v3.read-evidence-index.v3",
+            "index_path": (
+                "/var/lib/odoo-accounting-cli-v3/read-evidence-v3/test-run/"
+                "read-evidence-index.json"
+            ),
+            "index_sha256": "6" * 64,
+            "production_promotion_allowed": False,
+            "read_runtime_config_path": (
+                "/opt/odoo-accounting-cli-v3/trusted-artifacts/"
+                f"{release}.read-runtime.json"
+            ),
+            "read_runtime_config_sha256": "7" * 64,
+            "real_odoo_write_performed": False,
+            "release_identity": {
+                field: release_identity[field] for field in identity_fields
+            },
+            "required_evidence_kinds": READ_GOAL_EVIDENCE_KINDS,
+            "scope": {"database_names": ["odoo_v3_sandbox"]},
+            "scope_sha256": "8" * 64,
+            "trust_anchor_path": (
+                "/opt/odoo-accounting-cli-v3/trusted-artifacts/"
+                f"{release}.read-evidence-v3.json"
+            ),
+            "trust_anchor_sha256": "9" * 64,
+            "verified_capability_count": len(READ_CAPABILITY_IDS),
+        },
         "external_read_evidence_verifier_ready": True,
         "goal_evidence_ready_count": len(READ_CAPABILITY_IDS),
         "goal_evidence_ready_ids": READ_CAPABILITY_IDS,
@@ -356,7 +450,12 @@ def _ready_pi_recomputation_check(
     json_module = __import__("json")
     secret = b"pi-recomputation-test-secret-material"
     key_id = "pi-recomputation-test-key"
-    key_path = (tmp_path / "pi-recomputation-keys.json").resolve()
+    key_path = (
+        cli_module.DEFAULT_PI_RECOMPUTATION_ATTESTATION_KEYS_PARENT
+        / release_identity["release"]
+        / "attestation-keys.json"
+    ).resolve()
+    key_path.parent.mkdir(parents=True, exist_ok=True)
     key_path.write_text(
         json_module.dumps(
             {
@@ -373,6 +472,7 @@ def _ready_pi_recomputation_check(
         ),
         encoding="utf-8",
     )
+    key_path.chmod(0o600)
     report = json_module.loads(pi_report.read_text(encoding="utf-8"))
     report_sha256 = _sha256_path(pi_report)
     trace_digest = trace_file_sha256 or cli_module._sha256_bytes(
@@ -588,7 +688,7 @@ def _ready_final_evidence_manifest(
                 "business_succeeded": False,
                 "command": "evidence.read-capabilities-readiness",
                 "data": {
-                    **_ready_read_capabilities_report(),
+                    **_ready_read_capabilities_report(release_identity),
                     "release_identity": release_identity,
                 },
                 "ok": True,
@@ -887,6 +987,96 @@ def _ready_final_evidence_manifest(
     return manifest_path
 
 
+def _final_evidence_test_identity() -> dict:
+    return {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev262-test",
+        "verified": True,
+        "version": "0.1.0.dev262",
+    }
+
+
+def _invoke_final_evidence_manifest_check(
+    manifest: Path,
+    release_identity: dict,
+):
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(release_identity),
+    ), patch(
+        "odoo_accounting_cli_v3.cli._external_read_evidence_report",
+        return_value=_ready_read_capabilities_report(release_identity)[
+            "external_read_evidence"
+        ],
+    ):
+        return CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+
+def _final_evidence_source_artifacts(manifest: Path) -> dict[str, Path]:
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    return {
+        name: manifest.parent / relative
+        for name, relative in document["artifacts"].items()
+    }
+
+
+def _invoke_final_evidence_manifest_assemble(
+    output_file: Path,
+    artifacts: dict[str, Path],
+    release_identity: dict,
+    *,
+    overwrite: bool = False,
+    prepare_output_parent: bool = True,
+):
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+    if prepare_output_parent:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+    args = [
+        "evidence",
+        "final-evidence-manifest-assemble",
+        "--output-file",
+        str(output_file),
+    ]
+    for name in sorted(artifacts):
+        args.extend([f"--{name.replace('_', '-')}", str(artifacts[name])])
+    if overwrite:
+        args.append("--overwrite")
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
+        return_value=_ready_read_capabilities_report(release_identity),
+    ), patch(
+        "odoo_accounting_cli_v3.cli._external_read_evidence_report",
+        return_value=_ready_read_capabilities_report(release_identity)[
+            "external_read_evidence"
+        ],
+    ):
+        return CliRunner().invoke(main, args)
+
+
 def _ready_pi_trace_capture(
     tmp_path: Path,
 ) -> tuple[Path, Path, Path, object]:
@@ -914,6 +1104,7 @@ def _ready_pi_trace_capture(
         ),
         encoding="utf-8",
     )
+    key_path.chmod(0o600)
     binding_path = tmp_path / "pi-expected-capture-binding.json"
     binding_path.write_text(
         __import__("json").dumps(
@@ -977,6 +1168,28 @@ def _ready_pi_scenario_evidence(
         route,
         evidence_trust,
     )
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX mode contract")
+def test_pi_evidence_fixtures_create_private_attestation_keys(tmp_path: Path):
+    stat_module = __import__("stat")
+    _trace, trace_key, _binding, _trust = _ready_pi_trace_capture(tmp_path)
+    assert stat_module.S_IMODE(trace_key.stat().st_mode) == 0o600
+
+    release_identity = _final_evidence_test_identity()
+    report = _ready_pi_scenario_report(
+        tmp_path,
+        manifest_sha256=release_identity["manifest_sha256"],
+        package_sha256=release_identity["package_sha256"],
+        registry_digest_value=release_identity["registry_digest"],
+    )
+    _ready_pi_recomputation_check(tmp_path, report, release_identity)
+    recomputation_key = (
+        cli_module.DEFAULT_PI_RECOMPUTATION_ATTESTATION_KEYS_PARENT
+        / release_identity["release"]
+        / "attestation-keys.json"
+    ).resolve()
+    assert stat_module.S_IMODE(recomputation_key.stat().st_mode) == 0o600
 
 
 def _pi_scenario_report_check_args(
@@ -3993,6 +4206,326 @@ def test_evidence_read_capabilities_readiness_keeps_external_evidence_gate_close
     assert diagnostics_report["production_promotion_allowed"] is False
 
 
+def _verified_external_read_evidence_report() -> dict[str, object]:
+    return {
+        "blockers": [],
+        "capabilities": [
+            {
+                "capability_id": capability_id,
+                "verified": True,
+                "verified_evidence_kinds": READ_GOAL_EVIDENCE_KINDS,
+            }
+            for capability_id in READ_CAPABILITY_IDS
+        ],
+        "evidence_protocol": "sshsig-v3",
+        "external_read_evidence_verified": True,
+        "goal_evidence_admissible": True,
+        "index_kind": "odoo-accounting-cli-v3.read-evidence-index.v3",
+        "production_promotion_allowed": False,
+        "real_odoo_write_performed": False,
+    }
+
+
+def test_read_capabilities_readiness_accepts_verified_external_evidence():
+    capabilities = _load_capabilities()
+    handlers = cli_module._load_read_capability_implementation(
+        "evidence.read-capabilities-readiness"
+    )
+
+    report = _read_capabilities_readiness_report(
+        capabilities,
+        trusted_read_handlers=handlers,
+        external_evidence_report=_verified_external_read_evidence_report(),
+    )
+
+    assert report["blockers"] == []
+    assert report["external_read_evidence_verifier_ready"] is True
+    assert report["goal_evidence_ready_count"] == EXPECTED_READ_CAPABILITY_COUNT
+    assert report["completion_ready_count"] == EXPECTED_READ_CAPABILITY_COUNT
+    assert report["read_goal_readiness_ready"] is True
+    assert all(
+        item["external_read_evidence_verified"] is True
+        and item["goal_evidence_ready"] is True
+        and item["read_completion_ready"] is True
+        for item in report["capabilities"]
+    )
+    assert report["production_promotion_allowed"] is False
+
+
+def test_read_capabilities_readiness_rejects_legacy_v2_structural_audit():
+    capabilities = _load_capabilities()
+    handlers = cli_module._load_read_capability_implementation(
+        "evidence.read-capabilities-readiness"
+    )
+    legacy = {
+        **_verified_external_read_evidence_report(),
+        "blockers": ["legacy v2 is not admissible"],
+        "evidence_protocol": "hmac-v2",
+        "external_read_evidence_verified": False,
+        "goal_evidence_admissible": False,
+        "index_kind": "odoo-accounting-cli-v3.read-evidence-index.v2",
+        "legacy_v2_structural_audit_verified": True,
+    }
+
+    report = _read_capabilities_readiness_report(
+        capabilities,
+        trusted_read_handlers=handlers,
+        external_evidence_report=legacy,
+    )
+
+    assert report["external_read_evidence_verifier_ready"] is False
+    assert report["read_goal_readiness_ready"] is False
+    assert report["goal_evidence_ready_count"] == 0
+    assert "legacy v2 is not admissible" in report["blockers"]
+
+
+def test_evidence_read_capabilities_readiness_verifies_supplied_index():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev262-111111111111",
+        "verified": True,
+        "version": "0.1.0.dev262",
+    }
+    external = _verified_external_read_evidence_report()
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        return_value=external,
+    ) as verifier:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "read-capabilities-readiness",
+                "--read-evidence-index",
+                "/evidence/read-evidence-index.json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["data"]["read_goal_readiness_ready"] is True
+    assert payload["data"]["external_read_evidence_verifier_ready"] is True
+    assert payload["data"]["blockers"] == []
+    assert verifier.call_count == 1
+    assert verifier.call_args.args == (Path("/evidence/read-evidence-index.json"),)
+    assert set(verifier.call_args.kwargs) == {
+        "expected_capability_contracts",
+        "expected_release_identity",
+    }
+    assert verifier.call_args.kwargs["expected_release_identity"] == expected_identity
+    assert set(
+        verifier.call_args.kwargs["expected_capability_contracts"]
+    ) == set(READ_CAPABILITY_IDS)
+
+
+def test_evidence_read_capabilities_readiness_without_index_keeps_gate_closed():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev262-111111111111",
+        "verified": True,
+        "version": "0.1.0.dev262",
+    }
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli.verify_read_evidence_index"
+    ) as verifier:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "read-capabilities-readiness",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["external_read_evidence_verifier_ready"] is False
+    assert (
+        "trusted external read evidence is not independently verified for every "
+        "registered read capability"
+        in data["blockers"]
+    )
+    assert data["read_goal_readiness_ready"] is False
+    verifier.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("arguments", "rejected_option"),
+    [
+        (
+            [
+                "evidence",
+                "read-capabilities-readiness",
+                "--read-evidence-index",
+                "/evidence/read-evidence-index.json",
+                "--read-evidence-attestation-keys",
+                "/tmp/caller-selected-keys.json",
+            ],
+            "--read-evidence-attestation-keys",
+        ),
+        (
+            [
+                "evidence",
+                "read-evidence-index-check",
+                "--evidence-index",
+                "/evidence/read-evidence-index.json",
+                "--attestation-keys",
+                "/tmp/caller-selected-keys.json",
+            ],
+            "--attestation-keys",
+        ),
+    ],
+)
+def test_read_evidence_cli_rejects_caller_selected_trust_material(
+    arguments: list[str],
+    rejected_option: str,
+):
+    result = CliRunner().invoke(main, arguments)
+
+    assert result.exit_code == 2
+    assert "No such option" in result.output
+    assert rejected_option in result.output
+
+
+def test_evidence_read_evidence_index_check_is_release_and_registry_bound():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev262-111111111111",
+        "verified": True,
+        "version": "0.1.0.dev262",
+    }
+    external = _verified_external_read_evidence_report()
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        return_value=external,
+    ) as verifier:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "read-evidence-index-check",
+                "--evidence-index",
+                "/evidence/read-evidence-index.json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["command"] == "evidence.read-evidence-index-check"
+    assert payload["business_succeeded"] is False
+    assert payload["data"]["external_read_evidence_verified"] is True
+    assert payload["data"]["production_promotion_allowed"] is False
+    assert verifier.call_args.args == (Path("/evidence/read-evidence-index.json"),)
+    assert set(verifier.call_args.kwargs) == {
+        "expected_capability_contracts",
+        "expected_release_identity",
+    }
+    assert verifier.call_args.kwargs["expected_release_identity"] == expected_identity
+    assert set(
+        verifier.call_args.kwargs["expected_capability_contracts"]
+    ) == set(READ_CAPABILITY_IDS)
+
+
+def test_evidence_read_evidence_index_check_preserves_legacy_v2_blocker():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev262-111111111111",
+        "verified": True,
+        "version": "0.1.0.dev262",
+    }
+    external = {
+        **_verified_external_read_evidence_report(),
+        "blockers": ["legacy v2 is not admissible"],
+        "evidence_protocol": "hmac-v2",
+        "external_read_evidence_verified": False,
+        "goal_evidence_admissible": False,
+        "index_kind": "odoo-accounting-cli-v3.read-evidence-index.v2",
+        "legacy_v2_structural_audit_verified": True,
+    }
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        return_value=external,
+    ):
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "read-evidence-index-check",
+                "--evidence-index",
+                "/evidence/read-evidence-index.json",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["blockers"] == ["legacy v2 is not admissible"]
+    assert data["external_read_evidence_verified"] is False
+    assert data["goal_evidence_admissible"] is False
+    assert data["legacy_v2_structural_audit_verified"] is True
+
+
+def test_evidence_read_evidence_index_check_returns_structured_rejection():
+    expected_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev262-111111111111",
+        "verified": True,
+        "version": "0.1.0.dev262",
+    }
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=expected_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        side_effect=cli_module.ReadEvidenceIndexError("artifact digest mismatch"),
+    ) as verifier:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "read-evidence-index-check",
+                "--evidence-index",
+                "/evidence/read-evidence-index.json",
+            ],
+        )
+
+    assert result.exit_code == 5
+    payload = __import__("json").loads(result.output)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "read_evidence_index_rejected"
+    assert "artifact digest mismatch" in payload["error"]["message"]
+    assert verifier.call_args.args == (Path("/evidence/read-evidence-index.json"),)
+    assert set(verifier.call_args.kwargs) == {
+        "expected_capability_contracts",
+        "expected_release_identity",
+    }
+
+
 def test_read_capability_implementation_keeps_diagnostics_out_of_odoo_executor():
     from odoo_accounting_cli_v3.odoo.executor import (
         _CAPABILITIES as odoo_read_capabilities,
@@ -5145,7 +5678,7 @@ def test_evidence_goal_readiness_accepts_bound_retained_reports(tmp_path: Path):
         return_value={"sandbox_write_capacity_ready": True, "blockers": []},
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(expected_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -5699,6 +6232,117 @@ def test_goal_readiness_rejects_unsigned_self_reported_pi_success(
     )
 
 
+def test_pi_recomputation_rejects_report_selected_attestation_keys(
+    tmp_path: Path,
+):
+    json_module = __import__("json")
+    identity = _final_evidence_test_identity()
+    pi_report = _ready_pi_scenario_report(
+        tmp_path,
+        manifest_sha256=identity["manifest_sha256"],
+        package_sha256=identity["package_sha256"],
+        registry_digest_value=identity["registry_digest"],
+    )
+    check_path = _ready_pi_recomputation_check(
+        tmp_path,
+        pi_report,
+        identity,
+    )
+    canonical_keys = (
+        cli_module.DEFAULT_PI_RECOMPUTATION_ATTESTATION_KEYS_PARENT
+        / identity["release"]
+        / "attestation-keys.json"
+    ).resolve()
+    attacker_keys = (tmp_path / "attacker-selected-keys.json").resolve()
+    attacker_keys.write_bytes(canonical_keys.read_bytes())
+    check = json_module.loads(check_path.read_text(encoding="utf-8"))
+    check["data"]["attestation_keys_path"] = str(attacker_keys)
+    check_path.write_text(
+        json_module.dumps(check, sort_keys=True), encoding="utf-8"
+    )
+    pi_status = cli_module._pi_scenario_acceptance_report_status(
+        pi_report,
+        command="evidence.goal-readiness",
+        expected_release_identity=identity,
+    )
+
+    with patch.object(
+        cli_module,
+        "_load_root_managed_pi_attestation_keys",
+        wraps=cli_module._load_root_managed_pi_attestation_keys,
+    ) as key_loader:
+        status = cli_module._pi_recomputation_check_status(
+            check_path,
+            pi_scenario_status=pi_status,
+            command="evidence.goal-readiness",
+            expected_release_identity=identity,
+        )
+
+    assert status["recomputation_ready"] is False
+    assert status["attestation_verified"] is False
+    assert status["blockers"] == [
+        "Pi recomputation attestation keys path is not the release trust path"
+    ]
+    key_loader.assert_not_called()
+
+
+def _pi_recomputation_key_document() -> bytes:
+    return __import__("json").dumps(
+        {
+            "keys": {
+                "pi-recomputation-test-key": {
+                    "secret_hex": b"pi-recomputation-test-secret-material".hex(),
+                }
+            },
+            "schema_version": "odoo-accounting-cli-v3.pi-attestation-keys.v1",
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def test_pi_recomputation_attestation_keys_reject_hardlinks(
+    tmp_path: Path,
+):
+    os_module = __import__("os")
+    key_path = tmp_path / "attestation-keys.json"
+    raw = _pi_recomputation_key_document()
+    key_path.write_bytes(raw)
+    try:
+        os_module.link(key_path, tmp_path / "attestation-keys-alias.json")
+    except OSError as exc:
+        pytest.skip(f"hardlinks are unavailable: {exc}")
+    gate = cli_module._load_pi_scenario_gate()
+
+    with patch.object(
+        cli_module,
+        "_read_trusted_file",
+        return_value=(raw, (key_path.stat().st_dev, key_path.stat().st_ino)),
+    ):
+        with pytest.raises(ValueError, match="invalid"):
+            cli_module._load_root_managed_pi_attestation_keys(gate, key_path)
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX mode contract")
+@pytest.mark.parametrize("mode", [0o440, 0o640, 0o644])
+def test_pi_recomputation_attestation_keys_reject_nonprivate_modes(
+    tmp_path: Path,
+    mode: int,
+):
+    key_path = tmp_path / "attestation-keys.json"
+    raw = _pi_recomputation_key_document()
+    key_path.write_bytes(raw)
+    key_path.chmod(mode)
+    gate = cli_module._load_pi_scenario_gate()
+
+    with patch.object(
+        cli_module,
+        "_read_trusted_file",
+        return_value=(raw, (key_path.stat().st_dev, key_path.stat().st_ino)),
+    ):
+        with pytest.raises(ValueError, match="invalid"):
+            cli_module._load_root_managed_pi_attestation_keys(gate, key_path)
+
+
 def test_evidence_pi_scenario_report_check_accepts_current_release_report(
     tmp_path: Path,
 ):
@@ -6087,12 +6731,20 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
-    ):
+        return_value=_ready_read_capabilities_report(release_identity),
+    ), patch(
+        "odoo_accounting_cli_v3.cli._external_read_evidence_report",
+        return_value=_ready_read_capabilities_report(release_identity)[
+            "external_read_evidence"
+        ],
+    ) as read_evidence_reverify:
         result = CliRunner().invoke(
             main,
             [
@@ -6112,6 +6764,111 @@ def test_evidence_final_evidence_manifest_check_accepts_bound_manifest(
     assert data["artifact_count"] == 16
     assert data["blockers"] == []
     assert data["real_odoo_write_performed"] is False
+    assert read_evidence_reverify.call_count == 1
+    assert read_evidence_reverify.call_args.args == (
+        Path(
+            "/var/lib/odoo-accounting-cli-v3/read-evidence-v3/test-run/"
+            "read-evidence-index.json"
+        ),
+    )
+    assert set(read_evidence_reverify.call_args.kwargs) == {
+        "capabilities",
+        "expected_release_identity",
+    }
+    assert (
+        read_evidence_reverify.call_args.kwargs["expected_release_identity"]
+        == release_identity
+    )
+
+
+def test_final_manifest_reverifies_read_source_without_retained_trust_selection(
+    tmp_path: Path,
+):
+    release_identity = {
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev262-test",
+        "verified": True,
+        "version": "0.1.0.dev262",
+    }
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    json_module = __import__("json")
+    manifest_document = json_module.loads(manifest.read_text(encoding="utf-8"))
+    artifact_name = "read_capabilities_readiness_report"
+    readiness_path = tmp_path / manifest_document["artifacts"][artifact_name]
+    readiness_document = json_module.loads(readiness_path.read_text(encoding="utf-8"))
+    retained_external = readiness_document["data"]["external_read_evidence"]
+    attacker_keys = "/tmp/attacker-selected-read-evidence-keys.json"
+    attacker_anchor = "/tmp/attacker-selected-read-evidence-anchor.json"
+    retained_external["attestation_keys_path"] = attacker_keys
+    retained_external["trust_anchor_path"] = attacker_anchor
+    readiness_path.write_text(
+        json_module.dumps(readiness_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    manifest_document["artifact_sha256"][artifact_name] = _sha256_path(
+        readiness_path
+    )
+    manifest.write_text(
+        json_module.dumps(manifest_document, sort_keys=True),
+        encoding="utf-8",
+    )
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ), patch(
+        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        side_effect=cli_module.ReadEvidenceIndexError(
+            "source bundle digest mismatch"
+        ),
+    ) as source_verifier:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(manifest),
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    data = json_module.loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert (
+        "read_capabilities_readiness_report: read capabilities readiness report "
+        "does not match the current release"
+        in data["blockers"]
+    )
+    assert (
+        "read_capabilities_readiness_report: current release read capability "
+        "readiness is incomplete"
+        in data["blockers"]
+    )
+    source_verifier.assert_called_once()
+    assert source_verifier.call_args.args == (
+        Path(
+            "/var/lib/odoo-accounting-cli-v3/read-evidence-v3/test-run/"
+            "read-evidence-index.json"
+        ),
+    )
+    assert set(source_verifier.call_args.kwargs) == {
+        "expected_capability_contracts",
+        "expected_release_identity",
+    }
+    assert (
+        source_verifier.call_args.kwargs["expected_release_identity"]
+        == release_identity
+    )
+    assert attacker_keys not in repr(source_verifier.call_args)
+    assert attacker_anchor not in repr(source_verifier.call_args)
 
 
 @pytest.mark.parametrize(
@@ -6203,11 +6960,14 @@ def test_final_evidence_manifest_rejects_broken_pi_cross_binding(
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(release_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -6260,11 +7020,14 @@ def test_final_evidence_manifest_rejects_self_reported_recomputation(
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(release_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -6337,11 +7100,14 @@ def test_final_evidence_manifest_rejects_unbound_or_inconsistent_read_report(
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(release_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -6381,6 +7147,9 @@ def test_final_evidence_manifest_rejects_stale_checker_release(
     }
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ):
@@ -6397,6 +7166,79 @@ def test_final_evidence_manifest_rejects_stale_checker_release(
     assert result.exit_code == 5, result.output
     payload = __import__("json").loads(result.output)
     assert payload["error"]["code"] == "final_evidence_checker_release_mismatch"
+
+
+def test_final_evidence_checker_rejects_expected_identity_before_evidence_io(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ) as route_check, patch(
+        "odoo_accounting_cli_v3.cli._final_evidence_manifest_report",
+    ) as evidence_check:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "final-evidence-manifest-check",
+                "--manifest-file",
+                str(tmp_path / "must-not-be-read.json"),
+                "--expected-release",
+                "attacker-selected-release",
+            ],
+        )
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "final_evidence_checker_release_mismatch"
+    route_check.assert_not_called()
+    evidence_check.assert_not_called()
+
+
+def test_final_evidence_assembler_rejects_expected_identity_before_evidence_io(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
+    args = [
+        "evidence",
+        "final-evidence-manifest-assemble",
+        "--output-file",
+        str(tmp_path / "final-evidence-manifest.json"),
+        "--expected-release",
+        "attacker-selected-release",
+    ]
+    for name in sorted(cli_module.FINAL_EVIDENCE_REQUIRED_ARTIFACTS):
+        args.extend(
+            [
+                f"--{name.replace('_', '-')}",
+                str(tmp_path / f"{name}.json"),
+            ]
+        )
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ) as route_check, patch(
+        "odoo_accounting_cli_v3.cli._read_final_json_snapshot",
+    ) as evidence_reader:
+        result = CliRunner().invoke(main, args)
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "final_evidence_checker_release_mismatch"
+    route_check.assert_not_called()
+    evidence_reader.assert_not_called()
 
 
 def test_final_evidence_manifest_rejects_unexpected_artifact_keys(
@@ -6426,11 +7268,14 @@ def test_final_evidence_manifest_rejects_unexpected_artifact_keys(
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(release_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -6474,11 +7319,14 @@ def test_final_evidence_manifest_rejects_legacy_v1_schema(tmp_path: Path):
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(release_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -6571,11 +7419,14 @@ def test_evidence_final_evidence_manifest_check_rejects_unready_prerequisite_art
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(release_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -6611,14 +7462,18 @@ def test_evidence_final_evidence_manifest_assemble_creates_bound_manifest(
         name: tmp_path / path for name, path in source_document["artifacts"].items()
     }
     output_file = tmp_path / "assembled" / "final-evidence-manifest.json"
+    output_file.parent.mkdir()
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
         "odoo_accounting_cli_v3.cli._read_capabilities_readiness_report",
-        return_value=_ready_read_capabilities_report(),
+        return_value=_ready_read_capabilities_report(release_identity),
     ):
         result = CliRunner().invoke(
             main,
@@ -6694,47 +7549,15 @@ def test_evidence_final_evidence_manifest_assemble_rejects_duplicate_artifact(
         name: tmp_path / path for name, path in source_document["artifacts"].items()
     }
     duplicate = artifacts["goal_readiness_report"]
+    duplicate_artifacts = {
+        **artifacts,
+        "pi_trace_capture_check": duplicate,
+    }
 
-    result = CliRunner().invoke(
-        main,
-        [
-            "evidence",
-            "final-evidence-manifest-assemble",
-            "--output-file",
-            str(tmp_path / "assembled-duplicate.json"),
-            "--pi-trace-capture-check",
-            str(duplicate),
-            "--pi-scenario-report",
-            str(artifacts["pi_scenario_report"]),
-            "--pi-scenario-report-check",
-            str(artifacts["pi_scenario_report_check"]),
-            "--read-capabilities-readiness-report",
-            str(artifacts["read_capabilities_readiness_report"]),
-            "--sandbox-onboarding-receipt",
-            str(artifacts["sandbox_onboarding_receipt"]),
-            "--sandbox-database-candidates-report",
-            str(artifacts["sandbox_database_candidates_report"]),
-            "--sandbox-onboarding-receipt-check",
-            str(artifacts["sandbox_onboarding_receipt_check"]),
-            "--sandbox-provision-authorization",
-            str(artifacts["sandbox_provision_authorization"]),
-            "--sandbox-provision-authorization-check",
-            str(artifacts["sandbox_provision_authorization_check"]),
-            "--sandbox-prerequisite-handoff",
-            str(artifacts["sandbox_prerequisite_handoff"]),
-            "--sandbox-prerequisite-handoff-check",
-            str(artifacts["sandbox_prerequisite_handoff_check"]),
-            "--target-capacity-plan-report",
-            str(artifacts["target_capacity_plan_report"]),
-            "--target-capacity-recheck-report",
-            str(artifacts["target_capacity_recheck_report"]),
-            "--write-pipeline-report",
-            str(artifacts["write_pipeline_report"]),
-            "--write-evidence-index",
-            str(artifacts["write_evidence_index"]),
-            "--goal-readiness-report",
-            str(duplicate),
-        ],
+    result = _invoke_final_evidence_manifest_assemble(
+        tmp_path / "assembled-duplicate.json",
+        duplicate_artifacts,
+        release_identity,
     )
 
     assert result.exit_code == 5, result.output
@@ -6763,6 +7586,9 @@ def test_evidence_final_evidence_manifest_check_rejects_tampered_artifact_sha(
     route = {**READY_CURRENT_ROUTE, "route_identity": release_identity}
 
     with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=release_identity,
+    ), patch(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ):
@@ -6783,6 +7609,798 @@ def test_evidence_final_evidence_manifest_check_rejects_tampered_artifact_sha(
         "write_pipeline_report: artifact SHA-256 does not match manifest"
         in data["blockers"]
     )
+
+
+@pytest.mark.parametrize("reference_kind", ["absolute", "parent"])
+def test_final_evidence_manifest_rejects_artifact_path_escape(
+    tmp_path: Path,
+    reference_kind: str,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    if reference_kind == "absolute":
+        document["artifacts"] = {
+            name: str(tmp_path / relative)
+            for name, relative in document["artifacts"].items()
+        }
+    else:
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        manifest = nested / manifest.name
+        document["artifacts"] = {
+            name: f"../{relative}"
+            for name, relative in document["artifacts"].items()
+        }
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True), encoding="utf-8"
+    )
+
+    result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert any("artifact path is invalid" in item for item in data["blockers"])
+
+
+def test_final_evidence_manifest_rejects_symlink_artifact(tmp_path: Path):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    name = "sandbox_database_candidates_report"
+    target = tmp_path / document["artifacts"][name]
+    alias = tmp_path / "sandbox-database-candidates-alias.json"
+    try:
+        alias.symlink_to(target.name)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+    document["artifacts"][name] = alias.name
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True), encoding="utf-8"
+    )
+
+    result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert any(item.startswith(f"{name}:") for item in data["blockers"])
+
+
+def test_final_evidence_manifest_rejects_hardlink_artifact(tmp_path: Path):
+    os_module = __import__("os")
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    name = "sandbox_database_candidates_report"
+    target = tmp_path / document["artifacts"][name]
+    alias = tmp_path / "sandbox-database-candidates-hardlink.json"
+    try:
+        os_module.link(target, alias)
+    except OSError as exc:
+        pytest.skip(f"hard links are unavailable: {exc}")
+    document["artifacts"][name] = alias.name
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True), encoding="utf-8"
+    )
+
+    result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert any(item.startswith(f"{name}:") for item in data["blockers"])
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_final_evidence_manifest_rejects_linked_manifest(
+    tmp_path: Path,
+    link_kind: str,
+):
+    os_module = __import__("os")
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    linked_manifest = tmp_path / f"linked-{link_kind}-manifest.json"
+    try:
+        if link_kind == "symlink":
+            linked_manifest.symlink_to(manifest.name)
+        else:
+            os_module.link(manifest, linked_manifest)
+    except OSError as exc:
+        pytest.skip(f"{link_kind} is unavailable: {exc}")
+
+    result = _invoke_final_evidence_manifest_check(
+        linked_manifest, release_identity
+    )
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "retained_report_rejected"
+
+
+def test_final_evidence_manifest_rejects_duplicate_manifest_json_key(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    raw = manifest.read_bytes()
+    duplicate = (
+        b'{"schema_version":"odoo-accounting-cli-v3.final-evidence-manifest.v2",'
+        + raw[1:]
+    )
+    manifest.write_bytes(duplicate)
+
+    result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "retained_report_rejected"
+
+
+@pytest.mark.parametrize("mutation", ["duplicate_key", "nan", "invalid_utf8"])
+def test_final_evidence_manifest_rejects_non_strict_artifact_json(
+    tmp_path: Path,
+    mutation: str,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    name = "sandbox_database_candidates_report"
+    artifact = tmp_path / document["artifacts"][name]
+    raw = artifact.read_bytes()
+    if mutation == "duplicate_key":
+        raw = b'{"ok":true,' + raw[1:]
+    elif mutation == "nan":
+        raw = raw[:-1] + b',"untrusted_number":NaN}'
+    else:
+        raw = raw[:-1] + b',"untrusted_\xff":1}'
+    artifact.write_bytes(raw)
+    document["artifact_sha256"][name] = cli_module._sha256_bytes(raw)
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True), encoding="utf-8"
+    )
+
+    result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert any(item.startswith(f"{name}:") for item in data["blockers"])
+
+
+def test_final_evidence_manifest_rejects_oversized_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    monkeypatch.setattr(
+        cli_module,
+        "_MAX_FINAL_EVIDENCE_MANIFEST_BYTES",
+        len(manifest.read_bytes()) - 1,
+        raising=False,
+    )
+
+    result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "retained_report_rejected"
+
+
+def test_final_evidence_manifest_rejects_oversized_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    name = "sandbox_database_candidates_report"
+    artifact = tmp_path / document["artifacts"][name]
+    monkeypatch.setattr(
+        cli_module,
+        "_MAX_FINAL_EVIDENCE_ARTIFACT_BYTES",
+        len(artifact.read_bytes()) - 1,
+        raising=False,
+    )
+
+    result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert any(item.startswith(f"{name}:") for item in data["blockers"])
+
+
+def test_final_evidence_manifest_hash_and_semantics_use_one_artifact_snapshot(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    name = "sandbox_database_candidates_report"
+    artifact = tmp_path / document["artifacts"][name]
+    valid_raw = artifact.read_bytes()
+    invalid_raw = b"{}"
+    artifact.write_bytes(invalid_raw)
+    document["artifact_sha256"][name] = cli_module._sha256_bytes(invalid_raw)
+    manifest.write_text(
+        __import__("json").dumps(document, sort_keys=True), encoding="utf-8"
+    )
+    original_sha256_file = cli_module._sha256_file
+    swapped = False
+
+    def swap_after_hash(path: Path) -> str:
+        nonlocal swapped
+        digest = original_sha256_file(path)
+        if path == artifact and not swapped:
+            artifact.write_bytes(valid_raw)
+            swapped = True
+        return digest
+
+    with patch.object(cli_module, "_sha256_file", side_effect=swap_after_hash):
+        result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert any(item.startswith(f"{name}:") for item in data["blockers"])
+
+
+def test_final_evidence_manifest_reports_hash_of_verified_manifest_snapshot(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    verified_digest = cli_module._sha256_bytes(manifest.read_bytes())
+    original_sha256_file = cli_module._sha256_file
+
+    def replace_before_hash(path: Path) -> str:
+        if path == manifest:
+            manifest.write_bytes(b"{}")
+        return original_sha256_file(path)
+
+    with patch.object(cli_module, "_sha256_file", side_effect=replace_before_hash):
+        result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is True
+    assert data["manifest_sha256"] == verified_digest
+
+
+def test_final_evidence_manifest_reads_each_pi_artifact_once(tmp_path: Path):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    snapshot_reader = getattr(cli_module, "_read_final_json_snapshot")
+    targets = {
+        (tmp_path / document["artifacts"][name]).resolve()
+        for name in ("pi_scenario_report", "pi_scenario_report_check")
+    }
+
+    with patch.object(
+        cli_module,
+        "_read_final_json_snapshot",
+        wraps=snapshot_reader,
+    ) as reader:
+        result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    counts = {target: 0 for target in targets}
+    for call in reader.call_args_list:
+        observed = Path(call.args[0]).resolve()
+        if observed in counts:
+            counts[observed] += 1
+    assert counts == {target: 1 for target in targets}
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "dangling_symlink", "hardlink"])
+@pytest.mark.parametrize("overwrite", [False, True])
+def test_final_evidence_assemble_never_follows_output_manifest_links(
+    tmp_path: Path,
+    link_kind: str,
+    overwrite: bool,
+):
+    os_module = __import__("os")
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "published"
+    output_parent.mkdir()
+    output_file = output_parent / "final-evidence-manifest.json"
+    target = tmp_path / f"{link_kind}-target.txt"
+    if link_kind != "dangling_symlink":
+        target.write_bytes(b"original target bytes")
+    try:
+        if link_kind == "hardlink":
+            os_module.link(target, output_file)
+        else:
+            output_file.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"{link_kind} is unavailable: {exc}")
+    target_before = target.read_bytes() if target.exists() else None
+
+    result = _invoke_final_evidence_manifest_assemble(
+        output_file,
+        artifacts,
+        release_identity,
+        overwrite=overwrite,
+    )
+
+    assert (target.read_bytes() if target.exists() else None) == target_before
+    if overwrite:
+        assert result.exit_code == 0, result.output
+        data = __import__("json").loads(result.output)["data"]
+        assert data["manifest_created"] is True
+        assert output_file.is_file()
+        assert not output_file.is_symlink()
+        if target.exists():
+            assert not os_module.path.samefile(output_file, target)
+    else:
+        assert result.exit_code == 5, result.output
+        payload = __import__("json").loads(result.output)
+        assert payload["error"]["code"] == "final_evidence_manifest_exists"
+
+
+def test_final_evidence_assemble_requires_precreated_output_parent(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "missing-output-parent"
+    output_file = output_parent / "final-evidence-manifest.json"
+
+    result = _invoke_final_evidence_manifest_assemble(
+        output_file,
+        artifacts,
+        release_identity,
+        prepare_output_parent=False,
+    )
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "final_evidence_manifest_rejected"
+    assert not output_parent.exists()
+
+
+def test_final_evidence_assemble_does_not_create_through_symlink_ancestor(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    redirected_root = tmp_path / "redirected-root"
+    redirected_root.mkdir()
+    linked_root = tmp_path / "linked-root"
+    try:
+        linked_root.symlink_to(redirected_root, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+    output_parent = linked_root / "must-not-be-created"
+    output_file = output_parent / "final-evidence-manifest.json"
+
+    result = _invoke_final_evidence_manifest_assemble(
+        output_file,
+        artifacts,
+        release_identity,
+        prepare_output_parent=False,
+    )
+
+    assert result.exit_code == 5, result.output
+    assert not (redirected_root / "must-not-be-created").exists()
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX path policy")
+def test_final_evidence_assemble_rejects_writable_output_ancestor(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    unsafe_ancestor = tmp_path / "unsafe-ancestor"
+    unsafe_ancestor.mkdir()
+    unsafe_ancestor.chmod(0o777)
+    output_parent = unsafe_ancestor / "published"
+    output_parent.mkdir(mode=0o700)
+    output_file = output_parent / "final-evidence-manifest.json"
+
+    result = _invoke_final_evidence_manifest_assemble(
+        output_file, artifacts, release_identity
+    )
+
+    assert result.exit_code == 5, result.output
+    assert not output_file.exists()
+    assert not list(output_parent.glob("final-evidence-bundle-*"))
+
+
+def test_final_evidence_assemble_overwrite_keeps_old_bundle_immutable(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_file = tmp_path / "published" / "final-evidence-manifest.json"
+
+    first = _invoke_final_evidence_manifest_assemble(
+        output_file, artifacts, release_identity
+    )
+    assert first.exit_code == 0, first.output
+    old_manifest = __import__("json").loads(output_file.read_text(encoding="utf-8"))
+    name = "sandbox_database_candidates_report"
+    old_artifact = output_file.parent / old_manifest["artifacts"][name]
+    old_artifact_bytes = old_artifact.read_bytes()
+    artifacts[name].write_bytes(artifacts[name].read_bytes() + b"\n")
+
+    second = _invoke_final_evidence_manifest_assemble(
+        output_file,
+        artifacts,
+        release_identity,
+        overwrite=True,
+    )
+
+    assert second.exit_code == 0, second.output
+    new_manifest = __import__("json").loads(output_file.read_text(encoding="utf-8"))
+    assert old_artifact.read_bytes() == old_artifact_bytes
+    assert new_manifest["artifacts"][name] != old_manifest["artifacts"][name]
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX mode contract")
+def test_final_evidence_assemble_uses_private_staging_and_read_only_bundle(
+    tmp_path: Path,
+):
+    os_module = __import__("os")
+    stat_module = __import__("stat")
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_file = tmp_path / "published" / "final-evidence-manifest.json"
+    writer = cli_module._write_final_snapshot_exclusive
+    staging_modes: list[tuple[int, int]] = []
+
+    def observe_staging_mode(path: Path, raw: bytes) -> None:
+        writer(path, raw)
+        if path.parent.parent.name.endswith(".staging"):
+            staging_modes.append(
+                (
+                    stat_module.S_IMODE(path.parent.parent.stat().st_mode),
+                    stat_module.S_IMODE(path.stat().st_mode),
+                )
+            )
+
+    with patch.object(
+        cli_module,
+        "_write_final_snapshot_exclusive",
+        side_effect=observe_staging_mode,
+    ):
+        result = _invoke_final_evidence_manifest_assemble(
+            output_file, artifacts, release_identity
+        )
+
+    assert result.exit_code == 0, result.output
+    assert staging_modes
+    assert set(staging_modes) == {(0o700, 0o600)}
+    document = __import__("json").loads(output_file.read_text(encoding="utf-8"))
+    published_artifact = output_file.parent / document["artifacts"][
+        "sandbox_database_candidates_report"
+    ]
+    bundle_root = published_artifact.parent.parent
+    assert stat_module.S_IMODE(output_file.stat().st_mode) == 0o400
+    assert stat_module.S_IMODE(bundle_root.stat().st_mode) == 0o500
+    assert stat_module.S_IMODE(published_artifact.parent.stat().st_mode) == 0o500
+    assert stat_module.S_IMODE(published_artifact.stat().st_mode) == 0o400
+    assert os_module.path.samefile(bundle_root.parent, output_file.parent)
+
+
+def test_final_evidence_assemble_write_failure_cleans_staging_and_does_not_publish(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "published"
+    output_file = output_parent / "final-evidence-manifest.json"
+    writer = getattr(cli_module, "_write_final_snapshot_exclusive")
+    calls = 0
+
+    def fail_third_write(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("injected final evidence write failure")
+        return writer(*args, **kwargs)
+
+    with patch.object(
+        cli_module,
+        "_write_final_snapshot_exclusive",
+        side_effect=fail_third_write,
+    ):
+        result = _invoke_final_evidence_manifest_assemble(
+            output_file, artifacts, release_identity
+        )
+
+    assert result.exit_code == 5, result.output
+    assert not __import__("os").path.lexists(output_file)
+    assert not list(output_parent.glob(".final-evidence-*"))
+    assert not list(output_parent.glob("final-evidence-bundle-*"))
+
+
+def test_final_evidence_assemble_retains_published_bundle_when_fsync_fails(
+    tmp_path: Path,
+):
+    os_module = __import__("os")
+    json_module = __import__("json")
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "published"
+    output_file = output_parent / "final-evidence-manifest.json"
+    directory_sync = cli_module._fsync_final_directory
+
+    def fail_after_manifest_publication(path: Path) -> None:
+        if os_module.path.lexists(output_file):
+            raise OSError("injected post-publication directory fsync failure")
+        directory_sync(path)
+
+    with patch.object(
+        cli_module,
+        "_fsync_final_directory",
+        side_effect=fail_after_manifest_publication,
+    ):
+        result = _invoke_final_evidence_manifest_assemble(
+            output_file, artifacts, release_identity
+        )
+
+    assert result.exit_code == 5, result.output
+    assert output_file.is_file()
+    assert not output_file.is_symlink()
+    document = json_module.loads(output_file.read_text(encoding="utf-8"))
+    published_artifacts = {
+        output_parent / relative for relative in document["artifacts"].values()
+    }
+    assert all(path.is_file() for path in published_artifacts)
+    assert not list(output_parent.glob(".final-evidence-*"))
+    assert len(list(output_parent.glob("final-evidence-bundle-*"))) == 1
+
+
+def test_final_evidence_assemble_retains_published_bundle_when_lstat_fails(
+    tmp_path: Path,
+):
+    os_module = __import__("os")
+    json_module = __import__("json")
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "published"
+    output_file = output_parent / "final-evidence-manifest.json"
+    original_lstat = Path.lstat
+
+    def fail_published_manifest_lstat(path: Path):
+        if path == output_file and os_module.path.lexists(output_file):
+            raise OSError("injected post-publication manifest lstat failure")
+        return original_lstat(path)
+
+    with patch.object(Path, "lstat", fail_published_manifest_lstat):
+        result = _invoke_final_evidence_manifest_assemble(
+            output_file, artifacts, release_identity
+        )
+
+    assert result.exit_code == 5, result.output
+    document = json_module.loads(output_file.read_text(encoding="utf-8"))
+    assert all(
+        (output_parent / relative).is_file()
+        for relative in document["artifacts"].values()
+    )
+    assert len(list(output_parent.glob("final-evidence-bundle-*"))) == 1
+
+
+def test_final_evidence_assemble_retains_bundle_when_candidate_unlink_fails(
+    tmp_path: Path,
+):
+    json_module = __import__("json")
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "published"
+    output_file = output_parent / "final-evidence-manifest.json"
+    original_unlink = Path.unlink
+    failure_injected = False
+
+    def fail_first_candidate_unlink(path: Path, *args, **kwargs):
+        nonlocal failure_injected
+        if path.name.endswith(".manifest.tmp") and not failure_injected:
+            failure_injected = True
+            raise OSError("injected post-link candidate unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    with patch.object(Path, "unlink", fail_first_candidate_unlink):
+        result = _invoke_final_evidence_manifest_assemble(
+            output_file, artifacts, release_identity
+        )
+
+    assert failure_injected is True
+    assert result.exit_code == 5, result.output
+    document = json_module.loads(output_file.read_text(encoding="utf-8"))
+    assert all(
+        (output_parent / relative).is_file()
+        for relative in document["artifacts"].values()
+    )
+    assert not list(output_parent.glob(".final-evidence-*"))
+    assert len(list(output_parent.glob("final-evidence-bundle-*"))) == 1
+
+
+def test_final_evidence_assemble_retains_bundle_when_publish_is_interrupted(
+    tmp_path: Path,
+):
+    json_module = __import__("json")
+    os_module = __import__("os")
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "published"
+    output_file = output_parent / "final-evidence-manifest.json"
+    original_link = cli_module.os.link
+
+    def link_then_interrupt(source, destination, *args, **kwargs):
+        original_link(source, destination, *args, **kwargs)
+        raise KeyboardInterrupt()
+
+    with patch.object(cli_module.os, "link", side_effect=link_then_interrupt):
+        result = _invoke_final_evidence_manifest_assemble(
+            output_file, artifacts, release_identity
+        )
+
+    assert result.exit_code != 0
+    assert os_module.path.lexists(output_file)
+    document = json_module.loads(output_file.read_text(encoding="utf-8"))
+    assert all(
+        (output_parent / relative).is_file()
+        for relative in document["artifacts"].values()
+    )
+    assert len(list(output_parent.glob("final-evidence-bundle-*"))) == 1
+
+
+def test_final_evidence_assemble_retains_bundle_when_publish_outcome_is_uncertain(
+    tmp_path: Path,
+):
+    json_module = __import__("json")
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_parent = tmp_path / "published"
+    output_file = output_parent / "final-evidence-manifest.json"
+    original_link = cli_module.os.link
+
+    def link_then_fail(source, destination, *args, **kwargs):
+        original_link(source, destination, *args, **kwargs)
+        raise OSError("injected uncertain publication outcome")
+
+    with patch.object(cli_module.os, "link", side_effect=link_then_fail):
+        result = _invoke_final_evidence_manifest_assemble(
+            output_file, artifacts, release_identity
+        )
+
+    assert result.exit_code == 5, result.output
+    document = json_module.loads(output_file.read_text(encoding="utf-8"))
+    assert all(
+        (output_parent / relative).is_file()
+        for relative in document["artifacts"].values()
+    )
+    assert len(list(output_parent.glob("final-evidence-bundle-*"))) == 1
+
+
+def test_final_evidence_assemble_validation_failure_does_not_publish(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    name = "sandbox_database_candidates_report"
+    invalid = __import__("json").loads(artifacts[name].read_text(encoding="utf-8"))
+    invalid["data"]["selected_database_eligible"] = False
+    artifacts[name].write_text(
+        __import__("json").dumps(invalid, sort_keys=True), encoding="utf-8"
+    )
+    output_parent = tmp_path / "published"
+    output_file = output_parent / "final-evidence-manifest.json"
+
+    result = _invoke_final_evidence_manifest_assemble(
+        output_file, artifacts, release_identity
+    )
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["manifest_created"] is False
+    assert not __import__("os").path.lexists(output_file)
+    assert not list(output_parent.glob(".final-evidence-*"))
+    assert not list(output_parent.glob("final-evidence-bundle-*"))
+
+
+def test_final_evidence_assemble_keeps_old_manifest_complete_until_publish(
+    tmp_path: Path,
+):
+    release_identity = _final_evidence_test_identity()
+    source_manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    artifacts = _final_evidence_source_artifacts(source_manifest)
+    output_file = tmp_path / "published" / "final-evidence-manifest.json"
+    first = _invoke_final_evidence_manifest_assemble(
+        output_file, artifacts, release_identity
+    )
+    assert first.exit_code == 0, first.output
+    old_manifest_raw = output_file.read_bytes()
+    old_manifest = __import__("json").loads(old_manifest_raw.decode("utf-8"))
+    old_artifacts = {
+        name: (output_file.parent / relative).read_bytes()
+        for name, relative in old_manifest["artifacts"].items()
+    }
+    name = "sandbox_database_candidates_report"
+    artifacts[name].write_bytes(artifacts[name].read_bytes() + b"\n")
+    original_report = cli_module._final_evidence_manifest_report
+    observations: list[tuple[bytes, dict[str, bytes]]] = []
+
+    def observe_before_validation(*args, **kwargs):
+        observations.append(
+            (
+                output_file.read_bytes(),
+                {
+                    artifact_name: (output_file.parent / relative).read_bytes()
+                    for artifact_name, relative in old_manifest["artifacts"].items()
+                },
+            )
+        )
+        return original_report(*args, **kwargs)
+
+    with patch.object(
+        cli_module,
+        "_final_evidence_manifest_report",
+        side_effect=observe_before_validation,
+    ):
+        second = _invoke_final_evidence_manifest_assemble(
+            output_file,
+            artifacts,
+            release_identity,
+            overwrite=True,
+        )
+
+    assert second.exit_code == 0, second.output
+    assert observations == [(old_manifest_raw, old_artifacts)]
+
+
+@pytest.mark.parametrize("changed_path_kind", ["manifest", "artifact"])
+def test_final_evidence_checker_rechecks_all_snapshot_paths_before_success(
+    tmp_path: Path,
+    changed_path_kind: str,
+):
+    release_identity = _final_evidence_test_identity()
+    manifest = _ready_final_evidence_manifest(tmp_path, release_identity)
+    document = __import__("json").loads(manifest.read_text(encoding="utf-8"))
+    artifact = tmp_path / document["artifacts"][
+        "sandbox_database_candidates_report"
+    ]
+    target = manifest if changed_path_kind == "manifest" else artifact
+    original_recomputation = cli_module._pi_recomputation_check_status
+    changed = False
+
+    def change_after_snapshots(*args, **kwargs):
+        nonlocal changed
+        if not changed:
+            target.write_bytes(b"{}")
+            changed = True
+        return original_recomputation(*args, **kwargs)
+
+    with patch.object(
+        cli_module,
+        "_pi_recomputation_check_status",
+        side_effect=change_after_snapshots,
+    ):
+        result = _invoke_final_evidence_manifest_check(manifest, release_identity)
+
+    assert result.exit_code == 0, result.output
+    data = __import__("json").loads(result.output)["data"]
+    assert data["final_evidence_manifest_ready"] is False
+    assert any("changed after snapshot" in item for item in data["blockers"])
 
 
 def test_evidence_goal_readiness_reports_live_capacity_shortfall():
@@ -6819,6 +8437,76 @@ def test_evidence_goal_readiness_reports_live_capacity_shortfall():
     assert data["goal_readiness_ready"] is False
     assert "sandbox write capacity gate is not ready" in data["blockers"]
     assert data["capacity"]["shortfall_bytes"] == 1024
+
+
+def test_evidence_goal_readiness_rejects_expected_identity_override_before_checks():
+    identity = _final_evidence_test_identity()
+    route = {**READY_CURRENT_ROUTE, "route_identity": identity}
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ) as route_check, patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ) as capacity_check, patch(
+        "odoo_accounting_cli_v3.cli._external_read_evidence_report",
+        return_value=None,
+    ) as evidence_check:
+        result = CliRunner().invoke(
+            main,
+            [
+                "evidence",
+                "goal-readiness",
+                "--expected-release",
+                "attacker-selected-release",
+            ],
+        )
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "goal_readiness_release_identity_mismatch"
+    route_check.assert_not_called()
+    capacity_check.assert_not_called()
+    evidence_check.assert_not_called()
+
+
+def test_evidence_goal_readiness_rejects_stale_executing_release_before_checks(
+    tmp_path: Path,
+):
+    identity = _final_evidence_test_identity()
+    stale_release = tmp_path / "stale-release"
+    stale_release.mkdir()
+    route = {
+        **READY_CURRENT_ROUTE,
+        "resolved_release_path": str(stale_release),
+        "route_identity": identity,
+    }
+
+    with patch(
+        "odoo_accounting_cli_v3.cli._load_release_identity",
+        return_value=identity,
+    ), patch(
+        "odoo_accounting_cli_v3.cli._current_route_report",
+        return_value=route,
+    ) as route_check, patch(
+        "odoo_accounting_cli_v3.cli._target_capacity_recheck_report",
+        return_value={"sandbox_write_capacity_ready": True, "blockers": []},
+    ) as capacity_check, patch(
+        "odoo_accounting_cli_v3.cli._external_read_evidence_report",
+        return_value=None,
+    ) as evidence_check:
+        result = CliRunner().invoke(main, ["evidence", "goal-readiness"])
+
+    assert result.exit_code == 5, result.output
+    payload = __import__("json").loads(result.output)
+    assert payload["error"]["code"] == "final_evidence_checker_release_mismatch"
+    route_check.assert_called_once()
+    capacity_check.assert_not_called()
+    evidence_check.assert_not_called()
 
 
 def test_evidence_goal_readiness_retains_capacity_plan_and_recheck_reports(
