@@ -106,3 +106,8 @@ socket without routing production traffic; do not enable the service directly.
 Require a verified `/health` identity and all
 negative/tamper gates before any canary routing. Rollback is stopping this new
 sidecar only; the V2 unit remains untouched.
+
+The chat request budget is fixed at 5 seconds of Broker preflight, at most 120
+seconds for the Pi child, and 10 seconds for parent-only result delivery. The
+150-second stop window exceeds that 135-second request budget so an in-flight
+request can fail closed before systemd escalates termination.

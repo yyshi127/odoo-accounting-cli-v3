@@ -49,6 +49,10 @@ from .trusted_idempotency import (
     SQLiteRecoveryIdempotencyResolver,
 )
 from .trusted_read import TrustedReadAdapter
+from .trusted_result_delivery import (
+    ResultDeliveryRoute,
+    TrustedResultDeliveryResolver,
+)
 from .trusted_response_verifier import (
     ReleaseReceiptVerificationConfig,
     build_release_response_verifier_resolver,
@@ -223,11 +227,15 @@ class TrustedBrokerRuntime:
     config: TrustedBrokerRuntimeConfig
     topology: LoadedReleaseTopology
     operation_store: SQLitePersistence = field(repr=False)
+    read_result_store: SQLitePersistence = field(repr=False)
     session_store: SQLiteTrustedSessionStore = field(repr=False)
     audit_sink: SQLiteBrokerAuditSink = field(repr=False)
     authorities: tuple[TrustedAuthorityRuntime, ...] = field(repr=False)
     historical_router: HistoricalReleaseRouter = field(repr=False)
     read_adapter: TrustedReadAdapter = field(repr=False)
+    result_delivery_resolver: TrustedResultDeliveryResolver = field(
+        repr=False
+    )
     broker: TrustedBroker = field(repr=False)
 
     def dispatch_pi(self, request: BrokerDispatchRequest) -> BrokerDispatchResult:
@@ -254,6 +262,7 @@ class TrustedBrokerRuntime:
 
     def verify_integrity(self) -> bool:
         self.operation_store.verify_chain()
+        self.read_result_store.verify_chain()
         if not self.session_store.verify_integrity() or not self.audit_sink.verify():
             raise TrustedBrokerRuntimeError("trusted runtime integrity failed")
         if any(not runtime.store.verify_audit_chain() for runtime in self.authorities):
@@ -1147,6 +1156,47 @@ def build_trusted_broker_runtime(
         current = release_map[
             (config.current_release_digest, config.current_registry_digest)
         ]
+        read_result_store = SQLitePersistence(
+            current.base_runtime.receipt_state_path,
+            busy_timeout_ms=config.sqlite_busy_timeout_ms,
+            receipt_key_id=current.base_runtime.receipt_key_id,
+            receipt_secret=current.read_receipt_secret,
+            enable_verified_read_results=True,
+        )
+        result_delivery_routes = {
+            (release.release_digest, release.registry_digest): (
+                ResultDeliveryRoute(
+                    release_digest=release.release_digest,
+                    registry_digest=release.registry_digest,
+                    capability_channel=(
+                        release.base_runtime.capability_channel
+                    ),
+                    write_receipt_key_id=(
+                        release.write_runtime.write_receipt.key_id
+                    ),
+                    write_receipt_secret=(
+                        release.write_secrets.write_receipt
+                    ),
+                )
+            )
+            for release in topology.releases
+        }
+
+        def resolve_result_delivery_route(
+            release_digest: str, registry_digest: str
+        ) -> ResultDeliveryRoute | None:
+            return result_delivery_routes.get(
+                (release_digest, registry_digest)
+            )
+
+        result_delivery_resolver = TrustedResultDeliveryResolver(
+            current_release_digest=current.release_digest,
+            current_registry_digest=current.registry_digest,
+            read_store=read_result_store,
+            write_store=operation_store,
+            route_resolver=resolve_result_delivery_route,
+            clock=utc_clock,
+        )
         finalizer_runtime = current.write_runtime.effect_finalizer
 
         def preconnect_finalizer(route: Any):
@@ -1213,16 +1263,19 @@ def build_trusted_broker_runtime(
             request_id_factory=lambda: _runtime_identifier("request"),
             recovery_operation_id_factory=lambda: _runtime_identifier("recovery"),
             utc_clock=utc_clock,
+            result_delivery_resolver=result_delivery_resolver,
         )
         runtime = TrustedBrokerRuntime(
             config=config,
             topology=topology,
             operation_store=operation_store,
+            read_result_store=read_result_store,
             session_store=session_store,
             audit_sink=audit_sink,
             authorities=tuple(authority_runtimes),
             historical_router=historical_router,
             read_adapter=read_adapter,
+            result_delivery_resolver=result_delivery_resolver,
             broker=broker,
         )
         runtime.verify_integrity()

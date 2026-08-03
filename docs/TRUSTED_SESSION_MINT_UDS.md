@@ -1,9 +1,11 @@
 # Trusted Session Mint UDS
 
 `trusted_session_mint_uds` is a local credential lifecycle boundary. It exposes
-only `POST /v1/trusted-session/mint` and `POST /v1/trusted-session/revoke` on a
-Linux filesystem Unix socket. It does not create a TCP listener. Revoke accepts
-exactly `{ "handle": "..." }`, applies the fixed audit reason
+`POST /v1/trusted-session/mint`, the parent-only
+`POST /v1/trusted-session/result-delivery/mint`, and
+`POST /v1/trusted-session/revoke` on a Linux filesystem Unix socket. It does
+not create a TCP listener. Revoke accepts exactly `{ "handle": "..." }`,
+applies the fixed audit reason
 `odoo_request_completed`, and never echoes the handle.
 
 The root-owned launcher fixes the Odoo issuer UID, Pi Bridge UID, socket group,
@@ -19,10 +21,11 @@ value is not a valid production mint budget. Broker authentication plus
 Authority authorization consumes at least two resolutions for a normal read or
 write, `operation.preview` consumes three, and one `/chat` plan can call
 prepare, preview, status, and result in sequence. The mint configuration
-therefore enforces a minimum of 16 uses and defaults to 32 (maximum 64). The
-composition root must still choose TTL and budget for its complete call graph;
-it must never inherit the durable store's single-use default or a small test
-fixture value.
+therefore enforces a minimum of 16 uses and defaults to 32 (maximum 64). This
+budget applies only to the ordinary model-facing session. The independent
+result-delivery route always issues exactly one use and the Pi child never
+receives that handle. The composition root must still choose TTL and budget for
+its complete call graph; it must never inherit a small test fixture value.
 
 ## Same-UID threat
 
@@ -93,11 +96,22 @@ and reports exactly the configured broker service UID through `SO_PEERCRED`
 after connection. Socket ownership authenticates the systemd-created endpoint;
 peer credentials authenticate the non-root worker serving it.
 
-After minting, it sends the handle only in
-`X-Odoo-V3-Broker-Session` to literal loopback `127.0.0.1` on `/chat`.
-The client invokes `/v1/trusted-session/revoke` after both success and failure.
-A missing or rejected revoke makes the Odoo call fail closed. Neither transport
-logs the handle.
+For chat, Odoo mints an ordinary session and a distinct, single-use final-result
+session from the same server-established identity. It sends them only in
+`X-Odoo-V3-Broker-Session` and
+`X-Odoo-V3-Result-Delivery-Session` to literal loopback `127.0.0.1` on
+`/chat`. Pi receives only the ordinary handle on FD3; the parent retains the
+second handle for `result.deliver`. The client attempts to revoke every acquired
+handle after both success and failure, even when an earlier revoke fails. Any
+missing or rejected revoke makes the Odoo call fail closed. Neither transport
+logs or returns either handle.
+
+The fixed timing budget is 5 seconds for Broker preflight, at most 120 seconds
+for the Pi child, and 10 seconds for parent-only result delivery (135 seconds
+total). Odoo uses a 150-second outer HTTP deadline and accepts chat sessions only
+when their issued lifetime is at least 170 seconds and their remaining lifetime
+covers that outer deadline. The deployed 180-second root TTL meets this bound;
+shorter or expired credentials fail before `/chat`.
 
 ## Request and response
 
@@ -135,5 +149,6 @@ session store at the configured private path, and require callers to mint new
 sessions. Never add default route digests to old rows.
 
 Successful responses return the server-generated opaque handle, session ID,
-issue/expiry timestamps, and root-configured use count. Errors are fixed safe
-envelopes and never echo request values or exception details.
+issue/expiry timestamps, and server-selected use count: the root-configured
+budget for ordinary mint and exactly one for result delivery. Errors are fixed
+safe envelopes and never echo request values or exception details.

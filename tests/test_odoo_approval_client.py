@@ -194,7 +194,7 @@ def test_addon_registers_private_approval_client_without_acl_or_controller() -> 
     init = (ADDON / "models" / "__init__.py").read_text("utf-8")
     acl = (ADDON / "security" / "ir.model.access.csv").read_text("utf-8")
 
-    assert manifest["version"] == "19.0.0.7.1"
+    assert manifest["version"] == "19.0.0.7.2"
     assert "from . import approval_client" in init
     assert "models.AbstractModel" in source
     assert "def _odoo_v3_request_approval(" in source

@@ -13,6 +13,7 @@ export const PI_BRIDGE_RUNTIME_MEMBERS = Object.freeze([
 	"pi_bridge/extensions/odoo-tools.ts",
 	"pi_bridge/extensions/odoo-v3-cli.mjs",
 	"pi_bridge/final-evidence.mjs",
+	"pi_bridge/final-result-delivery.mjs",
 	"pi_bridge/odoo-session-header-resolver.mjs",
 	"pi_bridge/package-lock.json",
 	"pi_bridge/package.json",

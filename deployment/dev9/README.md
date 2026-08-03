@@ -168,6 +168,14 @@ exceptions. The 135-second stop window exceeds the outer 115-second broker
 deadline, allowing in-flight handlers and their bounded Odoo child processes
 to finish before systemd escalates termination.
 
+The separate Pi chat boundary reserves 5 seconds for Broker preflight, at most
+120 seconds for the Pi child, and 10 seconds for parent-only result delivery.
+Its 135-second total is enclosed by Odoo's 150-second HTTP deadline. Both the
+ordinary model-facing session and the independent single-use result-delivery
+session must have an issued lifetime of at least 170 seconds and enough
+remaining lifetime to cover the outer deadline; the deployed 180-second mint
+TTL satisfies that gate.
+
 ## Rollback
 
 First remove V3 routing from Pi. Stop and disable the three V3 socket units,

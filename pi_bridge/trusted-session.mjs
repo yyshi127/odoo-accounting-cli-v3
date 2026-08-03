@@ -182,10 +182,18 @@ export async function resolveAuthenticatedBrokerSession(resolver, request) {
 	if (
 		typeof resolved !== "object"
 		|| Array.isArray(resolved)
-		|| Object.keys(resolved).length !== 1
+		|| JSON.stringify(Object.keys(resolved).sort()) !== JSON.stringify([
+			"brokerSessionHandle",
+			"resultDeliverySessionHandle",
+		])
 		|| !validBrokerSessionHandle(resolved.brokerSessionHandle)
+		|| !validBrokerSessionHandle(resolved.resultDeliverySessionHandle)
+		|| resolved.brokerSessionHandle === resolved.resultDeliverySessionHandle
 	) {
 		throw new Error("Authenticated session resolver returned an invalid broker session");
 	}
-	return Object.freeze({ brokerSessionHandle: resolved.brokerSessionHandle });
+	return Object.freeze({
+		brokerSessionHandle: resolved.brokerSessionHandle,
+		resultDeliverySessionHandle: resolved.resultDeliverySessionHandle,
+	});
 }

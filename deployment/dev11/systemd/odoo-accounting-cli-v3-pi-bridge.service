@@ -33,7 +33,7 @@ ExecStart=@V3_NODE@ /opt/odoo-accounting-cli-v3/releases/@V3_RELEASE@/pi_bridge/
 Restart=on-failure
 RestartSec=5s
 TimeoutStartSec=180s
-TimeoutStopSec=135s
+TimeoutStopSec=150s
 KillSignal=SIGTERM
 UMask=0077
 

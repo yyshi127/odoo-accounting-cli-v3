@@ -986,6 +986,7 @@ class OdooRunnerTest(unittest.TestCase):
             Path(self.temp.name) / "receipt-audit.sqlite3",
             receipt_key_id=RECEIPT_KEY_ID,
             receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
         )
 
         _record_verified_read_audit(

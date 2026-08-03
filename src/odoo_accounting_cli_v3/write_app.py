@@ -1150,6 +1150,7 @@ def execute_write_action(
                 config.base_runtime.receipt_state_path,
                 receipt_key_id=config.base_runtime.receipt_key_id,
                 receipt_secret=read_receipt_secret,
+                enable_verified_read_results=True,
             )
             receipt_store.record_verified_read(
                 receipt=receipt,

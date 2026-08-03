@@ -1865,6 +1865,7 @@ def _child_main(root_env: Any, payload_fd: int, marker: str) -> None:
             runtime_config.receipt_state_path,
             receipt_key_id=runtime_config.receipt_key_id,
             receipt_secret=receipt_secret,
+            enable_verified_read_results=True,
         )
     finally:
         os.umask(previous_umask)

@@ -21,7 +21,7 @@ import {
 
 const VERSION = "1.2.3-test";
 const COMMIT = "a".repeat(40);
-const PYTHON_MANIFEST_DIGEST = "db76efa7f3bbb9febcbdda582f741afa0bd23e65611e26554b6dc975d7d3bfb7";
+const PYTHON_MANIFEST_DIGEST = "73c5d9c337949bfdd26ef543f9d70ef4e7d2377b9d1a38723b346881ed13d5c9";
 const temporaryRoots = [];
 
 function canonicalString(value) {

@@ -19,6 +19,8 @@ import {
 const RELEASE_DIGEST = "7".repeat(64);
 const REGISTRY_DIGEST = "a".repeat(64);
 const SESSION_HANDLE = "opaque-broker-session-0123456789abcdef";
+const RESULT_DELIVERY_SESSION_HANDLE =
+	"opaque-result-delivery-0123456789abcdef";
 
 function sha256(value) {
 	return createHash("sha256").update(value).digest("hex");
@@ -261,6 +263,125 @@ function brokerHarness(responseFactory = responseFor, executedIdentity = {}) {
 	});
 	return { calls, client };
 }
+
+function deliveredReadFixture(request) {
+	const receipt = responseFor("read", {
+		capability_id: request.capability_id,
+		parameters: {},
+	}).data.result.receipt;
+	return {
+		business_succeeded: true,
+		command: "result.deliver",
+		data: {
+			audit_receipt: {
+				...receipt,
+				id: request.receipt_id,
+				result_digest: request.result_digest,
+			},
+			business_result: {
+				page: { count: 0, total_count: 0 },
+				rows: [],
+			},
+			current_identity: {
+				registry_digest: REGISTRY_DIGEST,
+				release_digest: RELEASE_DIGEST,
+			},
+			executed_identity: {
+				registry_digest: REGISTRY_DIGEST,
+				release_digest: RELEASE_DIGEST,
+			},
+			locator: request,
+			session_binding: {
+				company_id: 7,
+				database_name: "odoo_v3_sandbox",
+				database_uuid: "11111111-1111-4111-8111-111111111111",
+				environment: "sandbox",
+				odoo_instance_id: "odoo19@sandbox",
+				principal: "pi:user-42",
+				user_id: 42,
+			},
+		},
+		ok: true,
+	};
+}
+
+test("parent-only result delivery uses one fixed read-only broker route", async () => {
+	const locator = {
+		action: "read",
+		business_succeeded: true,
+		capability_id: "acct.gl.trial_balance.v1",
+		operation_id: null,
+		receipt_id: "read-receipt-delivery-1",
+		result_digest: "b".repeat(64),
+		status: "verified_success",
+	};
+	const { calls, client } = brokerHarness(
+		(action, request) => {
+			if (action !== "result.deliver") return responseFor(action, request);
+			const response = deliveredReadFixture(request);
+			response.data.locator = Object.fromEntries(
+				Object.entries(request).reverse(),
+			);
+			return response;
+		},
+	);
+
+	const result = await client("result.deliver", locator);
+
+	assert.equal(result.ok, true);
+	assert.equal(result.command, "result.deliver");
+	assert.deepEqual(result.data.locator, locator);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].path, "/v1/result/deliver");
+	assert.deepEqual(JSON.parse(calls[0].body), locator);
+});
+
+test("result delivery rejects malformed locators and mismatched trusted bindings", async () => {
+	const locator = {
+		action: "read",
+		business_succeeded: true,
+		capability_id: "acct.gl.trial_balance.v1",
+		operation_id: null,
+		receipt_id: "read-receipt-delivery-1",
+		result_digest: "b".repeat(64),
+		status: "verified_success",
+	};
+	const malformed = brokerHarness();
+	const malformedResult = await malformed.client("result.deliver", {
+		...locator,
+		status: "verified_diagnostic",
+	});
+	assert.equal(malformedResult.ok, false);
+	assert.equal(malformedResult.error.code, "bridge_invalid_request_json");
+	assert.equal(malformed.calls.length, 0);
+
+	const mismatched = brokerHarness((_action, request) => {
+		const response = deliveredReadFixture(request);
+		response.data.session_binding.company_id = 8;
+		return response;
+	});
+	const mismatchedResult = await mismatched.client("result.deliver", locator);
+	assert.equal(mismatchedResult.ok, false);
+	assert.equal(
+		mismatchedResult.error.code,
+		"bridge_invalid_v3_broker_response",
+	);
+
+	const wrongCurrent = brokerHarness((_action, request) => {
+		const response = deliveredReadFixture(request);
+		response.data.current_identity.release_digest = "0".repeat(64);
+		return response;
+	});
+	const wrongCurrentResult = await wrongCurrent.client(
+		"result.deliver",
+		locator,
+	);
+	assert.equal(wrongCurrentResult.ok, false);
+	assert.equal(
+		wrongCurrentResult.error.code,
+		"bridge_invalid_v3_broker_response",
+	);
+});
 
 test("model-facing business requests cross the fixed broker socket byte-for-byte", async (t) => {
 	const requests = {
@@ -559,7 +680,10 @@ test("the server accepts only an injected authenticated-session resolver", async
 		await writeFile(modulePath, `
 export async function resolveAuthenticatedSession(request) {
   if (request.headers.authorization !== "Bearer upstream-verified") return null;
-  return { brokerSessionHandle: "${SESSION_HANDLE}" };
+  return {
+    brokerSessionHandle: "${SESSION_HANDLE}",
+    resultDeliverySessionHandle: "${RESULT_DELIVERY_SESSION_HANDLE}",
+  };
 }
 `, "utf8");
 		const resolver = await loadAuthenticatedSessionResolver(modulePath);
@@ -569,13 +693,36 @@ export async function resolveAuthenticatedSession(request) {
 			remoteAddress: "127.0.0.1",
 			url: "/chat",
 		});
-		assert.deepEqual(resolved, { brokerSessionHandle: SESSION_HANDLE });
+		assert.deepEqual(resolved, {
+			brokerSessionHandle: SESSION_HANDLE,
+			resultDeliverySessionHandle: RESULT_DELIVERY_SESSION_HANDLE,
+		});
 		assert.equal(await resolveAuthenticatedBrokerSession(null, {}), null);
 		assert.equal(await resolveAuthenticatedBrokerSession(resolver, {
 			headers: { authorization: "Bearer attacker" },
 		}), null);
 	} finally {
 		await rm(temp, { force: true, recursive: true });
+	}
+});
+
+test("the trusted resolver requires exactly two distinct session handles", async () => {
+	for (const resolved of [
+		{ brokerSessionHandle: SESSION_HANDLE },
+		{
+			brokerSessionHandle: SESSION_HANDLE,
+			resultDeliverySessionHandle: SESSION_HANDLE,
+		},
+		{
+			brokerSessionHandle: SESSION_HANDLE,
+			resultDeliverySessionHandle: RESULT_DELIVERY_SESSION_HANDLE,
+			extra: true,
+		},
+	]) {
+		await assert.rejects(
+			resolveAuthenticatedBrokerSession(async () => resolved, {}),
+			/invalid broker session/,
+		);
 	}
 });
 
@@ -587,40 +734,76 @@ test("the shipped Odoo header resolver accepts only the exact loopback chat boun
 	);
 	const resolver = await loadAuthenticatedSessionResolver(modulePath);
 	const accepted = await resolveAuthenticatedBrokerSession(resolver, {
-		headers: { "x-odoo-v3-broker-session": SESSION_HANDLE },
+		headers: {
+			"x-odoo-v3-broker-session": SESSION_HANDLE,
+			"x-odoo-v3-result-delivery-session": RESULT_DELIVERY_SESSION_HANDLE,
+		},
 		method: "POST",
 		remoteAddress: "127.0.0.1",
 		url: "/chat",
 	});
-	assert.deepEqual(accepted, { brokerSessionHandle: SESSION_HANDLE });
+	assert.deepEqual(accepted, {
+		brokerSessionHandle: SESSION_HANDLE,
+		resultDeliverySessionHandle: RESULT_DELIVERY_SESSION_HANDLE,
+	});
 
 	for (const request of [
 		{
-			headers: { "x-odoo-v3-broker-session": SESSION_HANDLE },
+			headers: {
+				"x-odoo-v3-broker-session": SESSION_HANDLE,
+				"x-odoo-v3-result-delivery-session": RESULT_DELIVERY_SESSION_HANDLE,
+			},
 			method: "GET",
 			remoteAddress: "127.0.0.1",
 			url: "/chat",
 		},
 		{
-			headers: { "x-odoo-v3-broker-session": SESSION_HANDLE },
+			headers: {
+				"x-odoo-v3-broker-session": SESSION_HANDLE,
+				"x-odoo-v3-result-delivery-session": RESULT_DELIVERY_SESSION_HANDLE,
+			},
 			method: "POST",
 			remoteAddress: "10.0.0.8",
 			url: "/chat",
 		},
 		{
-			headers: { "x-odoo-v3-broker-session": SESSION_HANDLE },
+			headers: {
+				"x-odoo-v3-broker-session": SESSION_HANDLE,
+				"x-odoo-v3-result-delivery-session": RESULT_DELIVERY_SESSION_HANDLE,
+			},
 			method: "POST",
 			remoteAddress: "127.0.0.1",
 			url: "/session/delete",
 		},
 		{
-			headers: { "x-odoo-v3-broker-session": [SESSION_HANDLE] },
+			headers: {
+				"x-odoo-v3-broker-session": [SESSION_HANDLE],
+				"x-odoo-v3-result-delivery-session": RESULT_DELIVERY_SESSION_HANDLE,
+			},
 			method: "POST",
 			remoteAddress: "127.0.0.1",
 			url: "/chat",
 		},
 		{
-			headers: { "x-odoo-v3-broker-session": `${SESSION_HANDLE},${SESSION_HANDLE}` },
+			headers: {
+				"x-odoo-v3-broker-session": `${SESSION_HANDLE},${SESSION_HANDLE}`,
+				"x-odoo-v3-result-delivery-session": RESULT_DELIVERY_SESSION_HANDLE,
+			},
+			method: "POST",
+			remoteAddress: "127.0.0.1",
+			url: "/chat",
+		},
+		{
+			headers: { "x-odoo-v3-broker-session": SESSION_HANDLE },
+			method: "POST",
+			remoteAddress: "127.0.0.1",
+			url: "/chat",
+		},
+		{
+			headers: {
+				"x-odoo-v3-broker-session": SESSION_HANDLE,
+				"x-odoo-v3-result-delivery-session": SESSION_HANDLE,
+			},
 			method: "POST",
 			remoteAddress: "127.0.0.1",
 			url: "/chat",
@@ -636,7 +819,10 @@ test("the session resolver binds exact bytes and rejects dependency and export e
 		const modulePath = path.join(temp, "resolver.mjs");
 		const source = `
 export default async function resolver() {
-  return { brokerSessionHandle: "${SESSION_HANDLE}" };
+  return {
+    brokerSessionHandle: "${SESSION_HANDLE}",
+    resultDeliverySessionHandle: "${RESULT_DELIVERY_SESSION_HANDLE}",
+  };
 }
 `;
 		await writeFile(modulePath, source, "utf8");
@@ -645,6 +831,7 @@ export default async function resolver() {
 		});
 		assert.deepEqual(await resolveAuthenticatedBrokerSession(resolver, {}), {
 			brokerSessionHandle: SESSION_HANDLE,
+			resultDeliverySessionHandle: RESULT_DELIVERY_SESSION_HANDLE,
 		});
 
 		await writeFile(modulePath, `${source}\n// changed\n`, "utf8");

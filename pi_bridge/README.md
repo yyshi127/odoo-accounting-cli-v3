@@ -127,11 +127,27 @@ the query, not success of the inspected operation. This
 terminal-answer control does not by itself prove the full 38-scenario
 natural-language gate or financial correctness; those require the separately
 retained evidence described in `docs/PI_SCENARIO_ACCEPTANCE.md`.
-The seven-field answer is currently an evidence locator, not the user-facing
-accounting payload. Before production use, the parent must obtain the exact
-verified result body from the trusted Broker/receipt store, recheck its digest,
-and render a bounded business result plus audit receipt without asking Pi to
-restate numbers. That result-delivery path is not yet implemented.
+The seven-field answer is an evidence locator, not the user-facing accounting
+payload. After the FD4 gate accepts it, the parent uses a separate, parent-only,
+single-use authenticated Broker session on the fixed `result.deliver` route.
+The Pi child receives only the ordinary session on FD3, so ordinary-session
+exhaustion cannot block final delivery and the delivery credential cannot enter
+model context, tools, arguments, or environment. The Broker returns only a
+persisted verified-read result or a durable verified terminal-write result; the
+parent independently rechecks the locator, current and executed release
+identity, session/company binding, receipt, and canonical result digest before
+returning a business result of at most 256 KiB plus its audit receipt. Pi never
+restates the accounting numbers. Clarification, refusal, and awaiting approval
+remain explicit non-success responses and do not call result delivery. Both
+success and non-success objects are returned to Odoo as bounded canonical JSON
+strings; either session handle appearing in the answer fails closed.
+Diagnostic delivery is deliberately unsupported and fails closed rather than
+re-running Odoo.
+
+The request phases reserve explicit margins: 5 seconds for Broker preflight,
+up to 120 seconds for the Pi child, and 10 seconds for final delivery. The
+Pi Bridge total is therefore at most 135 seconds; Odoo's outer deadline is 150
+seconds and chat credentials must have at least a 170-second issued lifetime.
 
 Production remains disabled until the authenticated-session resolver, broker
 socket ownership/permissions, broker session mapping, independent approval

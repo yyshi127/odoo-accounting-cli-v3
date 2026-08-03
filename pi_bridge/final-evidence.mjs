@@ -780,6 +780,5 @@ export function validateFinalEvidenceChildResult({
 	if (exitCode !== 0) reject("final_evidence_child_exit_rejected");
 	const evidence = decodeFinalEvidenceStream(evidenceBuffer);
 	const answer = decodePiPrintFinalAnswer(stdoutBuffer);
-	validateFinalAnswer(answer, evidence);
-	return answer;
+	return validateFinalAnswer(answer, evidence);
 }

@@ -12,7 +12,7 @@ import struct
 import sys
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -23,15 +23,21 @@ from .release_binding import VerifiedAddonRelease, verify_addon_release
 
 
 _MINT_PATH = "/v1/trusted-session/mint"
+_RESULT_DELIVERY_MINT_PATH = "/v1/trusted-session/result-delivery/mint"
 _REVOKE_PATH = "/v1/trusted-session/revoke"
 _CHAT_PATH = "/chat"
 _SESSION_HEADER = "X-Odoo-V3-Broker-Session"
+_RESULT_DELIVERY_SESSION_HEADER = "X-Odoo-V3-Result-Delivery-Session"
 _EXECUTOR_GROUP = "odoo_accounting_cli_v3_control.group_executor"
-# These client deadlines exceed the broker's enforced server-side maxima
-# (5 seconds for mint/revoke and 115 seconds for Pi requests).  A client must
-# not report failure while the trusted broker can still commit the operation.
+# Server phases are bounded at 5 seconds preflight, 120 seconds child work, and
+# 10 seconds parent-only result delivery.  The Odoo HTTP deadline leaves a
+# 15-second transport margin, while a 170-second session lifetime also covers
+# the second mint call before /chat.  The deployed root configuration is 180s.
 _SESSION_UDS_TIMEOUT_SECONDS = 10.0
-_PI_TIMEOUT_SECONDS = 120.0
+_PI_SERVER_TOTAL_BUDGET_SECONDS = 135.0
+_PI_TIMEOUT_SECONDS = 150.0
+_MIN_CHAT_SESSION_TTL_SECONDS = 170.0
+_SESSION_CLOCK_SKEW_SECONDS = 5.0
 _MAX_REQUEST_BYTES = 16 * 1024
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _HANDLE = re.compile(r"[A-Za-z0-9_-]{43}\Z")
@@ -53,6 +59,15 @@ class _RootSettings:
     mint_socket_path: str
     pi_bridge_port: int
     broker_uid: int
+
+
+@dataclass(frozen=True)
+class _MintedSession:
+    handle: str
+    session_id: str
+    issued_at: datetime
+    expires_at: datetime
+    max_uses: int
 
 
 def _required_root_value(name: str) -> str:
@@ -284,7 +299,7 @@ def _post_uds_json(
     route: str,
     payload: dict[str, Any],
 ) -> tuple[int, dict[str, Any]]:
-    if route not in {_MINT_PATH, _REVOKE_PATH}:
+    if route not in {_MINT_PATH, _RESULT_DELIVERY_MINT_PATH, _REVOKE_PATH}:
         raise SessionClientError("trusted session route is invalid")
     body = _json_bytes(payload)
     connection = _UnixHTTPConnection(
@@ -319,9 +334,14 @@ def _post_pi_chat(
     settings: _RootSettings,
     payload: dict[str, Any],
     handle: str,
+    result_delivery_handle: str,
 ) -> str:
-    if _HANDLE.fullmatch(handle) is None:
-        raise SessionClientError("trusted session handle is invalid")
+    if (
+        _HANDLE.fullmatch(handle) is None
+        or _HANDLE.fullmatch(result_delivery_handle) is None
+        or handle == result_delivery_handle
+    ):
+        raise SessionClientError("trusted session handles are invalid")
     body = _json_bytes(payload)
     connection = http.client.HTTPConnection(
         "127.0.0.1",
@@ -338,6 +358,7 @@ def _post_pi_chat(
                 ("Content-Type", "application/json"),
                 ("Content-Length", str(len(body))),
                 (_SESSION_HEADER, handle),
+                (_RESULT_DELIVERY_SESSION_HEADER, result_delivery_handle),
                 ("Connection", "close"),
             ),
         )
@@ -349,16 +370,22 @@ def _post_pi_chat(
         raise SessionClientError("Pi Bridge request failed") from exc
     finally:
         connection.close()
+    answer = value.get("answer")
+    try:
+        answer_bytes = len(answer.encode("utf-8")) if isinstance(answer, str) else 0
+    except UnicodeEncodeError:
+        answer_bytes = _MAX_RESPONSE_BYTES + 1
     if (
         response.status != 200
         or set(value) != {"ok", "answer"}
         or value.get("ok") is not True
-        or not isinstance(value.get("answer"), str)
-        or len(value["answer"]) > _MAX_RESPONSE_BYTES
-        or handle in value["answer"]
+        or not isinstance(answer, str)
+        or answer_bytes > _MAX_RESPONSE_BYTES
+        or handle in answer
+        or result_delivery_handle in answer
     ):
         raise SessionClientError("Pi Bridge returned an invalid response")
-    return value["answer"]
+    return answer
 
 
 def _validate_chat_payload(payload: object) -> dict[str, str]:
@@ -435,6 +462,68 @@ def _validated_mint_handle(status: int, value: object) -> str:
     return handle
 
 
+def _validated_chat_mint_session(
+    status: int,
+    value: object,
+    *,
+    expected_max_uses: int | None,
+) -> _MintedSession:
+    if (
+        status != 201
+        or not isinstance(value, dict)
+        or set(value) != {"ok", "session"}
+        or value.get("ok") is not True
+        or not isinstance(value.get("session"), dict)
+    ):
+        raise SessionClientError("trusted session mint response is invalid")
+    session = value["session"]
+    if set(session) != {
+        "handle",
+        "session_id",
+        "issued_at",
+        "expires_at",
+        "max_uses",
+    }:
+        raise SessionClientError("trusted session mint response is invalid")
+    handle = session["handle"]
+    try:
+        session_id = str(uuid.UUID(session["session_id"]))
+        issued_at = datetime.fromisoformat(session["issued_at"])
+        expires_at = datetime.fromisoformat(session["expires_at"])
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise SessionClientError("trusted session mint response is invalid") from exc
+    now = datetime.now(timezone.utc)
+    max_uses = session["max_uses"]
+    valid_use_budget = type(max_uses) is int and (
+        max_uses == expected_max_uses
+        if expected_max_uses is not None
+        else 16 <= max_uses <= 64
+    )
+    if (
+        not isinstance(handle, str)
+        or _HANDLE.fullmatch(handle) is None
+        or session_id != session["session_id"]
+        or issued_at.tzinfo is None
+        or issued_at.utcoffset() is None
+        or expires_at.tzinfo is None
+        or expires_at.utcoffset() is None
+        or issued_at > now + timedelta(seconds=_SESSION_CLOCK_SKEW_SECONDS)
+        or expires_at <= now + timedelta(seconds=_PI_TIMEOUT_SECONDS)
+        or expires_at - issued_at
+        < timedelta(seconds=_MIN_CHAT_SESSION_TTL_SECONDS)
+        or expires_at - issued_at > timedelta(hours=1)
+        or not valid_use_budget
+    ):
+        raise SessionClientError("trusted session mint response is invalid")
+    return _MintedSession(
+        handle=handle,
+        session_id=session_id,
+        issued_at=issued_at,
+        expires_at=expires_at,
+        max_uses=max_uses,
+    )
+
+
 def _validate_revoke_response(status: int, value: object) -> None:
     if status != 200 or value != {"ok": True, "revoked": True}:
         raise SessionClientError("trusted session revoke response is invalid")
@@ -503,7 +592,8 @@ class OdooAccountingCliV3SessionClient(models.AbstractModel):
             chat_payload = _validate_chat_payload(payload)
         except SessionClientError:
             raise UserError("The V3 business request was rejected.") from None
-        handle: str | None = None
+        acquired_handles: list[str] = []
+        settings: _RootSettings | None = None
         primary_error = False
         revoke_error = False
         answer: str | None = None
@@ -512,14 +602,48 @@ class OdooAccountingCliV3SessionClient(models.AbstractModel):
             release = verify_addon_release(__file__)
             identity = self._trusted_identity_payload(settings, release)
             mint_status, mint_value = _post_uds_json(settings, _MINT_PATH, identity)
-            handle = _candidate_handle(mint_status, mint_value)
-            handle = _validated_mint_handle(mint_status, mint_value)
-            answer = _post_pi_chat(settings, chat_payload, handle)
+            candidate = _candidate_handle(mint_status, mint_value)
+            if candidate is not None:
+                acquired_handles.append(candidate)
+            ordinary = _validated_chat_mint_session(
+                mint_status,
+                mint_value,
+                expected_max_uses=None,
+            )
+            delivery_status, delivery_value = _post_uds_json(
+                settings,
+                _RESULT_DELIVERY_MINT_PATH,
+                identity,
+            )
+            delivery_candidate = _candidate_handle(
+                delivery_status,
+                delivery_value,
+            )
+            if delivery_candidate is not None:
+                acquired_handles.append(delivery_candidate)
+            delivery = _validated_chat_mint_session(
+                delivery_status,
+                delivery_value,
+                expected_max_uses=1,
+            )
+            if (
+                ordinary.handle == delivery.handle
+                or ordinary.session_id == delivery.session_id
+            ):
+                raise SessionClientError("trusted sessions are not independent")
+            answer = _post_pi_chat(
+                settings,
+                chat_payload,
+                ordinary.handle,
+                delivery.handle,
+            )
         except Exception:
             primary_error = True
         finally:
-            if handle is not None:
+            for handle in reversed(acquired_handles):
                 try:
+                    if settings is None:
+                        raise SessionClientError("trusted session settings are absent")
                     revoke_status, revoke_value = _post_uds_json(
                         settings,
                         _REVOKE_PATH,

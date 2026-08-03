@@ -243,6 +243,7 @@ def test_template_is_a_non_conflicting_fail_closed_sidecar() -> None:
         "ProtectSystem": "strict",
         "RestrictNamespaces": "yes",
         "RestrictSUIDSGID": "yes",
+        "TimeoutStopSec": "150s",
         "UMask": "0077",
     }.items():
         assert _one(service, key) == expected

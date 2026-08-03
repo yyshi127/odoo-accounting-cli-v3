@@ -6,6 +6,7 @@ import importlib.util
 import json
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -17,8 +18,30 @@ ADDON = ROOT / "odoo_addons" / "odoo_accounting_cli_v3_control"
 MODEL = ADDON / "models" / "session_client.py"
 DATABASE_UUID = "f1d2d2f9-8d43-4b2f-a36c-64c76df38f81"
 HANDLE = "A" * 43
+RESULT_DELIVERY_HANDLE = "B" * 43
 RELEASE_DIGEST = "a" * 64
 REGISTRY_DIGEST = "b" * 64
+
+
+def _mint_response(
+    handle: str,
+    *,
+    max_uses: int,
+    session_id: str,
+    ttl_seconds: int = 180,
+) -> tuple[int, dict[str, Any]]:
+    issued_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    expires_at = issued_at + timedelta(seconds=ttl_seconds)
+    return 201, {
+        "ok": True,
+        "session": {
+            "handle": handle,
+            "session_id": session_id,
+            "issued_at": issued_at.isoformat(timespec="microseconds"),
+            "expires_at": expires_at.isoformat(timespec="microseconds"),
+            "max_uses": max_uses,
+        },
+    }
 
 
 class FakeAccessError(Exception):
@@ -123,7 +146,7 @@ def root_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 def test_manifest_init_and_acl_keep_client_internal() -> None:
     manifest = ast.literal_eval((ADDON / "__manifest__.py").read_text(encoding="utf-8"))
-    assert manifest["version"] == "19.0.0.7.1"
+    assert manifest["version"] == "19.0.0.7.2"
     assert "server-side" in manifest["summary"].lower()
     assert "from . import session_client" in (
         ADDON / "models" / "__init__.py"
@@ -148,6 +171,7 @@ def test_source_has_private_abstract_model_and_no_public_http_boundary() -> None
     assert "env.companies" in source
     assert 'get_param("database.uuid")' in source
     assert '"X-Odoo-V3-Broker-Session"' in source
+    assert '"X-Odoo-V3-Result-Delivery-Session"' in source
     assert '"ODOO_V3_BROKER_UID"' in source
     assert '"127.0.0.1"' in source
     assert '"/chat"' in source
@@ -226,22 +250,41 @@ def test_executor_only_chat_mints_calls_loopback_and_always_revokes(
         del settings
         calls.append((route, json.loads(json.dumps(payload))))
         if route == module._MINT_PATH:
-            return 201, {
-                "ok": True,
-                "session": {
-                    "handle": HANDLE,
-                    "session_id": "11111111-1111-4111-8111-111111111111",
-                    "issued_at": "2026-07-15T08:00:00.000000+00:00",
-                    "expires_at": "2026-07-15T08:01:00.000000+00:00",
-                    "max_uses": 32,
-                },
-            }
+            return _mint_response(
+                HANDLE,
+                max_uses=32,
+                session_id="11111111-1111-4111-8111-111111111111",
+            )
+        if route == module._RESULT_DELIVERY_MINT_PATH:
+            return _mint_response(
+                RESULT_DELIVERY_HANDLE,
+                max_uses=1,
+                session_id="22222222-2222-4222-8222-222222222222",
+            )
         assert route == module._REVOKE_PATH
-        assert payload == {"handle": HANDLE}
+        assert payload in (
+            {"handle": HANDLE},
+            {"handle": RESULT_DELIVERY_HANDLE},
+        )
         return 200, {"ok": True, "revoked": True}
 
-    def pi_call(settings: Any, payload: dict[str, Any], handle: str) -> str:
-        calls.append(("pi", (settings.pi_bridge_port, payload, handle)))
+    def pi_call(
+        settings: Any,
+        payload: dict[str, Any],
+        handle: str,
+        result_delivery_handle: str,
+    ) -> str:
+        calls.append(
+            (
+                "pi",
+                (
+                    settings.pi_bridge_port,
+                    payload,
+                    handle,
+                    result_delivery_handle,
+                ),
+            )
+        )
         return "verified answer"
 
     monkeypatch.setattr(module, "_post_uds_json", uds_call)
@@ -253,10 +296,22 @@ def test_executor_only_chat_mints_calls_loopback_and_always_revokes(
     assert calls[0][1]["release_digest"] == RELEASE_DIGEST
     assert calls[0][1]["registry_digest"] == REGISTRY_DIGEST
     assert calls[1] == (
-        "pi",
-        (8787, {"message": "show trial balance"}, HANDLE),
+        module._RESULT_DELIVERY_MINT_PATH,
+        calls[0][1],
     )
-    assert calls[2] == (module._REVOKE_PATH, {"handle": HANDLE})
+    assert calls[2] == (
+        "pi",
+        (
+            8787,
+            {"message": "show trial balance"},
+            HANDLE,
+            RESULT_DELIVERY_HANDLE,
+        ),
+    )
+    assert calls[3:] == [
+        (module._REVOKE_PATH, {"handle": RESULT_DELIVERY_HANDLE}),
+        (module._REVOKE_PATH, {"handle": HANDLE}),
+    ]
 
 
 def test_unverified_executing_addon_cannot_reach_mint_or_pi(
@@ -296,16 +351,17 @@ def test_pi_failure_still_revokes_and_never_exposes_handle(
     ) -> tuple[int, dict[str, Any]]:
         routes.append(route)
         if route == module._MINT_PATH:
-            return 201, {
-                "ok": True,
-                "session": {
-                    "handle": HANDLE,
-                    "session_id": "11111111-1111-4111-8111-111111111111",
-                    "issued_at": "2026-07-15T08:00:00.000000+00:00",
-                    "expires_at": "2026-07-15T08:01:00.000000+00:00",
-                    "max_uses": 32,
-                },
-            }
+            return _mint_response(
+                HANDLE,
+                max_uses=32,
+                session_id="11111111-1111-4111-8111-111111111111",
+            )
+        if route == module._RESULT_DELIVERY_MINT_PATH:
+            return _mint_response(
+                RESULT_DELIVERY_HANDLE,
+                max_uses=1,
+                session_id="22222222-2222-4222-8222-222222222222",
+            )
         return 200, {"ok": True, "revoked": True}
 
     monkeypatch.setattr(module, "_post_uds_json", uds_call)
@@ -317,7 +373,13 @@ def test_pi_failure_still_revokes_and_never_exposes_handle(
     with pytest.raises(FakeUserError) as caught:
         client._odoo_v3_chat({"message": "show trial balance"})
     assert HANDLE not in str(caught.value)
-    assert routes == [module._MINT_PATH, module._REVOKE_PATH]
+    assert RESULT_DELIVERY_HANDLE not in str(caught.value)
+    assert routes == [
+        module._MINT_PATH,
+        module._RESULT_DELIVERY_MINT_PATH,
+        module._REVOKE_PATH,
+        module._REVOKE_PATH,
+    ]
 
 
 def test_revoke_failure_fails_closed_even_after_pi_success(
@@ -331,16 +393,17 @@ def test_revoke_failure_fails_closed_even_after_pi_success(
         _settings: Any, route: str, _payload: dict[str, Any]
     ) -> tuple[int, dict[str, Any]]:
         if route == module._MINT_PATH:
-            return 201, {
-                "ok": True,
-                "session": {
-                    "handle": HANDLE,
-                    "session_id": "11111111-1111-4111-8111-111111111111",
-                    "issued_at": "2026-07-15T08:00:00.000000+00:00",
-                    "expires_at": "2026-07-15T08:01:00.000000+00:00",
-                    "max_uses": 32,
-                },
-            }
+            return _mint_response(
+                HANDLE,
+                max_uses=32,
+                session_id="11111111-1111-4111-8111-111111111111",
+            )
+        if route == module._RESULT_DELIVERY_MINT_PATH:
+            return _mint_response(
+                RESULT_DELIVERY_HANDLE,
+                max_uses=1,
+                session_id="22222222-2222-4222-8222-222222222222",
+            )
         return 404, {"ok": False, "error": {"code": "rejected"}}
 
     monkeypatch.setattr(module, "_post_uds_json", uds_call)
@@ -364,16 +427,12 @@ def test_malformed_mint_with_valid_candidate_handle_is_revoked(
     ) -> tuple[int, dict[str, Any]]:
         routes.append(route)
         if route == module._MINT_PATH:
-            return mint_status, {
-                "ok": True,
-                "session": {
-                    "handle": HANDLE,
-                    "session_id": "11111111-1111-4111-8111-111111111111",
-                    "issued_at": "2026-07-15T08:00:00.000000+00:00",
-                    "expires_at": "2026-07-15T08:01:00.000000+00:00",
-                    "max_uses": 2,
-                },
-            }
+            _, value = _mint_response(
+                HANDLE,
+                max_uses=2,
+                session_id="11111111-1111-4111-8111-111111111111",
+            )
+            return mint_status, value
         assert payload == {"handle": HANDLE}
         return 200, {"ok": True, "revoked": True}
 
@@ -384,6 +443,126 @@ def test_malformed_mint_with_valid_candidate_handle_is_revoked(
         client._odoo_v3_chat({"message": "show trial balance"})
     assert routes == [module._MINT_PATH, module._REVOKE_PATH]
     assert pi_calls == []
+
+
+@pytest.mark.parametrize("failure", ["missing", "wrong_use_budget", "same_handle"])
+def test_delivery_session_failure_rejects_chat_and_revokes_every_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+    failure: str,
+) -> None:
+    module = _load_client_module(monkeypatch)
+    client = _client(module)
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    def uds_call(
+        _settings: Any, route: str, payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        calls.append((route, payload))
+        if route == module._MINT_PATH:
+            return _mint_response(
+                HANDLE,
+                max_uses=32,
+                session_id="11111111-1111-4111-8111-111111111111",
+            )
+        if route == module._RESULT_DELIVERY_MINT_PATH:
+            if failure == "missing":
+                return 503, {"ok": False, "error": {"code": "unavailable"}}
+            return _mint_response(
+                HANDLE if failure == "same_handle" else RESULT_DELIVERY_HANDLE,
+                max_uses=32 if failure == "wrong_use_budget" else 1,
+                session_id="22222222-2222-4222-8222-222222222222",
+            )
+        return 200, {"ok": True, "revoked": True}
+
+    pi_calls: list[object] = []
+    monkeypatch.setattr(module, "_post_uds_json", uds_call)
+    monkeypatch.setattr(module, "_post_pi_chat", lambda *args: pi_calls.append(args))
+
+    with pytest.raises(FakeUserError, match="could not be completed safely"):
+        client._odoo_v3_chat({"message": "show trial balance"})
+
+    assert pi_calls == []
+    revoked = [payload["handle"] for route, payload in calls if route == module._REVOKE_PATH]
+    assert revoked == (
+        [HANDLE]
+        if failure == "missing"
+        else [
+            HANDLE if failure == "same_handle" else RESULT_DELIVERY_HANDLE,
+            HANDLE,
+        ]
+    )
+
+
+def test_chat_session_ttl_must_cover_mint_and_outer_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+) -> None:
+    module = _load_client_module(monkeypatch)
+    client = _client(module)
+    routes: list[str] = []
+
+    def uds_call(
+        _settings: Any, route: str, _payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        routes.append(route)
+        if route == module._MINT_PATH:
+            return _mint_response(
+                HANDLE,
+                max_uses=32,
+                session_id="11111111-1111-4111-8111-111111111111",
+                ttl_seconds=int(module._MIN_CHAT_SESSION_TTL_SECONDS) - 1,
+            )
+        return 200, {"ok": True, "revoked": True}
+
+    monkeypatch.setattr(module, "_post_uds_json", uds_call)
+    monkeypatch.setattr(
+        module,
+        "_post_pi_chat",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("Pi must not run")),
+    )
+
+    with pytest.raises(FakeUserError, match="could not be completed safely"):
+        client._odoo_v3_chat({"message": "show trial balance"})
+
+    assert routes == [module._MINT_PATH, module._REVOKE_PATH]
+
+
+def test_both_revoke_calls_are_attempted_when_the_first_revoke_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+) -> None:
+    module = _load_client_module(monkeypatch)
+    client = _client(module)
+    revoked: list[str] = []
+
+    def uds_call(
+        _settings: Any, route: str, payload: dict[str, Any]
+    ) -> tuple[int, dict[str, Any]]:
+        if route == module._MINT_PATH:
+            return _mint_response(
+                HANDLE,
+                max_uses=32,
+                session_id="11111111-1111-4111-8111-111111111111",
+            )
+        if route == module._RESULT_DELIVERY_MINT_PATH:
+            return _mint_response(
+                RESULT_DELIVERY_HANDLE,
+                max_uses=1,
+                session_id="22222222-2222-4222-8222-222222222222",
+            )
+        revoked.append(payload["handle"])
+        if len(revoked) == 1:
+            raise module.SessionClientError("private revoke failure")
+        return 200, {"ok": True, "revoked": True}
+
+    monkeypatch.setattr(module, "_post_uds_json", uds_call)
+    monkeypatch.setattr(module, "_post_pi_chat", lambda *_args: "answer")
+
+    with pytest.raises(FakeUserError, match="could not be completed safely"):
+        client._odoo_v3_chat({"message": "show trial balance"})
+
+    assert revoked == [RESULT_DELIVERY_HANDLE, HANDLE]
 
 
 def test_non_executor_is_rejected_before_mint(
@@ -404,7 +583,17 @@ def test_transport_limits_cover_server_deadlines_and_remain_bounded(
 ) -> None:
     module = _load_client_module(monkeypatch)
     assert 5 < module._SESSION_UDS_TIMEOUT_SECONDS <= 10
-    assert 115 < module._PI_TIMEOUT_SECONDS <= 120
+    assert module._PI_SERVER_TOTAL_BUDGET_SECONDS == 135
+    assert module._PI_TIMEOUT_SECONDS == 150
+    assert module._MIN_CHAT_SESSION_TTL_SECONDS == 170
+    assert (
+        module._PI_TIMEOUT_SECONDS
+        > module._PI_SERVER_TOTAL_BUDGET_SECONDS
+    )
+    assert (
+        module._MIN_CHAT_SESSION_TTL_SECONDS
+        > module._PI_TIMEOUT_SECONDS + module._SESSION_UDS_TIMEOUT_SECONDS
+    )
     assert module._MAX_REQUEST_BYTES <= 64 * 1024
     assert module._MAX_RESPONSE_BYTES <= 1024 * 1024
 
@@ -537,11 +726,75 @@ def test_pi_transport_uses_only_loopback_and_dedicated_session_header(
         settings,
         {"message": "show trial balance"},
         HANDLE,
+        RESULT_DELIVERY_HANDLE,
     ) == "verified answer"
-    assert calls[0] == ("connect", ("127.0.0.1", 8787, 120.0))
+    assert calls[0] == ("connect", ("127.0.0.1", 8787, 150.0))
     assert ("request", ("POST", "/chat", {
         "skip_host": True,
         "skip_accept_encoding": True,
     })) in calls
     assert ("header", ("X-Odoo-V3-Broker-Session", HANDLE)) in calls
-    assert all(HANDLE not in str(value) for kind, value in calls if kind != "header")
+    assert (
+        "header",
+        ("X-Odoo-V3-Result-Delivery-Session", RESULT_DELIVERY_HANDLE),
+    ) in calls
+    assert all(
+        HANDLE not in str(value) and RESULT_DELIVERY_HANDLE not in str(value)
+        for kind, value in calls
+        if kind != "header"
+    )
+
+
+def test_pi_transport_rejects_equal_handles_and_leaks_of_either_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    root_environment: None,
+) -> None:
+    module = _load_client_module(monkeypatch)
+    settings = module._root_settings()
+    with pytest.raises(module.SessionClientError, match="handles are invalid"):
+        module._post_pi_chat(settings, {"message": "x"}, HANDLE, HANDLE)
+
+    class Response:
+        status = 200
+        headers = Message()
+
+        def __init__(self) -> None:
+            body = json.dumps(
+                {"ok": True, "answer": RESULT_DELIVERY_HANDLE},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            self.body = body
+            self.headers.add_header("Content-Type", "application/json")
+            self.headers.add_header("Content-Length", str(len(body)))
+
+        def read(self, _amount: int) -> bytes:
+            return self.body
+
+    class Connection:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def putrequest(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def putheader(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        def endheaders(self, _body: bytes) -> None:
+            return None
+
+        def getresponse(self) -> Response:
+            return Response()
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module.http.client, "HTTPConnection", Connection)
+    with pytest.raises(module.SessionClientError, match="invalid response"):
+        module._post_pi_chat(
+            settings,
+            {"message": "x"},
+            HANDLE,
+            RESULT_DELIVERY_HANDLE,
+        )

@@ -143,13 +143,13 @@ test("FD3 remains parent-to-child while FD4 reaches a clean committed EOF", asyn
 		fixture.stdout(),
 	]);
 	assert.equal(exitCode, 0);
-	assert.equal(
+	assert.deepEqual(
 		validateFinalEvidenceChildResult({
 			evidenceBuffer,
 			exitCode,
 			stdoutBuffer,
 		}),
-		CLARIFICATION_ANSWER,
+		JSON.parse(CLARIFICATION_ANSWER),
 	);
 });
 
@@ -231,7 +231,7 @@ test("self-claimed success without a matching committed receipt is rejected", ()
 	);
 });
 
-test("the hardened server wires the fifth stdio pipe into the strict gate", async () => {
+test("the hardened server gates FD4 then asks the trusted broker to deliver the result", async () => {
 	const source = await readFile(path.join(root, "server.mjs"), "utf8");
 	assert.match(
 		source,
@@ -239,12 +239,63 @@ test("the hardened server wires the fifth stdio pipe into the strict gate", asyn
 	);
 	assert.match(source, /collectFinalEvidenceStream\(child\.stdio\[4\]\)/);
 	assert.match(source, /validateFinalEvidenceChildResult\(\{/);
+	assert.match(source, /createFinalResultDeliverer\(\{/);
+	assert.match(source, /sessionHandle: resultDeliverySessionHandle/);
+	assert.match(source, /await deliverFinalResult\(answer\)/);
+	assert.match(source, /serializeFinalDeliveredAnswer\(/);
+	assert.match(
+		source,
+		/child\.stdio\[3\]\.end\(brokerEnabled \? brokerSessionHandle : "", "utf8"\)/,
+	);
+	assert.doesNotMatch(
+		source,
+		/child\.stdio\[3\]\.end\([^\n]*resultDeliverySessionHandle/,
+	);
+	assert.match(source, /const PREFLIGHT_TIMEOUT_MS = 5_000/);
+	assert.match(source, /const MAX_PI_CHILD_TIMEOUT_MS = 120_000/);
+	assert.match(source, /const FINAL_RESULT_DELIVERY_TIMEOUT_MS = 10_000/);
+	assert.match(source, /const PI_SERVER_TOTAL_BUDGET_MS = 135_000/);
+	assert.match(source, /timeoutMs: PREFLIGHT_TIMEOUT_MS/);
+	assert.match(source, /timeoutMs: FINAL_RESULT_DELIVERY_TIMEOUT_MS/);
 	assert.match(source, /const MAX_PI_STDERR_BYTES = 64 \* 1024/);
 	assert.match(source, /stderrBytes > MAX_PI_STDERR_BYTES/);
 	assert.match(source, /new FinalEvidenceError\("pi_stderr_too_large"\)/);
 	assert.match(
 		source,
 		/Number\.isInteger\(error\?\.statusCode\) \? error\.statusCode : 502/,
+	);
+});
+
+test("the server rejects a child timeout that consumes the reserved boundary margins", async () => {
+	const environment = {
+		...process.env,
+		PI_AGENT_BRIDGE_TIMEOUT_MS: "120001",
+	};
+	for (const name of [
+		"LISTEN_FDNAMES",
+		"LISTEN_FDS",
+		"LISTEN_PID",
+		"ODOO_ACCOUNTING_CLI_V3_RELEASE_MANIFEST",
+		"PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_MODULE",
+		"PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_SHA256",
+	]) {
+		delete environment[name];
+	}
+	const child = spawn(process.execPath, [path.join(root, "server.mjs")], {
+		cwd: root,
+		env: environment,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	const stderr = [];
+	child.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+	const exitCode = await new Promise((resolve, reject) => {
+		child.once("error", reject);
+		child.once("exit", resolve);
+	});
+	assert.notEqual(exitCode, 0);
+	assert.match(
+		Buffer.concat(stderr).toString("utf8"),
+		/PI Agent child timeout configuration is invalid/,
 	);
 });
 

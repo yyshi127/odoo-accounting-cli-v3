@@ -132,6 +132,7 @@ def test_routes_are_the_fixed_pi_broker_contract() -> None:
         "/v1/operation/result": "operation.result",
         "/v1/operation/diagnostics": "operation.diagnostics",
         "/v1/operation/recover": "operation.recover",
+        "/v1/result/deliver": "result.deliver",
     }
 
 

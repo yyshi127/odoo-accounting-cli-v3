@@ -29,6 +29,7 @@ export const V3_OPERATION_COMMANDS = Object.freeze({
 
 export const V3_BROKER_ACTION_PATHS = Object.freeze({
 	read: "/v1/read",
+	"result.deliver": "/v1/result/deliver",
 	"operation.prepare": "/v1/operation/prepare",
 	"operation.preview": "/v1/operation/preview",
 	"operation.approve_execute": "/v1/operation/approve-execute",
@@ -156,6 +157,40 @@ const WRITE_RECEIPT_DIGEST_KEYS = Object.freeze([
 	"result_digest",
 	"signature",
 	"verification_evidence_digest",
+]);
+
+const RESULT_DELIVERY_LOCATOR_KEYS = Object.freeze([
+	"action",
+	"business_succeeded",
+	"capability_id",
+	"operation_id",
+	"receipt_id",
+	"result_digest",
+	"status",
+]);
+
+const RESULT_DELIVERY_DATA_KEYS = Object.freeze([
+	"audit_receipt",
+	"business_result",
+	"current_identity",
+	"executed_identity",
+	"locator",
+	"session_binding",
+]);
+
+const RESULT_DELIVERY_IDENTITY_KEYS = Object.freeze([
+	"registry_digest",
+	"release_digest",
+]);
+
+const RESULT_DELIVERY_SESSION_KEYS = Object.freeze([
+	"company_id",
+	"database_name",
+	"database_uuid",
+	"environment",
+	"odoo_instance_id",
+	"principal",
+	"user_id",
 ]);
 
 const READ_RECEIPT_KEYS = Object.freeze([
@@ -573,6 +608,114 @@ function validVerifiedWriteSuccess(
 		);
 }
 
+function validResultDeliveryLocator(locator) {
+	return exactKeys(locator, RESULT_DELIVERY_LOCATOR_KEYS)
+		&& locator.business_succeeded === true
+		&& locator.status === "verified_success"
+		&& CAPABILITY_ID.test(locator.capability_id)
+		&& boundedString(locator.receipt_id, 256)
+		&& SHA256.test(locator.result_digest)
+		&& (
+			(locator.action === "read" && locator.operation_id === null)
+			|| (
+				locator.action === "operation.result"
+				&& boundedString(locator.operation_id, 128)
+			)
+		);
+}
+
+function validResultDeliveryIdentity(identity) {
+	return exactKeys(identity, RESULT_DELIVERY_IDENTITY_KEYS)
+		&& SHA256.test(identity.release_digest)
+		&& SHA256.test(identity.registry_digest);
+}
+
+function validResultDeliverySession(binding) {
+	return exactKeys(binding, RESULT_DELIVERY_SESSION_KEYS)
+		&& positiveIntegerValue(binding.company_id)
+		&& positiveIntegerValue(binding.user_id)
+		&& nonEmptyString(binding.principal)
+		&& nonEmptyString(binding.odoo_instance_id)
+		&& nonEmptyString(binding.database_name)
+		&& DATABASE_UUID.test(binding.database_uuid)
+		&& nonEmptyString(binding.environment);
+}
+
+function sameResultDeliveryLocator(left, right) {
+	return exactKeys(left, RESULT_DELIVERY_LOCATOR_KEYS)
+		&& exactKeys(right, RESULT_DELIVERY_LOCATOR_KEYS)
+		&& RESULT_DELIVERY_LOCATOR_KEYS.every(
+			(key) => left[key] === right[key],
+		);
+}
+
+function validDeliveredResultData(
+	data,
+	request,
+	executedReleaseDigest,
+	executedRegistryDigest,
+	currentReleaseDigest,
+	currentRegistryDigest,
+) {
+	if (
+		!exactKeys(data, RESULT_DELIVERY_DATA_KEYS)
+		|| !sameResultDeliveryLocator(data.locator, request)
+		|| !validResultDeliveryLocator(data.locator)
+		|| !validResultDeliveryIdentity(data.current_identity)
+		|| !validResultDeliveryIdentity(data.executed_identity)
+		|| data.current_identity.release_digest !== currentReleaseDigest
+		|| data.current_identity.registry_digest !== currentRegistryDigest
+		|| data.executed_identity.release_digest !== executedReleaseDigest
+		|| data.executed_identity.registry_digest !== executedRegistryDigest
+		|| !validResultDeliverySession(data.session_binding)
+		|| !isObject(data.business_result)
+		|| !isObject(data.audit_receipt)
+	) {
+		return false;
+	}
+	const receipt = data.audit_receipt;
+	const session = data.session_binding;
+	if (
+		receipt.company_id !== session.company_id
+		|| receipt.user_id !== session.user_id
+		|| receipt.database_name !== session.database_name
+		|| receipt.database_uuid !== session.database_uuid
+		|| receipt.environment !== session.environment
+		|| receipt.odoo_instance_id !== session.odoo_instance_id
+		|| (
+			receipt.principal !== undefined
+			&& receipt.principal !== session.principal
+		)
+	) {
+		return false;
+	}
+	if (request.action === "read") {
+		return receipt.id === request.receipt_id
+			&& receipt.result_digest === request.result_digest
+			&& validReadReceipt(
+				receipt,
+				{ capability_id: request.capability_id },
+				executedReleaseDigest,
+				executedRegistryDigest,
+			);
+	}
+	return receipt.receipt_id === request.receipt_id
+		&& receipt.capability_id === request.capability_id
+		&& receipt.result_digest === request.result_digest
+		&& validVerifiedWriteSuccess(
+			{
+				business_succeeded: true,
+				data: {
+					...data.business_result,
+					audit_receipt: receipt,
+				},
+			},
+			{ operation_id: request.operation_id },
+			executedReleaseDigest,
+			executedRegistryDigest,
+		);
+}
+
 function assertJsonValue(value, seen = new Set()) {
 	if (value === null || typeof value === "string" || typeof value === "boolean") {
 		return;
@@ -685,6 +828,9 @@ function validBrokerBusinessRequest(action, request) {
 				|| request.capability_id !== REGISTRY_LIST_CAPABILITY_ID
 				|| exactKeys(request.parameters, [])
 			);
+	}
+	if (action === "result.deliver") {
+		return validResultDeliveryLocator(request);
 	}
 	if ([
 		"operation.preview",
@@ -825,6 +971,8 @@ function parseCliEnvelope(
 	request,
 	expectedReleaseDigest,
 	expectedRegistryDigest,
+	currentReleaseDigest = expectedReleaseDigest,
+	currentRegistryDigest = expectedRegistryDigest,
 ) {
 	let payload;
 	try {
@@ -836,7 +984,11 @@ function parseCliEnvelope(
 		return null;
 	}
 	if (expectedOk) {
-		const reportsBusinessResult = ["operation.approve_execute", "operation.result"].includes(cliCommand);
+		const reportsBusinessResult = [
+			"operation.approve_execute",
+			"operation.result",
+			"result.deliver",
+		].includes(cliCommand);
 		const expectedKeys = reportsBusinessResult
 			? ["business_succeeded", "command", "data", "ok"]
 			: ["command", "data", "ok"];
@@ -849,6 +1001,7 @@ function parseCliEnvelope(
 		}
 		if (
 			reportsBusinessResult
+			&& cliCommand !== "result.deliver"
 			&& payload.business_succeeded === true
 			&& !validVerifiedWriteSuccess(
 				payload,
@@ -877,6 +1030,22 @@ function parseCliEnvelope(
 				request,
 				expectedReleaseDigest,
 				expectedRegistryDigest,
+			)
+		) {
+			return null;
+		}
+		if (
+			cliCommand === "result.deliver"
+			&& (
+				payload.business_succeeded !== true
+				|| !validDeliveredResultData(
+					payload.data,
+					request,
+					expectedReleaseDigest,
+					expectedRegistryDigest,
+					currentReleaseDigest,
+					currentRegistryDigest,
+				)
 			)
 		) {
 			return null;
@@ -1414,7 +1583,7 @@ export function createV3BrokerClient(options = {}) {
 			});
 		} catch (error) {
 			if (
-				["read", "operation.diagnostics"].includes(action)
+				["read", "operation.diagnostics", "result.deliver"].includes(action)
 				|| (error instanceof BrokerTransportError && error.notDelivered)
 			) {
 				return bridgeFailure(action, request, {
@@ -1496,7 +1665,10 @@ export function createV3BrokerClient(options = {}) {
 			&& (
 				!executedIdentityValid
 				|| (
-					["read", "operation.prepare", "operation.diagnostics"].includes(action)
+					(
+						["read", "operation.prepare", "operation.diagnostics"].includes(action)
+						|| (action === "result.deliver" && request.action === "read")
+					)
 					&& (
 						response.executedReleaseDigest !== expectedReleaseDigest
 						|| response.executedRegistryDigest !== expectedRegistryDigest
@@ -1533,6 +1705,8 @@ export function createV3BrokerClient(options = {}) {
 			request,
 			response.executedReleaseDigest,
 			response.executedRegistryDigest,
+			expectedReleaseDigest,
+			expectedRegistryDigest,
 		);
 		if (success) {
 			return success;

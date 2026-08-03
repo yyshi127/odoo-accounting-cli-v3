@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+import odoo_accounting_cli_v3.trusted_broker_app as broker_app
 from odoo_accounting_cli_v3.effect_finalizer import EffectFinalizationIdentity
 from odoo_accounting_cli_v3.effect_finalizer_runtime import (
     EffectFinalizerClientRuntime,
@@ -119,6 +120,38 @@ def test_production_composition_injects_durable_precheck_resolver() -> None:
     assert len(router_calls) == 1
     router_keywords = {item.arg for item in router_calls[0].keywords}
     assert "effect_finalizer_preconnector" in router_keywords
+
+    persistence_calls = [
+        node
+        for node in ast.walk(build)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "SQLitePersistence"
+    ]
+    assert len(persistence_calls) == 2
+    shared_call, current_receipt_call = sorted(
+        persistence_calls, key=lambda node: node.lineno
+    )
+    assert ast.unparse(shared_call.args[0]) == "config.shared_write_state_path"
+    assert {
+        keyword.arg for keyword in shared_call.keywords
+    } == {"busy_timeout_ms"}
+    assert ast.unparse(current_receipt_call.args[0]) == (
+        "current.base_runtime.receipt_state_path"
+    )
+    current_keywords = {
+        keyword.arg: keyword.value for keyword in current_receipt_call.keywords
+    }
+    assert set(current_keywords) == {
+        "busy_timeout_ms",
+        "receipt_key_id",
+        "receipt_secret",
+        "enable_verified_read_results",
+    }
+    assert isinstance(
+        current_keywords["enable_verified_read_results"], ast.Constant
+    )
+    assert current_keywords["enable_verified_read_results"].value is True
 
     write_app_source = (
         Path(__file__).resolve().parents[1]
@@ -544,6 +577,152 @@ def test_loaded_release_topology_accepts_one_tenant_shared_write_and_isolated_st
 ) -> None:
     config, manifest, current, old = _loaded_topology(tmp_path)
     _assert_loaded_topology(config, manifest, (current, old))
+
+
+def test_loaded_release_topology_rejects_current_receipt_path_alias(
+    tmp_path: Path,
+) -> None:
+    config, manifest, current, old = _loaded_topology(tmp_path)
+    current = replace(
+        current,
+        write_runtime=replace(
+            current.write_runtime,
+            base_runtime=replace(
+                current.write_runtime.base_runtime,
+                receipt_state_path=config.shared_write_state_path,
+            ),
+        ),
+    )
+
+    with pytest.raises(TrustedBrokerRuntimeError, match="aliases .* by path"):
+        _assert_loaded_topology(config, manifest, (current, old))
+
+
+def test_loaded_release_topology_rejects_hardlinked_receipt_states(
+    tmp_path: Path,
+) -> None:
+    config, manifest, current, old = _loaded_topology(tmp_path)
+    current_receipt = current.write_runtime.base_runtime.receipt_state_path
+    old_receipt = old.write_runtime.base_runtime.receipt_state_path
+    current_receipt.write_bytes(b"current")
+    os.link(current_receipt, old_receipt)
+
+    with pytest.raises(TrustedBrokerRuntimeError, match="aliases .* by inode"):
+        _assert_loaded_topology(config, manifest, (current, old))
+
+
+def test_runtime_only_opts_current_receipt_store_into_verified_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config, manifest, current_authority, old_authority = _loaded_topology(
+        tmp_path
+    )
+
+    def release(authority, release_digest: str, registry_digest: str):
+        return SimpleNamespace(
+            release_digest=release_digest,
+            registry_digest=registry_digest,
+            authority_config=authority,
+            write_runtime=authority.write_runtime,
+            base_runtime=authority.write_runtime.base_runtime,
+            read_receipt_secret=b"read-receipt-secret-material-32b",
+            write_secrets=SimpleNamespace(
+                write_receipt=b"write-receipt-secret-material-32"
+            ),
+            approval_ttl_seconds=lambda _capability_id: 120,
+        )
+
+    current = release(current_authority, CURRENT_RELEASE, CURRENT_REGISTRY)
+    old = release(old_authority, OLD_RELEASE, OLD_REGISTRY)
+    topology = SimpleNamespace(
+        releases=(current, old),
+        manifest=manifest,
+    )
+    authority_by_path = {
+        item.config_path: item for item in (current_authority, old_authority)
+    }
+
+    class StopAfterPersistenceCalls(Exception):
+        pass
+
+    persistence_calls: list[tuple[Path, dict[str, Any]]] = []
+
+    def persistence(path, **kwargs):
+        persistence_calls.append((Path(path), kwargs))
+        if len(persistence_calls) == 2:
+            raise StopAfterPersistenceCalls
+        return SimpleNamespace()
+
+    def build_authority(path, **_kwargs):
+        authority = authority_by_path[Path(path)]
+        return SimpleNamespace(
+            config=authority,
+            authority=object(),
+            store=SimpleNamespace(find_challenge=lambda _challenge_id: None),
+        )
+
+    monkeypatch.setattr(
+        broker_app, "load_trusted_broker_runtime_config", lambda *_args, **_kwargs: config
+    )
+    monkeypatch.setattr(
+        broker_app, "load_release_topology", lambda _config: topology
+    )
+    monkeypatch.setattr(broker_app, "SQLitePersistence", persistence)
+    monkeypatch.setattr(
+        broker_app,
+        "SQLiteTrustedSessionStore",
+        lambda *_args, **_kwargs: SimpleNamespace(resolve=lambda _handle: None),
+    )
+    monkeypatch.setattr(
+        broker_app,
+        "SQLiteBrokerAuditSink",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        broker_app,
+        "OdooApproverAuthorizer",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        broker_app,
+        "ReleaseAuthority",
+        lambda **kwargs: SimpleNamespace(**kwargs),
+    )
+    monkeypatch.setattr(
+        broker_app, "build_trusted_authority", build_authority
+    )
+    monkeypatch.setattr(
+        broker_app,
+        "build_release_response_verifier_resolver",
+        lambda *_args, **_kwargs: object(),
+    )
+
+    with pytest.raises(TrustedBrokerRuntimeError) as exc_info:
+        broker_app.build_trusted_broker_runtime(
+            tmp_path / "broker.json",
+            require_root_owner=False,
+            enforce_service_identity=False,
+            enforce_source_release=False,
+        )
+    assert isinstance(exc_info.value.__cause__, StopAfterPersistenceCalls)
+    assert persistence_calls == [
+        (
+            config.shared_write_state_path,
+            {"busy_timeout_ms": config.sqlite_busy_timeout_ms},
+        ),
+        (
+            current.base_runtime.receipt_state_path,
+            {
+                "busy_timeout_ms": config.sqlite_busy_timeout_ms,
+                "receipt_key_id": current.base_runtime.receipt_key_id,
+                "receipt_secret": current.read_receipt_secret,
+                "enable_verified_read_results": True,
+            },
+        ),
+    ]
+    assert old.base_runtime.receipt_state_path not in {
+        path for path, _kwargs in persistence_calls
+    }
 
 
 def test_broker_service_must_join_dedicated_finalizer_socket_group(

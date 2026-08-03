@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
 from .monotonic_deadline import (
     bounded_sqlite_busy_timeout_ms,
@@ -65,8 +65,16 @@ SCHEMA_VERSION = 4
 GENESIS_HASH = "0" * 64
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_DIAGNOSTIC_AUDIT_PAYLOAD_BYTES = 64 * 1024
+MAX_VERIFIED_READ_PARAMETERS_BYTES = 128 * 1024
+MAX_VERIFIED_READ_RESULT_BYTES = 256 * 1024
+MAX_VERIFIED_READ_RECEIPT_BYTES = 64 * 1024
+MAX_VERIFIED_READ_JSON_DEPTH = 32
+MAX_VERIFIED_READ_JSON_NODES = 50_000
+_MAX_SAFE_JSON_INTEGER = 2**53 - 1
 _RECEIPT_KEY_ID_META = "receipt_verifier_key_id"
 _RECEIPT_KEY_DIGEST_META = "receipt_verifier_secret_sha256"
+_VERIFIED_READ_RESULTS_META = "verified_read_results_schema"
+_VERIFIED_READ_RESULTS_SCHEMA_VERSION = "1"
 _RECOVERY_BINDING_EVENT_PREFIX = "recovery-binding:"
 _RECOVERY_BINDING_EVENT_TYPE = "recovery.binding.created"
 _RECOVERY_BINDING_VERSION = 2
@@ -401,6 +409,46 @@ class StoredFinalWriteReceipt:
 
 
 @dataclass(frozen=True)
+class StoredVerifiedReadResult:
+    receipt_id: str
+    audit_event_id: str
+    capability_id: str
+    auth_token_id: str
+    principal: str
+    user_id: int
+    company_id: int
+    odoo_instance_id: str
+    database_name: str
+    database_uuid: str
+    environment: str
+    capability_channel: str
+    parameters_json: str
+    result_body_json: str
+    receipt_json: str
+    request_digest: str
+    result_digest: str
+    record_count: int
+    observed_at: datetime
+    current_release_digest: str
+    current_registry_digest: str
+    executed_release_digest: str
+    executed_registry_digest: str
+    record_hash: str
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return json.loads(self.parameters_json)
+
+    @property
+    def result_body(self) -> dict[str, Any]:
+        return json.loads(self.result_body_json)
+
+    @property
+    def receipt(self) -> dict[str, Any]:
+        return json.loads(self.receipt_json)
+
+
+@dataclass(frozen=True)
 class StoredRecoveryOperationBinding:
     binding_id: str
     origin_operation_id: str
@@ -509,6 +557,14 @@ class ResultAcceptance:
     result_record: StoredTrustedResultRecord
     audit_event: StoredAuditEvent
     final_receipt: StoredFinalWriteReceipt | None = None
+
+
+@dataclass(frozen=True)
+class StoredTerminalWriteDelivery:
+    operation: Operation
+    approval_record: StoredApprovalRecord
+    final_receipt: StoredFinalWriteReceipt
+    audit_event: StoredAuditEvent
 
 
 @dataclass(frozen=True)
@@ -1871,6 +1927,117 @@ _TERMINAL_V4_TRIGGER_SCHEMAS = (
     """,
 )
 
+_VERIFIED_READ_RESULT_COLUMNS = (
+    "receipt_id",
+    "audit_event_id",
+    "capability_id",
+    "auth_token_id",
+    "principal",
+    "user_id",
+    "company_id",
+    "odoo_instance_id",
+    "database_name",
+    "database_uuid",
+    "environment",
+    "capability_channel",
+    "parameters_json",
+    "result_body_json",
+    "receipt_json",
+    "request_digest",
+    "result_digest",
+    "record_count",
+    "observed_at",
+    "current_release_digest",
+    "current_registry_digest",
+    "executed_release_digest",
+    "executed_registry_digest",
+    "record_hash",
+)
+_VERIFIED_READ_RESULT_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS verified_read_results (
+        receipt_id TEXT PRIMARY KEY,
+        audit_event_id TEXT NOT NULL UNIQUE,
+        capability_id TEXT NOT NULL,
+        auth_token_id TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        user_id INTEGER NOT NULL CHECK(user_id > 0),
+        company_id INTEGER NOT NULL CHECK(company_id > 0),
+        odoo_instance_id TEXT NOT NULL,
+        database_name TEXT NOT NULL,
+        database_uuid TEXT NOT NULL,
+        environment TEXT NOT NULL CHECK(environment IN (
+            'test', 'sandbox', 'production'
+        )),
+        capability_channel TEXT NOT NULL CHECK(capability_channel IN (
+            'staged', 'enabled'
+        )),
+        parameters_json TEXT NOT NULL,
+        result_body_json TEXT NOT NULL,
+        receipt_json TEXT NOT NULL,
+        request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+        result_digest TEXT NOT NULL CHECK(length(result_digest) = 64),
+        record_count INTEGER NOT NULL CHECK(record_count >= 0),
+        observed_at TEXT NOT NULL,
+        current_release_digest TEXT NOT NULL
+            CHECK(length(current_release_digest) = 64),
+        current_registry_digest TEXT NOT NULL
+            CHECK(length(current_registry_digest) = 64),
+        executed_release_digest TEXT NOT NULL
+            CHECK(length(executed_release_digest) = 64),
+        executed_registry_digest TEXT NOT NULL
+            CHECK(length(executed_registry_digest) = 64),
+        record_hash TEXT NOT NULL CHECK(length(record_hash) = 64),
+        FOREIGN KEY(receipt_id) REFERENCES consumed_receipts(receipt_id)
+            ON DELETE RESTRICT,
+        FOREIGN KEY(audit_event_id) REFERENCES audit_events(event_id)
+            DEFERRABLE INITIALLY DEFERRED
+    ) STRICT
+"""
+_VERIFIED_READ_RESULT_TRIGGER_SCHEMAS = (
+    """
+    CREATE TRIGGER IF NOT EXISTS verified_read_results_no_update
+    BEFORE UPDATE ON verified_read_results
+    BEGIN
+        SELECT RAISE(ABORT, 'verified_read_results are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS verified_read_results_no_delete
+    BEFORE DELETE ON verified_read_results
+    BEGIN
+        SELECT RAISE(ABORT, 'verified_read_results are append-only');
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS verified_read_results_bind_evidence
+    BEFORE INSERT ON verified_read_results
+    BEGIN
+        SELECT CASE WHEN NEW.audit_event_id <> 'read:' || NEW.receipt_id
+            THEN RAISE(ABORT, 'verified read result audit identity differs')
+        END;
+        SELECT CASE WHEN NEW.current_release_digest
+                <> NEW.executed_release_digest
+             OR NEW.current_registry_digest
+                <> NEW.executed_registry_digest
+            THEN RAISE(ABORT, 'verified read result route differs')
+        END;
+        SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM consumed_receipts AS consumed
+            WHERE consumed.receipt_id = NEW.receipt_id
+              AND consumed.request_digest = NEW.request_digest
+              AND consumed.observed_at = NEW.observed_at
+        ) THEN RAISE(ABORT, 'verified read result consumption differs') END;
+        SELECT CASE WHEN NOT EXISTS (
+            SELECT 1 FROM audit_events AS event
+            WHERE event.event_id = NEW.audit_event_id
+              AND event.event_type = 'read.verified'
+              AND event.operation_id IS NULL
+              AND event.occurred_at = NEW.observed_at
+        ) THEN RAISE(ABORT, 'verified read result audit evidence differs') END;
+    END
+    """,
+)
+
 _EXPECTED_COLUMNS_V4 = {
     **_EXPECTED_COLUMNS_V3,
     "operation_protocols": _OPERATION_PROTOCOL_COLUMNS,
@@ -1961,6 +2128,70 @@ def _canonical_object_json(value: Any, field: str) -> str:
 def _canonical_object_digest(value: Any, field: str) -> tuple[str, str]:
     encoded = _canonical_object_json(value, field)
     return encoded, hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _bounded_verified_read_json(
+    value: Any,
+    field: str,
+    *,
+    maximum_bytes: int,
+) -> str:
+    if type(value) is not dict:
+        raise PersistenceError(f"{field} must be an object")
+    pending: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while pending:
+        current, depth = pending.pop()
+        nodes += 1
+        if (
+            depth > MAX_VERIFIED_READ_JSON_DEPTH
+            or nodes > MAX_VERIFIED_READ_JSON_NODES
+        ):
+            raise PersistenceError(f"{field} exceeds the shape limit")
+        if type(current) is dict:
+            if len(current) > 10_000:
+                raise PersistenceError(f"{field} exceeds the shape limit")
+            for key, child in current.items():
+                if (
+                    type(key) is not str
+                    or not key
+                    or len(key.encode("utf-8")) > 256
+                ):
+                    raise PersistenceError(f"{field} exceeds the shape limit")
+                pending.append((child, depth + 1))
+        elif type(current) is list:
+            if len(current) > 10_000:
+                raise PersistenceError(f"{field} exceeds the shape limit")
+            pending.extend((child, depth + 1) for child in current)
+        elif type(current) is str:
+            if len(current.encode("utf-8")) > 256 * 1024:
+                raise PersistenceError(f"{field} exceeds the shape limit")
+        elif type(current) is float:
+            raise PersistenceError(
+                f"{field} contains a non-integer JSON number"
+            )
+        elif type(current) is int and not (
+            -_MAX_SAFE_JSON_INTEGER <= current <= _MAX_SAFE_JSON_INTEGER
+        ):
+            raise PersistenceError(
+                f"{field} contains an unsafe JSON integer"
+            )
+        elif current is not None and type(current) not in {
+            bool,
+            int,
+        }:
+            raise PersistenceError(f"{field} exceeds the shape limit")
+    try:
+        encoded = canonical_json(value).decode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise PersistenceError(f"{field} must be canonical JSON") from exc
+    if len(encoded.encode("utf-8")) > maximum_bytes:
+        raise PersistenceError(f"{field} exceeds the size limit")
+    return encoded
+
+
+def _verified_read_result_record_hash(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_json(payload)).hexdigest()
 
 
 def _recovery_plan_binding_digest(
@@ -2900,6 +3131,7 @@ class SQLitePersistence:
         busy_timeout_ms: int = 5_000,
         receipt_key_id: str | None = None,
         receipt_secret: bytes | None = None,
+        enable_verified_read_results: bool = False,
     ) -> None:
         self.path = Path(path)
         if str(path) == ":memory:":
@@ -2916,6 +3148,14 @@ class SQLitePersistence:
             raise PersistenceError(
                 "receipt verifier key ID and secret must be configured together"
             )
+        if type(enable_verified_read_results) is not bool:
+            raise PersistenceError(
+                "verified read result mode must be a boolean"
+            )
+        if enable_verified_read_results and receipt_key_id is None:
+            raise PersistenceError(
+                "verified read result mode requires a receipt verifier"
+            )
         if receipt_key_id is not None:
             _required_text(receipt_key_id, "receipt_key_id")
             if type(receipt_secret) is not bytes or len(receipt_secret) < 32:
@@ -2930,6 +3170,7 @@ class SQLitePersistence:
             if receipt_secret is None
             else hashlib.sha256(receipt_secret).hexdigest()
         )
+        self._verified_read_results_enabled = enable_verified_read_results
         self.initialize()
 
     def _prepare_private_database_file(self) -> tuple[int, int]:
@@ -3028,7 +3269,12 @@ class SQLitePersistence:
             self._verify_database_and_sidecars(expected_database)
 
     @staticmethod
-    def _verify_schema(connection: sqlite3.Connection, version: int) -> None:
+    def _verify_schema(
+        connection: sqlite3.Connection,
+        version: int,
+        *,
+        include_verified_read_results: bool = False,
+    ) -> None:
         if version == LEGACY_SCHEMA_VERSION:
             expected_columns = _EXPECTED_COLUMNS_V1
             expected_tables = _TABLE_SCHEMAS_V1
@@ -3047,6 +3293,32 @@ class SQLitePersistence:
             expected_triggers = _TRIGGER_SCHEMAS_V4
         else:  # pragma: no cover - callers validate before dispatch
             raise PersistenceIntegrityError("unsupported persistence schema version")
+
+        if include_verified_read_results:
+            if version != SCHEMA_VERSION:
+                raise PersistenceIntegrityError(
+                    "verified read result schema requires persistence V4"
+                )
+            expected_columns = {
+                **expected_columns,
+                "verified_read_results": _VERIFIED_READ_RESULT_COLUMNS,
+            }
+            expected_tables = {
+                **expected_tables,
+                "verified_read_results": _VERIFIED_READ_RESULT_SCHEMA,
+            }
+            expected_triggers = {
+                **expected_triggers,
+                "verified_read_results_no_update": (
+                    _VERIFIED_READ_RESULT_TRIGGER_SCHEMAS[0]
+                ),
+                "verified_read_results_no_delete": (
+                    _VERIFIED_READ_RESULT_TRIGGER_SCHEMAS[1]
+                ),
+                "verified_read_results_bind_evidence": (
+                    _VERIFIED_READ_RESULT_TRIGGER_SCHEMAS[2]
+                ),
+            }
 
         stored = connection.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
@@ -3118,8 +3390,9 @@ class SQLitePersistence:
         ).fetchone() is not None
 
     @classmethod
-    def _verify_audit_chain_connection(cls, connection: sqlite3.Connection) -> int:
-        events = cls._load_audit_events(connection)
+    def _verify_audit_events(
+        cls, events: tuple[StoredAuditEvent, ...]
+    ) -> int:
         previous_hash = GENESIS_HASH
         for expected_sequence, event in enumerate(events, start=1):
             occurred_text = _utc_text(event.occurred_at, "occurred_at")
@@ -3146,6 +3419,18 @@ class SQLitePersistence:
         return len(events)
 
     @classmethod
+    def _load_and_verify_audit_events(
+        cls, connection: sqlite3.Connection
+    ) -> tuple[StoredAuditEvent, ...]:
+        events = cls._load_audit_events(connection)
+        cls._verify_audit_events(events)
+        return events
+
+    @classmethod
+    def _verify_audit_chain_connection(cls, connection: sqlite3.Connection) -> int:
+        return len(cls._load_and_verify_audit_events(connection))
+
+    @classmethod
     def _verify_stored_data(
         cls,
         connection: sqlite3.Connection,
@@ -3163,7 +3448,7 @@ class SQLitePersistence:
             else:
                 cls._load_operation(connection, operation_id)
         cls._verify_idempotency_bindings(connection, operation_ids)
-        cls._verify_audit_chain_connection(connection)
+        audit_events = cls._load_and_verify_audit_events(connection)
         if include_approvals:
             approval_ids = tuple(
                 row["operation_id"]
@@ -3188,9 +3473,24 @@ class SQLitePersistence:
                 raise PersistenceIntegrityError(
                     "approved operation has no durable approval record"
                 )
-            cls._verify_reserved_audit_namespaces(connection)
+            cls._verify_reserved_audit_namespaces(
+                connection, audit_events=audit_events
+            )
         if include_results:
             cls._verify_result_and_recovery_evidence(connection, operation_ids)
+        if cls._table_exists(connection, "verified_read_results"):
+            audit_events_by_id = {
+                event.event_id: event for event in audit_events
+            }
+            for row in connection.execute(
+                "SELECT receipt_id FROM verified_read_results "
+                "ORDER BY receipt_id"
+            ):
+                cls._load_verified_read_result(
+                    connection,
+                    row["receipt_id"],
+                    audit_events_by_id=audit_events_by_id,
+                )
 
     @classmethod
     def _verify_idempotency_bindings(
@@ -3471,8 +3771,197 @@ class SQLitePersistence:
             )
 
     @classmethod
+    def _load_verified_read_result(
+        cls,
+        connection: sqlite3.Connection,
+        receipt_id: str,
+        *,
+        audit_events_by_id: Mapping[str, StoredAuditEvent],
+    ) -> StoredVerifiedReadResult:
+        row = connection.execute(
+            f"SELECT {', '.join(_VERIFIED_READ_RESULT_COLUMNS)} "
+            "FROM verified_read_results WHERE receipt_id = ?",
+            (receipt_id,),
+        ).fetchone()
+        if row is None:
+            raise OperationNotFound("verified read result does not exist")
+        payload = {
+            column: row[column]
+            for column in _VERIFIED_READ_RESULT_COLUMNS[:-1]
+        }
+        if (
+            type(row["record_hash"]) is not str
+            or not hmac.compare_digest(
+                row["record_hash"],
+                _verified_read_result_record_hash(payload),
+            )
+        ):
+            raise PersistenceIntegrityError(
+                "stored verified read result hash mismatch"
+            )
+        try:
+            parameters = json.loads(row["parameters_json"])
+            result_body = json.loads(row["result_body_json"])
+            receipt = json.loads(row["receipt_json"])
+            observed_at = _parse_datetime(
+                row["observed_at"], "verified read observed_at"
+            )
+            parameters_json = _bounded_verified_read_json(
+                parameters,
+                "stored verified read parameters",
+                maximum_bytes=MAX_VERIFIED_READ_PARAMETERS_BYTES,
+            )
+            result_body_json = _bounded_verified_read_json(
+                result_body,
+                "stored verified read result",
+                maximum_bytes=MAX_VERIFIED_READ_RESULT_BYTES,
+            )
+            receipt_json = _bounded_verified_read_json(
+                receipt,
+                "stored verified read receipt",
+                maximum_bytes=MAX_VERIFIED_READ_RECEIPT_BYTES,
+            )
+            record = StoredVerifiedReadResult(
+                receipt_id=row["receipt_id"],
+                audit_event_id=row["audit_event_id"],
+                capability_id=row["capability_id"],
+                auth_token_id=row["auth_token_id"],
+                principal=row["principal"],
+                user_id=row["user_id"],
+                company_id=row["company_id"],
+                odoo_instance_id=row["odoo_instance_id"],
+                database_name=row["database_name"],
+                database_uuid=row["database_uuid"],
+                environment=row["environment"],
+                capability_channel=row["capability_channel"],
+                parameters_json=row["parameters_json"],
+                result_body_json=row["result_body_json"],
+                receipt_json=row["receipt_json"],
+                request_digest=row["request_digest"],
+                result_digest=row["result_digest"],
+                record_count=row["record_count"],
+                observed_at=observed_at,
+                current_release_digest=row["current_release_digest"],
+                current_registry_digest=row["current_registry_digest"],
+                executed_release_digest=row["executed_release_digest"],
+                executed_registry_digest=row["executed_registry_digest"],
+                record_hash=row["record_hash"],
+            )
+        except Exception as exc:
+            raise PersistenceIntegrityError(
+                "stored verified read result is invalid"
+            ) from exc
+        page = result_body.get("page") if type(result_body) is dict else None
+        event = audit_events_by_id.get(record.audit_event_id)
+        consumed = connection.execute(
+            "SELECT request_digest, observed_at FROM consumed_receipts "
+            "WHERE receipt_id = ?",
+            (record.receipt_id,),
+        ).fetchone()
+        required_text = (
+            "receipt_id",
+            "audit_event_id",
+            "capability_id",
+            "auth_token_id",
+            "principal",
+            "odoo_instance_id",
+            "database_name",
+            "database_uuid",
+            "environment",
+            "capability_channel",
+        )
+        required_digests = (
+            "request_digest",
+            "result_digest",
+            "current_release_digest",
+            "current_registry_digest",
+            "executed_release_digest",
+            "executed_registry_digest",
+        )
+        expected_audit = {
+            "auth_token_id": record.auth_token_id,
+            "capability_id": record.capability_id,
+            "capability_channel": record.capability_channel,
+            "company_id": record.company_id,
+            "environment": record.environment,
+            "database_name": record.database_name,
+            "database_uuid": record.database_uuid,
+            "odoo_instance_id": record.odoo_instance_id,
+            "principal": record.principal,
+            "receipt": receipt,
+            "receipt_id": record.receipt_id,
+            "registry_digest": record.executed_registry_digest,
+            "release_digest": record.executed_release_digest,
+            "request_digest": record.request_digest,
+            "result_digest": record.result_digest,
+            "user_id": record.user_id,
+        }
+        if (
+            parameters_json != record.parameters_json
+            or result_body_json != record.result_body_json
+            or receipt_json != record.receipt_json
+            or any(
+                type(getattr(record, field)) is not str
+                or not getattr(record, field).strip()
+                for field in required_text
+            )
+            or any(
+                type(getattr(record, field)) is not str
+                or _SHA256.fullmatch(getattr(record, field)) is None
+                for field in required_digests
+            )
+            or type(record.user_id) is not int
+            or record.user_id <= 0
+            or type(record.company_id) is not int
+            or record.company_id <= 0
+            or type(record.record_count) is not int
+            or record.record_count < 0
+            or not valid_read_runtime_binding(
+                record.environment, record.capability_channel
+            )
+            or record.current_release_digest
+            != record.executed_release_digest
+            or record.current_registry_digest
+            != record.executed_registry_digest
+            or type(page) is not dict
+            or page.get("total_count") != record.record_count
+            or type(receipt) is not dict
+            or set(receipt) != _READ_RECEIPT_FIELDS
+            or receipt.get("id") != record.receipt_id
+            or receipt.get("capability_id") != record.capability_id
+            or receipt.get("user_id") != record.user_id
+            or receipt.get("company_id") != record.company_id
+            or receipt.get("odoo_instance_id") != record.odoo_instance_id
+            or receipt.get("database_name") != record.database_name
+            or receipt.get("database_uuid") != record.database_uuid
+            or receipt.get("environment") != record.environment
+            or receipt.get("capability_channel") != record.capability_channel
+            or receipt.get("request_digest") != record.request_digest
+            or receipt.get("result_digest") != record.result_digest
+            or receipt.get("release_digest")
+            != record.executed_release_digest
+            or receipt.get("registry_digest")
+            != record.executed_registry_digest
+            or event is None
+            or event.payload != expected_audit
+            or event.occurred_at != record.observed_at
+            or consumed is None
+            or consumed["request_digest"] != record.request_digest
+            or consumed["observed_at"]
+            != _utc_text(record.observed_at, "verified read observed_at")
+        ):
+            raise PersistenceIntegrityError(
+                "stored verified read result binding is invalid"
+            )
+        cls._verify_read_audit_event(connection, event)
+        return record
+
+    @classmethod
     def _verify_reserved_audit_namespaces(
-        cls, connection: sqlite3.Connection
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        audit_events: tuple[StoredAuditEvent, ...] | None = None,
     ) -> None:
         native_approval_ids = {
             row["audit_event_id"]
@@ -3545,7 +4034,9 @@ class SQLitePersistence:
                 }
             )
         seen_legacy: set[str] = set()
-        for event in cls._load_audit_events(connection):
+        if audit_events is None:
+            audit_events = cls._load_audit_events(connection)
+        for event in audit_events:
             diagnostic_id = event.event_id.startswith("diagnostic:")
             diagnostic_type = event.event_type.startswith("diagnostic.")
             if diagnostic_id or diagnostic_type:
@@ -3834,6 +4325,54 @@ class SQLitePersistence:
                 "stored receipt verifier binding does not match configuration"
             )
 
+    @classmethod
+    def _ensure_verified_read_result_schema(
+        cls, connection: sqlite3.Connection
+    ) -> None:
+        marker = connection.execute(
+            "SELECT value FROM schema_meta WHERE key = ?",
+            (_VERIFIED_READ_RESULTS_META,),
+        ).fetchone()
+        table_exists = cls._table_exists(
+            connection, "verified_read_results"
+        )
+        trigger_names = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger' "
+                "AND name LIKE 'verified_read_results_%'"
+            )
+        }
+        expected_triggers = {
+            "verified_read_results_no_update",
+            "verified_read_results_no_delete",
+            "verified_read_results_bind_evidence",
+        }
+        if marker is None:
+            if table_exists or trigger_names:
+                raise PersistenceIntegrityError(
+                    "verified read result schema is partially installed"
+                )
+            connection.execute(_VERIFIED_READ_RESULT_SCHEMA)
+            for statement in _VERIFIED_READ_RESULT_TRIGGER_SCHEMAS:
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO schema_meta(key, value) VALUES(?, ?)",
+                (
+                    _VERIFIED_READ_RESULTS_META,
+                    _VERIFIED_READ_RESULTS_SCHEMA_VERSION,
+                ),
+            )
+            return
+        if (
+            marker["value"] != _VERIFIED_READ_RESULTS_SCHEMA_VERSION
+            or not table_exists
+            or trigger_names != expected_triggers
+        ):
+            raise PersistenceIntegrityError(
+                "verified read result schema metadata is invalid"
+            )
+
     def initialize(self) -> None:
         with self._transaction() as connection:
             current_version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -3991,7 +4530,15 @@ class SQLitePersistence:
                     )
                 connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-            self._verify_schema(connection, SCHEMA_VERSION)
+            if self._verified_read_results_enabled:
+                self._ensure_verified_read_result_schema(connection)
+            self._verify_schema(
+                connection,
+                SCHEMA_VERSION,
+                include_verified_read_results=(
+                    self._verified_read_results_enabled
+                ),
+            )
             self._verify_sqlite_integrity(connection)
             self._verify_or_bind_receipt_verifier(connection)
             self._verify_stored_data(
@@ -8572,6 +9119,56 @@ class SQLitePersistence:
                 )
             )
 
+    def get_terminal_write_delivery(
+        self, operation_id: str
+    ) -> StoredTerminalWriteDelivery:
+        operation_id = _required_text(operation_id, "operation_id")
+        with self._transaction() as connection:
+            self._verify_audit_chain_connection(connection)
+            operation = self._load_operation_with_evidence(
+                connection, operation_id
+            )
+            rows = tuple(
+                connection.execute(
+                    "SELECT receipt_id FROM final_write_receipts "
+                    "WHERE operation_id = ? AND operation_revision = ? "
+                    "AND terminal_state = ?",
+                    (
+                        operation.operation_id,
+                        operation.revision,
+                        operation.state.value,
+                    ),
+                )
+            )
+            if len(rows) != 1:
+                raise PersistenceIntegrityError(
+                    "terminal write delivery has no unique final receipt"
+                )
+            final_receipt = self._load_final_write_receipt_by_id(
+                connection, rows[0]["receipt_id"]
+            )
+            approval = self._load_approval_record(
+                connection, operation.operation_id
+            )
+            audit_event = next(
+                (
+                    event
+                    for event in self._load_audit_events(connection)
+                    if event.event_id == final_receipt.audit_event_id
+                ),
+                None,
+            )
+            if audit_event is None:
+                raise PersistenceIntegrityError(
+                    "terminal write delivery audit event is missing"
+                )
+            return StoredTerminalWriteDelivery(
+                operation=operation,
+                approval_record=approval,
+                final_receipt=final_receipt,
+                audit_event=audit_event,
+            )
+
     def get_recovery_records(
         self, operation_id: str
     ) -> tuple[StoredRecoveryRecord, ...]:
@@ -8717,6 +9314,10 @@ class SQLitePersistence:
         now: datetime,
     ) -> StoredAuditEvent:
         """Verify, consume, and audit one signed read receipt atomically."""
+        if not self._verified_read_results_enabled:
+            raise PersistenceError(
+                "verified read result mode is not enabled for this store"
+            )
         if self._receipt_key_id is None or self._receipt_secret is None:
             raise PersistenceError("receipt verifier is not configured for this store")
         if not all(
@@ -8758,17 +9359,34 @@ class SQLitePersistence:
             raise PersistenceError("verified read numeric bindings are invalid")
         _utc_text(now, "now")
         try:
-            receipt_document = json.loads(canonical_json(receipt))
-            parameters_document = json.loads(canonical_json(parameters))
-            result_document = json.loads(canonical_json(result_body))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise PersistenceError("verified read evidence is not canonical JSON") from exc
+            parameters_json = _bounded_verified_read_json(
+                parameters,
+                "verified read parameters",
+                maximum_bytes=MAX_VERIFIED_READ_PARAMETERS_BYTES,
+            )
+            result_body_json = _bounded_verified_read_json(
+                result_body,
+                "verified read result",
+                maximum_bytes=MAX_VERIFIED_READ_RESULT_BYTES,
+            )
+            receipt_json = _bounded_verified_read_json(
+                receipt,
+                "verified read receipt",
+                maximum_bytes=MAX_VERIFIED_READ_RECEIPT_BYTES,
+            )
+            parameters_document = json.loads(parameters_json)
+            result_document = json.loads(result_body_json)
+            receipt_document = json.loads(receipt_json)
+        except PersistenceError:
+            raise
+        except Exception as exc:
+            raise PersistenceError(
+                "verified read evidence is not canonical JSON"
+            ) from exc
 
         recorded: list[StoredAuditEvent] = []
         try:
             with self._transaction() as connection:
-                self._verify_audit_chain_connection(connection)
-
                 def consume_and_audit(
                     receipt_id: str,
                     request_digest: str,
@@ -8809,6 +9427,53 @@ class SQLitePersistence:
                         payload=audit_payload,
                     )
                     self._verify_read_audit_event(connection, event)
+                    stored_payload = {
+                        "receipt_id": receipt_id,
+                        "audit_event_id": event.event_id,
+                        "capability_id": capability_id,
+                        "auth_token_id": auth_token_id,
+                        "principal": principal,
+                        "user_id": user_id,
+                        "company_id": company_id,
+                        "odoo_instance_id": odoo_instance_id,
+                        "database_name": database_name,
+                        "database_uuid": normalized_database_uuid,
+                        "environment": environment,
+                        "capability_channel": capability_channel,
+                        "parameters_json": parameters_json,
+                        "result_body_json": result_body_json,
+                        "receipt_json": receipt_json,
+                        "request_digest": request_digest,
+                        "result_digest": receipt_document["result_digest"],
+                        "record_count": expected_record_count,
+                        "observed_at": _utc_text(
+                            observed_at, "verified read observed_at"
+                        ),
+                        "current_release_digest": release_digest,
+                        "current_registry_digest": registry_digest,
+                        "executed_release_digest": release_digest,
+                        "executed_registry_digest": registry_digest,
+                    }
+                    values = tuple(
+                        stored_payload[column]
+                        for column in _VERIFIED_READ_RESULT_COLUMNS[:-1]
+                    )
+                    connection.execute(
+                        f"INSERT INTO verified_read_results("
+                        f"{', '.join(_VERIFIED_READ_RESULT_COLUMNS)}) "
+                        f"VALUES({', '.join('?' for _ in _VERIFIED_READ_RESULT_COLUMNS)})",
+                        (
+                            *values,
+                            _verified_read_result_record_hash(
+                                stored_payload
+                            ),
+                        ),
+                    )
+                    self._load_verified_read_result(
+                        connection,
+                        receipt_id,
+                        audit_events_by_id={event.event_id: event},
+                    )
                     recorded.append(event)
                     return True
 
@@ -8846,6 +9511,78 @@ class SQLitePersistence:
             raise PersistenceIntegrityError("verified read audit was not recorded")
         return recorded[0]
 
+    def get_verified_read_result(
+        self, receipt_id: str
+    ) -> StoredVerifiedReadResult:
+        receipt_id = _required_text(receipt_id, "receipt_id")
+        if not self._verified_read_results_enabled:
+            raise PersistenceError(
+                "verified read result mode is not enabled for this store"
+            )
+        if self._receipt_key_id is None or self._receipt_secret is None:
+            raise PersistenceError(
+                "receipt verifier is not configured for this store"
+            )
+        with self._transaction() as connection:
+            audit_events = self._load_and_verify_audit_events(connection)
+            record = self._load_verified_read_result(
+                connection,
+                receipt_id,
+                audit_events_by_id={
+                    event.event_id: event for event in audit_events
+                },
+            )
+            consumed = connection.execute(
+                "SELECT request_digest, observed_at FROM consumed_receipts "
+                "WHERE receipt_id = ?",
+                (record.receipt_id,),
+            ).fetchone()
+
+            def confirm_consumed(
+                candidate_receipt_id: str,
+                request_digest: str,
+                observed_at: datetime,
+                _verified_at: datetime,
+            ) -> bool:
+                return bool(
+                    candidate_receipt_id == record.receipt_id
+                    and request_digest == record.request_digest
+                    and observed_at == record.observed_at
+                    and consumed is not None
+                    and consumed["request_digest"] == request_digest
+                    and consumed["observed_at"]
+                    == _utc_text(observed_at, "verified read observed_at")
+                )
+
+            try:
+                verify_read_receipt(
+                    record.receipt,
+                    capability_id=record.capability_id,
+                    parameters=record.parameters,
+                    result_body=record.result_body,
+                    auth_token_id=record.auth_token_id,
+                    principal=record.principal,
+                    odoo_instance_id=record.odoo_instance_id,
+                    database_name=record.database_name,
+                    database_uuid=record.database_uuid,
+                    company_id=record.company_id,
+                    user_id=record.user_id,
+                    registry_digest=record.executed_registry_digest,
+                    release_digest=record.executed_release_digest,
+                    environment=record.environment,
+                    capability_channel=record.capability_channel,
+                    expected_record_count=record.record_count,
+                    now=record.observed_at,
+                    consume_receipt=confirm_consumed,
+                    expected_key_id=self._receipt_key_id,
+                    secret=self._receipt_secret,
+                )
+            except ReceiptError as exc:
+                raise PersistenceIntegrityError(
+                    "stored verified read receipt rejected"
+                ) from exc
+            return record
+
     @staticmethod
     def _load_audit_events(connection: sqlite3.Connection) -> tuple[StoredAuditEvent, ...]:
         result = []
@@ -8879,8 +9616,7 @@ class SQLitePersistence:
 
     def audit_events(self) -> tuple[StoredAuditEvent, ...]:
         with self._transaction() as connection:
-            self._verify_audit_chain_connection(connection)
-            return self._load_audit_events(connection)
+            return self._load_and_verify_audit_events(connection)
 
     def verify_chain(self) -> int:
         with self._transaction() as connection:
@@ -8909,8 +9645,10 @@ __all__ = [
     "StoredBankStatementCompensationBinding",
     "StoredFinalWriteReceipt",
     "StoredPrecheckRecord",
+    "StoredVerifiedReadResult",
     "StoredReconciliationUndoBinding",
     "StoredRecoveryRecord",
     "StoredRecoveryOperationBinding",
     "StoredTrustedResultRecord",
+    "StoredTerminalWriteDelivery",
 ]

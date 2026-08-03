@@ -1,11 +1,13 @@
 """Root-configured Linux UDS boundary for trusted-session minting.
 
-Exactly two routes are exposed: ``POST /v1/trusted-session/mint`` and
+Exactly three routes are exposed: ``POST /v1/trusted-session/mint``,
+``POST /v1/trusted-session/result-delivery/mint``, and
 ``POST /v1/trusted-session/revoke``.  Linux ``SO_PEERCRED`` admits only the
 configured Odoo issuer UID.  The mint body contains only a server-established
-Odoo identity; session TTL and use budget come exclusively from immutable
-root-owned launcher configuration.  Revoke accepts only the opaque handle and
-never returns it.
+Odoo identity; session TTL and the ordinary-session use budget come exclusively
+from immutable root-owned launcher configuration.  The result-delivery route
+always issues an independent single-use session.  Revoke accepts only the
+opaque handle and never returns it.
 
 ``SO_PEERCRED`` authenticates a Unix UID, not an Odoo request or Python worker.
 It cannot distinguish a legitimate Odoo worker from malicious code running as
@@ -53,6 +55,7 @@ from .trusted_session_sqlite import (
 
 
 MINT_PATH: Final = "/v1/trusted-session/mint"
+RESULT_DELIVERY_MINT_PATH: Final = "/v1/trusted-session/result-delivery/mint"
 REVOKE_PATH: Final = "/v1/trusted-session/revoke"
 SAME_UID_THREAT: Final = (
     "Linux SO_PEERCRED cannot distinguish processes that share the Odoo issuer "
@@ -399,6 +402,33 @@ def _issue_session(
 ) -> IssuedTrustedSession:
     """Call the durable issuer with only root-configured credential limits."""
 
+    return _issue_session_with_max_uses(
+        store,
+        config,
+        identity,
+        max_uses=config.session_max_uses,
+    )
+
+
+def _issue_result_delivery_session(
+    store: SQLiteTrustedSessionStore,
+    config: TrustedSessionMintUdsConfig,
+    identity: TrustedSessionIdentity,
+) -> IssuedTrustedSession:
+    """Issue the parent-only final-delivery credential with exactly one use."""
+
+    return _issue_session_with_max_uses(store, config, identity, max_uses=1)
+
+
+def _issue_session_with_max_uses(
+    store: SQLiteTrustedSessionStore,
+    config: TrustedSessionMintUdsConfig,
+    identity: TrustedSessionIdentity,
+    *,
+    max_uses: int,
+) -> IssuedTrustedSession:
+    """Call the durable issuer with a server-selected credential use budget."""
+
     if not isinstance(store, SQLiteTrustedSessionStore):
         raise TrustedSessionMintUdsError("trusted session store is invalid")
     if type(identity) is not TrustedSessionIdentity:
@@ -418,7 +448,7 @@ def _issue_session(
         return store.issue(
             identity,
             ttl_seconds=config.session_ttl_seconds,
-            max_uses=config.session_max_uses,
+            max_uses=max_uses,
         )
     except Exception as exc:
         if _session_reconciliation_required(exc):
@@ -684,7 +714,11 @@ class _MintRequestHandler(BaseHTTPRequestHandler):
         self._send_json(status_code, _safe_error(code))
 
     def do_POST(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
-        if self.path not in {MINT_PATH, REVOKE_PATH}:
+        if self.path not in {
+            MINT_PATH,
+            RESULT_DELIVERY_MINT_PATH,
+            REVOKE_PATH,
+        }:
             self._reject(404, "session_mint_route_rejected")
             return
         if self.request_version != "HTTP/1.1":
@@ -773,7 +807,12 @@ class _MintRequestHandler(BaseHTTPRequestHandler):
                 self._reject(400, "session_mint_identity_rejected")
                 return
             try:
-                issued = _issue_session(self.server.store, self.server.config, identity)
+                issuer = (
+                    _issue_result_delivery_session
+                    if self.path == RESULT_DELIVERY_MINT_PATH
+                    else _issue_session
+                )
+                issued = issuer(self.server.store, self.server.config, identity)
             except MonotonicDeadlineExceeded:
                 self._reject(408, "session_mint_request_timeout")
                 return
@@ -1238,6 +1277,7 @@ def serve_trusted_session_mint_uds(
 
 __all__ = [
     "MINT_PATH",
+    "RESULT_DELIVERY_MINT_PATH",
     "REVOKE_PATH",
     "SAME_UID_THREAT",
     "TrustedSessionMintUdsConfig",

@@ -945,6 +945,7 @@ def test_test_staged_diagnostics_is_receipt_backed_and_does_not_change_operation
         harness.config.base_runtime.receipt_state_path,
         receipt_key_id=harness.config.base_runtime.receipt_key_id,
         receipt_secret=READ_RECEIPT_SECRET,
+        enable_verified_read_results=True,
     )
     read_events = [
         event

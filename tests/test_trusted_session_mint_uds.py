@@ -208,6 +208,28 @@ def test_store_issue_uses_only_fixed_config_budget(tmp_path: Path) -> None:
     assert store.resolve(issued.handle) is None
 
 
+def test_result_delivery_route_issues_an_independent_single_use_session(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 7, 15, 8, 0, tzinfo=timezone.utc)
+    store = SQLiteTrustedSessionStore(
+        (tmp_path / "sessions.sqlite3").resolve(), clock=FrozenClock(now)
+    )
+    config = _config(session_ttl_seconds=180, session_max_uses=16)
+    identity = mint_uds._decode_identity_request(_json_bytes(_identity_payload()))
+
+    ordinary = mint_uds._issue_session(store, config, identity)
+    delivery = mint_uds._issue_result_delivery_session(store, config, identity)
+
+    assert ordinary.handle != delivery.handle
+    assert ordinary.session.session_id != delivery.session.session_id
+    assert ordinary.max_uses == 16
+    assert delivery.max_uses == 1
+    assert delivery.session.expires_at == now + timedelta(seconds=180)
+    assert store.resolve(delivery.handle) == delivery.session
+    assert store.resolve(delivery.handle) is None
+
+
 @pytest.mark.parametrize(
     "forged",
     [
@@ -526,6 +548,31 @@ def test_real_linux_fixed_route_mints_without_logging_handle(
     captured = capfd.readouterr()
     assert handle not in captured.out
     assert handle not in captured.err
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="real Linux mint UDS contract")
+def test_real_linux_result_delivery_route_is_distinct_and_single_use(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteTrustedSessionStore((tmp_path / "sessions.sqlite3").resolve())
+    with _linux_server(store) as config:
+        ordinary_response = _exchange(config.socket_path, _raw_request())
+        delivery_response = _exchange(
+            config.socket_path,
+            _raw_request(path=mint_uds.RESULT_DELIVERY_MINT_PATH),
+        )
+
+    ordinary_status, _, ordinary_body = _response(ordinary_response)
+    delivery_status, _, delivery_body = _response(delivery_response)
+    ordinary = ordinary_body["session"]
+    delivery = delivery_body["session"]
+    assert ordinary_status == delivery_status == 201
+    assert ordinary["handle"] != delivery["handle"]
+    assert ordinary["session_id"] != delivery["session_id"]
+    assert ordinary["max_uses"] == 16
+    assert delivery["max_uses"] == 1
+    assert store.resolve(delivery["handle"]) is not None
+    assert store.resolve(delivery["handle"]) is None
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="real Linux mint UDS contract")

@@ -16,6 +16,7 @@ from odoo_accounting_cli_v3.broker_audit import SQLiteBrokerAuditSink
 from odoo_accounting_cli_v3.historical_router import HistoricalRouterError
 from odoo_accounting_cli_v3.odoo.bootstrap import request_context_from_mapping
 from odoo_accounting_cli_v3.persistence import StoredPrecheckRecord
+from odoo_accounting_cli_v3.receipts import create_read_receipt
 from odoo_accounting_cli_v3.operations import (
     Operation,
     State,
@@ -43,6 +44,7 @@ from odoo_accounting_cli_v3.trusted_broker import (
     AuthorizedReadAction,
     ReleaseAuthority,
     ReleaseResponseVerifier,
+    TrustedDeliveredResult,
     TrustedBroker,
     TrustedBrokerError,
 )
@@ -529,7 +531,7 @@ class FakeHistoricalExecutor:
 
 
 class Harness:
-    def __init__(self, *, audit_sink=None) -> None:
+    def __init__(self, *, audit_sink=None, result_delivery_resolver=None) -> None:
         self.clock = MutableClock()
         self.sessions = {
             "requester-session-0123456789abcdef": _session(
@@ -615,6 +617,7 @@ class Harness:
             precheck_resolver=lambda operation_id: self.executor.precheck_records.get(
                 operation_id
             ),
+            result_delivery_resolver=result_delivery_resolver,
         )
 
     def set_audit_failure(self, fail: bool) -> None:
@@ -819,6 +822,268 @@ class Harness:
 @pytest.fixture
 def harness() -> Harness:
     return Harness()
+
+
+DELIVERED_READ_RESULT = {
+    "lines": [{"account": "应收账款", "balance": 100}],
+    "page": {"total_count": 1},
+}
+DELIVERED_READ_RESULT_DIGEST = hashlib.sha256(
+    canonical_json(DELIVERED_READ_RESULT)
+).hexdigest()
+
+
+def _read_result_locator(**overrides: Any) -> dict[str, Any]:
+    locator = {
+        "action": "read",
+        "business_succeeded": True,
+        "capability_id": "acct.gl.trial_balance.v1",
+        "operation_id": None,
+        "receipt_id": "read-receipt-1",
+        "result_digest": DELIVERED_READ_RESULT_DIGEST,
+        "status": "verified_success",
+    }
+    locator.update(overrides)
+    return locator
+
+
+def _delivered_read_receipt(
+    locator: dict[str, Any], session: TrustedSession
+) -> dict[str, Any]:
+    return create_read_receipt(
+        receipt_id=locator["receipt_id"],
+        capability_id=locator["capability_id"],
+        parameters={"company_id": session.company_id},
+        result_body=DELIVERED_READ_RESULT,
+        auth_token_id="auth-result-delivery-1",
+        principal=session.principal,
+        odoo_instance_id=session.odoo_instance_id,
+        database_name=session.database_name,
+        database_uuid=session.database_uuid,
+        company_id=session.company_id,
+        user_id=session.user_id,
+        registry_digest=CURRENT_REGISTRY,
+        release_digest=CURRENT_RELEASE,
+        environment=session.environment,
+        capability_channel="staged",
+        record_count=1,
+        observed_at=NOW,
+        key_id="read-receipt-key-v2",
+        secret=READ_SECRET,
+    )
+
+
+def _delivered_read_result(
+    locator: dict[str, Any],
+    session: TrustedSession,
+    *,
+    business_result: dict[str, Any] | None = None,
+    audit_receipt: dict[str, Any] | None = None,
+) -> TrustedDeliveredResult:
+    return TrustedDeliveredResult(
+        action="read",
+        capability_id=locator["capability_id"],
+        operation_id=None,
+        receipt_id=locator["receipt_id"],
+        result_digest=locator["result_digest"],
+        principal=session.principal,
+        user_id=session.user_id,
+        company_id=session.company_id,
+        odoo_instance_id=session.odoo_instance_id,
+        database_name=session.database_name,
+        database_uuid=session.database_uuid,
+        environment=session.environment,
+        executed_release_digest=CURRENT_RELEASE,
+        executed_registry_digest=CURRENT_REGISTRY,
+        business_result=(
+            DELIVERED_READ_RESULT
+            if business_result is None
+            else business_result
+        ),
+        audit_receipt=(
+            _delivered_read_receipt(locator, session)
+            if audit_receipt is None
+            else audit_receipt
+        ),
+    )
+
+
+def test_result_deliver_returns_only_the_fixed_verified_read_envelope() -> None:
+    calls: list[tuple[dict[str, Any], TrustedSession]] = []
+    receipts: list[dict[str, Any]] = []
+
+    def resolve(locator: dict[str, Any], session: TrustedSession):
+        calls.append((locator, session))
+        delivered = _delivered_read_result(locator, session)
+        receipts.append(delivered.audit_receipt)
+        return delivered
+
+    harness = Harness(result_delivery_resolver=resolve)
+    before_audit = harness.audit.events()
+    locator = _read_result_locator()
+
+    delivered = harness.dispatch("result.deliver", locator)
+
+    assert delivered.status_code == 200
+    assert delivered.authority_verified is True
+    assert delivered.executed_release_digest == CURRENT_RELEASE
+    assert delivered.executed_registry_digest == CURRENT_REGISTRY
+    assert delivered.body == {
+        "business_succeeded": True,
+        "command": "result.deliver",
+        "data": {
+            "audit_receipt": {
+                **receipts[0],
+            },
+            "business_result": DELIVERED_READ_RESULT,
+            "current_identity": {
+                "registry_digest": CURRENT_REGISTRY,
+                "release_digest": CURRENT_RELEASE,
+            },
+            "executed_identity": {
+                "registry_digest": CURRENT_REGISTRY,
+                "release_digest": CURRENT_RELEASE,
+            },
+            "locator": locator,
+            "session_binding": {
+                "company_id": 7,
+                "database_name": "odoo_v3_sandbox",
+                "database_uuid": DATABASE_UUID,
+                "environment": "sandbox",
+                "odoo_instance_id": "odoo19@tokyo2",
+                "principal": "pi:user-42",
+                "user_id": 42,
+            },
+        },
+        "ok": True,
+    }
+    assert calls == [(locator, harness.sessions["requester-session-0123456789abcdef"])]
+    assert harness.executor.calls == []
+    assert harness.read_authorizations == 0
+    assert harness.read_executions == 0
+    assert harness.audit.events() == before_audit
+
+
+def test_trusted_delivered_result_detaches_caller_owned_json_graphs() -> None:
+    harness = Harness()
+    session = harness.sessions["requester-session-0123456789abcdef"]
+    locator = _read_result_locator()
+    source_result = json.loads(canonical_json(DELIVERED_READ_RESULT))
+    source_receipt = _delivered_read_receipt(locator, session)
+
+    delivered = _delivered_read_result(
+        locator,
+        session,
+        business_result=source_result,
+        audit_receipt=source_receipt,
+    )
+    source_result["lines"][0]["balance"] = 999
+    source_receipt["company_id"] = 8
+
+    assert delivered.business_result == DELIVERED_READ_RESULT
+    assert delivered.audit_receipt["company_id"] == session.company_id
+
+
+def test_result_deliver_revalidates_mutable_resolver_output() -> None:
+    def resolve(locator: dict[str, Any], session: TrustedSession):
+        delivered = _delivered_read_result(locator, session)
+        delivered.business_result["forged_after_construction"] = True
+        return delivered
+
+    harness = Harness(result_delivery_resolver=resolve)
+    result = harness.dispatch("result.deliver", _read_result_locator())
+
+    assert result.body["ok"] is False
+    assert result.body["error"]["code"] == "broker_result_delivery_rejected"
+    assert harness.executor.calls == []
+    assert harness.read_executions == 0
+
+
+def test_result_deliver_revalidates_mutated_receipt_binding() -> None:
+    def resolve(locator: dict[str, Any], session: TrustedSession):
+        delivered = _delivered_read_result(locator, session)
+        delivered.audit_receipt["company_id"] = 8
+        return delivered
+
+    harness = Harness(result_delivery_resolver=resolve)
+    result = harness.dispatch("result.deliver", _read_result_locator())
+
+    assert result.body["ok"] is False
+    assert result.body["error"]["code"] == "broker_result_delivery_rejected"
+    assert harness.executor.calls == []
+    assert harness.read_executions == 0
+
+
+def test_result_deliver_rejects_subclassed_resolver_output() -> None:
+    class ForgedDeliveredResult(TrustedDeliveredResult):
+        pass
+
+    def resolve(locator: dict[str, Any], session: TrustedSession):
+        valid = _delivered_read_result(locator, session)
+        return ForgedDeliveredResult(
+            action=valid.action,
+            capability_id=valid.capability_id,
+            operation_id=valid.operation_id,
+            receipt_id=valid.receipt_id,
+            result_digest=valid.result_digest,
+            principal=valid.principal,
+            user_id=valid.user_id,
+            company_id=valid.company_id,
+            odoo_instance_id=valid.odoo_instance_id,
+            database_name=valid.database_name,
+            database_uuid=valid.database_uuid,
+            environment=valid.environment,
+            executed_release_digest=valid.executed_release_digest,
+            executed_registry_digest=valid.executed_registry_digest,
+            business_result=valid.business_result,
+            audit_receipt=valid.audit_receipt,
+        )
+
+    harness = Harness(result_delivery_resolver=resolve)
+    result = harness.dispatch("result.deliver", _read_result_locator())
+
+    assert result.body["ok"] is False
+    assert result.body["error"]["code"] == "broker_result_delivery_rejected"
+    assert harness.executor.calls == []
+    assert harness.read_executions == 0
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        _read_result_locator(status="completed"),
+        _read_result_locator(action="operation.status"),
+        _read_result_locator(business_succeeded=False),
+        _read_result_locator(operation_id="fabricated-read-operation"),
+        _read_result_locator(extra="forbidden"),
+        _read_result_locator(result_digest="A" * 64),
+        {
+            **_read_result_locator(action="operation.result"),
+            "operation_id": None,
+        },
+    ],
+)
+def test_result_deliver_rejects_every_non_verified_or_malformed_locator(
+    locator: dict[str, Any],
+) -> None:
+    resolver_calls = 0
+
+    def resolve(_locator: dict[str, Any], _session: TrustedSession):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        raise AssertionError("malformed locator reached the resolver")
+
+    harness = Harness(result_delivery_resolver=resolve)
+    result = harness.dispatch("result.deliver", locator)
+
+    assert result.status_code == 200
+    assert result.authority_verified is True
+    assert result.body["ok"] is False
+    assert result.body["error"]["code"] == "broker_business_request_rejected"
+    assert result.body["error"]["odoo_effect"] == "none"
+    assert resolver_calls == 0
+    assert harness.executor.calls == []
+    assert harness.audit.events() == ()
 
 
 @pytest.mark.parametrize(

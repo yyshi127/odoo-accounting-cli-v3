@@ -62,6 +62,7 @@ BROKER_ACTION_PATHS: Final[dict[str, str]] = {
     "/v1/operation/result": "operation.result",
     "/v1/operation/diagnostics": "operation.diagnostics",
     "/v1/operation/recover": "operation.recover",
+    "/v1/result/deliver": "result.deliver",
 }
 
 _SESSION_HANDLE = re.compile(r"[A-Za-z0-9._~-]{32,512}\Z")
@@ -420,7 +421,14 @@ def _validated_executed_identity(
         or not _SHA256.fullmatch(registry_digest)
     ):
         raise TrustedBrokerUdsError("executed identity is invalid")
-    if request.action in {"read", "operation.prepare"} and (
+    current_release_action = request.action in {
+        "read",
+        "operation.prepare",
+    } or (
+        request.action == "result.deliver"
+        and request.payload.get("action") == "read"
+    )
+    if current_release_action and (
         release_digest != request.release_digest
         or registry_digest != request.registry_digest
     ):

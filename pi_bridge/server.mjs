@@ -12,6 +12,10 @@ import {
   validateFinalEvidenceChildResult,
 } from "./final-evidence.mjs";
 import {
+  createFinalResultDeliverer,
+  serializeFinalDeliveredAnswer,
+} from "./final-result-delivery.mjs";
+import {
   ChatRequestPolicyError,
   enabledPiToolNames,
   launchPolicyControlledChat,
@@ -101,7 +105,24 @@ const piVersion = packageJson.dependencies?.["@earendil-works/pi-coding-agent"] 
 const piBin = typeof bootstrapAttestation?.piEntrypoint === "string"
   ? bootstrapAttestation.piEntrypoint
   : "";
-const chatTimeoutMs = Number(process.env.PI_AGENT_BRIDGE_TIMEOUT_MS || 120000);
+const PREFLIGHT_TIMEOUT_MS = 5_000;
+const MAX_PI_CHILD_TIMEOUT_MS = 120_000;
+const FINAL_RESULT_DELIVERY_TIMEOUT_MS = 10_000;
+const PI_SERVER_TOTAL_BUDGET_MS = 135_000;
+const configuredChildTimeoutMs = Number(
+  process.env.PI_AGENT_BRIDGE_TIMEOUT_MS || MAX_PI_CHILD_TIMEOUT_MS,
+);
+if (
+  !Number.isSafeInteger(configuredChildTimeoutMs)
+  || configuredChildTimeoutMs < 1_000
+  || configuredChildTimeoutMs > MAX_PI_CHILD_TIMEOUT_MS
+  || PREFLIGHT_TIMEOUT_MS
+    + MAX_PI_CHILD_TIMEOUT_MS
+    + FINAL_RESULT_DELIVERY_TIMEOUT_MS !== PI_SERVER_TOTAL_BUDGET_MS
+) {
+  throw new Error("PI Agent child timeout configuration is invalid");
+}
+const chatTimeoutMs = configuredChildTimeoutMs;
 const MAX_PI_STDERR_BYTES = 64 * 1024;
 const configuredPiModel = process.env.PI_AGENT_MODEL || "";
 const configuredPiProvider = process.env.PI_AGENT_PROVIDER || "";
@@ -569,6 +590,7 @@ function runPiChat({
   selectedSkillKey,
   conversationContext,
   brokerSessionHandle,
+  resultDeliverySessionHandle,
 }) {
   return new Promise((resolve, reject) => {
     const prompt = String(message || "").trim();
@@ -592,6 +614,13 @@ function runPiChat({
     const brokerEnabled = v3Ready
       && v3BrokerSocketConfigured
       && validBrokerSessionHandle(brokerSessionHandle);
+    const resultDeliveryEnabled = brokerEnabled
+      && validBrokerSessionHandle(resultDeliverySessionHandle)
+      && resultDeliverySessionHandle !== brokerSessionHandle;
+    if (v3Ready && !resultDeliveryEnabled) {
+      reject(new Error("Authenticated result-delivery session is invalid"));
+      return;
+    }
     const enabledToolNames = enabledPiToolNames({
       brokerEnabled,
       hardenedV3Only,
@@ -692,6 +721,8 @@ function runPiChat({
       settle(reject, error);
     });
     child.on("close", (code) => {
+      if (settled) return;
+      clearTimeout(timer);
       void (async () => {
         if (stdoutFailure !== null) throw stdoutFailure;
         if (stderrFailure !== null) throw stderrFailure;
@@ -714,7 +745,18 @@ function runPiChat({
           exitCode: code,
           stdoutBuffer: stdout,
         });
-        settle(resolve, answer);
+        const deliverFinalResult = createFinalResultDeliverer({
+          brokerSocketPath: v3BrokerSocketPath,
+          expectedRegistryDigest: v3Identity.registry_digest,
+          expectedReleaseDigest: v3Identity.manifest_sha256,
+          sessionHandle: resultDeliverySessionHandle,
+          timeoutMs: FINAL_RESULT_DELIVERY_TIMEOUT_MS,
+        });
+        const delivered = await deliverFinalResult(answer);
+        settle(resolve, serializeFinalDeliveredAnswer(delivered, [
+          brokerSessionHandle,
+          resultDeliverySessionHandle,
+        ]));
       })().catch((error) => settle(reject, error));
     });
   });
@@ -782,19 +824,27 @@ const server = http.createServer((req, res) => {
         brokerSession: await authenticatedBrokerSession(req),
         payload,
       }))
-      .then(({ brokerSession, payload }) => launchPolicyControlledChat({
-        brokerSessionHandle: brokerSession?.brokerSessionHandle || "",
-        configuredModel: configuredPiModel,
-        configuredProvider: configuredPiProvider,
-        hardenedSystemPrompt,
-        hardenedV3Only,
-        payload,
-      }, ({ brokerSessionHandle }) => preflightV3BrokerSession({
-        brokerSocketPath: v3BrokerSocketPath,
-        expectedRegistryDigest: v3Identity.registry_digest,
-        expectedReleaseDigest: v3Identity.manifest_sha256,
-        sessionHandle: brokerSessionHandle,
-      }), runPiChat))
+      .then(({ brokerSession, payload }) => {
+        const resultDeliverySessionHandle =
+          brokerSession?.resultDeliverySessionHandle || "";
+        return launchPolicyControlledChat({
+          brokerSessionHandle: brokerSession?.brokerSessionHandle || "",
+          configuredModel: configuredPiModel,
+          configuredProvider: configuredPiProvider,
+          hardenedSystemPrompt,
+          hardenedV3Only,
+          payload,
+        }, ({ brokerSessionHandle }) => preflightV3BrokerSession({
+          brokerSocketPath: v3BrokerSocketPath,
+          expectedRegistryDigest: v3Identity.registry_digest,
+          expectedReleaseDigest: v3Identity.manifest_sha256,
+          sessionHandle: brokerSessionHandle,
+          timeoutMs: PREFLIGHT_TIMEOUT_MS,
+        }), (launchRequest) => runPiChat({
+          ...launchRequest,
+          resultDeliverySessionHandle,
+        }));
+      })
       .then((answer) => json(res, 200, { ok: true, answer }))
       .catch((error) => json(
         res,

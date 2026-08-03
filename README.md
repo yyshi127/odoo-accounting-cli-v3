@@ -13,7 +13,7 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-The current Dev260 development baseline registers 35 capabilities: 12 reads
+The current Dev261 development baseline registers 35 capabilities: 12 reads
 and 23 writes. The reads are staged only for `test`; no capability is enabled
 or production-routed. All 23 writes have concrete source paths, 21 can reach
 capability-specific ORM prechecks, and payment registration plus deferred
@@ -36,7 +36,7 @@ Dev257 adds the declared, disabled
 verified, database-finalized bank-import graph and creates a separate
 whole-batch opposite-signed statement from the exact retained available plan;
 it is not a delete, partial correction, or implicit unreconciliation path.
-Control add-on version `19.0.0.7.1` serializes supported ORM mutations of bank
+Control add-on version `19.0.0.7.2` serializes supported ORM mutations of bank
 statements, statement lines, their linked moves and journal items, and their
 reconciliation records on the same company-and-journal transaction lock.
 Specialized compensation and generic recovery acquire the complete ordered

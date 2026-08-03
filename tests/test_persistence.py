@@ -48,6 +48,8 @@ from odoo_accounting_cli_v3.persistence import (
     _TRIGGER_SCHEMAS_V3,
     _TRIGGER_SCHEMAS_V4,
     _TABLE_SCHEMAS_V3,
+    _VERIFIED_READ_RESULT_COLUMNS,
+    _VERIFIED_READ_RESULT_TRIGGER_SCHEMAS,
     _approval_audit_payload,
     _approval_event_id,
     _approval_record_hash,
@@ -63,6 +65,7 @@ from odoo_accounting_cli_v3.persistence import (
     _result_event_id,
     _trusted_result_payload,
     _trusted_result_record_hash,
+    _verified_read_result_record_hash,
     _operation_payload,
     _operation_record_hash,
     _recovery_operation_binding_event_id,
@@ -88,6 +91,85 @@ VERIFICATION_SECRET = b"verify-secret-material-at-least-32"
 RECOVERY_SECRET = b"recovery-secret-material-at-least-32"
 RECEIPT_SECRET = b"receipt-secret-material-at-least-32"
 RECEIPT_KEY_ID = "receipt-key-v1"
+
+
+def persistence_schema_snapshot(path: Path) -> dict[str, object]:
+    with closing(sqlite3.connect(path)) as connection:
+        return {
+            "user_version": connection.execute(
+                "PRAGMA user_version"
+            ).fetchone()[0],
+            "tables": tuple(
+                connection.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+                    "ORDER BY name"
+                )
+            ),
+            "triggers": tuple(
+                connection.execute(
+                    "SELECT name, sql FROM sqlite_master "
+                    "WHERE type = 'trigger' ORDER BY name"
+                )
+            ),
+            "meta": tuple(
+                connection.execute(
+                    "SELECT key, value FROM schema_meta ORDER BY key"
+                )
+            ),
+        }
+
+
+def record_verified_read_fixture(
+    store: SQLitePersistence,
+    *,
+    receipt_id: str,
+    parameters: dict,
+    result_body: dict,
+) -> dict:
+    observed_at = NOW - timedelta(seconds=1)
+    auth_token_id = f"auth-{receipt_id}"
+    receipt = create_read_receipt(
+        receipt_id=receipt_id,
+        capability_id="acct.gl.trial_balance.v1",
+        parameters=parameters,
+        result_body=result_body,
+        auth_token_id=auth_token_id,
+        principal="pi:user-42",
+        odoo_instance_id="odoo19@tokyo2",
+        database_name="odoo_test",
+        database_uuid=DATABASE_UUID,
+        company_id=7,
+        user_id=42,
+        registry_digest=REGISTRY_DIGEST,
+        release_digest=RELEASE_DIGEST,
+        environment="test",
+        capability_channel="staged",
+        record_count=result_body["page"]["total_count"],
+        observed_at=observed_at,
+        key_id=RECEIPT_KEY_ID,
+        secret=RECEIPT_SECRET,
+    )
+    store.record_verified_read(
+        receipt=receipt,
+        capability_id="acct.gl.trial_balance.v1",
+        parameters=parameters,
+        result_body=result_body,
+        auth_token_id=auth_token_id,
+        principal="pi:user-42",
+        odoo_instance_id="odoo19@tokyo2",
+        database_name="odoo_test",
+        database_uuid=DATABASE_UUID,
+        company_id=7,
+        user_id=42,
+        registry_digest=REGISTRY_DIGEST,
+        release_digest=RELEASE_DIGEST,
+        environment="test",
+        capability_channel="staged",
+        expected_record_count=result_body["page"]["total_count"],
+        now=NOW,
+    )
+    return receipt
 
 
 def content_digest(value: dict) -> str:
@@ -834,10 +916,23 @@ class SQLitePersistenceTest(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type = 'trigger'"
                 )
             }
+            meta = tuple(
+                connection.execute(
+                    "SELECT key, value FROM schema_meta ORDER BY key"
+                )
+            )
+            schema_rows = tuple(
+                connection.execute(
+                    "SELECT type, name, sql FROM sqlite_master "
+                    "WHERE type IN ('table', 'trigger') "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
+                )
+            )
             version = connection.execute("PRAGMA user_version").fetchone()[0]
         self.assertEqual(mode, "wal")
         self.assertEqual(version, 4)
-        self.assertTrue(
+        self.assertEqual(
+            tables,
             {
                 "schema_meta",
                 "consumed_auth_tokens",
@@ -851,7 +946,7 @@ class SQLitePersistenceTest(unittest.TestCase):
                 "operation_protocols",
                 "precheck_records",
                 "final_write_receipts",
-            }.issubset(tables)
+            },
         )
         self.assertEqual(
             triggers,
@@ -888,6 +983,127 @@ class SQLitePersistenceTest(unittest.TestCase):
                 "final_write_receipts_no_update",
             },
         )
+        self.assertEqual(meta, (("schema_version", "4"),))
+        schema_material = "\n".join(
+            f"{kind}\0{name}\0{_normalize_schema_sql(sql)}"
+            for kind, name, sql in schema_rows
+        )
+        self.assertEqual(
+            hashlib.sha256(schema_material.encode("utf-8")).hexdigest(),
+            "2d3001b48589d9daefbf6cc6721e5993a1f503420ed69ca1072f3473ebfba3fc",
+        )
+
+    def test_verified_read_schema_isolated_to_current_receipt_store(self) -> None:
+        shared_path = Path(self.directory.name) / "shared-write.sqlite3"
+        historical_path = Path(self.directory.name) / "historical-read.sqlite3"
+        current_path = Path(self.directory.name) / "current-read.sqlite3"
+
+        SQLitePersistence(shared_path)
+        SQLitePersistence(
+            historical_path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+        )
+        SQLitePersistence(
+            current_path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+        )
+        shared_before = persistence_schema_snapshot(shared_path)
+        historical_before = persistence_schema_snapshot(historical_path)
+        current_before = persistence_schema_snapshot(current_path)
+
+        SQLitePersistence(
+            current_path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
+        )
+
+        self.assertEqual(
+            persistence_schema_snapshot(shared_path), shared_before
+        )
+        self.assertEqual(
+            persistence_schema_snapshot(historical_path), historical_before
+        )
+        current_after = persistence_schema_snapshot(current_path)
+        self.assertEqual(current_after["user_version"], 4)
+        self.assertEqual(
+            {name for name, _sql in current_after["tables"]}
+            - {name for name, _sql in current_before["tables"]},
+            {"verified_read_results"},
+        )
+        self.assertEqual(
+            {name for name, _sql in current_after["triggers"]}
+            - {name for name, _sql in current_before["triggers"]},
+            {
+                "verified_read_results_bind_evidence",
+                "verified_read_results_no_delete",
+                "verified_read_results_no_update",
+            },
+        )
+        self.assertEqual(
+            set(current_after["meta"]) - set(current_before["meta"]),
+            {("verified_read_results_schema", "1")},
+        )
+        self.assertEqual(
+            len(current_after["tables"]), len(current_before["tables"]) + 1
+        )
+        self.assertEqual(
+            len(current_after["triggers"]),
+            len(current_before["triggers"]) + 3,
+        )
+        self.assertEqual(
+            len(current_after["meta"]), len(current_before["meta"]) + 1
+        )
+
+    def test_default_mode_rejects_extended_read_store_without_mutation(self) -> None:
+        current_path = Path(self.directory.name) / "extended-read.sqlite3"
+        SQLitePersistence(
+            current_path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
+        )
+        before = persistence_schema_snapshot(current_path)
+
+        with self.assertRaisesRegex(
+            PersistenceIntegrityError, "table schema mismatch"
+        ):
+            SQLitePersistence(
+                current_path,
+                receipt_key_id=RECEIPT_KEY_ID,
+                receipt_secret=RECEIPT_SECRET,
+            )
+
+        self.assertEqual(persistence_schema_snapshot(current_path), before)
+
+    def test_verified_read_schema_install_failure_rolls_back_to_dev260(self) -> None:
+        current_path = Path(self.directory.name) / "rollback-read.sqlite3"
+        SQLitePersistence(
+            current_path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+        )
+        before = persistence_schema_snapshot(current_path)
+
+        with patch.object(
+            SQLitePersistence,
+            "_verify_schema",
+            side_effect=PersistenceIntegrityError(
+                "injected extension verification failure"
+            ),
+        ), self.assertRaisesRegex(
+            PersistenceIntegrityError, "extension verification"
+        ):
+            SQLitePersistence(
+                current_path,
+                receipt_key_id=RECEIPT_KEY_ID,
+                receipt_secret=RECEIPT_SECRET,
+                enable_verified_read_results=True,
+            )
+
+        self.assertEqual(persistence_schema_snapshot(current_path), before)
 
     def test_v1_schema_anchor_and_atomic_migration_preserve_evidence(self) -> None:
         fingerprint = hashlib.sha256(
@@ -3155,6 +3371,7 @@ class SQLitePersistenceTest(unittest.TestCase):
             self.path,
             receipt_key_id=RECEIPT_KEY_ID,
             receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
         )
 
         def receipt(receipt_id: str):
@@ -3208,6 +3425,18 @@ class SQLitePersistenceTest(unittest.TestCase):
         self.assertEqual(event.payload["receipt"], first_receipt)
         self.assertEqual(event.payload["principal"], "pi:user-42")
         self.assertEqual(event.payload["odoo_instance_id"], "odoo19@tokyo2")
+        retained = read_store.get_verified_read_result("receipt-read-1")
+        self.assertEqual(retained.receipt, first_receipt)
+        self.assertEqual(retained.parameters, parameters)
+        self.assertEqual(retained.result_body, result_body)
+        self.assertEqual(retained.capability_id, "acct.gl.trial_balance.v1")
+        self.assertEqual(retained.principal, "pi:user-42")
+        self.assertEqual(retained.company_id, 7)
+        self.assertEqual(retained.user_id, 42)
+        self.assertEqual(retained.current_release_digest, RELEASE_DIGEST)
+        self.assertEqual(retained.current_registry_digest, REGISTRY_DIGEST)
+        self.assertEqual(retained.executed_release_digest, RELEASE_DIGEST)
+        self.assertEqual(retained.executed_registry_digest, REGISTRY_DIGEST)
         self.assertEqual(self.store.verify_chain(), 1)
         with self.assertRaisesRegex(ReplayRejected, "already consumed"):
             record(first_receipt)
@@ -3225,8 +3454,9 @@ class SQLitePersistenceTest(unittest.TestCase):
                 self.path,
                 receipt_key_id="attacker-key",
                 receipt_secret=b"attacker-selected-receipt-secret!!",
+                enable_verified_read_results=True,
             )
-        with self.assertRaisesRegex(PersistenceError, "verifier is not configured"):
+        with self.assertRaisesRegex(PersistenceError, "mode is not enabled"):
             self.store.record_verified_read(
                 receipt=first_receipt,
                 capability_id="acct.gl.trial_balance.v1",
@@ -3258,6 +3488,42 @@ class SQLitePersistenceTest(unittest.TestCase):
         self.assertEqual(recovered.event_id, "read:receipt-read-atomic")
         self.assertEqual(self.store.verify_chain(), 2)
 
+        post_insert = receipt("receipt-read-post-insert")
+        with patch.object(
+            SQLitePersistence,
+            "_load_verified_read_result",
+            side_effect=PersistenceIntegrityError(
+                "injected post-insert validation failure"
+            ),
+        ), self.assertRaisesRegex(
+            PersistenceIntegrityError, "post-insert validation"
+        ):
+            record(post_insert)
+        with closing(sqlite3.connect(self.path)) as connection:
+            for table, field in (
+                ("consumed_receipts", "receipt_id"),
+                ("verified_read_results", "receipt_id"),
+                ("audit_events", "event_id"),
+            ):
+                value = (
+                    f"read:{post_insert['id']}"
+                    if table == "audit_events"
+                    else post_insert["id"]
+                )
+                self.assertEqual(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE {field} = ?",
+                        (value,),
+                    ).fetchone()[0],
+                    0,
+                )
+        recovered_post_insert = record(post_insert)
+        self.assertEqual(
+            recovered_post_insert.event_id,
+            "read:receipt-read-post-insert",
+        )
+        self.assertEqual(self.store.verify_chain(), 3)
+
         with closing(sqlite3.connect(self.path)) as connection:
             consumed = connection.execute(
                 "SELECT request_digest, observed_at FROM consumed_receipts "
@@ -3271,6 +3537,286 @@ class SQLitePersistenceTest(unittest.TestCase):
                 observed_at.isoformat(timespec="microseconds").replace("+00:00", "Z"),
             ),
         )
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "append-only"
+            ):
+                connection.execute(
+                    "UPDATE verified_read_results SET principal = ? "
+                    "WHERE receipt_id = ?",
+                    ("attacker", first_receipt["id"]),
+                )
+            with self.assertRaisesRegex(
+                sqlite3.IntegrityError, "append-only"
+            ):
+                connection.execute(
+                    "DELETE FROM verified_read_results WHERE receipt_id = ?",
+                    (first_receipt["id"],),
+                )
+
+    def test_verified_read_result_size_limit_rolls_back_every_effect(self) -> None:
+        observed_at = NOW - timedelta(seconds=1)
+        parameters = {"company_id": 7}
+        result_body = {
+            "blob": ["x" * (200 * 1024)] * 3,
+            "page": {"total_count": 0},
+        }
+        read_store = SQLitePersistence(
+            self.path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
+        )
+        receipt = create_read_receipt(
+            receipt_id="receipt-read-oversized",
+            capability_id="acct.gl.trial_balance.v1",
+            parameters=parameters,
+            result_body=result_body,
+            auth_token_id="auth-read-oversized",
+            principal="pi:user-42",
+            odoo_instance_id="odoo19@tokyo2",
+            database_name="odoo_test",
+            database_uuid=DATABASE_UUID,
+            company_id=7,
+            user_id=42,
+            registry_digest=REGISTRY_DIGEST,
+            release_digest=RELEASE_DIGEST,
+            environment="test",
+            capability_channel="staged",
+            record_count=0,
+            observed_at=observed_at,
+            key_id=RECEIPT_KEY_ID,
+            secret=RECEIPT_SECRET,
+        )
+
+        with self.assertRaisesRegex(PersistenceError, "size limit"):
+            read_store.record_verified_read(
+                receipt=receipt,
+                capability_id="acct.gl.trial_balance.v1",
+                parameters=parameters,
+                result_body=result_body,
+                auth_token_id="auth-read-oversized",
+                principal="pi:user-42",
+                odoo_instance_id="odoo19@tokyo2",
+                database_name="odoo_test",
+                database_uuid=DATABASE_UUID,
+                company_id=7,
+                user_id=42,
+                registry_digest=REGISTRY_DIGEST,
+                release_digest=RELEASE_DIGEST,
+                environment="test",
+                capability_channel="staged",
+                expected_record_count=0,
+                now=NOW,
+            )
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM consumed_receipts"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM audit_events"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM verified_read_results"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_verified_read_startup_and_get_scan_audit_events_once(self) -> None:
+        read_store = SQLitePersistence(
+            self.path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
+        )
+        for index in range(3):
+            record_verified_read_fixture(
+                read_store,
+                receipt_id=f"receipt-scan-{index}",
+                parameters={"company_id": 7, "index": index},
+                result_body={"lines": [], "page": {"total_count": 0}},
+            )
+
+        original = SQLitePersistence._load_audit_events
+        with patch.object(
+            SQLitePersistence,
+            "_load_audit_events",
+            wraps=original,
+        ) as load_events:
+            restarted = SQLitePersistence(
+                self.path,
+                receipt_key_id=RECEIPT_KEY_ID,
+                receipt_secret=RECEIPT_SECRET,
+                enable_verified_read_results=True,
+            )
+            self.assertEqual(load_events.call_count, 1)
+            load_events.reset_mock()
+
+            retained = restarted.get_verified_read_result("receipt-scan-2")
+            self.assertEqual(retained.receipt_id, "receipt-scan-2")
+            self.assertEqual(load_events.call_count, 1)
+            load_events.reset_mock()
+
+            self.assertEqual(len(restarted.audit_events()), 3)
+            self.assertEqual(load_events.call_count, 1)
+            load_events.reset_mock()
+
+            record_verified_read_fixture(
+                restarted,
+                receipt_id="receipt-scan-3",
+                parameters={"company_id": 7, "index": 3},
+                result_body={"lines": [], "page": {"total_count": 0}},
+            )
+            self.assertEqual(load_events.call_count, 1)
+
+    def test_verified_read_json_depth_and_number_limits_fail_safely(self) -> None:
+        read_store = SQLitePersistence(
+            self.path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
+        )
+        base_parameters = {"company_id": 7}
+        base_result = {"lines": [], "page": {"total_count": 0}}
+        receipt = create_read_receipt(
+            receipt_id="receipt-json-limits",
+            capability_id="acct.gl.trial_balance.v1",
+            parameters=base_parameters,
+            result_body=base_result,
+            auth_token_id="auth-json-limits",
+            principal="pi:user-42",
+            odoo_instance_id="odoo19@tokyo2",
+            database_name="odoo_test",
+            database_uuid=DATABASE_UUID,
+            company_id=7,
+            user_id=42,
+            registry_digest=REGISTRY_DIGEST,
+            release_digest=RELEASE_DIGEST,
+            environment="test",
+            capability_channel="staged",
+            record_count=0,
+            observed_at=NOW - timedelta(seconds=1),
+            key_id=RECEIPT_KEY_ID,
+            secret=RECEIPT_SECRET,
+        )
+
+        def attempt(parameters: dict, result_body: dict) -> None:
+            read_store.record_verified_read(
+                receipt=receipt,
+                capability_id="acct.gl.trial_balance.v1",
+                parameters=parameters,
+                result_body=result_body,
+                auth_token_id="auth-json-limits",
+                principal="pi:user-42",
+                odoo_instance_id="odoo19@tokyo2",
+                database_name="odoo_test",
+                database_uuid=DATABASE_UUID,
+                company_id=7,
+                user_id=42,
+                registry_digest=REGISTRY_DIGEST,
+                release_digest=RELEASE_DIGEST,
+                environment="test",
+                capability_channel="staged",
+                expected_record_count=0,
+                now=NOW,
+            )
+
+        deep: dict = {"leaf": True}
+        for _ in range(2_000):
+            deep = {"nested": deep}
+        with self.assertRaisesRegex(PersistenceError, "shape limit"):
+            attempt(deep, base_result)
+        with self.assertRaisesRegex(PersistenceError, "unsafe JSON integer"):
+            attempt(
+                base_parameters,
+                {"value": 2**53, "page": {"total_count": 0}},
+            )
+        with self.assertRaisesRegex(
+            PersistenceError, "non-integer JSON number"
+        ):
+            attempt(
+                base_parameters,
+                {"value": 1.5, "page": {"total_count": 0}},
+            )
+        with self.assertRaisesRegex(PersistenceError, "canonical JSON"):
+            attempt({"\ud800": True}, base_result)
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM verified_read_results"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM consumed_receipts"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_verified_read_noncanonical_stored_json_is_rejected(self) -> None:
+        read_store = SQLitePersistence(
+            self.path,
+            receipt_key_id=RECEIPT_KEY_ID,
+            receipt_secret=RECEIPT_SECRET,
+            enable_verified_read_results=True,
+        )
+        record_verified_read_fixture(
+            read_store,
+            receipt_id="receipt-noncanonical",
+            parameters={"company_id": 7},
+            result_body={"lines": [], "page": {"total_count": 0}},
+        )
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                "DROP TRIGGER verified_read_results_no_update"
+            )
+            row = connection.execute(
+                f"SELECT {', '.join(_VERIFIED_READ_RESULT_COLUMNS)} "
+                "FROM verified_read_results WHERE receipt_id = ?",
+                ("receipt-noncanonical",),
+            ).fetchone()
+            self.assertIsNotNone(row)
+            tampered_json = '{"page": {"total_count": 0}, "lines": []}'
+            payload = {
+                column: row[column]
+                for column in _VERIFIED_READ_RESULT_COLUMNS[:-1]
+            }
+            payload["result_body_json"] = tampered_json
+            connection.execute(
+                "UPDATE verified_read_results "
+                "SET result_body_json = ?, record_hash = ? "
+                "WHERE receipt_id = ?",
+                (
+                    tampered_json,
+                    _verified_read_result_record_hash(payload),
+                    "receipt-noncanonical",
+                ),
+            )
+            connection.execute(_VERIFIED_READ_RESULT_TRIGGER_SCHEMAS[0])
+            connection.commit()
+
+        with self.assertRaisesRegex(
+            PersistenceIntegrityError, "binding is invalid"
+        ):
+            SQLitePersistence(
+                self.path,
+                receipt_key_id=RECEIPT_KEY_ID,
+                receipt_secret=RECEIPT_SECRET,
+                enable_verified_read_results=True,
+            )
 
     def test_prepared_operation_round_trip_survives_restart(self) -> None:
         expected = prepared_operation("op-restart", "request-restart")

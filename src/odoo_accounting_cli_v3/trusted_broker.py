@@ -15,7 +15,7 @@ import hmac
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol
 
@@ -28,6 +28,11 @@ from .broker_audit import (
 from .gateway import RequestContext
 from .historical_router import HistoricalRouterError
 from .operations import Operation, State, canonical_json, operation_digest
+from .receipts import (
+    READ_RECEIPT_PURPOSE,
+    SIGNATURE_VERSION as READ_RECEIPT_SIGNATURE_VERSION,
+    valid_read_runtime_binding,
+)
 from .trusted_authority import (
     ApprovalChallenge,
     ApprovalDecision,
@@ -44,15 +49,29 @@ from .write_receipts import (
     RECEIPT_FIELDS as WRITE_AUDIT_RECEIPT_FIELDS,
     WRITE_RECEIPT_PURPOSE,
     WRITE_SIGNATURE_VERSION,
+    validate_write_result_body,
 )
 
 
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
+_CAPABILITY_ID = re.compile(
+    r"acct\.[a-z0-9_]+\.[a-z0-9_]+\.v[1-9][0-9]*\Z"
+)
 _SESSION_HANDLE = re.compile(r"[A-Za-z0-9._~-]{32,512}\Z")
 _MAX_LINUX_ID = 2**32 - 2
 _MAX_LINUX_PID = 2**31 - 1
+_MAX_RESULT_DELIVERY_BYTES = 512 * 1024
+_MAX_DELIVERED_BUSINESS_RESULT_BYTES = 256 * 1024
+_MAX_DELIVERED_AUDIT_RECEIPT_BYTES = 64 * 1024
+_MAX_SAFE_JSON_INTEGER = 2**53 - 1
+_MAX_DELIVERED_JSON_DEPTH = 32
+_MAX_DELIVERED_JSON_NODES = 50_000
+_MAX_DELIVERED_CONTAINER_ITEMS = 10_000
+_MAX_DELIVERED_JSON_KEY_BYTES = 256
+_MAX_DELIVERED_JSON_STRING_BYTES = 256 * 1024
 _REGISTRY_LIST_CAPABILITY = "acct.registry.list.v1"
+_DIAGNOSTICS_CAPABILITY = "acct.diagnostics.operation_read.v1"
 _RECONCILIATION_UNDO_CAPABILITY = "acct.reconciliation.undo.v1"
 _RECONCILIATION_ORIGIN_CAPABILITY = "acct.reconciliation.apply.v1"
 _RECONCILIATION_UNDO_PARAMETER_FIELDS = frozenset(
@@ -99,8 +118,19 @@ _BUSINESS_FIELDS: dict[str, frozenset[str]] = {
     "operation.recover": frozenset(
         {"origin_operation_id", "recovery_date", "reason", "idempotency_key"}
     ),
+    "result.deliver": frozenset(
+        {
+            "action",
+            "business_succeeded",
+            "capability_id",
+            "operation_id",
+            "receipt_id",
+            "result_digest",
+            "status",
+        }
+    ),
 }
-_WRITE_ACTIONS = frozenset(_BUSINESS_FIELDS) - {"read"}
+_WRITE_ACTIONS = frozenset(_BUSINESS_FIELDS) - {"read", "result.deliver"}
 _TERMINAL_ACTIONS = frozenset(
     {"operation.approve_execute", "operation.result"}
 )
@@ -130,6 +160,29 @@ _TERMINAL_RECEIPT_TEXT_FIELDS = frozenset(
         "receipt_id",
         "request_id",
         "signing_key_id",
+    }
+)
+_READ_AUDIT_RECEIPT_FIELDS = frozenset(
+    {
+        "capability_channel",
+        "capability_id",
+        "company_id",
+        "database_name",
+        "database_uuid",
+        "environment",
+        "id",
+        "observed_at",
+        "odoo_instance_id",
+        "record_count",
+        "registry_digest",
+        "release_digest",
+        "request_digest",
+        "result_digest",
+        "signature",
+        "signature_key_id",
+        "signature_purpose",
+        "signature_version",
+        "user_id",
     }
 )
 _AUTHORITY_FIELDS = frozenset(
@@ -248,6 +301,14 @@ class PrecheckResolver(Protocol):
     def __call__(self, operation_id: str) -> object: ...
 
 
+class ResultDeliveryResolver(Protocol):
+    def __call__(
+        self,
+        locator: dict[str, Any],
+        session: TrustedSession,
+    ) -> "TrustedDeliveredResult": ...
+
+
 @dataclass(frozen=True, slots=True)
 class AuthorizedReadAction:
     """A read request and context returned by a separate trusted authorizer."""
@@ -331,8 +392,320 @@ class TrustedBrokerResult:
             raise TrustedBrokerError("broker_result_contract_rejected")
 
 
+@dataclass(frozen=True, slots=True)
+class TrustedDeliveredResult:
+    action: str
+    capability_id: str
+    operation_id: str | None
+    receipt_id: str
+    result_digest: str
+    principal: str
+    user_id: int
+    company_id: int
+    odoo_instance_id: str
+    database_name: str
+    database_uuid: str
+    environment: str
+    executed_release_digest: str
+    executed_registry_digest: str
+    business_result: dict[str, Any]
+    audit_receipt: dict[str, Any]
+    _business_result_fingerprint: str = field(
+        init=False, repr=False, compare=False
+    )
+    _audit_receipt_fingerprint: str = field(
+        init=False, repr=False, compare=False
+    )
+
+    def __post_init__(self) -> None:
+        pending = [(self.business_result, 0), (self.audit_receipt, 0)]
+        nodes = 0
+        try:
+            while pending:
+                current, depth = pending.pop()
+                nodes += 1
+                if (
+                    depth > _MAX_DELIVERED_JSON_DEPTH
+                    or nodes > _MAX_DELIVERED_JSON_NODES
+                ):
+                    raise TrustedBrokerError(
+                        "broker_result_delivery_rejected", status_code=502
+                    )
+                if type(current) is dict:
+                    if (
+                        len(current) > _MAX_DELIVERED_CONTAINER_ITEMS
+                        or nodes + len(pending) + len(current)
+                        > _MAX_DELIVERED_JSON_NODES
+                    ):
+                        raise TrustedBrokerError(
+                            "broker_result_delivery_rejected", status_code=502
+                        )
+                    for key, child in current.items():
+                        if (
+                            type(key) is not str
+                            or not key
+                            or len(key.encode("utf-8"))
+                            > _MAX_DELIVERED_JSON_KEY_BYTES
+                        ):
+                            raise TrustedBrokerError(
+                                "broker_result_delivery_rejected",
+                                status_code=502,
+                            )
+                        pending.append((child, depth + 1))
+                elif type(current) is list:
+                    if (
+                        len(current) > _MAX_DELIVERED_CONTAINER_ITEMS
+                        or nodes + len(pending) + len(current)
+                        > _MAX_DELIVERED_JSON_NODES
+                    ):
+                        raise TrustedBrokerError(
+                            "broker_result_delivery_rejected", status_code=502
+                        )
+                    pending.extend(
+                        (child, depth + 1) for child in current
+                    )
+                elif type(current) is str:
+                    if (
+                        len(current.encode("utf-8"))
+                        > _MAX_DELIVERED_JSON_STRING_BYTES
+                    ):
+                        raise TrustedBrokerError(
+                            "broker_result_delivery_rejected", status_code=502
+                        )
+                elif type(current) is float or (
+                    type(current) is int
+                    and not -_MAX_SAFE_JSON_INTEGER
+                    <= current
+                    <= _MAX_SAFE_JSON_INTEGER
+                ):
+                    raise TrustedBrokerError(
+                        "broker_result_delivery_rejected", status_code=502
+                    )
+                elif current is not None and type(current) not in {
+                    bool,
+                    int,
+                }:
+                    raise TrustedBrokerError(
+                        "broker_result_delivery_rejected", status_code=502
+                    )
+        except TrustedBrokerError:
+            raise
+        except (RecursionError, UnicodeError) as exc:
+            raise TrustedBrokerError(
+                "broker_result_delivery_rejected", status_code=502
+            ) from exc
+        try:
+            business_result = json.loads(canonical_json(self.business_result))
+            audit_receipt = json.loads(canonical_json(self.audit_receipt))
+            business_bytes = canonical_json(business_result)
+            receipt_bytes = canonical_json(audit_receipt)
+            encoded = canonical_json(
+                {
+                    "audit_receipt": audit_receipt,
+                    "business_result": business_result,
+                }
+            )
+        except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
+            raise TrustedBrokerError(
+                "broker_result_delivery_rejected", status_code=502
+            ) from exc
+        receipt_id_field = (
+            "id" if self.action == "read" else "receipt_id"
+        )
+        if (
+            self.action not in {"read", "operation.result"}
+            or not isinstance(self.capability_id, str)
+            or _CAPABILITY_ID.fullmatch(self.capability_id) is None
+            or not isinstance(self.receipt_id, str)
+            or _IDENTIFIER.fullmatch(self.receipt_id) is None
+            or not _is_digest(self.result_digest)
+            or (
+                self.action == "read"
+                and self.operation_id is not None
+            )
+            or (
+                self.action == "operation.result"
+                and (
+                    not isinstance(self.operation_id, str)
+                    or _IDENTIFIER.fullmatch(self.operation_id) is None
+                )
+            )
+            or any(
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > 512
+                for value in (
+                    self.principal,
+                    self.odoo_instance_id,
+                    self.database_name,
+                    self.database_uuid,
+                    self.environment,
+                )
+            )
+            or type(self.user_id) is not int
+            or self.user_id <= 0
+            or type(self.company_id) is not int
+            or self.company_id <= 0
+            or not _is_digest(self.executed_release_digest)
+            or not _is_digest(self.executed_registry_digest)
+            or type(business_result) is not dict
+            or type(audit_receipt) is not dict
+            or audit_receipt.get(receipt_id_field) != self.receipt_id
+            or audit_receipt.get("result_digest") != self.result_digest
+            or hashlib.sha256(canonical_json(business_result)).hexdigest()
+            != self.result_digest
+            or len(business_bytes)
+            > _MAX_DELIVERED_BUSINESS_RESULT_BYTES
+            or len(receipt_bytes) > _MAX_DELIVERED_AUDIT_RECEIPT_BYTES
+            or len(encoded) > _MAX_RESULT_DELIVERY_BYTES
+        ):
+            raise TrustedBrokerError(
+                "broker_result_delivery_rejected", status_code=502
+            )
+        try:
+            if self.action == "read":
+                page = business_result.get("page")
+                if (
+                    self.capability_id == _DIAGNOSTICS_CAPABILITY
+                    or set(audit_receipt) != _READ_AUDIT_RECEIPT_FIELDS
+                    or audit_receipt["id"] != self.receipt_id
+                    or audit_receipt["capability_id"] != self.capability_id
+                    or audit_receipt["company_id"] != self.company_id
+                    or audit_receipt["user_id"] != self.user_id
+                    or audit_receipt["odoo_instance_id"]
+                    != self.odoo_instance_id
+                    or audit_receipt["database_name"] != self.database_name
+                    or audit_receipt["database_uuid"] != self.database_uuid
+                    or audit_receipt["environment"] != self.environment
+                    or audit_receipt["release_digest"]
+                    != self.executed_release_digest
+                    or audit_receipt["registry_digest"]
+                    != self.executed_registry_digest
+                    or audit_receipt["result_digest"] != self.result_digest
+                    or not valid_read_runtime_binding(
+                        audit_receipt["environment"],
+                        audit_receipt["capability_channel"],
+                    )
+                    or type(audit_receipt["record_count"]) is not int
+                    or audit_receipt["record_count"] < 0
+                    or type(page) is not dict
+                    or page.get("total_count")
+                    != audit_receipt["record_count"]
+                    or audit_receipt["signature_version"]
+                    != READ_RECEIPT_SIGNATURE_VERSION
+                    or audit_receipt["signature_purpose"]
+                    != READ_RECEIPT_PURPOSE
+                    or not _is_digest(audit_receipt["request_digest"])
+                    or not _is_digest(audit_receipt["signature"])
+                    or not _canonical_utc_timestamp(
+                        audit_receipt["observed_at"]
+                    )
+                    or not _bounded_delivery_text(
+                        audit_receipt["signature_key_id"]
+                    )
+                ):
+                    raise TrustedBrokerError(
+                        "broker_result_delivery_rejected", status_code=502
+                    )
+            else:
+                validate_write_result_body(
+                    business_result, operation_id=self.operation_id
+                )
+                if (
+                    set(audit_receipt) != WRITE_AUDIT_RECEIPT_FIELDS
+                    or business_result["operation_state"]
+                    != State.COMPLETED.value
+                    or business_result["verification"].get("passed") is not True
+                    or audit_receipt["receipt_id"] != self.receipt_id
+                    or audit_receipt["operation_id"] != self.operation_id
+                    or audit_receipt["capability_id"] != self.capability_id
+                    or audit_receipt["principal"] != self.principal
+                    or audit_receipt["company_id"] != self.company_id
+                    or audit_receipt["user_id"] != self.user_id
+                    or audit_receipt["odoo_instance_id"]
+                    != self.odoo_instance_id
+                    or audit_receipt["database_name"] != self.database_name
+                    or audit_receipt["database_uuid"] != self.database_uuid
+                    or audit_receipt["environment"] != self.environment
+                    or audit_receipt["release_digest"]
+                    != self.executed_release_digest
+                    or audit_receipt["registry_digest"]
+                    != self.executed_registry_digest
+                    or audit_receipt["result_digest"] != self.result_digest
+                    or audit_receipt["verification_evidence_digest"]
+                    != business_result["verification"]["evidence_digest"]
+                    or not valid_read_runtime_binding(
+                        audit_receipt["environment"],
+                        audit_receipt["capability_channel"],
+                    )
+                    or type(audit_receipt["approver_user_id"]) is not int
+                    or audit_receipt["approver_user_id"] <= 0
+                    or audit_receipt["approver_user_id"] == self.user_id
+                    or audit_receipt["signature_version"]
+                    != WRITE_SIGNATURE_VERSION
+                    or audit_receipt["signature_purpose"]
+                    != WRITE_RECEIPT_PURPOSE
+                    or not _canonical_utc_timestamp(
+                        audit_receipt["issued_at"]
+                    )
+                    or any(
+                        not _is_digest(audit_receipt[field])
+                        for field in _TERMINAL_RECEIPT_DIGEST_FIELDS
+                    )
+                    or any(
+                        not _bounded_delivery_text(audit_receipt[field])
+                        for field in _TERMINAL_RECEIPT_TEXT_FIELDS
+                    )
+                ):
+                    raise TrustedBrokerError(
+                        "broker_result_delivery_rejected", status_code=502
+                    )
+        except TrustedBrokerError:
+            raise
+        except Exception as exc:
+            raise TrustedBrokerError(
+                "broker_result_delivery_rejected", status_code=502
+            ) from exc
+        object.__setattr__(self, "business_result", business_result)
+        object.__setattr__(self, "audit_receipt", audit_receipt)
+        object.__setattr__(
+            self,
+            "_business_result_fingerprint",
+            hashlib.sha256(business_bytes).hexdigest(),
+        )
+        object.__setattr__(
+            self,
+            "_audit_receipt_fingerprint",
+            hashlib.sha256(receipt_bytes).hexdigest(),
+        )
+
+
 def _is_digest(value: object) -> bool:
     return isinstance(value, str) and _SHA256.fullmatch(value) is not None
+
+
+def _bounded_delivery_text(value: object, maximum: int = 512) -> bool:
+    return (
+        type(value) is str
+        and value == value.strip()
+        and 0 < len(value) <= maximum
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
+
+
+def _canonical_utc_timestamp(value: object) -> bool:
+    if type(value) is not str or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (
+        parsed.tzinfo is not None
+        and parsed.utcoffset() is not None
+        and parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        == value
+    )
 
 
 def _session_reconciliation_error(
@@ -627,6 +1000,33 @@ def _business_request(action: str, value: object) -> dict[str, Any]:
                         "broker_business_request_rejected",
                         status_code=400,
                     )
+    elif action == "result.deliver":
+        delivered_action = request.get("action")
+        operation_id = request.get("operation_id")
+        if (
+            delivered_action not in {"read", "operation.result"}
+            or request.get("business_succeeded") is not True
+            or request.get("status") != "verified_success"
+            or not isinstance(request.get("capability_id"), str)
+            or _CAPABILITY_ID.fullmatch(request["capability_id"]) is None
+            or not isinstance(request.get("receipt_id"), str)
+            or _IDENTIFIER.fullmatch(request["receipt_id"]) is None
+            or not _is_digest(request.get("result_digest"))
+            or (
+                delivered_action == "read"
+                and operation_id is not None
+            )
+            or (
+                delivered_action == "operation.result"
+                and (
+                    not isinstance(operation_id, str)
+                    or _IDENTIFIER.fullmatch(operation_id) is None
+                )
+            )
+        ):
+            raise TrustedBrokerError(
+                "broker_business_request_rejected", status_code=400
+            )
     elif action == "operation.diagnostics":
         _identifier(request["operation_id"], "operation_id")
         company_id = request["company_id"]
@@ -1135,6 +1535,7 @@ class TrustedBroker:
         monotonic_clock: Callable[[], float] = time.monotonic,
         utc_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         precheck_resolver: PrecheckResolver | None = None,
+        result_delivery_resolver: ResultDeliveryResolver | None = None,
     ) -> None:
         if not _is_digest(current_release_digest) or not _is_digest(
             current_registry_digest
@@ -1162,6 +1563,13 @@ class TrustedBroker:
             raise TrustedBrokerError("broker_historical_executor_rejected")
         if precheck_resolver is not None and not callable(precheck_resolver):
             raise TrustedBrokerError("broker_precheck_resolver_rejected")
+        if (
+            result_delivery_resolver is not None
+            and not callable(result_delivery_resolver)
+        ):
+            raise TrustedBrokerError(
+                "broker_result_delivery_resolver_rejected"
+            )
         if type(audit_sink) is not SQLiteBrokerAuditSink:
             raise TrustedBrokerError("broker_audit_sink_rejected")
         self._current_release_digest = current_release_digest
@@ -1183,6 +1591,7 @@ class TrustedBroker:
         self._monotonic_clock = monotonic_clock
         self._utc_clock = utc_clock
         self._precheck_resolver = precheck_resolver
+        self._result_delivery_resolver = result_delivery_resolver
 
     @staticmethod
     def _error(
@@ -1808,6 +2217,159 @@ class TrustedBroker:
             authority_verified=True,
             executed_release_digest=identity[0],
             executed_registry_digest=identity[1],
+        )
+
+    def _dispatch_result_delivery(
+        self,
+        *,
+        locator: dict[str, Any],
+        trusted_session: TrustedSession,
+        deadline_monotonic: float | None,
+    ) -> TrustedBrokerResult:
+        action = "result.deliver"
+        resolver = self._result_delivery_resolver
+        if resolver is None:
+            return self._error(
+                action,
+                TrustedBrokerError(
+                    "broker_result_delivery_unavailable",
+                    status_code=503,
+                    retryable=True,
+                ),
+                authority_verified=True,
+            )
+        try:
+            self._deadline(deadline_monotonic, action=action)
+            delivered = resolver(locator, trusted_session)
+            self._deadline(
+                deadline_monotonic, action=action, post_submit=True
+            )
+            if type(delivered) is not TrustedDeliveredResult:
+                raise TrustedBrokerError(
+                    "broker_result_delivery_rejected", status_code=502
+                )
+            candidate = delivered
+            delivered = TrustedDeliveredResult(
+                action=candidate.action,
+                capability_id=candidate.capability_id,
+                operation_id=candidate.operation_id,
+                receipt_id=candidate.receipt_id,
+                result_digest=candidate.result_digest,
+                principal=candidate.principal,
+                user_id=candidate.user_id,
+                company_id=candidate.company_id,
+                odoo_instance_id=candidate.odoo_instance_id,
+                database_name=candidate.database_name,
+                database_uuid=candidate.database_uuid,
+                environment=candidate.environment,
+                executed_release_digest=(
+                    candidate.executed_release_digest
+                ),
+                executed_registry_digest=(
+                    candidate.executed_registry_digest
+                ),
+                business_result=candidate.business_result,
+                audit_receipt=candidate.audit_receipt,
+            )
+            if (
+                not hmac.compare_digest(
+                    delivered._business_result_fingerprint,
+                    candidate._business_result_fingerprint,
+                )
+                or not hmac.compare_digest(
+                    delivered._audit_receipt_fingerprint,
+                    candidate._audit_receipt_fingerprint,
+                )
+            ):
+                raise TrustedBrokerError(
+                    "broker_result_delivery_rejected", status_code=502
+                )
+            expected_operation_id = locator["operation_id"]
+            if (
+                delivered.action != locator["action"]
+                or delivered.capability_id != locator["capability_id"]
+                or delivered.operation_id != expected_operation_id
+                or delivered.receipt_id != locator["receipt_id"]
+                or not hmac.compare_digest(
+                    delivered.result_digest, locator["result_digest"]
+                )
+                or delivered.principal != trusted_session.principal
+                or delivered.user_id != trusted_session.user_id
+                or delivered.company_id != trusted_session.company_id
+                or delivered.company_id
+                not in trusted_session.allowed_company_ids
+                or delivered.odoo_instance_id
+                != trusted_session.odoo_instance_id
+                or delivered.database_name
+                != trusted_session.database_name
+                or delivered.database_uuid
+                != trusted_session.database_uuid
+                or delivered.environment != trusted_session.environment
+                or (
+                    locator["action"] == "read"
+                    and (
+                        delivered.executed_release_digest
+                        != self._current_release_digest
+                        or delivered.executed_registry_digest
+                        != self._current_registry_digest
+                    )
+                )
+            ):
+                raise TrustedBrokerError(
+                    "broker_result_delivery_rejected", status_code=409
+                )
+            data = {
+                "audit_receipt": delivered.audit_receipt,
+                "business_result": delivered.business_result,
+                "current_identity": {
+                    "registry_digest": self._current_registry_digest,
+                    "release_digest": self._current_release_digest,
+                },
+                "executed_identity": {
+                    "registry_digest": (
+                        delivered.executed_registry_digest
+                    ),
+                    "release_digest": (
+                        delivered.executed_release_digest
+                    ),
+                },
+                "locator": locator,
+                "session_binding": {
+                    "company_id": trusted_session.company_id,
+                    "database_name": trusted_session.database_name,
+                    "database_uuid": trusted_session.database_uuid,
+                    "environment": trusted_session.environment,
+                    "odoo_instance_id": trusted_session.odoo_instance_id,
+                    "principal": trusted_session.principal,
+                    "user_id": trusted_session.user_id,
+                },
+            }
+            body = {
+                "business_succeeded": True,
+                "command": action,
+                "data": data,
+                "ok": True,
+            }
+            if len(canonical_json(body)) > _MAX_RESULT_DELIVERY_BYTES:
+                raise TrustedBrokerError(
+                    "broker_result_delivery_rejected", status_code=502
+                )
+        except TrustedBrokerError as exc:
+            return self._error(action, exc, authority_verified=True)
+        except Exception:
+            return self._error(
+                action,
+                TrustedBrokerError(
+                    "broker_result_delivery_failed", status_code=502
+                ),
+                authority_verified=True,
+            )
+        return TrustedBrokerResult(
+            status_code=200,
+            body=body,
+            authority_verified=True,
+            executed_release_digest=delivered.executed_release_digest,
+            executed_registry_digest=delivered.executed_registry_digest,
         )
 
     def _route_for_write(
@@ -2517,7 +3079,7 @@ class TrustedBroker:
         except TrustedBrokerError as exc:
             return self._error(safe_action, exc)
         audit_metadata: dict[str, Any] = {}
-        if action != "read":
+        if action not in {"read", "result.deliver"}:
             try:
                 request_digest = canonical_request_digest(
                     {"action": action, "payload": payload}
@@ -2587,11 +3149,21 @@ class TrustedBroker:
                 )
         except TrustedBrokerError as exc:
             result = self._error(safe_action, exc, authority_verified=True)
-            return result if action == "read" else audited(result)
+            return (
+                result
+                if action in {"read", "result.deliver"}
+                else audited(result)
+            )
         if action == "read":
             return self._dispatch_read(
                 request=request,
                 session_handle=session_handle,
+                trusted_session=trusted_session,
+                deadline_monotonic=deadline_monotonic,
+            )
+        if action == "result.deliver":
+            return self._dispatch_result_delivery(
+                locator=request,
                 trusted_session=trusted_session,
                 deadline_monotonic=deadline_monotonic,
             )

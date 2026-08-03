@@ -66,7 +66,7 @@ where practical, then record actual execution evidence separately.
   swapped. Delete, subset/partial, reconciled, bank-matched, externally changed,
   or binding-mismatched origins fail closed. Current production-routed imports
   do not contain the required facade/available-plan provenance, so they are
-  ineligible. The `19.0.0.7.1` control add-on and V3 executor share one
+  ineligible. The `19.0.0.7.2` control add-on and V3 executor share one
   company-and-journal sequence lock for supported statement, line, linked
   move/journal-item, and reconciliation ORM mutations. Generic recovery obtains
   its graph and sequence locks in one sorted set before row locks. Execution

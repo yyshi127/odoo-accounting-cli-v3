@@ -23,6 +23,9 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     final_evidence = (BRIDGE / "final-evidence.mjs").read_text(
         encoding="utf-8"
     )
+    final_result_delivery = (BRIDGE / "final-result-delivery.mjs").read_text(
+        encoding="utf-8"
+    )
     tool_policy = (BRIDGE / "tool-policy.mjs").read_text(encoding="utf-8")
     system_prompt = (BRIDGE / "SYSTEM_PROMPT.md").read_text(encoding="utf-8")
     package = json.loads((BRIDGE / "package.json").read_text(encoding="utf-8"))
@@ -33,6 +36,7 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
         BRIDGE / "bootstrap.mjs",
         BRIDGE / "create-runtime-binding.mjs",
         BRIDGE / "final-evidence.mjs",
+        BRIDGE / "final-result-delivery.mjs",
         BRIDGE / "extensions" / "odoo-v3-cli.mjs",
         BRIDGE / "extensions" / "odoo-tools.ts",
         BRIDGE / "package-lock.json",
@@ -43,6 +47,7 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
         BRIDGE / "tests" / "odoo-v3-cli.test.mjs",
         BRIDGE / "tests" / "bootstrap.test.mjs",
         BRIDGE / "tests" / "final-evidence.test.mjs",
+        BRIDGE / "tests" / "final-result-delivery.test.mjs",
         BRIDGE / "tests" / "release-binding.test.mjs",
         BRIDGE / "tests" / "server-final-evidence.test.mjs",
         BRIDGE / "tests" / "tool-policy.test.mjs",
@@ -73,7 +78,7 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     assert "preflightV3BrokerSession" in server
     assert '"hardened_chat_broker_session_rejected"' in tool_policy
     assert server.index("preflightV3BrokerSession({") < server.index(
-        "}), runPiChat)"
+        "(launchRequest) => runPiChat({"
     )
     assert tool_policy.index("await preflight(launchRequest)") < tool_policy.index(
         "return await launch(launchRequest)"
@@ -184,6 +189,11 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     assert '? ["ignore", "pipe", "pipe", "pipe", "pipe"]' in server
     assert 'collectFinalEvidenceStream(child.stdio[4])' in server
     assert "child.stdio[3].end" in server
+    assert "createFinalResultDeliverer" in server
+    assert "result.deliver" in final_result_delivery
+    assert "sessionHandleProvider" in final_result_delivery
+    assert "business_result" in final_result_delivery
+    assert "audit_receipt" in final_result_delivery
     assert "ODOO_ACCOUNTING_CLI_V3_BROKER_SESSION" not in server
     assert "brokerSessionHandle: payload.session_id" not in server
     assert "systemPrompt: payload.system_prompt" not in server
