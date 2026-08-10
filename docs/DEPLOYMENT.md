@@ -1287,7 +1287,7 @@ and negative-test results. A command exit code alone is not evidence.
 
 ## Dedicated write-sandbox candidate verification
 
-All 23 currently registered write capabilities are closed by default. Local
+All 24 currently registered write capabilities are closed by default. Local
 contracts, handlers, and tests do not authorize staging. After the complete
 local gate, create a new reviewed release that stages only the selected
 capabilities for a dedicated sandbox. The sandbox must have its own database
@@ -1301,7 +1301,8 @@ writes with 16 state-dependent contracts; draft versus posted invoice, bill,
 refund, and period-adjustment results intentionally select different actions.
 That catalog count is not the current write-capability count. The original
 draft-cancel and recovery-execute paths add no follow-on contracts, and the six
-later writes plus the three Dev259 document-lifecycle writes use their
+later writes plus the three Dev259 document-lifecycle writes and the one Dev265
+refund post-and-reconcile write use their
 separately approved cancellation/reversal capability or
 their explicit terminal/manual-escalation policy. A local passing test must
 prove the exact action/guard graph, pre-action fingerprints,
@@ -1350,6 +1351,34 @@ delete the refund. The write schemas do not currently carry an eligibility
 receipt/digest; each write precheck independently reconstructs the Odoo graph.
 The sandbox evidence must therefore correlate the read and write externally
 rather than claim an implemented receipt-chaining control.
+
+Dev265 adds a third eligibility arrow and a fourth closed document-lifecycle
+write:
+
+- `acct.refund.post_reconcile_eligibility.v1` feeds only
+  `acct.refund.post_reconcile_origin.v1`.
+
+The read is `contract_tested` and staged only for `test`; the critical write is
+`declared`, unstaged, disabled, and requires manual recovery escalation. Its
+31 approved parameters bind the pristine linked refund and posted origin,
+selected/commercial partners, one receivable/payable term-line pair and account,
+full or partial automatic-reconciliation result, residual/payment states, and
+the complete immutable graphs. A request to post the linked refund without the
+automatic origin reconciliation must be refused.
+
+The release must carry and install the matching
+`odoo_accounting_cli_v3_control` add-on bytes before this capability is even a
+sandbox candidate. Its `refund_rank.py` override delegates ordinary Odoo calls
+to native behavior and permits synchronous rank mutation only inside the exact
+trusted V3 execution scope for a non-superuser executor, the approved rank
+field, delta one, and selected/commercial-partner union. Install or upgrade the
+add-on and restart the Odoo workers from the same immutable release before
+collecting any candidate receipt; never copy this file separately into a shared
+mutable add-ons tree. Then retain a real Odoo 19 sandbox lifecycle proving posting,
+full/partial reconciliation, exact rank rollback/commit behavior, duplicate and
+concurrent requests, failed execution, fresh verification, and manual recovery
+escalation. None of those receipts exists in the current tree, so no route,
+registry channel, or production setting may be changed for Dev265 yet.
 
 The current customer-invoice/vendor-bill posting slice admits only a target
 whose relevant `customer_rank`/`supplier_rank` is exactly `0` before

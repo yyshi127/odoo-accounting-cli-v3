@@ -844,6 +844,39 @@ function writeParameterFixtures() {
 			reason: "Cancel the never-posted V3 customer credit note while preserving its bound origin",
 			idempotency_key: "refund-draft-cancel-6221",
 		},
+		"acct.refund.post_reconcile_origin.v1": {
+			company_id: 7,
+			move_id: 6241,
+			expected_move_type: "out_refund",
+			expected_origin_move_id: 6251,
+			expected_document_binding: "6d53c66b4601835a2eed8cd74f7284953913dc8fa87f2c61085c6c3e917180e5",
+			expected_document_binding_v2: "5d1e7fa86cd76a21e3d52ee1fc80881be7ee60312d4905bf6a69d551dd82328d",
+			expected_business_binding: "ccd398cae41890655bb7ad0260c7f57bddbedef4b2a1c935509a18df378583b1",
+			expected_origin_document_binding: "84abb11a8e0a7f85084c6076803873d481aff103e966a56e895ce2cd75b12435",
+			expected_origin_document_binding_v2: "1f044d27a8021080f026e0fa6ee0f4837481705a3f08cf50c18fe7c0ffae8321",
+			expected_origin_business_binding: "bd5076900d993092bc704d16fa5b2c4a9018c8878a2593c690c752d2941ce933",
+			expected_partner_id: 901,
+			expected_journal_id: 31,
+			expected_currency_id: 12,
+			expected_refund_date: "2026-07-25",
+			expected_total_amount: "128.50",
+			expected_source_refund_mode: "full",
+			expected_commercial_partner_id: 911,
+			expected_origin_total_amount: "128.50",
+			expected_reconcile_amount: "128.50",
+			expected_refund_payment_term_line_id: 6243,
+			expected_origin_payment_term_line_id: 6253,
+			expected_payment_term_account_id: 1201,
+			expected_reconciliation_outcome: "full_origin_reversal",
+			expected_refund_payment_state_after: "paid",
+			expected_origin_payment_state_after: "reversed",
+			expected_refund_residual_after: "0",
+			expected_origin_residual_after: "0",
+			expected_line_ids: [6242, 6243],
+			expected_origin_line_ids: [6252, 6253],
+			reason: "Post the bound customer credit note and verify Odoo 19 automatic origin reconciliation",
+			idempotency_key: "refund-post-reconcile-origin-6241",
+		},
 		"acct.recovery.execute.v1": {
 			company_id: 7,
 			origin_operation_id: "op-origin-0001",
@@ -1775,12 +1808,12 @@ test("complex financial parameters are retained byte-for-byte through the test b
 	assert.deepEqual(result.data.argv, ["operation", "prepare"]);
 });
 
-test("all 23 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
+test("all 24 registered write schemas have valid complete fixtures and transit byte-for-byte", async (t) => {
 	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
 	const registry = JSON.parse(await readFile(registryPath, "utf8"));
 	const writeCapabilities = registry.capabilities.filter((item) => item.access === "write");
 	const fixtures = writeParameterFixtures();
-	assert.equal(writeCapabilities.length, 23);
+	assert.equal(writeCapabilities.length, 24);
 	assert.deepEqual(Object.keys(fixtures).sort(), writeCapabilities.map((item) => item.id).sort());
 
 	const run = createBoundRunner({
@@ -1808,6 +1841,51 @@ test("all 23 registered write schemas have valid complete fixtures and transit b
 			assert.deepEqual(request, before);
 		});
 	}
+});
+
+test("refund post-reconcile eligibility and write preserve every parameter byte-for-byte", async () => {
+	const run = createBoundRunner({
+		cliPath: process.execPath,
+		prefixArgs: [trustedFixture],
+		runtimeConfigPath: path.join(fixtureDir, "runtime.json"),
+		timeoutMs: 5000,
+	});
+	for (const parameters of [
+		{ company_id: 7, move_id: 6241, expected_move_type: "out_refund" },
+		{ company_id: 7, move_id: 6261, expected_move_type: "in_refund" },
+	]) {
+		const request = {
+			capability_id: "acct.refund.post_reconcile_eligibility.v1",
+			parameters,
+		};
+		const before = structuredClone(request);
+		const result = await run("read", request);
+
+		assert.equal(result.ok, true);
+		assert.equal(result.data.result._test_raw_stdin, JSON.stringify(before));
+		assert.deepEqual(result.data.result._test_parsed_request, before);
+		assert.deepEqual(request, before);
+	}
+
+	const registryPath = path.resolve(root, "..", "registry", "capabilities.json");
+	const registry = JSON.parse(await readFile(registryPath, "utf8"));
+	const capability = registry.capabilities.find(
+		(item) => item.id === "acct.refund.post_reconcile_origin.v1",
+	);
+	const parameters = writeParameterFixtures()[capability.id];
+	assert.equal(capability.input_schema.required.length, 31);
+	assert.deepEqual(
+		Object.keys(parameters).sort(),
+		[...capability.input_schema.required].sort(),
+	);
+	const request = { capability_id: capability.id, parameters };
+	const before = structuredClone(request);
+	const result = await run("operation.prepare", request);
+
+	assert.equal(result.ok, true);
+	assert.equal(result.data.raw_stdin, JSON.stringify(before));
+	assert.deepEqual(result.data.parsed_request, before);
+	assert.deepEqual(request, before);
 });
 
 test("reconciliation undo preserves every trusted origin binding and no free-form graph", async () => {

@@ -320,6 +320,76 @@ def test_refund_draft_cancel_locks_refund_and_origin_in_stable_order():
     assert set(locks) == {*refund_lock, *origin_lock}
 
 
+@pytest.mark.parametrize(
+    ("commercial_partner_id", "expected_lock_count"),
+    ((601, 3), (602, 4)),
+)
+def test_refund_post_reconcile_locks_both_moves_and_partners_in_stable_order(
+    commercial_partner_id,
+    expected_lock_count,
+):
+    parameters = {
+        "move_id": 501,
+        "expected_origin_move_id": 401,
+        "expected_partner_id": 601,
+        "expected_commercial_partner_id": commercial_partner_id,
+    }
+
+    locks = _resource_lock_digests(
+        "acct.refund.post_reconcile_origin.v1",
+        7,
+        parameters,
+        None,
+    )
+    reordered = _resource_lock_digests(
+        "acct.refund.post_reconcile_origin.v1",
+        7,
+        {
+            "expected_commercial_partner_id": commercial_partner_id,
+            "expected_partner_id": 601,
+            "expected_origin_move_id": 401,
+            "move_id": 501,
+        },
+        None,
+    )
+    refund_lock = _resource_lock_digests(
+        "acct.move.reverse.v1", 7, {"move_id": 501}, None
+    )
+    origin_lock = _resource_lock_digests(
+        "acct.move.reverse.v1", 7, {"move_id": 401}, None
+    )
+    partner_lock = _resource_lock_digests(
+        "acct.invoice.customer_post.v1",
+        7,
+        {"move_id": 999, "expected_partner_id": 601},
+        None,
+    )
+    commercial_partner_lock = _resource_lock_digests(
+        "acct.invoice.customer_post.v1",
+        7,
+        {
+            "move_id": 999,
+            "expected_partner_id": commercial_partner_id,
+        },
+        None,
+    )
+    synthetic_move_lock = set(
+        _resource_lock_digests(
+            "acct.move.reverse.v1", 7, {"move_id": 999}, None
+        )
+    )
+
+    assert locks == reordered
+    assert locks == sorted(set(locks))
+    assert len(locks) == expected_lock_count
+    assert set(locks) == {
+        *refund_lock,
+        *origin_lock,
+        *(set(partner_lock) - synthetic_move_lock),
+        *(set(commercial_partner_lock) - synthetic_move_lock),
+    }
+
+
 def test_refund_draft_cancel_complete_refund_origin_graph_has_fixed_exclusive_row_order():
     def snapshot(model, record_id):
         values = {"company_id": [7, "Sandbox Company"], "state": "draft"}
@@ -362,6 +432,7 @@ def test_refund_draft_cancel_complete_refund_origin_graph_has_fixed_exclusive_ro
     [
         "acct.invoice.customer_post.v1",
         "acct.bill.vendor_post.v1",
+        "acct.refund.post_reconcile_origin.v1",
         "acct.refund.draft_cancel.v1",
     ],
 )
@@ -410,6 +481,17 @@ def test_phase_b_move_capabilities_have_exact_move_model_allowlists():
         == document_post_expected
     )
     assert _ALLOWED_MODELS["acct.refund.draft_cancel.v1"] == expected
+    assert _ALLOWED_MODELS[
+        "acct.refund.post_reconcile_origin.v1"
+    ] == frozenset(
+        {
+            "account.move",
+            "account.move.line",
+            "account.partial.reconcile",
+            "account.full.reconcile",
+            "res.partner",
+        }
+    )
 
 
 def test_payment_cancel_has_exact_models_locks_and_exclusive_before_graph():
@@ -1979,6 +2061,7 @@ def _capabilities():
         "acct.invoice.customer_create.v1",
         "acct.bill.vendor_create.v1",
         "acct.move.draft_cancel.v1",
+        "acct.refund.post_reconcile_origin.v1",
         "acct.recovery.execute.v1",
     ):
         capability = copy.deepcopy(
@@ -2021,6 +2104,42 @@ def _parameters(*, company_id=7, idempotency_key="invoice-1"):
             }
         ],
         "idempotency_key": idempotency_key,
+    }
+
+
+def _refund_post_reconcile_parameters():
+    return {
+        "company_id": 7,
+        "move_id": 884,
+        "expected_move_type": "out_refund",
+        "expected_origin_move_id": 880,
+        "expected_document_binding": "3" * 64,
+        "expected_document_binding_v2": "7" * 64,
+        "expected_business_binding": "4" * 64,
+        "expected_origin_document_binding": "5" * 64,
+        "expected_origin_document_binding_v2": "8" * 64,
+        "expected_origin_business_binding": "6" * 64,
+        "expected_source_refund_mode": "full",
+        "expected_partner_id": 10,
+        "expected_commercial_partner_id": 10,
+        "expected_journal_id": 4,
+        "expected_currency_id": 12,
+        "expected_refund_date": "2026-07-16",
+        "expected_total_amount": "100.00",
+        "expected_origin_total_amount": "100.00",
+        "expected_reconcile_amount": "100.00",
+        "expected_refund_payment_term_line_id": 2202,
+        "expected_origin_payment_term_line_id": 2102,
+        "expected_payment_term_account_id": 20,
+        "expected_reconciliation_outcome": "full_origin_reversal",
+        "expected_refund_payment_state_after": "paid",
+        "expected_origin_payment_state_after": "reversed",
+        "expected_refund_residual_after": "0.00",
+        "expected_origin_residual_after": "0.00",
+        "expected_line_ids": [2201, 2202],
+        "expected_origin_line_ids": [2101, 2102],
+        "reason": "Post the linked refund and reconcile its origin",
+        "idempotency_key": "post-customer-refund-884",
     }
 
 
@@ -2339,6 +2458,32 @@ class ConfigModel:
         return DATABASE_UUID
 
 
+class CallbackQueue:
+    def __init__(self):
+        self.data = {}
+        self._callbacks = []
+
+    def add(self, callback):
+        self._callbacks.append(callback)
+        return callback
+
+    def clear(self):
+        self._callbacks.clear()
+        self.data.clear()
+
+    def run(self):
+        callbacks = list(self._callbacks)
+        self._callbacks.clear()
+        try:
+            for callback in callbacks:
+                callback()
+        finally:
+            self.data.clear()
+
+    def __len__(self):
+        return len(self._callbacks)
+
+
 class Cursor:
     dbname = "v3_sandbox"
 
@@ -2347,6 +2492,7 @@ class Cursor:
         self.savepoints = 0
         self.rolled_back_savepoints = 0
         self.side_effects = []
+        self.postcommit = CallbackQueue()
 
     @contextmanager
     def savepoint(self):
@@ -2361,6 +2507,7 @@ class Cursor:
 
     def commit(self):
         self.commits += 1
+        self.postcommit.run()
 
 
 class BoundEnv:
@@ -3195,6 +3342,230 @@ def test_verification_rebinds_to_a_new_environment_after_the_business_commit():
     ]
 
 
+def test_business_postcommit_runs_after_execution_commit_before_verify():
+    context, operation, approval = _executing()
+    root, cr, anchors, _handler, kwargs = _harness()
+    state = {"rank": 1}
+
+    class PostcommitExecutionHandler(Handler):
+        def execute(self, capability_id, parameters):
+            result = super().execute(capability_id, parameters)
+            assert state["rank"] == 1
+
+            @cr.postcommit.add
+            def increase_rank():
+                state["rank"] += 1
+
+            return result
+
+        def verify(self, capability_id, parameters, execution):
+            assert cr.commits == 1
+            assert state["rank"] == 2
+            return super().verify(capability_id, parameters, execution)
+
+    handler = PostcommitExecutionHandler()
+    kwargs["handler_factory"] = (
+        lambda _env, _context, _now, trusted_plan=None: handler
+    )
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(
+        result["verification"]["result"]
+    ).succeeded is True
+    assert handler.calls == ["execute", "verify"]
+    assert state["rank"] == 2
+    assert cr.commits == 2
+    assert next(iter(anchors.by_scope.values())).state == "verified"
+
+
+@pytest.mark.parametrize(
+    ("verification_case", "expected_passed"),
+    (
+        ("exact_synchronous_rank", True),
+        ("concurrent_same_user_increment", True),
+        ("concurrent_other_user_increment", False),
+        ("fresh_rank_decreased", False),
+        ("non_target_rank_field_changed", False),
+        ("non_target_partner_added", False),
+    ),
+)
+def test_refund_post_reconcile_commits_rank_atomically_and_allows_later_increment(
+    verification_case, expected_passed
+):
+    parameters = _refund_post_reconcile_parameters()
+    context, operation, approval = _executing(
+        parameters,
+        capability_id="acct.refund.post_reconcile_origin.v1",
+    )
+    root, cr, anchors, _handler, kwargs = _harness()
+    partner = {
+        "record_id": parameters["expected_partner_id"],
+        "active": True,
+        "customer_rank": 1,
+        "supplier_rank": 0,
+        "write_uid": [42, "Executor"],
+        "write_date": "2026-07-15 03:59:00",
+    }
+    extra_partners = []
+
+    def snapshot(model, record_id, state, values):
+        return {
+            "model": model,
+            "record_id": record_id,
+            "company_id": 7,
+            "state": state,
+            "values": copy.deepcopy(values),
+            "values_digest": hashlib.sha256(
+                canonical_json(values)
+            ).hexdigest(),
+        }
+
+    def current_after():
+        result = [
+            snapshot(
+                "account.move",
+                parameters["move_id"],
+                "posted",
+                {"state": "posted", "payment_state": "paid"},
+            ),
+            snapshot(
+                "account.move",
+                parameters["expected_origin_move_id"],
+                "posted",
+                {"state": "posted", "payment_state": "reversed"},
+            ),
+            snapshot(
+                "res.partner",
+                partner["record_id"],
+                "active",
+                {
+                    "active": partner["active"],
+                    "customer_rank": partner["customer_rank"],
+                    "supplier_rank": partner["supplier_rank"],
+                    "write_uid": partner["write_uid"],
+                    "write_date": partner["write_date"],
+                },
+            ),
+        ]
+        result.extend(copy.deepcopy(extra_partners))
+        return sorted(result, key=lambda item: (item["model"], item["record_id"]))
+
+    approved_before = current_after()
+
+    class RefundSynchronousRankHandler(Handler):
+        def execute(self, capability_id, received_parameters):
+            self.calls.append("execute")
+            partner["customer_rank"] += 1
+            partner["write_uid"] = [42, "Executor"]
+            partner["write_date"] = "2026-07-15 04:00:00"
+            committed_after = current_after()
+
+            return {
+                "capability_id": capability_id,
+                "company_id": received_parameters["company_id"],
+                "parameters_digest": hashlib.sha256(
+                    canonical_json(received_parameters)
+                ).hexdigest(),
+                "before": copy.deepcopy(approved_before),
+                "after": committed_after,
+                "records": [
+                    {"model": item["model"], "record_id": item["record_id"]}
+                    for item in committed_after
+                ],
+                "recovery": {
+                    "status": "manual_escalation",
+                    "method": "manual_review_refund_post_reconcile_recovery",
+                    "targets": [
+                        {
+                            "model": "account.move",
+                            "record_id": received_parameters["move_id"],
+                        },
+                        {
+                            "model": "account.move",
+                            "record_id": received_parameters[
+                                "expected_origin_move_id"
+                            ],
+                        },
+                    ],
+                },
+            }
+
+        def verify(self, capability_id, received_parameters, execution):
+            self.calls.append("verify")
+            if verification_case in {
+                "concurrent_same_user_increment",
+                "concurrent_other_user_increment",
+            }:
+                partner["customer_rank"] += 1
+                partner["write_uid"] = [
+                    99 if verification_case == "concurrent_other_user_increment" else 42,
+                    "Concurrent User",
+                ]
+                partner["write_date"] = "2026-07-15 04:00:02"
+            if verification_case == "fresh_rank_decreased":
+                partner["customer_rank"] -= 1
+                partner["write_uid"] = [42, "Executor"]
+                partner["write_date"] = "2026-07-15 04:00:02"
+            if verification_case == "non_target_rank_field_changed":
+                partner["supplier_rank"] = 1
+                partner["write_uid"] = [42, "Executor"]
+                partner["write_date"] = "2026-07-15 04:00:02"
+            if verification_case == "non_target_partner_added":
+                extra_partners.append(
+                    snapshot(
+                        "res.partner",
+                        11,
+                        "active",
+                        {
+                            "active": True,
+                            "customer_rank": 1,
+                            "supplier_rank": 0,
+                            "write_uid": [42, "Executor"],
+                            "write_date": "2026-07-15 04:00:02",
+                        },
+                    )
+                )
+            after = current_after()
+            return {
+                "passed": True,
+                "method": "odoo_public_orm_readback_v1",
+                "checks": ["atomic_refund_rank_and_fresh_readback_exact"],
+                "after": after,
+                "evidence_digest": hashlib.sha256(
+                    canonical_json(after)
+                ).hexdigest(),
+            }
+
+    handler = RefundSynchronousRankHandler()
+    kwargs["handler_factory"] = (
+        lambda _env, _context, _now, trusted_plan=None: handler
+    )
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    committed_partner = next(
+        item
+        for item in result["execution"]["evidence"]["difference"]["after"]
+        if item["model"] == "res.partner" and item["record_id"] == 10
+    )
+    assert json.loads(committed_partner["values_json"])["customer_rank"] == 2
+    verification = trusted_result_from_mapping(
+        result["verification"]["result"]
+    )
+    assert verification.succeeded is expected_passed
+    assert result["verification"]["evidence"]["passed"] is expected_passed
+    assert handler.calls == ["execute", "verify"]
+    assert cr.commits == 2
+    assert next(iter(anchors.by_scope.values())).state == (
+        "verified" if expected_passed else "failed"
+    )
+
+
 def test_same_signed_request_replays_verified_anchor_without_another_write_or_commit():
     context, operation, approval = _executing()
     root, cr, _anchors, handler, kwargs = _harness()
@@ -3875,6 +4246,64 @@ def test_execution_exception_rolls_back_savepoint_and_commits_signed_failure_anc
     assert cr.savepoints == 3
     assert cr.commits == 1
     assert next(iter(anchors.by_scope.values())).state == "failed"
+
+
+def test_execution_failure_discards_business_postcommit_before_failed_anchor_commit():
+    context, operation, approval = _executing()
+    root, cr, anchors, _handler, kwargs = _harness()
+
+    class PostcommitThenFailHandler(Handler):
+        def execute(self, capability_id, parameters):
+            self.calls.append("execute")
+            cr.postcommit.data["business.rank"] = {"partner_id": 101}
+
+            @cr.postcommit.add
+            def leaked_business_callback():
+                cr.side_effects.append("business-postcommit-ran")
+
+            raise RuntimeError("business write failed after queuing postcommit")
+
+    handler = PostcommitThenFailHandler()
+    kwargs["handler_factory"] = (
+        lambda _env, _context, _now, trusted_plan=None: handler
+    )
+
+    result = execute_write_from_odoo_shell(
+        root, _request(context, operation, approval), **kwargs
+    )
+
+    assert trusted_result_from_mapping(
+        result["execution"]["result"]
+    ).succeeded is False
+    assert result["verification"] is None
+    assert next(iter(anchors.by_scope.values())).state == "failed"
+    assert cr.commits == 1
+    assert cr.side_effects == []
+    assert len(cr.postcommit) == 0
+    assert cr.postcommit.data == {}
+
+
+def test_preexisting_postcommit_fails_closed_without_commit_or_queue_mutation():
+    context, operation, approval = _executing()
+    root, cr, _anchors, handler, kwargs = _harness()
+    callback_calls = []
+    existing_data = {"partner_id": 999}
+    cr.postcommit.data["third.party"] = existing_data
+
+    @cr.postcommit.add
+    def third_party_callback():
+        callback_calls.append("ran")
+
+    with pytest.raises(OdooWriteBootstrapError, match="postcommit"):
+        execute_write_from_odoo_shell(
+            root, _request(context, operation, approval), **kwargs
+        )
+
+    assert cr.commits == 0
+    assert handler.calls == []
+    assert callback_calls == []
+    assert len(cr.postcommit) == 1
+    assert cr.postcommit.data == {"third.party": existing_data}
 
 
 def test_changed_live_precheck_is_anchored_as_no_effect_failure_before_execute():

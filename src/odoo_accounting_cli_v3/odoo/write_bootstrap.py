@@ -171,6 +171,7 @@ EXCLUSIVE_BEFORE_LOCK_CAPABILITIES = frozenset(
     {
         "acct.invoice.customer_post.v1",
         "acct.bill.vendor_post.v1",
+        "acct.refund.post_reconcile_origin.v1",
         "acct.refund.draft_cancel.v1",
         "acct.move.draft_cancel.v1",
         "acct.move.draft_cancel.v2",
@@ -257,6 +258,14 @@ def _resource_lock_digests(
     elif capability_id == "acct.refund.draft_cancel.v1":
         add("account.move", parameters.get("move_id"))
         add("account.move", parameters.get("expected_origin_move_id"))
+    elif capability_id == "acct.refund.post_reconcile_origin.v1":
+        add("account.move", parameters.get("move_id"))
+        add("account.move", parameters.get("expected_origin_move_id"))
+        add("res.partner", parameters.get("expected_partner_id"))
+        add(
+            "res.partner",
+            parameters.get("expected_commercial_partner_id"),
+        )
     elif capability_id == "acct.payment.cancel.v1":
         add("account.payment", parameters.get("payment_id"))
         add("account.move", parameters.get("move_id"))
@@ -1795,6 +1804,171 @@ def _failed_execution_evidence(
     )
 
 
+def _snapshot_values(snapshot: Any) -> dict[str, Any] | None:
+    if (
+        not isinstance(snapshot, Mapping)
+        or snapshot.get("exists") is not True
+        or not isinstance(snapshot.get("values_json"), str)
+        or not isinstance(snapshot.get("values_digest"), str)
+    ):
+        return None
+    try:
+        values = json.loads(snapshot["values_json"])
+    except (TypeError, ValueError):
+        return None
+    if type(values) is not dict or not hmac.compare_digest(
+        snapshot["values_digest"], _digest(values)
+    ):
+        return None
+    return values
+
+
+def _refund_rank_records_match(
+    operation: Operation,
+    execution_evidence: Mapping[str, Any],
+    fresh_pairs: list[tuple[dict[str, Any], dict[str, Any] | None]],
+) -> bool:
+    if operation.capability_id != "acct.refund.post_reconcile_origin.v1":
+        return False
+    parameters = operation.parameters
+    move_type = parameters.get("expected_move_type")
+    rank_field = (
+        "customer_rank"
+        if move_type == "out_refund"
+        else "supplier_rank" if move_type == "in_refund" else None
+    )
+    raw_partner_ids = (
+        parameters.get("expected_partner_id"),
+        parameters.get("expected_commercial_partner_id"),
+    )
+    if rank_field is None or any(
+        type(partner_id) is not int or partner_id <= 0
+        for partner_id in raw_partner_ids
+    ):
+        return False
+    partner_ids = set(raw_partner_ids)
+    partner_keys = {("res.partner", partner_id) for partner_id in partner_ids}
+    committed_records = execution_evidence.get("odoo_records")
+    committed_difference = execution_evidence.get("difference")
+    committed_after = (
+        committed_difference.get("after")
+        if isinstance(committed_difference, Mapping)
+        else None
+    )
+    if not isinstance(committed_records, list) or not isinstance(
+        committed_after, list
+    ):
+        return False
+    try:
+        committed_references = {
+            (item["model"], item["record_id"]): item
+            for item in committed_records
+        }
+        fresh_references = {
+            (reference["model"], reference["record_id"]): reference
+            for _snapshot, reference in fresh_pairs
+            if reference is not None
+        }
+        committed_snapshots = {
+            (item["model"], item["record_id"]): item
+            for item in committed_after
+        }
+        fresh_snapshots = {
+            (snapshot["model"], snapshot["record_id"]): snapshot
+            for snapshot, _reference in fresh_pairs
+        }
+    except (KeyError, TypeError):
+        return False
+    identities = set(committed_references)
+    if (
+        len(committed_references) != len(committed_records)
+        or len(fresh_references)
+        != sum(reference is not None for _snapshot, reference in fresh_pairs)
+        or len(committed_snapshots) != len(committed_after)
+        or len(fresh_snapshots) != len(fresh_pairs)
+        or identities != set(fresh_references)
+        or identities != set(committed_snapshots)
+        or identities != set(fresh_snapshots)
+        or not partner_keys.issubset(identities)
+    ):
+        return False
+    for identity in identities:
+        committed_reference = committed_references[identity]
+        fresh_reference = fresh_references[identity]
+        committed_snapshot = committed_snapshots[identity]
+        fresh_snapshot = fresh_snapshots[identity]
+        if identity not in partner_keys:
+            if (
+                canonical_json(committed_reference)
+                != canonical_json(fresh_reference)
+                or _digest(committed_snapshot) != _digest(fresh_snapshot)
+            ):
+                return False
+            continue
+        if any(
+            committed_reference.get(field) != fresh_reference.get(field)
+            for field in ("model", "record_id", "company_id", "record_state")
+        ):
+            return False
+        committed_values = _snapshot_values(committed_snapshot)
+        fresh_values = _snapshot_values(fresh_snapshot)
+        if (
+            committed_values is None
+            or fresh_values is None
+            or set(committed_values) != set(fresh_values)
+        ):
+            return False
+        committed_rank = committed_values.get(rank_field)
+        fresh_rank = fresh_values.get(rank_field)
+        if (
+            isinstance(committed_rank, bool)
+            or not isinstance(committed_rank, int)
+            or committed_rank < 1
+            or isinstance(fresh_rank, bool)
+            or not isinstance(fresh_rank, int)
+            or fresh_rank < committed_rank
+        ):
+            return False
+        if fresh_rank == committed_rank:
+            if (
+                canonical_json(committed_reference)
+                != canonical_json(fresh_reference)
+                or _digest(committed_snapshot) != _digest(fresh_snapshot)
+            ):
+                return False
+            continue
+        if (
+            any(
+                committed_values[field] != fresh_values[field]
+                for field in set(committed_values)
+                - {rank_field, "write_uid", "write_date"}
+            )
+            or classic_read_many2one_id(fresh_values.get("write_uid"))
+            != operation.user_id
+        ):
+            return False
+        try:
+            committed_write_date = datetime.fromisoformat(
+                str(committed_values["write_date"])
+            )
+            fresh_write_date = datetime.fromisoformat(
+                str(fresh_values["write_date"])
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (
+            committed_write_date.tzinfo is not None
+            or fresh_write_date.tzinfo is not None
+            or fresh_write_date < committed_write_date
+            or committed_reference.get("record_fingerprint")
+            != _digest(committed_snapshot)
+            or fresh_reference.get("record_fingerprint")
+            != _digest(fresh_snapshot)
+        ):
+            return False
+    return True
+
+
 def _verification_evidence(
     operation: Operation,
     execution_evidence: Mapping[str, Any],
@@ -1851,9 +2025,17 @@ def _verification_evidence(
             for _snapshot, reference in fresh_pairs
             if reference is not None
         ]
-        if canonical_json(fresh_records) != canonical_json(
-            execution_evidence["odoo_records"]
-        ):
+        if operation.capability_id == "acct.refund.post_reconcile_origin.v1":
+            records_match = _refund_rank_records_match(
+                operation,
+                execution_evidence,
+                fresh_pairs,
+            )
+        else:
+            records_match = canonical_json(fresh_records) == canonical_json(
+                execution_evidence["odoo_records"]
+            )
+        if not records_match:
             raise OdooWriteBootstrapError(
                 "fresh Odoo readback differs from committed execution records"
             )
@@ -2086,6 +2268,41 @@ def _record_verification(
 
 def _commit(root_env: Any) -> None:
     root_env.cr.commit()
+
+
+def _empty_postcommit_boundary(root_env: Any) -> Any:
+    postcommit = getattr(getattr(root_env, "cr", None), "postcommit", None)
+    clear = getattr(postcommit, "clear", None)
+    data = getattr(postcommit, "data", None)
+    try:
+        callback_count = len(postcommit)
+    except (AttributeError, TypeError) as exc:
+        raise OdooWriteBootstrapError(
+            "Odoo postcommit boundary is unavailable"
+        ) from exc
+    if not callable(clear) or type(data) is not dict:
+        raise OdooWriteBootstrapError(
+            "Odoo postcommit boundary is unavailable"
+        )
+    if callback_count != 0 or data:
+        raise OdooWriteBootstrapError(
+            "Odoo postcommit boundary is not empty before business execution"
+        )
+    return postcommit
+
+
+def _discard_business_postcommit(postcommit: Any) -> None:
+    try:
+        postcommit.clear()
+        callback_count = len(postcommit)
+    except Exception as exc:
+        raise OdooWriteBootstrapError(
+            "business postcommit callbacks could not be discarded"
+        ) from exc
+    if callback_count != 0 or postcommit.data:
+        raise OdooWriteBootstrapError(
+            "business postcommit callbacks were not discarded"
+        )
 
 
 def _default_metadata_execution_scope() -> ContextManager[None]:
@@ -2584,6 +2801,7 @@ def execute_write_from_odoo_shell(
             "checks": list(live_precheck["checks"]),
             **dict(live_precheck["handler_details"]),
         }
+        business_postcommit = _empty_postcommit_boundary(root_env)
         try:
             with root_env.cr.savepoint():
                 with metadata_scope_factory():
@@ -2606,6 +2824,7 @@ def execute_write_from_odoo_shell(
                     secret=execution_secret,
                 )
         except Exception as exc:
+            _discard_business_postcommit(business_postcommit)
             execution_evidence = _failed_execution_evidence(operation, exc)
             with root_env.cr.savepoint():
                 execution_result, failed = _record_execution(

@@ -8,6 +8,7 @@ from odoo_accounting_cli_v3.contracts import ContractError
 from odoo_accounting_cli_v3.gateway import CapabilityGateway, GatewayError, RequestContext
 from odoo_accounting_cli_v3.receipts import ReceiptError, create_read_receipt, verify_read_receipt
 from odoo_accounting_cli_v3.registry import validate_registry
+from odoo_accounting_cli_v3.write_service import write_idempotency_scope
 
 
 REGISTRY_PATH = Path(__file__).resolve().parents[1] / "registry" / "capabilities.json"
@@ -78,6 +79,42 @@ def invoice_parameters(
         "posting_mode": "draft",
         "reference": f"invoice-{idempotency_key}",
         "lines": [invoice_line()],
+        "idempotency_key": idempotency_key,
+    }
+
+
+def refund_post_reconcile_parameters(idempotency_key: str):
+    return {
+        "company_id": 7,
+        "move_id": 904,
+        "expected_move_type": "out_refund",
+        "expected_origin_move_id": 901,
+        "expected_document_binding": "5" * 64,
+        "expected_document_binding_v2": "9" * 64,
+        "expected_business_binding": "6" * 64,
+        "expected_origin_document_binding": "1" * 64,
+        "expected_origin_document_binding_v2": "a" * 64,
+        "expected_origin_business_binding": "2" * 64,
+        "expected_source_refund_mode": "full",
+        "expected_partner_id": 101,
+        "expected_commercial_partner_id": 101,
+        "expected_journal_id": 5,
+        "expected_currency_id": 12,
+        "expected_refund_date": "2026-07-16",
+        "expected_total_amount": "100.00",
+        "expected_origin_total_amount": "100.00",
+        "expected_reconcile_amount": "100.00",
+        "expected_refund_payment_term_line_id": 9043,
+        "expected_origin_payment_term_line_id": 9013,
+        "expected_payment_term_account_id": 1201,
+        "expected_reconciliation_outcome": "full_origin_reversal",
+        "expected_refund_payment_state_after": "paid",
+        "expected_origin_payment_state_after": "reversed",
+        "expected_refund_residual_after": "0.00",
+        "expected_origin_residual_after": "0.00",
+        "expected_line_ids": [9041, 9043],
+        "expected_origin_line_ids": [9011, 9013],
+        "reason": "Post and reconcile the approved customer credit note",
         "idempotency_key": idempotency_key,
     }
 
@@ -175,6 +212,71 @@ class GatewayTest(unittest.TestCase):
             preview["semantic_precheck"]["computed"]["untaxed_line_subtotal"],
             "100.00",
         )
+
+    def test_refund_post_reconcile_parameters_survive_gateway_and_deduplicate(self) -> None:
+        parameters = refund_post_reconcile_parameters(
+            "post-reconcile-refund-904"
+        )
+        first = self.gateway.prepare(
+            context(),
+            operation_id="op-refund-post-1",
+            request_id="request-refund-post-1",
+            capability_id="acct.refund.post_reconcile_origin.v1",
+            parameters=parameters,
+        )
+
+        preview = self.gateway.preview(context(), first.operation_id)
+        second = self.gateway.prepare(
+            context(),
+            operation_id="op-refund-post-duplicate",
+            request_id="request-refund-post-duplicate",
+            capability_id="acct.refund.post_reconcile_origin.v1",
+            parameters=copy.deepcopy(parameters),
+        )
+
+        self.assertEqual(preview["parameters"], parameters)
+        self.assertEqual(second.operation_id, first.operation_id)
+
+    def test_refund_post_reconcile_scope_matches_durable_origin_identity(self) -> None:
+        capability = next(
+            item
+            for item in enabled_capabilities()
+            if item.id == "acct.refund.post_reconcile_origin.v1"
+        )
+        baseline = refund_post_reconcile_parameters("refund-scope-baseline")
+        same_origin_different_refund = {
+            **baseline,
+            "move_id": baseline["move_id"] + 1,
+        }
+        different_origin_same_refund = {
+            **baseline,
+            "expected_origin_move_id": baseline["expected_origin_move_id"] + 1,
+        }
+
+        gateway_scope = CapabilityGateway._idempotency_scope(
+            capability, baseline
+        )
+        self.assertEqual(
+            CapabilityGateway._idempotency_scope(
+                capability, same_origin_different_refund
+            ),
+            gateway_scope,
+        )
+        self.assertNotEqual(
+            CapabilityGateway._idempotency_scope(
+                capability, different_origin_same_refund
+            ),
+            gateway_scope,
+        )
+        for parameters in (
+            baseline,
+            same_origin_different_refund,
+            different_origin_same_refund,
+        ):
+            self.assertEqual(
+                CapabilityGateway._idempotency_scope(capability, parameters),
+                write_idempotency_scope(capability, parameters),
+            )
 
     def test_prepare_rejects_cross_field_accounting_error_before_persistence(self) -> None:
         parameters = invoice_parameters("invalid-due-date")
@@ -281,6 +383,7 @@ class GatewayTest(unittest.TestCase):
                 "acct.multicompany.consolidated_read.v1",
                 "acct.multicurrency.balance_read.v1",
                 "acct.refund.draft_cancel_eligibility.v1",
+                "acct.refund.post_reconcile_eligibility.v1",
                 "acct.registry.list.v1",
                 "acct.report.financial_read.v1",
                 "acct.tax.report_read.v1",

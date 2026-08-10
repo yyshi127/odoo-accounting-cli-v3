@@ -322,6 +322,57 @@ DEV264_READ_EVIDENCE_FOUNDATION_RELEASE_MEMBERS = frozenset(
         "tests/test_release_archive.py",
     }
 )
+DEV265_REFUND_POST_RELEASE_MEMBERS = frozenset(
+    {
+        ".github/workflows/quality.yml",
+        "README.md",
+        "VERSION",
+        "docs/CAPABILITY_AUDIT.md",
+        "docs/DEPLOYMENT.md",
+        "docs/PI_SCENARIO_ACCEPTANCE.md",
+        "docs/READ_EVIDENCE_INDEX.md",
+        "docs/RUNTIME_CONFIGURATION.md",
+        "docs/WRITE_CAPABILITY_STATUS.md",
+        "odoo_addons/odoo_accounting_cli_v3_control/__manifest__.py",
+        "odoo_addons/odoo_accounting_cli_v3_control/models/__init__.py",
+        "odoo_addons/odoo_accounting_cli_v3_control/models/refund_rank.py",
+        "pi_bridge/tests/odoo-v3-cli.test.mjs",
+        "registry/capabilities.json",
+        "src/odoo_accounting_cli_v3/cli.py",
+        "src/odoo_accounting_cli_v3/domain/write_semantics.py",
+        "src/odoo_accounting_cli_v3/gateway.py",
+        "src/odoo_accounting_cli_v3/odoo/executor.py",
+        "src/odoo_accounting_cli_v3/odoo/write_bootstrap.py",
+        "src/odoo_accounting_cli_v3/odoo/write_handlers.py",
+        "src/odoo_accounting_cli_v3/read_evidence_raw_v3.py",
+        "src/odoo_accounting_cli_v3/write_service.py",
+        "tests/fixtures/pi_scenarios.v1.json",
+        "tests/TEST.md",
+        "tests/test_accounting_metadata_guard.py",
+        "tests/test_cli.py",
+        "tests/test_cli_evidence.py",
+        "tests/test_dev251_report_read_evidence.py",
+        "tests/test_gateway.py",
+        "tests/test_odoo_approval_client.py",
+        "tests/test_odoo_approval_wizard.py",
+        "tests/test_odoo_control_addon.py",
+        "tests/test_odoo_executor.py",
+        "tests/test_odoo_session_client.py",
+        "tests/test_odoo_write_bootstrap.py",
+        "tests/test_odoo_write_handlers.py",
+        "tests/test_pi_scenario_gate.py",
+        "tests/test_read_evidence_raw_v3.py",
+        "tests/test_read_evidence_v3_linux_integration.py",
+        "tests/test_read_handler_static_safety.py",
+        "tests/test_recovery_contracts.py",
+        "tests/test_refund_rank_addon.py",
+        "tests/test_registry.py",
+        "tests/test_release_archive.py",
+        "tests/test_write_registry_contracts.py",
+        "tests/test_write_semantics.py",
+        "tests/test_write_service.py",
+    }
+)
 EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
     {
         "bin/odoo-accounting-cli-v3-effect-finalizer",
@@ -441,6 +492,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "tests/test_dev22_module_guard_postgres.py",
         "tests/test_dev22_module_guard_security_contract.py",
         "tests/test_odoo_release_binding.py",
+        "tests/test_refund_rank_addon.py",
         "tests/test_odoo_session_client.py",
         "tests/test_odoo_write_bootstrap.py",
         "tests/test_odoo_write_handlers.py",
@@ -476,6 +528,7 @@ WRITE_RUNTIME_RELEASE_MEMBERS = frozenset(
         "odoo_addons/odoo_accounting_cli_v3_control/models/mail_thread_projection.py",
         "odoo_addons/odoo_accounting_cli_v3_control/models/operation.py",
         "odoo_addons/odoo_accounting_cli_v3_control/models/release_binding.py",
+        "odoo_addons/odoo_accounting_cli_v3_control/models/refund_rank.py",
         "odoo_addons/odoo_accounting_cli_v3_control/models/session_client.py",
         "odoo_addons/odoo_accounting_cli_v3_control/security/ir.model.access.csv",
         "odoo_addons/odoo_accounting_cli_v3_control/security/odoo_accounting_cli_v3_security.xml",
@@ -507,6 +560,7 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
     | DEV262_READ_EVIDENCE_INDEX_RELEASE_MEMBERS
     | DEV263_READ_EVIDENCE_V3_RELEASE_MEMBERS
     | DEV264_READ_EVIDENCE_FOUNDATION_RELEASE_MEMBERS
+    | DEV265_REFUND_POST_RELEASE_MEMBERS
     | EFFECT_FINALIZER_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
@@ -515,6 +569,23 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
 
 
 class ReleaseArchiveTest(unittest.TestCase):
+    def test_dev265_refund_post_release_is_complete_and_versioned(self) -> None:
+        self.assertEqual(
+            (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip(),
+            "0.1.0.dev265",
+        )
+        missing_sources = {
+            name
+            for name in DEV265_REFUND_POST_RELEASE_MEMBERS
+            if not (PROJECT_ROOT / name).is_file()
+        }
+        self.assertFalse(missing_sources, sorted(missing_sources))
+        self.assertTrue(
+            DEV265_REFUND_POST_RELEASE_MEMBERS.issubset(
+                REQUIRED_WRITE_RELEASE_MEMBERS
+            )
+        )
+
     def test_dev264_read_evidence_foundations_are_in_the_release(self) -> None:
         for name in DEV264_READ_EVIDENCE_FOUNDATION_RELEASE_MEMBERS:
             self.assertTrue((PROJECT_ROOT / name).is_file(), name)

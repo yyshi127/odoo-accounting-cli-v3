@@ -386,6 +386,54 @@ def refund_draft_cancel_parameters() -> dict:
     }
 
 
+def refund_post_reconcile_parameters(
+    *, vendor: bool = False, partial: bool = False
+) -> dict:
+    refund_amount = "40.00" if partial else "100.00"
+    origin_residual_after = "60.00" if partial else "0.00"
+    return {
+        "company_id": 7,
+        "move_id": 884,
+        "expected_move_type": "in_refund" if vendor else "out_refund",
+        "expected_origin_move_id": 880,
+        "expected_document_binding": "3" * 64,
+        "expected_document_binding_v2": "7" * 64,
+        "expected_business_binding": "4" * 64,
+        "expected_origin_document_binding": "5" * 64,
+        "expected_origin_document_binding_v2": "8" * 64,
+        "expected_origin_business_binding": "6" * 64,
+        "expected_source_refund_mode": "partial" if partial else "full",
+        "expected_partner_id": 10,
+        "expected_commercial_partner_id": 10,
+        "expected_journal_id": 4,
+        "expected_currency_id": 12,
+        "expected_refund_date": "2026-07-16",
+        "expected_total_amount": refund_amount,
+        "expected_origin_total_amount": "100.00",
+        "expected_reconcile_amount": refund_amount,
+        "expected_refund_payment_term_line_id": 2202,
+        "expected_origin_payment_term_line_id": 2102,
+        "expected_payment_term_account_id": 20,
+        "expected_reconciliation_outcome": (
+            "partial_origin_reduction" if partial else "full_origin_reversal"
+        ),
+        "expected_refund_payment_state_after": "paid",
+        "expected_origin_payment_state_after": (
+            "partial" if partial else "reversed"
+        ),
+        "expected_refund_residual_after": "0.00",
+        "expected_origin_residual_after": origin_residual_after,
+        "expected_line_ids": [2201, 2202],
+        "expected_origin_line_ids": [2101, 2102],
+        "reason": "Post the linked refund and reconcile its origin",
+        "idempotency_key": (
+            "post-vendor-refund-884"
+            if vendor
+            else "post-customer-refund-884"
+        ),
+    }
+
+
 def recovery_parameters() -> dict:
     return {
         "company_id": 7,
@@ -447,6 +495,7 @@ VALID_CASES = {
     "acct.move.draft_cancel.v2": draft_cancel_v2_parameters,
     "acct.invoice.customer_post.v1": document_post_parameters,
     "acct.bill.vendor_post.v1": lambda: document_post_parameters(vendor=True),
+    "acct.refund.post_reconcile_origin.v1": refund_post_reconcile_parameters,
     "acct.refund.draft_cancel.v1": refund_draft_cancel_parameters,
     "acct.recovery.execute.v1": recovery_parameters,
     "acct.reconciliation.undo.v1": reconciliation_undo_parameters,
@@ -1152,6 +1201,165 @@ def test_refund_draft_cancel_semantics_reject_unbound_or_overlapping_graphs(
 
     with pytest.raises(WriteSemanticError, match=error):
         validate_write_semantics("acct.refund.draft_cancel.v1", parameters)
+
+
+@pytest.mark.parametrize(
+    ("vendor", "partial"),
+    ((False, False), (True, False), (False, True), (True, True)),
+)
+def test_refund_post_reconcile_semantics_bind_exact_outcome(vendor, partial):
+    parameters = refund_post_reconcile_parameters(
+        vendor=vendor, partial=partial
+    )
+
+    result = validate_write_semantics(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+
+    assert result["computed"]["expected_source_refund_mode"] == (
+        "partial" if partial else "full"
+    )
+    assert result["computed"]["expected_reconciliation_outcome"] == (
+        "partial_origin_reduction" if partial else "full_origin_reversal"
+    )
+    assert result["computed"]["expected_reconcile_amount"] == (
+        "40.00" if partial else "100.00"
+    )
+    assert result["computed"]["expected_origin_residual_after"] == (
+        "60.00" if partial else "0.00"
+    )
+    assert result["computed"]["expected_line_count"] == 2
+    assert result["computed"]["expected_origin_line_count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error"),
+    (
+        (
+            lambda value: value.update(expected_move_type="out_invoice"),
+            "expected_move_type",
+        ),
+        (
+            lambda value: value.update(expected_source_refund_mode="full"),
+            "full",
+        ),
+        (
+            lambda value: value.update(
+                expected_reconciliation_outcome="full_origin_reversal"
+            ),
+            "reconciliation_outcome",
+        ),
+        (
+            lambda value: value.update(expected_reconcile_amount="39.99"),
+            "reconcile_amount",
+        ),
+        (
+            lambda value: value.update(expected_total_amount="100.00"),
+            "less than",
+        ),
+        (
+            lambda value: value.update(expected_origin_residual_after="59.99"),
+            "origin_residual_after",
+        ),
+        (
+            lambda value: value.update(
+                expected_refund_payment_state_after="not_paid"
+            ),
+            "refund_payment_state_after",
+        ),
+        (
+            lambda value: value.update(
+                expected_origin_payment_state_after="reversed"
+            ),
+            "origin_payment_state_after",
+        ),
+        (
+            lambda value: value.update(expected_refund_residual_after="0.01"),
+            "refund_residual_after",
+        ),
+        (
+            lambda value: value.update(
+                expected_refund_payment_term_line_id=2102
+            ),
+            "must belong",
+        ),
+        (
+            lambda value: value.update(
+                expected_origin_payment_term_line_id=2202
+            ),
+            "must belong",
+        ),
+        (
+            lambda value: value.update(
+                expected_payment_term_account_id=0
+            ),
+            "expected_payment_term_account_id",
+        ),
+        (
+            lambda value: value.update(
+                expected_commercial_partner_id=0
+            ),
+            "expected_commercial_partner_id",
+        ),
+        (
+            lambda value: value.update(expected_line_ids=[2202, 2201]),
+            "sorted",
+        ),
+        (
+            lambda value: value.update(
+                expected_origin_line_ids=[2101, 2202]
+            ),
+            "overlap",
+        ),
+    ),
+)
+def test_partial_refund_post_reconcile_semantics_reject_inconsistent_graph(
+    mutate, error
+):
+    parameters = refund_post_reconcile_parameters(partial=True)
+    mutate(parameters)
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics(
+            "acct.refund.post_reconcile_origin.v1", parameters
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    (
+        (
+            "expected_reconciliation_outcome",
+            "partial_origin_reduction",
+            "reconciliation_outcome",
+        ),
+        (
+            "expected_origin_payment_state_after",
+            "partial",
+            "origin_payment_state_after",
+        ),
+        (
+            "expected_origin_residual_after",
+            "0.01",
+            "origin_residual_after",
+        ),
+        (
+            "expected_total_amount",
+            "99.99",
+            "full",
+        ),
+    ),
+)
+def test_full_refund_post_reconcile_semantics_reject_partial_outcome(
+    field, value, error
+):
+    parameters = refund_post_reconcile_parameters()
+    parameters[field] = value
+
+    with pytest.raises(WriteSemanticError, match=error):
+        validate_write_semantics(
+            "acct.refund.post_reconcile_origin.v1", parameters
+        )
 
 
 def test_depreciation_requires_real_asset_move_reference():

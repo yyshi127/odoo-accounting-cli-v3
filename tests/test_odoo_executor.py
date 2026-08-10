@@ -512,6 +512,9 @@ def draft_refund_graph(
     origin_quantity="1",
     origin_price_unit="100",
     origin_total="100",
+    origin_invoice_date="2026-07-13",
+    origin_accounting_date="2026-07-13",
+    refund_date="2026-07-13",
 ):
     origin_id = 6101
     refund_id = 6102
@@ -541,8 +544,8 @@ def draft_refund_graph(
         id=6301,
         company_id=company,
         active=True,
-        customer_rank=0,
-        supplier_rank=0,
+        customer_rank=0 if vendor else 1,
+        supplier_rank=1 if vendor else 0,
     )
     commercial_partner.commercial_partner_id = commercial_partner
     partner = (
@@ -550,8 +553,8 @@ def draft_refund_graph(
             id=6302,
             company_id=company,
             active=True,
-            customer_rank=0,
-            supplier_rank=0,
+            customer_rank=0 if vendor else 1,
+            supplier_rank=1 if vendor else 0,
             commercial_partner_id=commercial_partner,
         )
         if child_contact
@@ -574,12 +577,14 @@ def draft_refund_graph(
         company_ids=[company],
         account_type="expense" if vendor else "income",
         deprecated=False,
+        reconcile=False,
     )
     term_account = SimpleRecord(
         id=6602,
         company_ids=[company],
         account_type="liability_payable" if vendor else "asset_receivable",
         deprecated=False,
+        reconcile=True,
     )
     origin_lines = [
         SimpleRecord(
@@ -638,7 +643,7 @@ def draft_refund_graph(
             ),
             matching_number=False,
             deductible_amount="100",
-            date_maturity=date(2026, 7, 13),
+            date_maturity=date.fromisoformat(origin_invoice_date),
             reconciled=False,
         ),
     ]
@@ -707,16 +712,16 @@ def draft_refund_graph(
             ),
             matching_number=False,
             deductible_amount="100",
-            date_maturity=date(2026, 7, 13),
+            date_maturity=date.fromisoformat(refund_date),
             reconciled=False,
         ),
     ]
     origin_parameters = {
         "company_id": company.id,
         "partner_id": partner.id,
-        "invoice_date": "2026-07-13",
-        "accounting_date": "2026-07-13",
-        "due_date": "2026-07-13",
+        "invoice_date": origin_invoice_date,
+        "accounting_date": origin_accounting_date,
+        "due_date": origin_invoice_date,
         "currency_id": currency.id,
         "journal_id": journal.id,
         "posting_mode": origin_posting_mode,
@@ -779,9 +784,9 @@ def draft_refund_graph(
         amount_tax="0.00",
         amount_total=origin_amount_text,
         amount_residual=origin_amount_text,
-        invoice_date=date(2026, 7, 13),
-        date=date(2026, 7, 13),
-        invoice_date_due=date(2026, 7, 13),
+        invoice_date=date.fromisoformat(origin_invoice_date),
+        date=date.fromisoformat(origin_accounting_date),
+        invoice_date_due=date.fromisoformat(origin_invoice_date),
         ref=origin_parameters[
             (
                 "vendor_reference"
@@ -818,7 +823,7 @@ def draft_refund_graph(
             else "customer_credit_note"
         ),
         "refund_mode": refund_mode,
-        "refund_date": "2026-07-13",
+        "refund_date": refund_date,
         "journal_id": journal.id,
         "currency_id": currency.id,
         "expected_total_amount": refund_total,
@@ -848,9 +853,9 @@ def draft_refund_graph(
         currency_id=currency,
         partner_id=partner,
         commercial_partner_id=commercial_partner,
-        invoice_date=date(2026, 7, 13),
-        date=date(2026, 7, 13),
-        invoice_date_due=date(2026, 7, 13),
+        invoice_date=date.fromisoformat(refund_date),
+        date=date.fromisoformat(refund_date),
+        invoice_date_due=date.fromisoformat(refund_date),
         invoice_payment_term_id=False,
         payment_state="not_paid",
         amount_untaxed=refund_amount_text,
@@ -869,6 +874,8 @@ def draft_refund_graph(
         odoo_cli_v3_document_binding=refund_document_binding,
         odoo_cli_v3_document_binding_v2=refund_document_binding_v2_value,
         odoo_cli_v3_business_binding=refund_business_binding,
+        _affect_tax_report=lambda: False,
+        _get_violated_lock_dates=lambda _date, _affects_tax: [],
     )
     origin.reversal_move_ids = [refund]
     return origin, refund
@@ -3814,6 +3821,367 @@ class OdooReadExecutorTest(unittest.TestCase):
         executor.verify(
             context(), report_capability, requested, result, "c" * 64, "d" * 64
         )
+
+    def test_refund_post_reconcile_eligibility_binds_full_and_partial_outcomes(
+        self,
+    ) -> None:
+        cases = (
+            ("out_refund", "full", "100.00", "0.00", "reversed"),
+            ("in_refund", "full", "100.00", "0.00", "reversed"),
+            ("out_refund", "partial", "40.00", "60.00", "partial"),
+            ("in_refund", "partial", "40.00", "60.00", "partial"),
+        )
+        for (
+            move_type,
+            refund_mode,
+            refund_total,
+            origin_residual_after,
+            origin_payment_state_after,
+        ) in cases:
+            with self.subTest(move_type=move_type, refund_mode=refund_mode):
+                company = Company()
+                origin, refund = draft_refund_graph(
+                    company,
+                    move_type=move_type,
+                    refund_mode=refund_mode,
+                )
+                env = MoveEnvironment([origin, refund])
+                cap = synthetic_read_capability(
+                    "acct.refund.post_reconcile_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 6102,
+                    "expected_move_type": move_type,
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                validate_value(result, cap.data["output_schema"])
+                self.assertIs(result["eligible"], True)
+                self.assertEqual(result["eligibility_failures"], [])
+                self.assertEqual(
+                    result["candidate_write_capability_id"],
+                    "acct.refund.post_reconcile_origin.v1",
+                )
+                self.assertEqual(
+                    result["required_user_parameters"],
+                    ["idempotency_key", "reason"],
+                )
+                self.assertEqual(
+                    result["write_parameters"],
+                    {
+                        "company_id": 7,
+                        "move_id": 6102,
+                        "expected_move_type": move_type,
+                        "expected_origin_move_id": 6101,
+                        "expected_document_binding": (
+                            refund.odoo_cli_v3_document_binding
+                        ),
+                        "expected_document_binding_v2": (
+                            refund.odoo_cli_v3_document_binding_v2
+                        ),
+                        "expected_business_binding": (
+                            refund.odoo_cli_v3_business_binding
+                        ),
+                        "expected_origin_document_binding": (
+                            origin.odoo_cli_v3_document_binding
+                        ),
+                        "expected_origin_document_binding_v2": (
+                            origin.odoo_cli_v3_document_binding_v2
+                        ),
+                        "expected_origin_business_binding": (
+                            origin.odoo_cli_v3_business_binding
+                        ),
+                        "expected_source_refund_mode": refund_mode,
+                        "expected_partner_id": 6301,
+                        "expected_commercial_partner_id": 6301,
+                        "expected_journal_id": 6201,
+                        "expected_currency_id": 12,
+                        "expected_refund_date": "2026-07-13",
+                        "expected_total_amount": refund_total,
+                        "expected_origin_total_amount": "100.00",
+                        "expected_reconcile_amount": refund_total,
+                        "expected_refund_payment_term_line_id": 6502,
+                        "expected_origin_payment_term_line_id": 6402,
+                        "expected_payment_term_account_id": 6602,
+                        "expected_reconciliation_outcome": (
+                            "partial_origin_reduction"
+                            if refund_mode == "partial"
+                            else "full_origin_reversal"
+                        ),
+                        "expected_refund_payment_state_after": "paid",
+                        "expected_origin_payment_state_after": (
+                            origin_payment_state_after
+                        ),
+                        "expected_refund_residual_after": "0.00",
+                        "expected_origin_residual_after": (
+                            origin_residual_after
+                        ),
+                        "expected_line_ids": [6501, 6502],
+                        "expected_origin_line_ids": [6401, 6402],
+                    },
+                )
+                executor.verify(
+                    context(), cap, requested, result, "c" * 64, "d" * 64
+                )
+
+    def test_refund_post_reconcile_eligibility_binds_selected_and_commercial_partner(
+        self,
+    ) -> None:
+        company = Company()
+        origin, refund = draft_refund_graph(
+            company,
+            child_contact=True,
+        )
+        env = MoveEnvironment([origin, refund])
+        cap = synthetic_read_capability(
+            "acct.refund.post_reconcile_eligibility.v1"
+        )
+        executor = self.executor(env=env, registry=registry_with(cap))
+        requested = {
+            "company_id": 7,
+            "move_id": 6102,
+            "expected_move_type": "out_refund",
+        }
+
+        result = executor(
+            context(), cap, requested, "c" * 64, "d" * 64
+        )
+
+        validate_value(result, cap.data["output_schema"])
+        self.assertIs(result["eligible"], True)
+        self.assertEqual(result["write_parameters"]["expected_partner_id"], 6302)
+        self.assertEqual(
+            result["write_parameters"]["expected_commercial_partner_id"],
+            6301,
+        )
+        executor.verify(
+            context(), cap, requested, result, "c" * 64, "d" * 64
+        )
+
+    def test_refund_post_reconcile_eligibility_accepts_rank_from_posted_origin(
+        self,
+    ) -> None:
+        for move_type, rank_field in (
+            ("out_refund", "customer_rank"),
+            ("in_refund", "supplier_rank"),
+        ):
+            with self.subTest(move_type=move_type, rank_field=rank_field):
+                company = Company()
+                origin, refund = draft_refund_graph(
+                    company,
+                    move_type=move_type,
+                )
+                setattr(refund.partner_id, rank_field, 2)
+                env = MoveEnvironment([origin, refund])
+                cap = synthetic_read_capability(
+                    "acct.refund.post_reconcile_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 6102,
+                    "expected_move_type": move_type,
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                validate_value(result, cap.data["output_schema"])
+                self.assertIs(result["eligible"], True)
+                self.assertEqual(result["eligibility_failures"], [])
+                self.assertEqual(
+                    result["write_parameters"]["expected_origin_move_id"],
+                    6101,
+                )
+
+    def test_refund_post_reconcile_eligibility_uses_origin_accounting_date(
+        self,
+    ) -> None:
+        for origin_accounting_date, expected_eligible in (
+            ("2026-07-14", False),
+            ("2026-07-12", True),
+        ):
+            with self.subTest(
+                origin_accounting_date=origin_accounting_date,
+                expected_eligible=expected_eligible,
+            ):
+                company = Company()
+                origin, refund = draft_refund_graph(
+                    company,
+                    origin_invoice_date="2026-07-10",
+                    origin_accounting_date=origin_accounting_date,
+                    refund_date="2026-07-13",
+                )
+                env = MoveEnvironment([origin, refund])
+                cap = synthetic_read_capability(
+                    "acct.refund.post_reconcile_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 6102,
+                    "expected_move_type": "out_refund",
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                validate_value(result, cap.data["output_schema"])
+                self.assertIs(result["eligible"], expected_eligible)
+                if expected_eligible:
+                    self.assertEqual(result["eligibility_failures"], [])
+                    self.assertEqual(
+                        result["write_parameters"]["expected_refund_date"],
+                        "2026-07-13",
+                    )
+                else:
+                    self.assertIsNone(result["write_parameters"])
+                    self.assertIn(
+                        "refund_date_precedes_or_lacks_origin_date",
+                        result["eligibility_failures"],
+                    )
+
+    def test_refund_post_reconcile_eligibility_rejects_incompatible_graphs(
+        self,
+    ) -> None:
+        def full_amount_drift(origin, refund):
+            refund.amount_total = "40.00"
+            refund.amount_residual = "40.00"
+
+        def wrong_term_line(_origin, refund):
+            refund.line_ids[1].display_type = "product"
+
+        def prior_reconciliation(origin, _refund):
+            origin.line_ids[1].matched_debit_ids = [SimpleRecord(id=7001)]
+
+        def nonreconcilable_term(_origin, refund):
+            refund.line_ids[1].account_id.reconcile = False
+
+        def reconcilable_business_account(_origin, refund):
+            refund.line_ids[0].account_id.reconcile = True
+
+        def cash_business_account(_origin, refund):
+            refund.line_ids[0].account_id.account_type = "asset_cash"
+
+        def violated_lock_date(_origin, refund):
+            refund._get_violated_lock_dates = (
+                lambda _date, _affects_tax: ["hard_lock_date"]
+            )
+
+        def missing_posted_origin_rank(_origin, refund):
+            refund.partner_id.customer_rank = 0
+
+        cases = (
+            (
+                "full_amount_drift",
+                "full",
+                "100",
+                full_amount_drift,
+                "source_refund_mode_or_amount_incompatible",
+            ),
+            (
+                "partial_not_less_than_origin",
+                "partial",
+                "40",
+                lambda _origin, _refund: None,
+                "partial_refund_must_reduce_origin",
+            ),
+            (
+                "wrong_term_line",
+                "full",
+                "100",
+                wrong_term_line,
+                "payment_term_graph_not_exact",
+            ),
+            (
+                "prior_reconciliation",
+                "full",
+                "100",
+                prior_reconciliation,
+                "refund_or_origin_already_reconciled",
+            ),
+            (
+                "nonreconcilable_term",
+                "full",
+                "100",
+                nonreconcilable_term,
+                "payment_term_account_not_reconcilable",
+            ),
+            (
+                "reconcilable_business_account",
+                "full",
+                "100",
+                reconcilable_business_account,
+                "nonterm_account_reconciliation_unsafe",
+            ),
+            (
+                "cash_business_account",
+                "full",
+                "100",
+                cash_business_account,
+                "nonterm_account_reconciliation_unsafe",
+            ),
+            (
+                "violated_lock_date",
+                "full",
+                "100",
+                violated_lock_date,
+                "effective_lock_date_violated",
+            ),
+            (
+                "missing_posted_origin_rank",
+                "full",
+                "100",
+                missing_posted_origin_rank,
+                "posting_partner_commercial_rank_or_scope_invalid",
+            ),
+        )
+        for label, refund_mode, origin_total, mutate, failure in cases:
+            with self.subTest(label=label):
+                company = Company()
+                origin, refund = draft_refund_graph(
+                    company,
+                    refund_mode=refund_mode,
+                    origin_total=origin_total,
+                )
+                mutate(origin, refund)
+                env = MoveEnvironment([origin, refund])
+                cap = synthetic_read_capability(
+                    "acct.refund.post_reconcile_eligibility.v1"
+                )
+                executor = self.executor(
+                    env=env, registry=registry_with(cap)
+                )
+                requested = {
+                    "company_id": 7,
+                    "move_id": 6102,
+                    "expected_move_type": "out_refund",
+                }
+
+                result = executor(
+                    context(), cap, requested, "c" * 64, "d" * 64
+                )
+
+                validate_value(result, cap.data["output_schema"])
+                self.assertIs(result["eligible"], False)
+                self.assertIsNone(result["write_parameters"])
+                self.assertIn(failure, result["eligibility_failures"])
+                executor.verify(
+                    context(), cap, requested, result, "c" * 64, "d" * 64
+                )
 
 
 if __name__ == "__main__":

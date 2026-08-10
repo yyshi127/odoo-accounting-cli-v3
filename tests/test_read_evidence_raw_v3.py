@@ -604,10 +604,10 @@ def _validate_with_scope(
 @pytest.mark.parametrize(
     ("kind", "expected_case_count"),
     (
-        ("accounting_oracle", 12),
-        ("live_odoo", 12),
-        ("release_identity", 12),
-        ("security_negative", 60),
+        ("accounting_oracle", 13),
+        ("live_odoo", 13),
+        ("release_identity", 13),
+        ("security_negative", 65),
     ),
 )
 def test_full_raw_contracts_are_structurally_valid_but_not_trusted(
@@ -624,7 +624,7 @@ def test_full_raw_contracts_are_structurally_valid_but_not_trusted(
     assert result["oracle_execution_attested"] is False
     assert "goal_admissible" not in result
     assert result["evidence_kind"] == kind
-    assert result["capability_count"] == 12
+    assert result["capability_count"] == 13
     assert result["case_count"] == expected_case_count
     assert result["raw_node_count"] > expected_case_count
     assert result["raw_size_bytes"] > 0
@@ -657,7 +657,7 @@ def test_public_api_exposes_no_source_trust_promotion_hook() -> None:
 def test_release_registry_fixtures_conform_to_real_contracts(
     capability_id: str,
 ) -> None:
-    assert len(READ_CAPABILITIES) == 12
+    assert len(READ_CAPABILITIES) == 13
     capability = READ_CAPABILITIES[capability_id]
     execution = _execution(capability_id)
     validate_value(
@@ -937,6 +937,10 @@ def test_multicompany_company_payload_must_exactly_cover_request() -> None:
         ),
         (
             "acct.refund.draft_cancel_eligibility.v1",
+            ("target", "origin", "company_id"),
+        ),
+        (
+            "acct.refund.post_reconcile_eligibility.v1",
             ("target", "origin", "company_id"),
         ),
     ),

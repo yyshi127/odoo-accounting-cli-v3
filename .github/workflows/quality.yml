@@ -84,6 +84,117 @@ jobs:
           PY
       - run: python tools/check_source_boundary.py
 
+  dev265-refund-post-contracts:
+    name: Dev265 refund post/reconcile contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the test runtime
+        run: python -m pip install -e ".[test]"
+      - name: Prove the exact Dev265 refund post/reconcile slice
+        shell: bash
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/dev265-refund-post.xml"
+          expression='refund_post or post_reconcile or refund_rank or dev265 or registry_audit_reports_complete_contract or exact_write_capability_set_and_safety_gates_remain_closed or write_inputs_have_exact_complete_fields or write_outputs_share_one_strict_auditable_shape or all_write_examples_validate or document_and_refund_metadata_match or registered_write_capabilities_are_bound or control_addon_is_odoo_19_scoped or current_cli_readiness_requires_a_new_protocol or full_raw_contracts_are_structurally_valid or capability_coverage_and_order_are_exact or policy_covers_every_staged_or_enabled_read_capability or read_entrypoint_has_exact_reviewed_transitive_import_closure or trusted_read_handlers_have_no_write_escape_calls_or_network_imports or bootstrap_source_and_public_read_boundary_are_pinned or clean_commit_build_is_deterministic or document_binding_v2_static_contract_and_addon_patch_version or addon_registers_private_approval_client_without_acl_or_controller or approval_entry_is_wizard_only_and_has_no_bare_client_rpc or manifest_init_and_acl_keep_client_internal'
+          python -m pytest -q -p no:cacheprovider --junitxml="$report" \
+            tests/test_registry.py \
+            tests/test_write_registry_contracts.py \
+            tests/test_cli.py \
+            tests/test_cli_evidence.py \
+            tests/test_gateway.py \
+            tests/test_write_service.py \
+            tests/test_write_semantics.py \
+            tests/test_odoo_executor.py \
+            tests/test_odoo_write_handlers.py \
+            tests/test_odoo_write_bootstrap.py \
+            tests/test_refund_rank_addon.py \
+            tests/test_odoo_control_addon.py \
+            tests/test_accounting_metadata_guard.py \
+            tests/test_odoo_approval_client.py \
+            tests/test_odoo_approval_wizard.py \
+            tests/test_odoo_session_client.py \
+            tests/test_pi_scenario_gate.py \
+            tests/test_recovery_contracts.py \
+            tests/test_read_evidence_raw_v3.py \
+            tests/test_dev251_report_read_evidence.py \
+            tests/test_read_handler_static_safety.py \
+            tests/test_release_archive.py \
+            -k "$expression"
+          python - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          expected_counts = {
+              "test_accounting_metadata_guard": 1,
+              "test_cli": 2,
+              "test_cli_evidence": 2,
+              "test_dev251_report_read_evidence": 1,
+              "test_gateway": 2,
+              "test_odoo_approval_client": 1,
+              "test_odoo_approval_wizard": 1,
+              "test_odoo_control_addon": 1,
+              "test_odoo_executor": 5,
+              "test_odoo_session_client": 1,
+              "test_odoo_write_bootstrap": 9,
+              "test_odoo_write_handlers": 26,
+              "test_pi_scenario_gate": 2,
+              "test_read_evidence_raw_v3": 7,
+              "test_read_handler_static_safety": 4,
+              "test_recovery_contracts": 2,
+              "test_refund_rank_addon": 16,
+              "test_registry": 1,
+              "test_release_archive": 2,
+              "test_write_registry_contracts": 6,
+              "test_write_semantics": 24,
+              "test_write_service": 1,
+          }
+
+          def exact_module(classname):
+              parts = classname.split(".")
+              matches = [module for module in expected_counts if module in parts]
+              return matches[0] if len(matches) == 1 else None
+
+          observed_counts = {
+              module: sum(
+                  exact_module(case.get("classname", "")) == module
+                  for case in tests
+              )
+              for module in expected_counts
+          }
+          unclassified = [
+              case.get("classname", "")
+              for case in tests
+              if exact_module(case.get("classname", "")) is None
+          ]
+          if (
+              len(tests) != 117
+              or observed_counts != expected_counts
+              or unclassified
+              or failures
+              or errors
+              or skipped
+          ):
+              raise SystemExit(
+                  "Dev265 refund post/reconcile gate is incomplete: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)} "
+                  f"observed_counts={observed_counts} "
+                  f"expected_counts={expected_counts} "
+                  f"unclassified={unclassified}"
+              )
+          print("dev265_refund_post_contract_tests=117")
+          PY
+
   dev9-linux-runtime:
     name: Dev9 Linux UDS and systemd evidence
     runs-on: ubuntu-latest
@@ -878,11 +989,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e ".[test]"
-      - name: Verify the Dev264 read-evidence boundary as Linux root
+      - name: Verify the Dev265 read-evidence boundary as Linux root
         shell: bash
         run: |
           set -euo pipefail
-          report="$RUNNER_TEMP/dev264-read-evidence-root.xml"
+          report="$RUNNER_TEMP/dev265-read-evidence-root.xml"
           sudo "$(command -v python)" -m pytest -q -rs -p no:cacheprovider \
             --junitxml="$report" \
             tests/test_read_evidence_admission.py \
@@ -903,7 +1014,7 @@ jobs:
           expected_counts = {
               "test_read_evidence_admission": 67,
               "test_read_evidence_publication": 50,
-              "test_read_evidence_raw_v3": 66,
+              "test_read_evidence_raw_v3": 68,
               "test_read_evidence_v3": 61,
               "test_read_evidence_v3_linux_integration": 1,
               "test_sshsig": 16,
@@ -943,7 +1054,7 @@ jobs:
                   skipped_node = case.find("skipped")
                   if skipped_node is not None:
                       print(
-                          "dev264_read_evidence_skipped="
+                          "dev265_read_evidence_skipped="
                           f"{case.get('classname', '')}.{case.get('name', '')}:"
                           f"{skipped_node.get('message', '')}",
                           file=sys.stderr,
@@ -957,20 +1068,20 @@ jobs:
               or errors
           ):
               raise SystemExit(
-                  "Dev264 read-evidence root gate is incomplete: "
+                  "Dev265 read-evidence root gate is incomplete: "
                   f"tests={len(tests)} skipped={len(skipped)} "
                   f"failures={len(failures)} errors={len(errors)} "
                   f"observed_counts={observed_counts} "
                   f"expected_counts={expected_counts} "
                   f"unclassified={unclassified}"
               )
-          print("dev264_read_evidence_admission_root_tests=67")
-          print("dev264_read_evidence_publication_root_tests=50")
-          print("dev264_read_evidence_raw_v3_root_tests=66")
-          print("dev264_read_evidence_v3_root_tests=61")
-          print("dev264_read_evidence_v3_linux_integration_root_tests=1")
-          print("dev264_sshsig_root_tests=16")
-          print("dev264_read_evidence_root_tests=261")
+          print("dev265_read_evidence_admission_root_tests=67")
+          print("dev265_read_evidence_publication_root_tests=50")
+          print("dev265_read_evidence_raw_v3_root_tests=68")
+          print("dev265_read_evidence_v3_root_tests=61")
+          print("dev265_read_evidence_v3_linux_integration_root_tests=1")
+          print("dev265_sshsig_root_tests=16")
+          print("dev265_read_evidence_root_tests=263")
           PY
       - name: Verify the tracked dev8 tool manifest and embedded Python
         run: python deployment/dev8/check_toolchain.py
@@ -2053,10 +2164,21 @@ jobs:
           "$runtime_cli" registry list \
             > registry-list.json 2> registry-list.stderr
           test ! -s registry-list.stderr
+          "$runtime_cli" registry audit \
+            > registry-audit.json 2> registry-audit.stderr
+          test ! -s registry-audit.stderr
           "$runtime_cli" registry get \
             --capability-id acct.gl.trial_balance.v1 \
             > registry-get.json 2> registry-get.stderr
           test ! -s registry-get.stderr
+          "$runtime_cli" registry get \
+            --capability-id acct.refund.post_reconcile_eligibility.v1 \
+            > refund-post-read.json 2> refund-post-read.stderr
+          test ! -s refund-post-read.stderr
+          "$runtime_cli" registry get \
+            --capability-id acct.refund.post_reconcile_origin.v1 \
+            > refund-post-write.json 2> refund-post-write.stderr
+          test ! -s refund-post-write.stderr
 
           set +e
           "$runtime_cli" registry get \
@@ -2118,16 +2240,32 @@ jobs:
           from pathlib import Path
 
           listed = json.loads(Path("registry-list.json").read_text("utf-8"))
+          audited = json.loads(Path("registry-audit.json").read_text("utf-8"))
           fetched = json.loads(Path("registry-get.json").read_text("utf-8"))
+          refund_read = json.loads(Path("refund-post-read.json").read_text("utf-8"))
+          refund_write = json.loads(Path("refund-post-write.json").read_text("utf-8"))
           unknown = json.loads(Path("unknown.stderr").read_text("utf-8"))
           operation = json.loads(Path("operation.stderr").read_text("utf-8"))
           capabilities = listed["data"]["capabilities"]
+          by_id = {item["id"]: item for item in capabilities}
           assert listed["ok"] is True
           assert listed["command"] == "registry.list"
-          assert listed["data"]["count"] == len(capabilities) > 0
+          assert listed["data"]["count"] == len(capabilities) == 37
+          assert sum(item["access"] == "read" for item in capabilities) == 13
+          assert sum(item["access"] == "write" for item in capabilities) == 24
           assert [item["id"] for item in capabilities] == sorted(
               item["id"] for item in capabilities
           )
+          assert all(
+              "production" not in item.get("enabled_environments", [])
+              for item in capabilities
+          )
+          assert audited["ok"] is True
+          assert audited["command"] == "registry.audit"
+          assert audited["data"]["total_count"] == 37
+          assert audited["data"]["access_counts"] == {"read": 13, "write": 24}
+          assert audited["data"]["production_promotion_allowed"] is False
+          assert audited["data"]["real_odoo_write_performed"] is False
           assert fetched["ok"] is True
           assert fetched["data"]["capability"]["id"] == (
               "acct.gl.trial_balance.v1"
@@ -2135,6 +2273,41 @@ jobs:
           assert fetched["data"]["registry_digest"] == (
               listed["data"]["registry_digest"]
           )
+          assert refund_read["ok"] is True
+          assert refund_read["data"]["registry_digest"] == (
+              listed["data"]["registry_digest"]
+          )
+          assert refund_read["data"]["capability"] == by_id[
+              "acct.refund.post_reconcile_eligibility.v1"
+          ]
+          assert refund_read["data"]["capability"]["access"] == "read"
+          assert refund_read["data"]["capability"]["evidence"] == {
+              "level": "contract_tested",
+              "receipts": [],
+          }
+          assert refund_read["data"]["capability"]["staged_environments"] == [
+              "test"
+          ]
+          assert refund_read["data"]["capability"]["enabled_environments"] == []
+          assert refund_write["ok"] is True
+          assert refund_write["data"]["registry_digest"] == (
+              listed["data"]["registry_digest"]
+          )
+          assert refund_write["data"]["capability"] == by_id[
+              "acct.refund.post_reconcile_origin.v1"
+          ]
+          assert refund_write["data"]["capability"]["access"] == "write"
+          assert refund_write["data"]["capability"]["risk_level"] == "critical"
+          assert refund_write["data"]["capability"]["approval"]["required"] is True
+          assert refund_write["data"]["capability"]["idempotency"]["required"] is True
+          assert refund_write["data"]["capability"]["evidence"] == {
+              "level": "declared",
+              "receipts": [],
+          }
+          assert refund_write["data"]["capability"].get(
+              "staged_environments", []
+          ) == []
+          assert refund_write["data"]["capability"]["enabled_environments"] == []
           assert unknown["ok"] is False
           assert unknown["command"] == "registry.get"
           assert unknown["error"]["code"] == "capability_not_found"

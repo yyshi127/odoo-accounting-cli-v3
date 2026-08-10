@@ -74,6 +74,7 @@ READ_CAPABILITY_IDS = [
     "acct.multicompany.consolidated_read.v1",
     "acct.multicurrency.balance_read.v1",
     "acct.refund.draft_cancel_eligibility.v1",
+    "acct.refund.post_reconcile_eligibility.v1",
     "acct.registry.list.v1",
     "acct.report.financial_read.v1",
     "acct.tax.report_read.v1",
@@ -109,9 +110,10 @@ WRITE_CAPABILITY_IDS = [
     "acct.recovery.execute.v1",
     "acct.refund.create.v1",
     "acct.refund.draft_cancel.v1",
+    "acct.refund.post_reconcile_origin.v1",
 ]
-EXPECTED_READ_CAPABILITY_COUNT = 12
-EXPECTED_WRITE_CAPABILITY_COUNT = 23
+EXPECTED_READ_CAPABILITY_COUNT = 13
+EXPECTED_WRITE_CAPABILITY_COUNT = 24
 
 
 def test_cli_readiness_fixtures_are_the_exact_current_capability_inventory():
@@ -361,12 +363,15 @@ def _ready_pi_scenario_report(
     package_sha256: str = "4" * 64,
     registry_digest_value: str = "4" * 64,
 ) -> Path:
+    helper = PiScenarioGateTest()
+    helper.setUp()
+    scenario_counts = helper._scenario_counts()
     gate_denominators = {
-        "F01": 43,
-        "F02": 43,
-        "F03": 36,
-        "F04": 21,
-        "F05": 43,
+        "F01": scenario_counts["total"],
+        "F02": scenario_counts["total"],
+        "F03": scenario_counts["executable"],
+        "F04": scenario_counts["write"],
+        "F05": scenario_counts["total"],
     }
     gates = {
         gate_id: {
@@ -417,18 +422,18 @@ def _ready_pi_scenario_report(
         "run_id": "pi-run-1",
         "runtime_evidence": {
             "acl_independently_rechecked": False,
-            "expected_trace_count": 36,
-            "read_exchange_count": 15,
+            "expected_trace_count": scenario_counts["executable"],
+            "read_exchange_count": scenario_counts["read"],
             "verified": True,
-            "verified_trace_count": 36,
-            "write_authority_signature_verified_count": 21,
-            "write_exchange_count": 21,
+            "verified_trace_count": scenario_counts["executable"],
+            "write_authority_signature_verified_count": scenario_counts["write"],
+            "write_exchange_count": scenario_counts["write"],
         },
         "runtime_evidence_verified": True,
         "schema_version": "odoo-accounting-cli-v3.pi-gate-report.v3",
         "trace_coverage": {
-            "captured": 43,
-            "expected": 43,
+            "captured": scenario_counts["total"],
+            "expected": scenario_counts["total"],
             "missing_scenario_ids": [],
             "passed": True,
         },
@@ -6512,7 +6517,9 @@ def test_evidence_pi_scenario_report_check_requires_verified_runtime_evidence(
     )
     report = __import__("json").loads(pi_report.read_text(encoding="utf-8"))
     report["runtime_evidence"]["verified"] = False
-    report["runtime_evidence"]["verified_trace_count"] = 30
+    report["runtime_evidence"]["verified_trace_count"] = (
+        report["runtime_evidence"]["expected_trace_count"] - 1
+    )
     report["runtime_evidence_verified"] = False
     pi_report.write_text(
         __import__("json").dumps(report, sort_keys=True),
@@ -6665,7 +6672,8 @@ def test_evidence_pi_trace_capture_check_accepts_current_release_capture(
     assert payload["command"] == "evidence.pi-trace-capture-check"
     assert payload["business_succeeded"] is False
     assert payload["data"]["trace_capture_ready"] is True
-    assert payload["data"]["trace_count"] == 43
+    trace_document = __import__("json").loads(trace_path.read_text(encoding="utf-8"))
+    assert payload["data"]["trace_count"] == len(trace_document["traces"])
     assert payload["data"]["real_odoo_write_performed"] is False
 
 

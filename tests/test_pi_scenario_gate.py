@@ -151,6 +151,32 @@ class PiScenarioGateTest(unittest.TestCase):
             for name, definition in self.corpus["fixture_bindings"].items()
         }
 
+    def _scenario_counts(self) -> dict[str, int]:
+        capability_by_id = {
+            item["id"]: item for item in self.registry["capabilities"]
+        }
+        executable = [
+            scenario
+            for scenario in self.corpus["scenarios"]
+            if scenario["expected"]["clarification"]["outcome"] != "refused"
+        ]
+        write = [
+            scenario
+            for scenario in executable
+            if capability_by_id[scenario["expected"]["capability_id"]]["access"]
+            == "write"
+        ]
+        return {
+            "total": len(self.corpus["scenarios"]),
+            "executable": len(executable),
+            "read": len(executable) - len(write),
+            "write": len(write),
+        }
+
+    @staticmethod
+    def _score_percent(numerator: int, denominator: int) -> str:
+        return f"{(100 * numerator / denominator):.2f}"
+
     @staticmethod
     def _expected_capture_binding() -> dict[str, object]:
         return {
@@ -648,8 +674,8 @@ class PiScenarioGateTest(unittest.TestCase):
             for scenario in self.corpus["scenarios"]
         }
         self.assertEqual(covered, registered)
-        self.assertEqual(self.corpus["frozen_revision"], 11)
-        self.assertEqual(len(self.corpus["scenarios"]), 43)
+        self.assertEqual(self.corpus["frozen_revision"], 12)
+        self.assertEqual(len(self.corpus["scenarios"]), 48)
         self.assertEqual(
             {scenario["category"] for scenario in self.corpus["scenarios"]},
             {
@@ -815,6 +841,8 @@ class PiScenarioGateTest(unittest.TestCase):
                 "acct.invoice.customer_post.v1",
                 "acct.bill.vendor_post.v1",
                 "acct.refund.draft_cancel.v1",
+                "acct.refund.post_reconcile_eligibility.v1",
+                "acct.refund.post_reconcile_origin.v1",
             }
         }
         self.assertEqual(
@@ -832,11 +860,28 @@ class PiScenarioGateTest(unittest.TestCase):
                 "pi-v1-customer-invoice-post": "acct.invoice.customer_post.v1",
                 "pi-v1-vendor-bill-post": "acct.bill.vendor_post.v1",
                 "pi-v1-refund-draft-cancel": "acct.refund.draft_cancel.v1",
+                "pi-v1-customer-refund-post-reconcile-eligibility-read": (
+                    "acct.refund.post_reconcile_eligibility.v1"
+                ),
+                "pi-v1-vendor-refund-post-reconcile-eligibility-read": (
+                    "acct.refund.post_reconcile_eligibility.v1"
+                ),
+                "pi-v1-customer-refund-post-reconcile-origin": (
+                    "acct.refund.post_reconcile_origin.v1"
+                ),
+                "pi-v1-vendor-refund-post-reconcile-origin": (
+                    "acct.refund.post_reconcile_origin.v1"
+                ),
+                "pi-v1-refund-post-only-without-origin-reconcile-refused": (
+                    "acct.refund.post_reconcile_origin.v1"
+                ),
             },
         )
         for scenario_id in (
             "pi-v1-document-post-eligibility-read",
             "pi-v1-refund-draft-cancel-eligibility-read",
+            "pi-v1-customer-refund-post-reconcile-eligibility-read",
+            "pi-v1-vendor-refund-post-reconcile-eligibility-read",
         ):
             self.assertEqual(
                 set(
@@ -910,6 +955,52 @@ class PiScenarioGateTest(unittest.TestCase):
                 "idempotency_key",
             },
         )
+        refund_post_reconcile_fields = {
+            "company_id",
+            "move_id",
+            "expected_move_type",
+            "expected_origin_move_id",
+            "expected_document_binding",
+            "expected_document_binding_v2",
+            "expected_business_binding",
+            "expected_origin_document_binding",
+            "expected_origin_document_binding_v2",
+            "expected_origin_business_binding",
+            "expected_partner_id",
+            "expected_journal_id",
+            "expected_currency_id",
+            "expected_refund_date",
+            "expected_total_amount",
+            "expected_source_refund_mode",
+            "expected_commercial_partner_id",
+            "expected_origin_total_amount",
+            "expected_reconcile_amount",
+            "expected_refund_payment_term_line_id",
+            "expected_origin_payment_term_line_id",
+            "expected_payment_term_account_id",
+            "expected_reconciliation_outcome",
+            "expected_refund_payment_state_after",
+            "expected_origin_payment_state_after",
+            "expected_refund_residual_after",
+            "expected_origin_residual_after",
+            "expected_line_ids",
+            "expected_origin_line_ids",
+            "reason",
+            "idempotency_key",
+        }
+        for scenario_id in (
+            "pi-v1-customer-refund-post-reconcile-origin",
+            "pi-v1-vendor-refund-post-reconcile-origin",
+            "pi-v1-refund-post-only-without-origin-reconcile-refused",
+        ):
+            self.assertEqual(
+                set(
+                    document_lifecycle_scenarios[scenario_id]["expected"][
+                        "material_parameters"
+                    ]
+                ),
+                refund_post_reconcile_fields,
+            )
         resolved_document_lifecycle = {
             scenario_id: resolve_fixture_bindings(
                 scenario["expected"]["material_parameters"], self._bindings()
@@ -922,6 +1013,12 @@ class PiScenarioGateTest(unittest.TestCase):
         vendor_post = resolved_document_lifecycle["pi-v1-vendor-bill-post"]
         refund_cancel = resolved_document_lifecycle[
             "pi-v1-refund-draft-cancel"
+        ]
+        customer_refund_post = resolved_document_lifecycle[
+            "pi-v1-customer-refund-post-reconcile-origin"
+        ]
+        vendor_refund_post = resolved_document_lifecycle[
+            "pi-v1-vendor-refund-post-reconcile-origin"
         ]
         self.assertEqual(
             {
@@ -979,6 +1076,24 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertEqual(customer_post["expected_invoice_date"], "2026-06-20")
         self.assertEqual(vendor_post["expected_invoice_date"], "2026-06-21")
         self.assertEqual(refund_cancel["expected_refund_date"], "2026-06-24")
+        self.assertEqual(
+            (
+                customer_refund_post["expected_source_refund_mode"],
+                customer_refund_post["expected_reconciliation_outcome"],
+                customer_refund_post["expected_origin_payment_state_after"],
+                customer_refund_post["expected_origin_residual_after"],
+            ),
+            ("full", "full_origin_reversal", "reversed", "0"),
+        )
+        self.assertEqual(
+            (
+                vendor_refund_post["expected_source_refund_mode"],
+                vendor_refund_post["expected_reconciliation_outcome"],
+                vendor_refund_post["expected_origin_payment_state_after"],
+                vendor_refund_post["expected_origin_residual_after"],
+            ),
+            ("partial", "partial_origin_reduction", "partial", "480.00"),
+        )
         self.assertEqual(
             {
                 customer_post["expected_currency_id"],
@@ -1281,6 +1396,8 @@ class PiScenarioGateTest(unittest.TestCase):
             "pi-v1-customer-invoice-post",
             "pi-v1-vendor-bill-post",
             "pi-v1-refund-draft-cancel",
+            "pi-v1-customer-refund-post-reconcile-origin",
+            "pi-v1-vendor-refund-post-reconcile-origin",
         ):
             self._assert_write_parameter_binding(
                 traces[scenario_id],
@@ -1298,6 +1415,139 @@ class PiScenarioGateTest(unittest.TestCase):
         self._assert_write_parameter_binding(
             payment_cancel_trace, resolved_payment_cancel
         )
+
+    def test_dev265_refund_post_reconcile_slice_passes_hard_four_of_four(
+        self,
+    ) -> None:
+        required_slice = {
+            "pi-v1-customer-refund-post-reconcile-eligibility-read": (
+                "acct.refund.post_reconcile_eligibility.v1",
+                "out_refund",
+                "read",
+            ),
+            "pi-v1-vendor-refund-post-reconcile-eligibility-read": (
+                "acct.refund.post_reconcile_eligibility.v1",
+                "in_refund",
+                "read",
+            ),
+            "pi-v1-customer-refund-post-reconcile-origin": (
+                "acct.refund.post_reconcile_origin.v1",
+                "out_refund",
+                "write",
+            ),
+            "pi-v1-vendor-refund-post-reconcile-origin": (
+                "acct.refund.post_reconcile_origin.v1",
+                "in_refund",
+                "write",
+            ),
+        }
+        capability_by_id = {
+            item["id"]: item for item in self.registry["capabilities"]
+        }
+        scenarios = {
+            scenario["id"]: scenario
+            for scenario in self.corpus["scenarios"]
+            if scenario["expected"]["capability_id"]
+            in {
+                "acct.refund.post_reconcile_eligibility.v1",
+                "acct.refund.post_reconcile_origin.v1",
+            }
+            and scenario["expected"]["clarification"]["outcome"]
+            != "refused"
+        }
+        self.assertEqual(set(scenarios), set(required_slice))
+
+        trace_document = self._perfect_trace_document()
+        report = score_documents(
+            self.corpus,
+            trace_document,
+            self.registry,
+            TEST_ATTESTATION_KEYS,
+            expected_release_sha256=TEST_RELEASE_SHA256,
+        )
+        slice_results = {}
+        for scenario_id, (
+            capability_id,
+            move_type,
+            access,
+        ) in required_slice.items():
+            scenario = scenarios[scenario_id]
+            expected = scenario["expected"]
+            capability = capability_by_id[capability_id]
+            parameters = resolve_fixture_bindings(
+                expected["material_parameters"], self._bindings()
+            )
+            trace = self._trace(trace_document, scenario_id)
+            self.assertEqual(expected["capability_id"], capability_id)
+            self.assertEqual(capability["access"], access)
+            self.assertEqual(parameters["expected_move_type"], move_type)
+            self.assertEqual(
+                set(parameters), set(capability["input_schema"]["required"])
+            )
+            self.assertEqual(
+                self._event(trace, "capability_selected")["capability_id"],
+                capability_id,
+            )
+            self.assertEqual(
+                self._event(trace, "material_parameters_finalized")[
+                    "parameters"
+                ],
+                parameters,
+            )
+            self.assertEqual(
+                self._event(trace, "cli_input")["parameters"], parameters
+            )
+            if access == "write":
+                self._assert_write_parameter_binding(trace, parameters)
+            gate_ids = ["F01", "F02", "F03", "F05"]
+            if access == "write":
+                gate_ids.append("F04")
+            slice_results[scenario_id] = all(
+                scenario_id not in report["gates"][gate_id]["failures"]
+                for gate_id in gate_ids
+            )
+
+        self.assertEqual(
+            (sum(slice_results.values()), len(slice_results)),
+            (4, 4),
+        )
+
+    def test_refund_post_only_without_origin_reconciliation_is_refused(
+        self,
+    ) -> None:
+        scenario_id = "pi-v1-refund-post-only-without-origin-reconcile-refused"
+        scenario = next(
+            item for item in self.corpus["scenarios"] if item["id"] == scenario_id
+        )
+        self.assertEqual(
+            scenario["expected"]["capability_id"],
+            "acct.refund.post_reconcile_origin.v1",
+        )
+        self.assertEqual(
+            scenario["expected"]["clarification"],
+            {"outcome": "refused", "fields": []},
+        )
+        self.assertIn("只过账", scenario["input"])
+        self.assertIn("不要核销来源", scenario["input"])
+        self.assertIn("action_post 会自动核销来源", scenario["input"])
+
+        trace_document = self._perfect_trace_document()
+        trace = self._trace(trace_document, scenario_id)
+        self.assertEqual(
+            [event["type"] for event in trace["events"]],
+            [
+                "user_input",
+                "capability_selected",
+                "clarification_completed",
+                "execution_refused",
+                "assistant_final",
+            ],
+        )
+        refusal = self._event(trace, "execution_refused")
+        self.assertEqual(refusal["write_tool_call_count"], 0)
+        self.assertIs(refusal["odoo_effect"], False)
+        self.assertIsNone(refusal["operation_id"])
+        self.assertIsNone(refusal["receipt_id"])
 
     def test_corpus_rejects_duplicate_ids_unknown_fields_and_incomplete_parameters(self) -> None:
         duplicate = copy.deepcopy(self.corpus)
@@ -1389,6 +1639,7 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_perfect_captured_run_passes_with_exact_ratios(self) -> None:
         trace_document = self._perfect_trace_document()
+        counts = self._scenario_counts()
         report = score_documents(
             self.corpus,
             trace_document,
@@ -1410,8 +1661,8 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertEqual(
             report["trace_coverage"],
             {
-                "captured": 43,
-                "expected": 43,
+                "captured": counts["total"],
+                "expected": counts["total"],
                 "passed": True,
                 "missing_scenario_ids": [],
             },
@@ -1425,25 +1676,33 @@ class PiScenarioGateTest(unittest.TestCase):
             report["runtime_evidence"],
             {
                 "verified": True,
-                "verified_trace_count": 36,
-                "expected_trace_count": 36,
-                "read_exchange_count": 15,
-                "write_exchange_count": 21,
-                "write_authority_signature_verified_count": 21,
+                "verified_trace_count": counts["executable"],
+                "expected_trace_count": counts["executable"],
+                "read_exchange_count": counts["read"],
+                "write_exchange_count": counts["write"],
+                "write_authority_signature_verified_count": counts["write"],
                 "acl_independently_rechecked": False,
             },
         )
         for gate_id in ("F01", "F02", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 43)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 43)
+            self.assertEqual(
+                report["gates"][gate_id]["numerator"], counts["total"]
+            )
+            self.assertEqual(
+                report["gates"][gate_id]["denominator"], counts["total"]
+            )
             self.assertEqual(report["gates"][gate_id]["percent"], "100.00")
             self.assertTrue(report["gates"][gate_id]["passed"])
-        self.assertEqual(report["gates"]["F03"]["numerator"], 36)
-        self.assertEqual(report["gates"]["F03"]["denominator"], 36)
+        self.assertEqual(
+            report["gates"]["F03"]["numerator"], counts["executable"]
+        )
+        self.assertEqual(
+            report["gates"]["F03"]["denominator"], counts["executable"]
+        )
         self.assertEqual(report["gates"]["F03"]["percent"], "100.00")
         self.assertTrue(report["gates"]["F03"]["passed"])
-        self.assertEqual(report["gates"]["F04"]["numerator"], 21)
-        self.assertEqual(report["gates"]["F04"]["denominator"], 21)
+        self.assertEqual(report["gates"]["F04"]["numerator"], counts["write"])
+        self.assertEqual(report["gates"]["F04"]["denominator"], counts["write"])
         self.assertEqual(report["gates"]["F04"]["percent"], "100.00")
         self.assertTrue(report["gates"]["F04"]["passed"])
 
@@ -2218,6 +2477,7 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_refused_assistant_cannot_report_business_success(self) -> None:
         trace_document = self._perfect_trace_document()
+        counts = self._scenario_counts()
         refused_trace = self._trace(trace_document, "pi-v1-refund")
         assistant = self._event(refused_trace, "assistant_final")
         result = json.loads(assistant["text"])
@@ -2232,7 +2492,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F05"]["numerator"], 42)
+        self.assertEqual(
+            report["gates"]["F05"]["numerator"], counts["total"] - 1
+        )
         self.assertFalse(report["gates"]["F05"]["passed"])
         failure = report["gates"]["F05"]["failures"]["pi-v1-refund"]
         self.assertIn("assistant_final.status", failure["issues"])
@@ -2325,6 +2587,7 @@ class PiScenarioGateTest(unittest.TestCase):
             )
 
     def test_refused_tool_calls_effects_and_receipts_fail_f05(self) -> None:
+        counts = self._scenario_counts()
         cases = {
             "write_tool_call_count": 1,
             "odoo_effect": True,
@@ -2345,12 +2608,15 @@ class PiScenarioGateTest(unittest.TestCase):
                     TEST_ATTESTATION_KEYS,
                     expected_release_sha256=TEST_RELEASE_SHA256,
                 )
-                self.assertEqual(report["gates"]["F05"]["numerator"], 42)
+                self.assertEqual(
+                    report["gates"]["F05"]["numerator"], counts["total"] - 1
+                )
                 self.assertFalse(report["gates"]["F05"]["passed"])
                 failure = report["gates"]["F05"]["failures"]["pi-v1-refund"]
                 self.assertIn(f"execution_refused.{field}", failure["issues"])
 
     def test_positive_result_receipt_and_final_bindings_fail_closed(self) -> None:
+        counts = self._scenario_counts()
         cases = {
             "verification": (
                 "odoo_result",
@@ -2449,7 +2715,8 @@ class PiScenarioGateTest(unittest.TestCase):
                         expected_release_sha256=TEST_RELEASE_SHA256,
                     )
                     self.assertEqual(
-                        report["gates"]["F05"]["numerator"], 42
+                        report["gates"]["F05"]["numerator"],
+                        counts["total"] - 1,
                     )
                     self.assertFalse(report["gates"]["F05"]["passed"])
                     failure = report["gates"]["F05"]["failures"][
@@ -2585,6 +2852,7 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_selection_gate_fails_below_95_percent(self) -> None:
         trace_document = self._perfect_trace_document()
+        counts = self._scenario_counts()
         wrong_id = "acct.refund.draft_cancel.v1"
         for trace in trace_document["traces"][:3]:
             trace["events"][1]["data"]["capability_id"] = wrong_id
@@ -2596,15 +2864,23 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 40)
-        self.assertEqual(report["gates"]["F01"]["denominator"], 43)
-        self.assertEqual(report["gates"]["F01"]["percent"], "93.02")
+        self.assertEqual(
+            report["gates"]["F01"]["numerator"], counts["total"] - 3
+        )
+        self.assertEqual(
+            report["gates"]["F01"]["denominator"], counts["total"]
+        )
+        self.assertEqual(
+            report["gates"]["F01"]["percent"],
+            self._score_percent(counts["total"] - 3, counts["total"]),
+        )
         self.assertEqual(report["gates"]["F01"]["minimum_percent"], "95.00")
         self.assertFalse(report["gates"]["F01"]["passed"])
         self.assertFalse(report["acceptance_passed"])
 
     def test_selection_gate_accepts_one_miss_at_95_percent_or_higher(self) -> None:
         trace_document = self._perfect_trace_document()
+        counts = self._scenario_counts()
         trace_document["traces"][0]["events"][1]["data"]["capability_id"] = (
             self.corpus["scenarios"][2]["expected"]["capability_id"]
         )
@@ -2616,11 +2892,17 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 42)
-        self.assertEqual(report["gates"]["F01"]["percent"], "97.67")
+        self.assertEqual(
+            report["gates"]["F01"]["numerator"], counts["total"] - 1
+        )
+        self.assertEqual(
+            report["gates"]["F01"]["percent"],
+            self._score_percent(counts["total"] - 1, counts["total"]),
+        )
         self.assertTrue(report["gates"]["F01"]["passed"])
 
     def test_clarification_and_parameter_loss_are_scored_independently(self) -> None:
+        counts = self._scenario_counts()
         clarification_document = self._perfect_trace_document()
         clarification_document["traces"][0]["events"][2]["data"] = {
             "outcome": "refused",
@@ -2635,8 +2917,10 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F01"]["numerator"], 43)
-        self.assertEqual(report["gates"]["F02"]["numerator"], 42)
+        self.assertEqual(report["gates"]["F01"]["numerator"], counts["total"])
+        self.assertEqual(
+            report["gates"]["F02"]["numerator"], counts["total"] - 1
+        )
         self.assertEqual(len(report["gates"]["F02"]["failures"]), 1)
 
         parameter_document = self._perfect_trace_document()
@@ -2658,6 +2942,7 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_parameter_loss_after_finalization_fails_f03(self) -> None:
         trace_document = self._perfect_trace_document()
+        counts = self._scenario_counts()
         invoice_trace = next(
             trace
             for trace in trace_document["traces"]
@@ -2672,7 +2957,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 35)
+        self.assertEqual(
+            report["gates"]["F03"]["numerator"], counts["executable"] - 1
+        )
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -2680,6 +2967,7 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_write_prepare_parameter_loss_fails_f03(self) -> None:
         trace_document = self._perfect_trace_document()
+        counts = self._scenario_counts()
         invoice_trace = next(
             trace
             for trace in trace_document["traces"]
@@ -2696,7 +2984,9 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F03"]["numerator"], 35)
+        self.assertEqual(
+            report["gates"]["F03"]["numerator"], counts["executable"] - 1
+        )
         failure = report["gates"]["F03"]["failures"][
             "pi-v1-customer-invoice"
         ]
@@ -2728,6 +3018,7 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_clarification_answer_must_be_captured_and_bound_to_final_value(self) -> None:
         trace_document = self._perfect_trace_document()
+        counts = self._scenario_counts()
         trace_document["traces"][0]["events"][2]["data"]["turns"][0][
             "answer"
         ] = self._bindings()["company_secondary_id"]
@@ -2739,8 +3030,12 @@ class PiScenarioGateTest(unittest.TestCase):
             TEST_ATTESTATION_KEYS,
             expected_release_sha256=TEST_RELEASE_SHA256,
         )
-        self.assertEqual(report["gates"]["F02"]["numerator"], 42)
-        self.assertEqual(report["gates"]["F03"]["numerator"], 36)
+        self.assertEqual(
+            report["gates"]["F02"]["numerator"], counts["total"] - 1
+        )
+        self.assertEqual(
+            report["gates"]["F03"]["numerator"], counts["executable"]
+        )
         self.assertIn(
             "company_id",
             report["gates"]["F02"]["failures"]["pi-v1-registry-list"][
@@ -2750,7 +3045,13 @@ class PiScenarioGateTest(unittest.TestCase):
 
     def test_missing_scenario_is_counted_in_every_denominator_and_fails_coverage(self) -> None:
         trace_document = self._perfect_trace_document()
-        missing_id = trace_document["traces"].pop()["scenario_id"]
+        counts = self._scenario_counts()
+        missing_id = "pi-v1-bank-statement-compensate-matched-refused"
+        trace_document["traces"] = [
+            trace
+            for trace in trace_document["traces"]
+            if trace["scenario_id"] != missing_id
+        ]
         self._resign(trace_document)
         report = score_documents(
             self.corpus,
@@ -2762,14 +3063,22 @@ class PiScenarioGateTest(unittest.TestCase):
         self.assertFalse(report["trace_coverage"]["passed"])
         self.assertEqual(report["trace_coverage"]["missing_scenario_ids"], [missing_id])
         for gate_id in ("F01", "F02", "F05"):
-            self.assertEqual(report["gates"][gate_id]["numerator"], 42)
-            self.assertEqual(report["gates"][gate_id]["denominator"], 43)
+            self.assertEqual(
+                report["gates"][gate_id]["numerator"], counts["total"] - 1
+            )
+            self.assertEqual(
+                report["gates"][gate_id]["denominator"], counts["total"]
+            )
             self.assertIn(missing_id, report["gates"][gate_id]["failures"])
-        self.assertEqual(report["gates"]["F03"]["numerator"], 36)
-        self.assertEqual(report["gates"]["F03"]["denominator"], 36)
+        self.assertEqual(
+            report["gates"]["F03"]["numerator"], counts["executable"]
+        )
+        self.assertEqual(
+            report["gates"]["F03"]["denominator"], counts["executable"]
+        )
         self.assertNotIn(missing_id, report["gates"]["F03"]["failures"])
-        self.assertEqual(report["gates"]["F04"]["numerator"], 21)
-        self.assertEqual(report["gates"]["F04"]["denominator"], 21)
+        self.assertEqual(report["gates"]["F04"]["numerator"], counts["write"])
+        self.assertEqual(report["gates"]["F04"]["denominator"], counts["write"])
 
     def test_trace_is_bound_to_corpus_input_and_rejects_unknown_event_fields(self) -> None:
         wrong_release = self._perfect_trace_document()

@@ -913,7 +913,7 @@ def test_source_has_no_privilege_or_transaction_escape_and_no_private_orm_calls(
     assert ".remove_move_reconcile(" not in source
 
 
-def test_all_twenty_three_registered_write_capabilities_have_three_real_dispatch_phases():
+def test_all_twenty_four_registered_write_capabilities_have_three_real_dispatch_phases():
     baseline_identifiers = {
         "acct.invoice.customer_create.v1",
         "acct.bill.vendor_create.v1",
@@ -947,6 +947,7 @@ def test_all_twenty_three_registered_write_capabilities_have_three_real_dispatch
     document_lifecycle_identifiers = {
         "acct.invoice.customer_post.v1",
         "acct.bill.vendor_post.v1",
+        "acct.refund.post_reconcile_origin.v1",
         "acct.refund.draft_cancel.v1",
     }
     identifiers = {
@@ -959,7 +960,7 @@ def test_all_twenty_three_registered_write_capabilities_have_three_real_dispatch
     assert len(payment_close_identifiers) == 1
     assert len(reconciliation_undo_identifiers) == 1
     assert len(bank_compensation_identifiers) == 1
-    assert len(document_lifecycle_identifiers) == 3
+    assert len(document_lifecycle_identifiers) == 4
     assert identifiers == (
         baseline_identifiers
         | phase_b_identifiers
@@ -12976,3 +12977,1183 @@ def test_existing_document_post_rejects_unexpected_partner_rank_delta():
             parameters,
             checked,
         )
+
+
+def refund_post_reconcile_parameters(
+    *,
+    vendor=False,
+    partial=False,
+    origin_invoice_date="2026-07-10",
+    origin_accounting_date="2026-07-10",
+    refund_date="2026-07-10",
+):
+    refund_source = refund_create_source_parameters(vendor=vendor)
+    refund_source["refund_date"] = refund_date
+    refund_amount = "40" if partial else "100"
+    if partial:
+        refund_source.update(
+            {
+                "refund_mode": "partial",
+                "expected_total_amount": refund_amount,
+                "lines": [
+                    {
+                        "line_reference": "line-1",
+                        "name": "Invoice line",
+                        "account_id": 10,
+                        "quantity": "1",
+                        "price_unit": refund_amount,
+                        "tax_ids": [],
+                    }
+                ],
+            }
+        )
+    origin_source = existing_document_create_parameters(vendor=vendor)
+    origin_source.update(
+        {
+            "invoice_date": origin_invoice_date,
+            "accounting_date": origin_accounting_date,
+        }
+    )
+    origin_kind = "vendor_bill" if vendor else "customer_invoice"
+    return {
+        "company_id": 7,
+        "move_id": 1301,
+        "expected_move_type": "in_refund" if vendor else "out_refund",
+        "expected_origin_move_id": 1401,
+        "expected_document_binding": OdooWriteHandlers.document_binding(
+            "refund", refund_source
+        ),
+        "expected_document_binding_v2": (
+            OdooWriteHandlers.document_binding_v2("refund", refund_source)
+        ),
+        "expected_business_binding": OdooWriteHandlers.business_binding(
+            "refund", refund_source
+        ),
+        "expected_origin_document_binding": OdooWriteHandlers.document_binding(
+            origin_kind, origin_source
+        ),
+        "expected_origin_document_binding_v2": (
+            OdooWriteHandlers.document_binding_v2(origin_kind, origin_source)
+        ),
+        "expected_origin_business_binding": OdooWriteHandlers.business_binding(
+            origin_kind, origin_source
+        ),
+        "expected_source_refund_mode": "partial" if partial else "full",
+        "expected_partner_id": 10,
+        "expected_commercial_partner_id": 10,
+        "expected_journal_id": 2,
+        "expected_currency_id": 1,
+        "expected_refund_date": refund_date,
+        "expected_total_amount": refund_amount,
+        "expected_origin_total_amount": "100",
+        "expected_reconcile_amount": refund_amount,
+        "expected_refund_payment_term_line_id": 1303,
+        "expected_origin_payment_term_line_id": 1403,
+        "expected_payment_term_account_id": 20,
+        "expected_reconciliation_outcome": (
+            "partial_origin_reduction" if partial else "full_origin_reversal"
+        ),
+        "expected_refund_payment_state_after": "paid",
+        "expected_origin_payment_state_after": (
+            "partial" if partial else "reversed"
+        ),
+        "expected_refund_residual_after": "0",
+        "expected_origin_residual_after": "60" if partial else "0",
+        "expected_line_ids": [1302, 1303],
+        "expected_origin_line_ids": [1402, 1403],
+        "reason": "Post the linked refund and reconcile its origin",
+        "idempotency_key": (
+            "post-partial-vendor-refund-1301"
+            if vendor and partial
+            else (
+                "post-vendor-refund-1301"
+                if vendor
+                else (
+                    "post-partial-customer-refund-1301"
+                    if partial
+                    else "post-customer-refund-1301"
+                )
+            )
+        ),
+    }
+
+
+def refund_post_reconcile_fixture(
+    *,
+    vendor=False,
+    partial=False,
+    distinct_commercial_partner=False,
+    origin_invoice_date="2026-07-10",
+    origin_accounting_date="2026-07-10",
+    refund_date="2026-07-10",
+):
+    comp, refund, refund_lines, origin, origin_lines, records = (
+        refund_draft_cancel_fixture(vendor=vendor)
+    )
+    refund.invoice_date = refund_date
+    refund.date = refund_date
+    refund.invoice_date_due = refund_date
+    refund.snapshot_values.update(
+        {
+            "invoice_date": refund_date,
+            "date": refund_date,
+            "invoice_date_due": refund_date,
+        }
+    )
+    refund_lines[1].date_maturity = refund_date
+    refund_lines[1].snapshot_values["date_maturity"] = refund_date
+    origin.invoice_date = origin_invoice_date
+    origin.date = origin_accounting_date
+    origin.snapshot_values.update(
+        {
+            "invoice_date": origin_invoice_date,
+            "date": origin_accounting_date,
+        }
+    )
+    selected_partner = refund.partner_id
+    selected_partner.company_id = None
+    selected_partner.company_ids = []
+    selected_partner.customer_rank = 0 if vendor else 1
+    selected_partner.supplier_rank = 1 if vendor else 0
+    selected_partner.create_uid = Record(42)
+    selected_partner.create_date = "2026-07-10 09:00:00"
+    selected_partner.write_uid = Record(42)
+    selected_partner.write_date = "2026-07-10 09:00:00"
+    selected_partner.snapshot_values = {
+        "active": True,
+        "company_id": False,
+        "company_ids": [],
+        "commercial_partner_id": [10, "Selected Partner"],
+        "customer_rank": selected_partner.customer_rank,
+        "supplier_rank": selected_partner.supplier_rank,
+        "create_uid": [42, "V3 Executor"],
+        "create_date": "2026-07-10 09:00:00",
+        "write_uid": [42, "V3 Executor"],
+        "write_date": "2026-07-10 09:00:00",
+    }
+    commercial_partner = selected_partner
+    if distinct_commercial_partner:
+        commercial_partner = Record(
+            11,
+            active=True,
+            company_id=None,
+            company_ids=[],
+            customer_rank=0 if vendor else 1,
+            supplier_rank=1 if vendor else 0,
+            create_uid=Record(42),
+            create_date="2026-07-10 09:00:00",
+            write_uid=Record(42),
+            write_date="2026-07-10 09:00:00",
+        )
+        commercial_partner.commercial_partner_id = commercial_partner
+        commercial_partner.snapshot_values = {
+            "active": True,
+            "company_id": False,
+            "company_ids": [],
+            "commercial_partner_id": [11, "Commercial Partner"],
+            "customer_rank": commercial_partner.customer_rank,
+            "supplier_rank": commercial_partner.supplier_rank,
+            "create_uid": [42, "V3 Executor"],
+            "create_date": "2026-07-10 09:00:00",
+            "write_uid": [42, "V3 Executor"],
+            "write_date": "2026-07-10 09:00:00",
+        }
+        selected_partner.commercial_partner_id = commercial_partner
+        selected_partner.snapshot_values["commercial_partner_id"] = [
+            11,
+            "Commercial Partner",
+        ]
+        for move in (refund, origin):
+            move.commercial_partner_id = commercial_partner
+            move.snapshot_values["commercial_partner_id"] = [
+                11,
+                "Commercial Partner",
+            ]
+        for line in [*refund_lines, *origin_lines]:
+            line.partner_id = commercial_partner
+            line.snapshot_values["partner_id"] = 11
+        records[("res.partner", 11)] = commercial_partner
+    records[("res.partner", 10)] = selected_partner
+
+    for line in (refund_lines[0], origin_lines[0]):
+        line.account_id.reconcile = False
+    refund_lines[1].account_id.reconcile = True
+    origin_lines[1].account_id.reconcile = True
+    refund_lines[1].amount_residual_currency = refund_lines[1].amount_residual
+    origin_lines[1].amount_residual_currency = origin_lines[1].amount_residual
+    for line in (refund_lines[1], origin_lines[1]):
+        line.snapshot_values.update(
+            {
+                "amount_residual": str(line.amount_residual),
+                "amount_residual_currency": str(
+                    line.amount_residual_currency
+                ),
+                "full_reconcile_id": False,
+                "matched_debit_ids": [],
+                "matched_credit_ids": [],
+                "matching_number": False,
+                "reconciled": False,
+            }
+        )
+
+    if partial:
+        refund.amount_untaxed = 40
+        refund.amount_total = 40
+        refund.amount_residual = 40
+        refund.snapshot_values.update(
+            {
+                "amount_untaxed": "40",
+                "amount_total": "40",
+                "amount_residual": "40",
+            }
+        )
+        refund_product, refund_term = refund_lines
+        if vendor:
+            refund_product.debit = 0
+            refund_product.credit = 40
+            refund_product.balance = -40
+            refund_product.amount_currency = -40
+            refund_term.debit = 40
+            refund_term.credit = 0
+            refund_term.balance = 40
+            refund_term.amount_currency = 40
+            refund_term.amount_residual = 40
+            refund_term.amount_residual_currency = 40
+        else:
+            refund_product.debit = 40
+            refund_product.credit = 0
+            refund_product.balance = 40
+            refund_product.amount_currency = 40
+            refund_term.debit = 0
+            refund_term.credit = 40
+            refund_term.balance = -40
+            refund_term.amount_currency = -40
+            refund_term.amount_residual = -40
+            refund_term.amount_residual_currency = -40
+        refund_product.price_unit = 40
+        refund_product.price_subtotal = 40
+        refund_product.price_total = 40
+        refund_product.odoo_cli_v3_line_reference = "line-1"
+        refund_product.snapshot_values.update(
+            {
+                "debit": str(refund_product.debit),
+                "credit": str(refund_product.credit),
+                "balance": str(refund_product.balance),
+                "amount_currency": str(refund_product.amount_currency),
+                "price_unit": "40",
+                "price_subtotal": "40",
+                "price_total": "40",
+                "odoo_cli_v3_line_reference": "line-1",
+            }
+        )
+        refund_term.snapshot_values.update(
+            {
+                "debit": str(refund_term.debit),
+                "credit": str(refund_term.credit),
+                "balance": str(refund_term.balance),
+                "amount_currency": str(refund_term.amount_currency),
+                "amount_residual": str(refund_term.amount_residual),
+                "amount_residual_currency": str(
+                    refund_term.amount_residual_currency
+                ),
+            }
+        )
+
+    parameters = refund_post_reconcile_parameters(
+        vendor=vendor,
+        partial=partial,
+        origin_invoice_date=origin_invoice_date,
+        origin_accounting_date=origin_accounting_date,
+        refund_date=refund_date,
+    )
+    if distinct_commercial_partner:
+        parameters["expected_commercial_partner_id"] = 11
+    refund.odoo_cli_v3_document_binding = parameters[
+        "expected_document_binding"
+    ]
+    refund.odoo_cli_v3_document_binding_v2 = parameters[
+        "expected_document_binding_v2"
+    ]
+    refund.odoo_cli_v3_business_binding = parameters[
+        "expected_business_binding"
+    ]
+    refund.snapshot_values.update(
+        {
+            "odoo_cli_v3_document_binding": (
+                refund.odoo_cli_v3_document_binding
+            ),
+            "odoo_cli_v3_document_binding_v2": (
+                refund.odoo_cli_v3_document_binding_v2
+            ),
+            "odoo_cli_v3_business_binding": (
+                refund.odoo_cli_v3_business_binding
+            ),
+        }
+    )
+    origin.odoo_cli_v3_document_binding = parameters[
+        "expected_origin_document_binding"
+    ]
+    origin.odoo_cli_v3_document_binding_v2 = parameters[
+        "expected_origin_document_binding_v2"
+    ]
+    origin.odoo_cli_v3_business_binding = parameters[
+        "expected_origin_business_binding"
+    ]
+    origin.snapshot_values.update(
+        {
+            "odoo_cli_v3_document_binding": (
+                origin.odoo_cli_v3_document_binding
+            ),
+            "odoo_cli_v3_document_binding_v2": (
+                origin.odoo_cli_v3_document_binding_v2
+            ),
+            "odoo_cli_v3_business_binding": (
+                origin.odoo_cli_v3_business_binding
+            ),
+        }
+    )
+
+    partial_reconcile = Record(
+        1501,
+        company_id=Record(7),
+        debit_move_id=None,
+        credit_move_id=None,
+        amount=40 if partial else 100,
+        debit_amount_currency=40 if partial else 100,
+        credit_amount_currency=40 if partial else 100,
+        full_reconcile_id=None,
+        company_currency_id=refund.currency_id,
+        debit_currency_id=refund.currency_id,
+        credit_currency_id=refund.currency_id,
+        exchange_move_id=None,
+        max_date=refund_date,
+        draft_caba_move_vals=False,
+    )
+    full_reconcile = None
+    if not partial:
+        full_reconcile = Record(
+            1502,
+            partial_reconcile_ids=[partial_reconcile],
+            reconciled_line_ids=[],
+        )
+        partial_reconcile.full_reconcile_id = full_reconcile
+        records[("account.full.reconcile", 1502)] = full_reconcile
+    records[("account.partial.reconcile", 1501)] = partial_reconcile
+
+    def action_post():
+        refund.action_post_calls += 1
+        refund.state = "posted"
+        refund.name = (
+            "RBILL/2026/0001" if vendor else "RINV/2026/0001"
+        )
+        refund.posted_before = True
+        refund.sequence_prefix = "RBILL/2026/" if vendor else "RINV/2026/"
+        refund.sequence_number = 1
+        refund.checked = True
+        refund.payment_state = "paid"
+        refund.amount_residual = 0
+        refund.write_uid = Record(42)
+        refund.write_date = "2026-07-10 09:01:00"
+        refund.snapshot_values.update(
+            {
+                "state": "posted",
+                "name": refund.name,
+                "posted_before": True,
+                "sequence_prefix": refund.sequence_prefix,
+                "sequence_number": 1,
+                "checked": True,
+                "payment_state": "paid",
+                "amount_residual": "0",
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:01:00",
+            }
+        )
+        origin.payment_state = "partial" if partial else "reversed"
+        origin.amount_residual = 60 if partial else 0
+        origin.write_uid = Record(42)
+        origin.write_date = "2026-07-10 09:01:00"
+        origin.snapshot_values.update(
+            {
+                "payment_state": origin.payment_state,
+                "amount_residual": str(origin.amount_residual),
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:01:00",
+            }
+        )
+        for line in refund_lines:
+            line.parent_state = "posted"
+            line.write_uid = Record(42)
+            line.write_date = "2026-07-10 09:01:00"
+            line.snapshot_values.update(
+                {
+                    "move_id": [refund.id, refund.name],
+                    "parent_state": "posted",
+                    "write_uid": [42, "V3 Executor"],
+                    "write_date": "2026-07-10 09:01:00",
+                }
+            )
+
+        origin_term = origin_lines[1]
+        refund_term = refund_lines[1]
+        if vendor:
+            debit_line, credit_line = refund_term, origin_term
+        else:
+            debit_line, credit_line = origin_term, refund_term
+        partial_reconcile.debit_move_id = debit_line
+        partial_reconcile.credit_move_id = credit_line
+        partial_reconcile.snapshot_values = {
+            "company_id": 7,
+            "debit_move_id": debit_line.id,
+            "credit_move_id": credit_line.id,
+            "amount": parameters["expected_reconcile_amount"],
+            "debit_amount_currency": parameters["expected_reconcile_amount"],
+            "credit_amount_currency": parameters["expected_reconcile_amount"],
+            "full_reconcile_id": 1502 if full_reconcile else False,
+            "company_currency_id": 1,
+            "debit_currency_id": 1,
+            "credit_currency_id": 1,
+            "exchange_move_id": False,
+            "max_date": refund_date,
+            "draft_caba_move_vals": False,
+        }
+        debit_line.matched_credit_ids = [partial_reconcile]
+        credit_line.matched_debit_ids = [partial_reconcile]
+        if partial:
+            origin_term.amount_residual = -60 if vendor else 60
+            origin_term.amount_residual_currency = origin_term.amount_residual
+            refund_term.amount_residual = 0
+            refund_term.amount_residual_currency = 0
+            origin_term.reconciled = False
+            refund_term.reconciled = True
+            origin_term.matching_number = "P1501"
+            refund_term.matching_number = "P1501"
+        else:
+            for line in (origin_term, refund_term):
+                line.amount_residual = 0
+                line.amount_residual_currency = 0
+                line.reconciled = True
+                line.full_reconcile_id = full_reconcile
+                line.matching_number = "1502"
+            full_reconcile.reconciled_line_ids = [origin_term, refund_term]
+            full_reconcile.snapshot_values = {
+                "partial_reconcile_ids": [1501],
+                "reconciled_line_ids": sorted(
+                    [origin_term.id, refund_term.id]
+                ),
+            }
+        for line in (origin_term, refund_term):
+            line.write_uid = Record(42)
+            line.write_date = "2026-07-10 09:01:00"
+            line.snapshot_values.update(
+                {
+                    "amount_residual": str(line.amount_residual),
+                    "amount_residual_currency": str(
+                        line.amount_residual_currency
+                    ),
+                    "reconciled": line.reconciled,
+                    "full_reconcile_id": (
+                        full_reconcile.id if full_reconcile else False
+                    ),
+                    "matched_debit_ids": [
+                        item.id for item in line.matched_debit_ids
+                    ],
+                    "matched_credit_ids": [
+                        item.id for item in line.matched_credit_ids
+                    ],
+                    "matching_number": line.matching_number,
+                    "write_uid": [42, "V3 Executor"],
+                    "write_date": "2026-07-10 09:01:00",
+                }
+            )
+        rank_field = "supplier_rank" if vendor else "customer_rank"
+        posting_partners = {
+            selected_partner.id: selected_partner,
+            commercial_partner.id: commercial_partner,
+        }
+
+        for partner in posting_partners.values():
+            setattr(partner, rank_field, getattr(partner, rank_field) + 1)
+            partner.write_uid = Record(42)
+            partner.write_date = "2026-07-10 09:01:00"
+            partner.snapshot_values.update(
+                {
+                    rank_field: getattr(partner, rank_field),
+                    "write_uid": [42, "V3 Executor"],
+                    "write_date": "2026-07-10 09:01:00",
+                }
+            )
+        return False
+
+    refund.action_post = action_post
+    return (
+        comp,
+        refund,
+        refund_lines,
+        origin,
+        origin_lines,
+        partial_reconcile,
+        full_reconcile,
+        selected_partner,
+        commercial_partner,
+        records,
+        parameters,
+    )
+
+
+@pytest.mark.parametrize("vendor", (False, True))
+def test_refund_post_reconcile_full_matches_odoo19_automatic_graph(vendor):
+    (
+        comp,
+        refund,
+        refund_lines,
+        origin,
+        origin_lines,
+        partial_reconcile,
+        full_reconcile,
+        partner,
+        _commercial_partner,
+        records,
+        parameters,
+    ) = refund_post_reconcile_fixture(vendor=vendor)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+    execution = handler.execute_prechecked(
+        "acct.refund.post_reconcile_origin.v1", parameters, checked
+    )
+    assert refund.contexts[-1] == {
+        "tracking_disable": True,
+        "mail_notrack": True,
+        "odoo_accounting_cli_v3_rank_capability_id": (
+            "acct.refund.post_reconcile_origin.v1"
+        ),
+        "odoo_accounting_cli_v3_rank_field": (
+            "supplier_rank" if vendor else "customer_rank"
+        ),
+        "odoo_accounting_cli_v3_rank_partner_ids": (10,),
+    }
+    assert getattr(
+        partner, "supplier_rank" if vendor else "customer_rank"
+    ) == 2
+    verification = handler.verify(
+        "acct.refund.post_reconcile_origin.v1", parameters, execution
+    )
+
+    assert refund.action_post_calls == 1
+    assert (refund.state, refund.payment_state, refund.amount_residual) == (
+        "posted",
+        "paid",
+        0,
+    )
+    assert (origin.state, origin.payment_state, origin.amount_residual) == (
+        "posted",
+        "reversed",
+        0,
+    )
+    assert partial_reconcile.full_reconcile_id is full_reconcile
+    assert full_reconcile.partial_reconcile_ids == [partial_reconcile]
+    assert len(full_reconcile.reconciled_line_ids) == 2
+    assert refund_lines[1].matching_number == "1502"
+    assert origin_lines[1].matching_number == "1502"
+    assert sum(
+        item["model"] == "account.partial.reconcile"
+        for item in execution["records"]
+    ) == 1
+    assert sum(
+        item["model"] == "account.full.reconcile"
+        for item in execution["records"]
+    ) == 1
+    assert getattr(
+        partner, "supplier_rank" if vendor else "customer_rank"
+    ) == 2
+    assert verification["passed"] is True
+    assert "linked_refund_posted_and_origin_reconciled_exactly" in verification[
+        "checks"
+    ]
+    assert execution["recovery"] == {
+        "status": "manual_escalation",
+        "method": "manual_review_refund_post_reconcile_recovery",
+        "targets": [
+            {"model": "account.move", "record_id": 1301},
+            {"model": "account.move", "record_id": 1401},
+        ],
+    }
+
+
+@pytest.mark.parametrize("vendor", (False, True))
+def test_refund_post_reconcile_partial_has_one_partial_and_no_full(vendor):
+    (
+        comp,
+        refund,
+        refund_lines,
+        origin,
+        origin_lines,
+        partial_reconcile,
+        full_reconcile,
+        _partner,
+        _commercial_partner,
+        records,
+        parameters,
+    ) = refund_post_reconcile_fixture(vendor=vendor, partial=True)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+    execution = handler.execute_prechecked(
+        "acct.refund.post_reconcile_origin.v1", parameters, checked
+    )
+    verification = handler.verify(
+        "acct.refund.post_reconcile_origin.v1", parameters, execution
+    )
+
+    assert refund.action_post_calls == 1
+    assert (refund.payment_state, refund.amount_residual) == ("paid", 0)
+    assert (origin.payment_state, origin.amount_residual) == ("partial", 60)
+    assert refund_lines[1].reconciled is True
+    assert origin_lines[1].reconciled is False
+    assert refund_lines[1].matching_number == "P1501"
+    assert origin_lines[1].matching_number == "P1501"
+    assert partial_reconcile.full_reconcile_id is None
+    assert full_reconcile is None
+    assert sum(
+        item["model"] == "account.partial.reconcile"
+        for item in execution["records"]
+    ) == 1
+    assert not any(
+        item["model"] == "account.full.reconcile"
+        for item in execution["records"]
+    )
+    assert verification["passed"] is True
+
+
+def test_refund_post_reconcile_verify_allows_later_same_user_rank_increment():
+    fixture = refund_post_reconcile_fixture()
+    comp, refund, partner, records, parameters = (
+        fixture[0],
+        fixture[1],
+        fixture[7],
+        fixture[9],
+        fixture[10],
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+    execution = handler.execute_prechecked(
+        "acct.refund.post_reconcile_origin.v1", parameters, checked
+    )
+    assert partner.customer_rank == 2
+
+    partner.customer_rank = 3
+    partner.write_uid = Record(42)
+    partner.write_date = "2026-07-10 09:02:00"
+    partner.snapshot_values.update(
+        {
+            "customer_rank": 3,
+            "write_uid": [42, "V3 Executor"],
+            "write_date": "2026-07-10 09:02:00",
+        }
+    )
+
+    verification = handler.verify(
+        "acct.refund.post_reconcile_origin.v1", parameters, execution
+    )
+
+    assert verification["passed"] is True
+
+
+@pytest.mark.parametrize(
+    ("origin_accounting_date", "expected_valid"),
+    (("2026-07-14", False), ("2026-07-12", True)),
+)
+def test_refund_post_reconcile_precheck_uses_origin_accounting_date(
+    origin_accounting_date, expected_valid
+):
+    (
+        comp,
+        refund,
+        _refund_lines,
+        _origin,
+        _origin_lines,
+        _partial_reconcile,
+        _full_reconcile,
+        _partner,
+        _commercial_partner,
+        records,
+        parameters,
+    ) = refund_post_reconcile_fixture(
+        origin_invoice_date="2026-07-10",
+        origin_accounting_date=origin_accounting_date,
+        refund_date="2026-07-13",
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    if expected_valid:
+        checked = handler.precheck(
+            "acct.refund.post_reconcile_origin.v1", parameters
+        )
+        assert checked["before"]
+    else:
+        with pytest.raises(
+            OdooWriteHandlerError,
+            match="accounting date|precedes.*origin",
+        ):
+            handler.precheck(
+                "acct.refund.post_reconcile_origin.v1", parameters
+            )
+    assert refund.action_post_calls == 0
+
+
+def test_refund_post_reconcile_increments_selected_and_commercial_partner_once():
+    (
+        comp,
+        refund,
+        _refund_lines,
+        _origin,
+        _origin_lines,
+        _partial_reconcile,
+        _full_reconcile,
+        selected_partner,
+        commercial_partner,
+        records,
+        parameters,
+    ) = refund_post_reconcile_fixture(distinct_commercial_partner=True)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+    execution = handler.execute_prechecked(
+        "acct.refund.post_reconcile_origin.v1", parameters, checked
+    )
+    assert refund.contexts[-1][
+        "odoo_accounting_cli_v3_rank_partner_ids"
+    ] == (10, 11)
+    assert selected_partner.customer_rank == 2
+    assert commercial_partner.customer_rank == 2
+    handler.verify(
+        "acct.refund.post_reconcile_origin.v1", parameters, execution
+    )
+
+    assert selected_partner.customer_rank == 2
+    assert commercial_partner.customer_rank == 2
+
+
+@pytest.mark.parametrize(
+    ("vendor", "rank_field"),
+    ((False, "customer_rank"), (True, "supplier_rank")),
+)
+def test_refund_post_reconcile_increments_positive_rank_in_the_main_transaction(
+    vendor, rank_field
+):
+    fixture = refund_post_reconcile_fixture(vendor=vendor)
+    comp, refund, partner, records, parameters = (
+        fixture[0],
+        fixture[1],
+        fixture[7],
+        fixture[9],
+        fixture[10],
+    )
+    setattr(partner, rank_field, 2)
+    partner.snapshot_values[rank_field] = 2
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+    execution = handler.execute_prechecked(
+        "acct.refund.post_reconcile_origin.v1", parameters, checked
+    )
+
+    assert refund.action_post_calls == 1
+    assert getattr(partner, rank_field) == 3
+    assert partner.write_uid.id == 42
+    assert partner.write_date == "2026-07-10 09:01:00"
+
+    verification = handler.verify(
+        "acct.refund.post_reconcile_origin.v1", parameters, execution
+    )
+
+    assert verification["passed"] is True
+
+
+def test_refund_post_reconcile_execute_rejects_missing_synchronous_rank_increment():
+    fixture = refund_post_reconcile_fixture()
+    comp, refund, partner, records, parameters = (
+        fixture[0],
+        fixture[1],
+        fixture[7],
+        fixture[9],
+        fixture[10],
+    )
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+    exact_action_post = refund.action_post
+
+    def action_post_without_rank_increment():
+        result = exact_action_post()
+        partner.customer_rank = 1
+        partner.write_uid = Record(42)
+        partner.write_date = "2026-07-10 09:00:00"
+        partner.snapshot_values.update(
+            {
+                "customer_rank": 1,
+                "write_uid": [42, "V3 Executor"],
+                "write_date": "2026-07-10 09:00:00",
+            }
+        )
+        return result
+
+    refund.action_post = action_post_without_rank_increment
+    with pytest.raises(OdooWriteHandlerError, match="rank|delta"):
+        handler.execute_prechecked(
+            "acct.refund.post_reconcile_origin.v1", parameters, checked
+        )
+
+
+def test_refund_post_reconcile_precheck_requires_write_acl_on_every_mutated_record():
+    fixture = refund_post_reconcile_fixture(distinct_commercial_partner=True)
+    comp, _refund, refund_lines, _origin, origin_lines = fixture[:5]
+    selected_partner, commercial_partner, records, parameters = (
+        fixture[7],
+        fixture[8],
+        fixture[9],
+        fixture[10],
+    )
+    handler = DraftCancelAclHarness(records=records)
+    handler.test_company = comp
+
+    handler.precheck("acct.refund.post_reconcile_origin.v1", parameters)
+
+    assert set(handler.write_acl_targets) >= {
+        ("account.move", 1301),
+        ("account.move", 1401),
+        *(("account.move.line", line.id) for line in refund_lines),
+        *(("account.move.line", line.id) for line in origin_lines),
+        ("res.partner", selected_partner.id),
+        ("res.partner", commercial_partner.id),
+    }
+
+
+def test_refund_post_reconcile_rejects_commercial_partner_binding_tamper():
+    fixture = refund_post_reconcile_fixture(distinct_commercial_partner=True)
+    comp, refund, records, parameters = (
+        fixture[0],
+        fixture[1],
+        fixture[9],
+        fixture[10],
+    )
+    parameters["expected_commercial_partner_id"] = 10
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(
+        OdooWriteHandlerError,
+        match="commercial partner|partner binding|approved partner",
+    ):
+        handler.precheck("acct.refund.post_reconcile_origin.v1", parameters)
+
+    assert refund.action_post_calls == 0
+
+
+def test_refund_post_reconcile_accepts_origin_computed_state_without_log_access_delta():
+    fixture = refund_post_reconcile_fixture()
+    comp, refund, origin, records, parameters = (
+        fixture[0],
+        fixture[1],
+        fixture[3],
+        fixture[9],
+        fixture[10],
+    )
+    previous_write_uid = origin.write_uid
+    previous_write_date = origin.write_date
+    previous_snapshot_uid = origin.snapshot_values["write_uid"]
+    previous_snapshot_date = origin.snapshot_values["write_date"]
+    exact_action_post = refund.action_post
+
+    def action_post_without_origin_log_access_delta():
+        result = exact_action_post()
+        origin.write_uid = previous_write_uid
+        origin.write_date = previous_write_date
+        origin.snapshot_values["write_uid"] = previous_snapshot_uid
+        origin.snapshot_values["write_date"] = previous_snapshot_date
+        return result
+
+    refund.action_post = action_post_without_origin_log_access_delta
+    handler = Harness(records=records)
+    handler.test_company = comp
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+
+    execution = handler.execute_prechecked(
+        "acct.refund.post_reconcile_origin.v1", parameters, checked
+    )
+    verification = handler.verify(
+        "acct.refund.post_reconcile_origin.v1", parameters, execution
+    )
+
+    assert refund.action_post_calls == 1
+    assert origin.payment_state == "reversed"
+    assert origin.amount_residual == 0
+    assert verification["passed"] is True
+
+
+def test_refund_post_reconcile_rejects_graph_drift_before_action_post():
+    (
+        comp,
+        refund,
+        _refund_lines,
+        origin,
+        _origin_lines,
+        _partial_reconcile,
+        _full_reconcile,
+        _partner,
+        _commercial_partner,
+        records,
+        parameters,
+    ) = refund_post_reconcile_fixture()
+    handler = Harness(records=records)
+    handler.test_company = comp
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+    origin.ref = "ORIGIN-CHANGED-AFTER-APPROVAL"
+    origin.snapshot_values["ref"] = origin.ref
+
+    with pytest.raises(OdooWriteHandlerError, match="approved|binding|changed"):
+        handler.execute_prechecked(
+            "acct.refund.post_reconcile_origin.v1", parameters, checked
+        )
+
+    assert refund.action_post_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    (
+        (
+            lambda fixture, parameters: parameters.update(
+                expected_source_refund_mode="partial"
+            ),
+            "refund mode|full|partial|binding",
+        ),
+        (
+            lambda fixture, parameters: parameters.update(
+                expected_total_amount="99"
+            ),
+            "amount|full|binding",
+        ),
+        (
+            lambda fixture, parameters: parameters.update(
+                expected_refund_payment_term_line_id=1302
+            ),
+            "payment term",
+        ),
+        (
+            lambda fixture, parameters: setattr(
+                fixture[2][1].account_id, "reconcile", False
+            ),
+            "reconcile|payment term",
+        ),
+        (
+            lambda fixture, parameters: setattr(
+                fixture[2][0].account_id, "account_type", "asset_cash"
+            ),
+            "reconcile|cash|credit|nonterm|business",
+        ),
+        (
+            lambda fixture, parameters: setattr(
+                fixture[4][1],
+                "matched_credit_ids",
+                [Record(1991)],
+            ),
+            "reconcil|external",
+        ),
+    ),
+)
+def test_refund_post_reconcile_precheck_rejects_wrong_mode_term_or_prior_reconcile(
+    mutate, match
+):
+    fixture = refund_post_reconcile_fixture()
+    comp, refund, _refund_lines, _origin, _origin_lines = fixture[:5]
+    records, parameters = fixture[9], fixture[10]
+    mutate(fixture, parameters)
+    handler = Harness(records=records)
+    handler.test_company = comp
+
+    with pytest.raises(OdooWriteHandlerError, match=match):
+        handler.precheck(
+            "acct.refund.post_reconcile_origin.v1", parameters
+        )
+
+    assert refund.action_post_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("mutate_after", "match"),
+    (
+        (
+            lambda fixture: fixture[3].snapshot_values.update(
+                {"amount_residual": "0.01"}
+            ),
+            "residual|delta|amount",
+        ),
+        (
+            lambda fixture: fixture[1].snapshot_values.update(
+                {"ref": "UNAPPROVED-POSTING-DELTA"}
+            ),
+            "delta|allowlist|changed|identity",
+        ),
+        (
+            lambda fixture: fixture[7].snapshot_values.update(
+                {"customer_rank": 3}
+            ),
+            "rank|delta|allowlist",
+        ),
+    ),
+)
+def test_refund_post_reconcile_rejects_wrong_action_post_delta(
+    mutate_after, match
+):
+    fixture = refund_post_reconcile_fixture()
+    comp, refund, records, parameters = (
+        fixture[0],
+        fixture[1],
+        fixture[9],
+        fixture[10],
+    )
+    exact_action_post = refund.action_post
+
+    def action_post_with_delta_drift():
+        result = exact_action_post()
+        mutate_after(fixture)
+        if fixture[3].snapshot_values.get("amount_residual") == "0.01":
+            fixture[3].amount_residual = Decimal("0.01")
+        if fixture[1].snapshot_values.get("ref") == "UNAPPROVED-POSTING-DELTA":
+            fixture[1].ref = "UNAPPROVED-POSTING-DELTA"
+        if fixture[7].snapshot_values.get("customer_rank") == 3:
+            fixture[7].customer_rank = 3
+        return result
+
+    refund.action_post = action_post_with_delta_drift
+    handler = Harness(records=records)
+    handler.test_company = comp
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+
+    with pytest.raises(OdooWriteHandlerError, match=match):
+        handler.execute_prechecked(
+            "acct.refund.post_reconcile_origin.v1", parameters, checked
+        )
+
+    assert refund.action_post_calls == 1
+
+
+def test_refund_post_reconcile_rejects_an_extra_automatic_partial_record():
+    fixture = refund_post_reconcile_fixture()
+    comp, refund, refund_lines, _origin, origin_lines = fixture[:5]
+    records, parameters = fixture[9], fixture[10]
+    exact_action_post = refund.action_post
+
+    def action_post_with_extra_partial():
+        result = exact_action_post()
+        origin_term = origin_lines[1]
+        refund_term = refund_lines[1]
+        extra = Record(
+            1599,
+            company_id=Record(7),
+            debit_move_id=origin_term,
+            credit_move_id=refund_term,
+            amount=1,
+            debit_amount_currency=1,
+            credit_amount_currency=1,
+            full_reconcile_id=None,
+            company_currency_id=refund.currency_id,
+            debit_currency_id=refund.currency_id,
+            credit_currency_id=refund.currency_id,
+            exchange_move_id=None,
+            max_date="2026-07-10",
+            draft_caba_move_vals=False,
+        )
+        extra.snapshot_values = {
+            "company_id": 7,
+            "debit_move_id": origin_term.id,
+            "credit_move_id": refund_term.id,
+            "amount": "1",
+            "debit_amount_currency": "1",
+            "credit_amount_currency": "1",
+            "full_reconcile_id": False,
+            "company_currency_id": 1,
+            "debit_currency_id": 1,
+            "credit_currency_id": 1,
+            "exchange_move_id": False,
+            "max_date": "2026-07-10",
+            "draft_caba_move_vals": False,
+        }
+        records[("account.partial.reconcile", 1599)] = extra
+        origin_term.matched_credit_ids.append(extra)
+        refund_term.matched_debit_ids.append(extra)
+        origin_term.snapshot_values["matched_credit_ids"].append(1599)
+        refund_term.snapshot_values["matched_debit_ids"].append(1599)
+        return result
+
+    refund.action_post = action_post_with_extra_partial
+    handler = Harness(records=records)
+    handler.test_company = comp
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+
+    with pytest.raises(
+        OdooWriteHandlerError, match="partial|reconcil|record graph|delta"
+    ):
+        handler.execute_prechecked(
+            "acct.refund.post_reconcile_origin.v1", parameters, checked
+        )
+
+    assert refund.action_post_calls == 1
+
+
+def test_refund_post_reconcile_action_failure_has_no_success_result():
+    fixture = refund_post_reconcile_fixture()
+    comp, refund, refund_lines, origin, origin_lines = fixture[:5]
+    records, parameters = fixture[9], fixture[10]
+
+    def failed_action_post():
+        refund.action_post_calls += 1
+        raise RuntimeError("simulated Odoo action_post failure")
+
+    refund.action_post = failed_action_post
+    handler = Harness(records=records)
+    handler.test_company = comp
+    checked = handler.precheck(
+        "acct.refund.post_reconcile_origin.v1", parameters
+    )
+
+    with pytest.raises(RuntimeError, match="action_post failure"):
+        handler.execute_prechecked(
+            "acct.refund.post_reconcile_origin.v1", parameters, checked
+        )
+
+    assert refund.action_post_calls == 1
+    assert (refund.state, refund.payment_state) == ("draft", "not_paid")
+    assert (origin.state, origin.payment_state) == ("posted", "not_paid")
+    assert refund_lines[1].matched_debit_ids == []
+    assert refund_lines[1].matched_credit_ids == []
+    assert origin_lines[1].matched_debit_ids == []
+    assert origin_lines[1].matched_credit_ids == []

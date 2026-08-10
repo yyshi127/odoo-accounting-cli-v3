@@ -78,6 +78,7 @@ def test_control_addon_is_odoo_19_scoped_and_loadable_as_a_static_package():
         encoding="utf-8"
     ).splitlines() == [
         "from . import execution_scope",
+        "from . import refund_rank",
         "from . import accounting_metadata",
         "from . import bank_statement_sequence_guard",
         "from . import approval_client",

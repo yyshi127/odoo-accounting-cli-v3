@@ -135,6 +135,9 @@ REVIEWED_READ_DISPATCH = {
     "acct.refund.draft_cancel_eligibility.v1": (
         "_read_refund_draft_cancel_eligibility"
     ),
+    "acct.refund.post_reconcile_eligibility.v1": (
+        "_read_refund_post_reconcile_eligibility"
+    ),
     "acct.report.financial_read.v1": "_read_financial_report",
     "acct.tax.report_read.v1": "_read_tax_report",
 }
@@ -151,7 +154,7 @@ READ_BOOTSTRAP_SOURCE_SHA256 = (
     "e089b7c0d7607d65ee49cf40c527dbc2ae28b5f025e9b36fe716c0f4b4909ec7"
 )
 READ_EXECUTOR_SOURCE_SHA256 = (
-    "6101d81072d92837a617f37e93a6f3ca57ea700f4aaeb647064ed4b1166fa3b6"
+    "061d08201f37696f2714d4f95850783cf71ec207f6de9cad7e1714c56dec246f"
 )
 REVIEWED_INITIALIZER_ATTRIBUTES = {
     ("odoo_accounting_cli_v3.gateway", "CapabilityGateway"): frozenset(
@@ -417,23 +420,38 @@ REVIEWED_SOURCE_VIOLATIONS = frozenset(
         ),
         (
             "odoo_accounting_cli_v3.odoo.executor",
-            560,
+            561,
             "dynamic:getattr",
         ),
         (
             "odoo_accounting_cli_v3.odoo.executor",
-            582,
+            583,
             "dynamic:getattr",
         ),
         (
             "odoo_accounting_cli_v3.odoo.executor",
-            823,
+            824,
             "dynamic:getattr",
         ),
         (
             "odoo_accounting_cli_v3.odoo.executor",
-            847,
+            848,
             "dynamic:getattr",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.executor",
+            2842,
+            "attribute:reconcile",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.executor",
+            2843,
+            "attribute:reconcile",
+        ),
+        (
+            "odoo_accounting_cli_v3.odoo.executor",
+            2861,
+            "attribute:reconcile",
         ),
         (
             "odoo_accounting_cli_v3.domain.multicompany_consolidated",

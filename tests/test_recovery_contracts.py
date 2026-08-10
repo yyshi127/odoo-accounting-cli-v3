@@ -243,15 +243,24 @@ def test_terminal_capabilities_have_no_follow_on_executable_recovery(
     [
         "acct.invoice.customer_post.v1",
         "acct.bill.vendor_post.v1",
+        "acct.refund.post_reconcile_origin.v1",
     ],
 )
-def test_document_post_requires_a_future_separate_credit_note_capability(
+def test_document_post_requires_a_future_separate_compensating_capability(
     capability_id,
 ):
     assert contracts_for_capability(capability_id) == ()
     assert all(
         contract.origin_capability_id != capability_id
         for contract in RECOVERY_ACTION_CONTRACTS.values()
+    )
+
+
+def test_refund_post_manual_review_is_not_an_executable_recovery_contract():
+    assert len(RECOVERY_ACTION_CONTRACTS) == 16
+    assert (
+        "manual_review_refund_post_reconcile_recovery"
+        not in EXECUTABLE_RECOVERY_METHODS
     )
 
 

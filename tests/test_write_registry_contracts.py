@@ -46,6 +46,7 @@ DOCUMENT_LIFECYCLE_WRITE_IDS = (
     "acct.invoice.customer_post.v1",
     "acct.bill.vendor_post.v1",
     "acct.refund.draft_cancel.v1",
+    "acct.refund.post_reconcile_origin.v1",
 )
 WRITE_IDS = (
     *BASELINE_WRITE_IDS[:13],
@@ -204,6 +205,27 @@ EXPECTED_INPUT_FIELDS = {
         "expected_refund_date", "expected_total_amount",
         "expected_line_ids", "expected_origin_line_ids", "reason",
         "idempotency_key",
+    },
+    "acct.refund.post_reconcile_origin.v1": {
+        "company_id", "move_id", "expected_move_type",
+        "expected_origin_move_id", "expected_document_binding",
+        "expected_document_binding_v2", "expected_business_binding",
+        "expected_origin_document_binding",
+        "expected_origin_document_binding_v2",
+        "expected_origin_business_binding", "expected_source_refund_mode",
+        "expected_partner_id", "expected_commercial_partner_id",
+        "expected_journal_id", "expected_currency_id",
+        "expected_refund_date", "expected_total_amount",
+        "expected_origin_total_amount", "expected_reconcile_amount",
+        "expected_refund_payment_term_line_id",
+        "expected_origin_payment_term_line_id",
+        "expected_payment_term_account_id",
+        "expected_reconciliation_outcome",
+        "expected_refund_payment_state_after",
+        "expected_origin_payment_state_after",
+        "expected_refund_residual_after",
+        "expected_origin_residual_after", "expected_line_ids",
+        "expected_origin_line_ids", "reason", "idempotency_key",
     },
 }
 
@@ -566,6 +588,37 @@ VALID_INPUTS = {
         "reason": "Cancel the duplicate unposted credit note",
         "idempotency_key": "cancel-draft-refund-903",
     },
+    "acct.refund.post_reconcile_origin.v1": {
+        "company_id": 7, "move_id": 904,
+        "expected_move_type": "out_refund",
+        "expected_origin_move_id": 901,
+        "expected_document_binding": "5" * 64,
+        "expected_document_binding_v2": "9" * 64,
+        "expected_business_binding": "6" * 64,
+        "expected_origin_document_binding": "1" * 64,
+        "expected_origin_document_binding_v2": "a" * 64,
+        "expected_origin_business_binding": "2" * 64,
+        "expected_source_refund_mode": "full",
+        "expected_partner_id": 101,
+        "expected_commercial_partner_id": 101,
+        "expected_journal_id": 5, "expected_currency_id": 12,
+        "expected_refund_date": "2026-07-16",
+        "expected_total_amount": "100.00",
+        "expected_origin_total_amount": "100.00",
+        "expected_reconcile_amount": "100.00",
+        "expected_refund_payment_term_line_id": 9043,
+        "expected_origin_payment_term_line_id": 9013,
+        "expected_payment_term_account_id": 1201,
+        "expected_reconciliation_outcome": "full_origin_reversal",
+        "expected_refund_payment_state_after": "paid",
+        "expected_origin_payment_state_after": "reversed",
+        "expected_refund_residual_after": "0.00",
+        "expected_origin_residual_after": "0.00",
+        "expected_line_ids": [9041, 9043],
+        "expected_origin_line_ids": [9011, 9013],
+        "reason": "Post and reconcile the approved customer credit note",
+        "idempotency_key": "post-reconcile-refund-904",
+    },
 }
 
 
@@ -675,7 +728,7 @@ def _valid_v2_output(capability_id):
 
 def test_exact_write_capability_set_and_safety_gates_remain_closed():
     writes = _writes()
-    assert len(WRITE_IDS) == 23
+    assert len(WRITE_IDS) == 24
     assert tuple(writes) == WRITE_IDS
     assert len(BASELINE_WRITE_IDS) == 14
     assert tuple(
@@ -1604,6 +1657,36 @@ def test_document_and_refund_metadata_match_strict_graph_verifiers_and_manual_re
     assert refund["recovery"] == {
         "method": "cancel_draft_refund_v1_test_or_sandbox_only"
     }
+    refund_post = writes["acct.refund.post_reconcile_origin.v1"]
+    assert refund_post["risk_level"] == "critical"
+    assert refund_post["odoo_permissions"] == [
+        "account.group_account_invoice"
+    ]
+    assert refund_post["approval"] == {
+        "required": True,
+        "policy": "refund_post_reconcile_origin",
+        "ttl_seconds": 600,
+    }
+    assert refund_post["idempotency"] == {
+        "required": True,
+        "scope": "company_origin_move",
+    }
+    assert refund_post["verification"] == {
+        "method": (
+            "read_back_exact_posted_refund_and_origin_auto_reconciliation_"
+            "graph_with_partial_or_full_outcome_rank_delta_and_allowlisted_"
+            "audit_delta_v1"
+        )
+    }
+    assert refund_post["recovery"] == {
+        "method": "manual_review_refund_post_reconcile_recovery"
+    }
+    assert refund_post["evidence"] == {
+        "level": "declared",
+        "receipts": [],
+    }
+    assert refund_post.get("staged_environments", []) == []
+    assert refund_post["enabled_environments"] == []
 
 
 def test_write_batch_limits_fit_the_precommit_audit_graph_budget():
@@ -1714,6 +1797,7 @@ def test_registered_write_capabilities_are_bound_to_control_and_odoo_layers():
         if capability_id in {
             "acct.invoice.customer_post.v1",
             "acct.bill.vendor_post.v1",
+            "acct.refund.post_reconcile_origin.v1",
         }:
             allowed_non_account_models.add("res.partner")
         if capability_id in mail_message_capability_ids:

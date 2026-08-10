@@ -885,8 +885,8 @@ def test_current_cli_readiness_requires_a_new_protocol_after_frozen_dev251() -> 
             release_identity=identity,
         )
     assert data["read_static_readiness_ready"] is True
-    assert data["admissible_count"] == 12
-    assert data["total_read_capabilities"] == 12
+    assert data["admissible_count"] == 13
+    assert data["total_read_capabilities"] == 13
     assert data["unready_capability_ids"] == []
 
 

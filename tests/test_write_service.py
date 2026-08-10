@@ -60,6 +60,7 @@ from odoo_accounting_cli_v3.write_service import (
     DurableWriteService,
     WriteServiceError,
     WriteServiceSecurity,
+    write_idempotency_scope,
 )
 
 
@@ -102,6 +103,13 @@ def test_write_service_accepts_every_model_emitted_by_hardened_write_handlers():
         }
     assert _ALLOWED_MODELS["acct.refund.draft_cancel.v1"] == {
         "account.move", "account.move.line",
+    }
+    assert _ALLOWED_MODELS["acct.refund.post_reconcile_origin.v1"] == {
+        "account.move",
+        "account.move.line",
+        "account.partial.reconcile",
+        "account.full.reconcile",
+        "res.partner",
     }
     assert _ALLOWED_MODELS["acct.payment.register.v1"] == {
         "account.payment", "account.move", "account.move.line",
@@ -457,6 +465,63 @@ def _capabilities():
             item["staged_environments"] = ["sandbox"]
             item["evidence"]["level"] = "contract_tested"
     return validate_registry(document)
+
+
+def test_refund_post_reconcile_idempotency_scope_binds_origin_move():
+    capability = next(
+        item
+        for item in _capabilities()
+        if item.id == "acct.refund.post_reconcile_origin.v1"
+    )
+    baseline = {
+        "move_id": 1301,
+        "expected_origin_move_id": 1401,
+    }
+
+    same_origin_different_refund = {
+        **baseline,
+        "move_id": 1302,
+    }
+    different_origin_same_refund = {
+        **baseline,
+        "expected_origin_move_id": 1402,
+    }
+
+    baseline_scope = write_idempotency_scope(capability, baseline)
+    assert write_idempotency_scope(
+        capability, same_origin_different_refund
+    ) == baseline_scope
+    assert write_idempotency_scope(
+        capability, different_origin_same_refund
+    ) != baseline_scope
+
+
+def test_refund_draft_cancel_idempotency_scope_remains_bound_to_refund_move():
+    capability = next(
+        item
+        for item in _capabilities()
+        if item.id == "acct.refund.draft_cancel.v1"
+    )
+    baseline = {
+        "move_id": 1301,
+        "expected_origin_move_id": 1401,
+    }
+    same_refund_different_origin = {
+        **baseline,
+        "expected_origin_move_id": 1402,
+    }
+    different_refund_same_origin = {
+        **baseline,
+        "move_id": 1302,
+    }
+
+    baseline_scope = write_idempotency_scope(capability, baseline)
+    assert write_idempotency_scope(
+        capability, same_refund_different_origin
+    ) == baseline_scope
+    assert write_idempotency_scope(
+        capability, different_refund_same_origin
+    ) != baseline_scope
 
 
 def _context(

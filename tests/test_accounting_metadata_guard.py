@@ -155,7 +155,7 @@ def test_document_binding_v2_static_contract_and_addon_patch_version() -> None:
     )
     assert '@api.constrains("odoo_cli_v3_document_binding_v2")' in source
     assert "document binding V2 must be lowercase SHA-256" in source
-    assert manifest["version"] == "19.0.0.7.2"
+    assert manifest["version"] == "19.0.0.7.3"
 
 
 def test_document_binding_v2_can_only_be_assigned_once(

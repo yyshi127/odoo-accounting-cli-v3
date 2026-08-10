@@ -93,6 +93,7 @@ _OUTPUT_COMPANY_BINDING_KIND = {
     "acct.multicompany.consolidated_read.v1": "multicompany",
     "acct.multicurrency.balance_read.v1": "multicurrency",
     "acct.refund.draft_cancel_eligibility.v1": "refund_eligibility",
+    "acct.refund.post_reconcile_eligibility.v1": "refund_eligibility",
     "acct.registry.list.v1": "none",
     "acct.report.financial_read.v1": "none",
     "acct.tax.report_read.v1": "none",

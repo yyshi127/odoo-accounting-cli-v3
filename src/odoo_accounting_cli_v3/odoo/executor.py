@@ -75,6 +75,7 @@ _CAPABILITIES = frozenset(
         "acct.move.document_post_eligibility.v1",
         "acct.move.draft_cancel_eligibility.v1",
         "acct.refund.draft_cancel_eligibility.v1",
+        "acct.refund.post_reconcile_eligibility.v1",
         "acct.report.financial_read.v1",
         "acct.tax.report_read.v1",
     }
@@ -2166,16 +2167,39 @@ class OdooReadExecutor:
     def _read_refund_draft_cancel_eligibility(
         self, context: RequestContext, parameters: dict[str, Any]
     ) -> dict[str, Any]:
+        return self._read_refund_eligibility(
+            context, parameters, post_reconcile=False
+        )
+
+    def _read_refund_post_reconcile_eligibility(
+        self, context: RequestContext, parameters: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._read_refund_eligibility(
+            context, parameters, post_reconcile=True
+        )
+
+    def _read_refund_eligibility(
+        self,
+        context: RequestContext,
+        parameters: dict[str, Any],
+        *,
+        post_reconcile: bool,
+    ) -> dict[str, Any]:
         company_id = parameters["company_id"]
         refund_id = parameters["move_id"]
         expected_move_type = parameters["expected_move_type"]
+        eligibility_label = (
+            "refund post and origin reconciliation"
+            if post_reconcile
+            else "refund draft cancellation"
+        )
         company = self._bound_read_company(
-            context, company_id, label="refund draft cancellation"
+            context, company_id, label=eligibility_label
         )
         refund = self._bound_read_move(
             refund_id,
             company_id,
-            label="refund draft cancellation move",
+            label=f"{eligibility_label} move",
         )
         failures: list[str] = []
         if not _acl_granted(refund, "write"):
@@ -2188,7 +2212,7 @@ class OdooReadExecutor:
         origin = self._bound_read_move(
             origin_id,
             company_id,
-            label="refund draft cancellation origin",
+            label=f"{eligibility_label} origin",
         )
 
         refund_lines = _iter_records(getattr(refund, "line_ids", []))
@@ -2502,11 +2526,14 @@ class OdooReadExecutor:
             )
         if refund_date is None or accounting_date != refund_date:
             failures.append("refund_date_binding_invalid")
+        origin_date_floor = (
+            origin_accounting_date if post_reconcile else origin_invoice_date
+        )
         if (
-            origin_invoice_date is None
+            origin_date_floor is None
             or (
                 refund_date is not None
-                and refund_date < origin_invoice_date
+                and refund_date < origin_date_floor
             )
         ):
             failures.append("refund_date_precedes_or_lacks_origin_date")
@@ -2715,6 +2742,173 @@ class OdooReadExecutor:
                     "partial_refund_origin_line_relation_not_exact"
                 )
 
+        refund_term_line_id = None
+        origin_term_line_id = None
+        payment_term_account_id = None
+        reconciliation_outcome = None
+        origin_payment_state_after = None
+        origin_residual_after = None
+        if post_reconcile:
+            if not _acl_granted(origin, "write"):
+                failures.append("origin_write_acl_denied")
+            if any(
+                not _acl_granted(line, "write") for line in origin_lines
+            ):
+                failures.append("origin_line_write_acl_denied")
+            posting_partners = {
+                item_id: item
+                for item in (partner, commercial_partner)
+                if (item_id := _record_id(item)) is not None
+            }
+            if set(posting_partners) != {
+                item_id
+                for item_id in (partner_id, commercial_partner_id)
+                if item_id is not None
+            }:
+                failures.append("posting_partner_graph_invalid")
+            for posting_partner in posting_partners.values():
+                rank = (
+                    posting_partner.supplier_rank
+                    if vendor
+                    else posting_partner.customer_rank
+                )
+                if (
+                    getattr(posting_partner, "active", True) is False
+                    or not _record_company_bound(
+                        posting_partner, company_id, shared=True
+                    )
+                    or isinstance(rank, bool)
+                    or not isinstance(rank, int)
+                    or rank < 1
+                ):
+                    failures.append(
+                        "posting_partner_commercial_rank_or_scope_invalid"
+                    )
+                elif not _acl_granted(posting_partner, "write"):
+                    failures.append("posting_partner_write_acl_denied")
+
+            refund_term_lines = [
+                line
+                for line in refund_lines
+                if str(getattr(line, "display_type", "") or "")
+                == "payment_term"
+            ]
+            origin_term_lines = [
+                line
+                for line in origin_lines
+                if str(getattr(line, "display_type", "") or "")
+                == "payment_term"
+            ]
+            expected_term_type = (
+                "liability_payable" if vendor else "asset_receivable"
+            )
+            if len(refund_term_lines) != 1 or len(origin_term_lines) != 1:
+                failures.append("payment_term_graph_not_exact")
+            else:
+                refund_term = refund_term_lines[0]
+                origin_term = origin_term_lines[0]
+                refund_term_line_id = _record_id(refund_term)
+                origin_term_line_id = _record_id(origin_term)
+                refund_term_account = getattr(
+                    refund_term, "account_id", None
+                )
+                origin_term_account = getattr(
+                    origin_term, "account_id", None
+                )
+                payment_term_account_id = _record_id(
+                    refund_term_account
+                )
+                if (
+                    refund_term_line_id is None
+                    or origin_term_line_id is None
+                    or payment_term_account_id is None
+                    or _record_id(origin_term_account)
+                    != payment_term_account_id
+                    or str(
+                        getattr(refund_term_account, "account_type", "")
+                        or ""
+                    )
+                    != expected_term_type
+                    or str(
+                        getattr(origin_term_account, "account_type", "")
+                        or ""
+                    )
+                    != expected_term_type
+                ):
+                    failures.append("payment_term_graph_not_exact")
+                if (
+                    refund_term_account is None
+                    or origin_term_account is None
+                    or refund_term_account.reconcile is not True
+                    or origin_term_account.reconcile is not True
+                ):
+                    failures.append(
+                        "payment_term_account_not_reconcilable"
+                    )
+            term_ids = {
+                item_id
+                for item_id in (
+                    refund_term_line_id,
+                    origin_term_line_id,
+                )
+                if item_id is not None
+            }
+            unsafe_nonterm_lines = []
+            for line in [*refund_lines, *origin_lines]:
+                if _record_id(line) in term_ids:
+                    continue
+                account = line.account_id
+                if account.reconcile is not False or str(
+                    account.account_type or ""
+                ) in {"asset_cash", "liability_credit_card"}:
+                    unsafe_nonterm_lines.append(line)
+            if unsafe_nonterm_lines:
+                failures.append("nonterm_account_reconciliation_unsafe")
+            already_reconciled = bool(
+                failed_refund_line_ids or failed_origin_line_ids
+            )
+            if already_reconciled:
+                failures.append("refund_or_origin_already_reconciled")
+
+            refund_total = _decimal(getattr(refund, "amount_total", None))
+            origin_total = _decimal(getattr(origin, "amount_total", None))
+            if (
+                source_refund_mode not in {"full", "partial"}
+                or refund_total is None
+                or origin_total is None
+                or not refund_total.is_finite()
+                or not origin_total.is_finite()
+                or refund_total <= 0
+                or origin_total <= 0
+            ):
+                failures.append(
+                    "source_refund_mode_or_amount_incompatible"
+                )
+            elif source_refund_mode == "full":
+                if refund_total != origin_total:
+                    failures.append(
+                        "source_refund_mode_or_amount_incompatible"
+                    )
+                reconciliation_outcome = "full_origin_reversal"
+                origin_payment_state_after = "reversed"
+                origin_residual_after = "0.00"
+            else:
+                if refund_total >= origin_total:
+                    failures.append("partial_refund_must_reduce_origin")
+                reconciliation_outcome = "partial_origin_reduction"
+                origin_payment_state_after = "partial"
+                origin_residual_after = format(
+                    origin_total - refund_total, "f"
+                )
+            lock_failure = _effective_posting_date_failure(
+                refund,
+                accounting_date,
+                has_taxes=False,
+                today=self._now().date(),
+            )
+            if lock_failure is not None:
+                failures.append(lock_failure)
+
         eligible = not failures
         write_parameters = (
             {
@@ -2745,14 +2939,82 @@ class OdooReadExecutor:
             if eligible
             else None
         )
-        return {
-            "candidate_write_capability_id": (
-                "acct.refund.draft_cancel.v1"
-            ),
-            "basis": (
+        if write_parameters is not None and post_reconcile:
+            write_parameters = {
+                **write_parameters,
+                    "expected_source_refund_mode": source_refund_mode,
+                    "expected_commercial_partner_id": (
+                        commercial_partner_id
+                    ),
+                    "expected_origin_total_amount": origin_total_amount,
+                    "expected_reconcile_amount": total_amount,
+                    "expected_refund_payment_term_line_id": (
+                        refund_term_line_id
+                    ),
+                    "expected_origin_payment_term_line_id": (
+                        origin_term_line_id
+                    ),
+                    "expected_payment_term_account_id": (
+                        payment_term_account_id
+                    ),
+                    "expected_reconciliation_outcome": (
+                        reconciliation_outcome
+                    ),
+                    "expected_refund_payment_state_after": "paid",
+                    "expected_origin_payment_state_after": (
+                        origin_payment_state_after
+                    ),
+                    "expected_refund_residual_after": "0.00",
+                    "expected_origin_residual_after": (
+                        origin_residual_after
+                    ),
+            }
+        candidate_write_capability_id = (
+            "acct.refund.post_reconcile_origin.v1"
+            if post_reconcile
+            else "acct.refund.draft_cancel.v1"
+        )
+        basis = (
+            "odoo_pristine_v3_refund_origin_post_reconcile_"
+            "eligibility_read"
+            if post_reconcile
+            else (
                 "odoo_pristine_v3_refund_and_origin_graph_"
                 "draft_cancel_eligibility_read"
-            ),
+            )
+        )
+        checks = [
+            "bound_company_and_read_acl",
+            "single_visible_v3_draft_refund",
+            "single_visible_bound_posted_origin",
+            "exact_refund_origin_reversal_graph",
+            "immutable_refund_and_origin_bindings",
+            "refund_and_refund_line_write_acl",
+            "active_partner_currency_journal_and_company_scope",
+            "company_currency_and_non_storno_scope",
+            "taxless_financial_dependency_graphs_exact",
+            "full_refund_linewise_reversal_exact_when_applicable",
+            "full_refund_invoice_lineage_exact_when_applicable",
+            "partial_refund_total_within_origin_when_applicable",
+            "partial_refund_origin_line_relation_exact_when_applicable",
+            "fully_unpaid_residuals_match_totals",
+            "no_payment_reconciliation_or_external_effects",
+            "complete_refund_and_origin_line_guard_graphs",
+        ]
+        if post_reconcile:
+            checks.extend(
+                [
+                    "origin_line_and_posting_partner_write_acl",
+                    "posting_partner_positive_rank_preconditions_bound",
+                    "payment_term_pair_and_reconcilable_account_exact",
+                    "nonterm_accounts_reconciliation_safe",
+                    "full_or_partial_reconciliation_outcome_bound",
+                    "effective_odoo_lock_date_open",
+                ]
+            )
+        return {
+            "candidate_write_capability_id": candidate_write_capability_id,
+            "basis": basis,
             "filters": {
                 "company_id": company_id,
                 "move_id": refund_id,
@@ -2823,24 +3085,7 @@ class OdooReadExecutor:
             "eligibility_failures": sorted(set(failures)),
             "failed_refund_line_ids": failed_refund_line_ids,
             "failed_origin_line_ids": failed_origin_line_ids,
-            "checks": [
-                "bound_company_and_read_acl",
-                "single_visible_v3_draft_refund",
-                "single_visible_bound_posted_origin",
-                "exact_refund_origin_reversal_graph",
-                "immutable_refund_and_origin_bindings",
-                "refund_and_refund_line_write_acl",
-                "active_partner_currency_journal_and_company_scope",
-                "company_currency_and_non_storno_scope",
-                "taxless_financial_dependency_graphs_exact",
-                "full_refund_linewise_reversal_exact_when_applicable",
-                "full_refund_invoice_lineage_exact_when_applicable",
-                "partial_refund_total_within_origin_when_applicable",
-                "partial_refund_origin_line_relation_exact_when_applicable",
-                "fully_unpaid_residuals_match_totals",
-                "no_payment_reconciliation_or_external_effects",
-                "complete_refund_and_origin_line_guard_graphs",
-            ],
+            "checks": checks,
             "required_user_parameters": ["idempotency_key", "reason"],
             "write_parameters": write_parameters,
             "page": {"count": 2, "total_count": 2},
@@ -3080,6 +3325,7 @@ class OdooReadExecutor:
             "acct.move.document_post_eligibility.v1": self._read_document_post_eligibility,
             "acct.move.draft_cancel_eligibility.v1": self._read_draft_cancel_eligibility,
             "acct.refund.draft_cancel_eligibility.v1": self._read_refund_draft_cancel_eligibility,
+            "acct.refund.post_reconcile_eligibility.v1": self._read_refund_post_reconcile_eligibility,
             "acct.report.financial_read.v1": self._read_financial_report,
             "acct.tax.report_read.v1": self._read_tax_report,
         }

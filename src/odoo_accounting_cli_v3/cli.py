@@ -5434,6 +5434,7 @@ _REQUIRED_READ_CAPABILITY_IDS = frozenset(
         "acct.multicompany.consolidated_read.v1",
         "acct.multicurrency.balance_read.v1",
         "acct.refund.draft_cancel_eligibility.v1",
+        "acct.refund.post_reconcile_eligibility.v1",
         "acct.registry.list.v1",
         "acct.report.financial_read.v1",
         "acct.tax.report_read.v1",

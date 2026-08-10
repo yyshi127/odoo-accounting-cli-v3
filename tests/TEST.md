@@ -24,10 +24,11 @@ where practical, then record actual execution evidence separately.
   `acct.report.financial_read.v1`, `acct.tax.report_read.v1`,
   `acct.multicompany.consolidated_read.v1`,
   `acct.move.document_post_eligibility.v1`,
-  `acct.refund.draft_cancel_eligibility.v1`, and
-  `acct.diagnostics.operation_read.v1` are the twelve trusted, statically
+  `acct.refund.draft_cancel_eligibility.v1`,
+  `acct.refund.post_reconcile_eligibility.v1`, and
+  `acct.diagnostics.operation_read.v1` are the thirteen trusted, statically
   admissible read-handler targets staged for the isolated `test` environment.
-  The first eleven use the constrained Odoo read boundary; diagnostics uses only
+  The first twelve use the constrained Odoo read boundary; diagnostics uses only
   the trusted local write store.
 - The financial and tax report reads are fixed to posted entries,
   `all_report_eligible` journals, no requested line expansion, and the bound
@@ -35,14 +36,15 @@ where practical, then record actual execution evidence separately.
   PostgreSQL read-only transaction. Both remain `contract_tested` and
   `test`-staged only; neither is production-enabled.
 - No capability is enabled and no write capability is staged.
-- The current registry contains 23 write capabilities: the original 14-capability
+- The current registry contains 24 write capabilities: the original 14-capability
   baseline plus `acct.journal.entry_create.v1`, `acct.move.post.v1`, and
   `acct.move.draft_cancel.v2`, plus the narrowly scoped
   `acct.payment.cancel.v1` and the receipt-bound
   `acct.reconciliation.undo.v1` and
   `acct.bank.statement_compensate.v1`, plus
   `acct.invoice.customer_post.v1`, `acct.bill.vendor_post.v1`, and
-  `acct.refund.draft_cancel.v1`. All nine additions remain
+  `acct.refund.draft_cancel.v1`, plus
+  `acct.refund.post_reconcile_origin.v1`. All ten additions remain
   `declared`, have no retained evidence receipts, and are neither staged nor
   enabled. `tests/test_phaseb_move_write_capability_closure.py` is an offline
   schema, semantics, idempotency, signed-failure, tamper, and dispatch test; it
@@ -66,7 +68,7 @@ where practical, then record actual execution evidence separately.
   swapped. Delete, subset/partial, reconciled, bank-matched, externally changed,
   or binding-mismatched origins fail closed. Current production-routed imports
   do not contain the required facade/available-plan provenance, so they are
-  ineligible. The `19.0.0.7.2` control add-on and V3 executor share one
+  ineligible. The `19.0.0.7.3` control add-on and V3 executor share one
   company-and-journal sequence lock for supported statement, line, linked
   move/journal-item, and reconciliation ORM mutations. Generic recovery obtains
   its graph and sequence locks in one sorted set before row locks. Execution
@@ -165,6 +167,22 @@ where practical, then record actual execution evidence separately.
   external, Goal, or production verification true. The module exposes no
   ledger, filesystem, key, trust-root, builder, signer, or verifier input and is
   not connected to the CLI.
+- Dev265 adds `acct.refund.post_reconcile_eligibility.v1` and
+  `acct.refund.post_reconcile_origin.v1`. Contract and fake-Odoo tests require
+  the read to return the exact linked refund/origin graph and require all 31
+  write parameters to survive prepare, preview, approval, execution, and
+  verification. Handler/bootstrap tests cover customer full reconciliation,
+  vendor partial reconciliation, duplicate committed-anchor retry,
+  changed-graph/failure rejection, and exact audit/result evidence. Dedicated
+  control-add-on tests require ordinary calls to retain native rank behavior and
+  the trusted refund-post branch to reject superuser/non-executor, wrong field,
+  wrong delta, or wrong partner set while rolling back the synchronous rank
+  increment with the transaction. The revision-12 Pi fixture has 48 scenarios:
+  40 execution-shaped branches (17 reads and 23 writes) and 8 refusals. The
+  perfect synthetic trace scores F01 selection at `48/48` (`100.00%`), but no
+  live Pi capture or real Odoo write receipt exists. The read remains test-staged
+  only; the critical write remains declared, unstaged, disabled, and limited to
+  manual recovery escalation. Goal and production readiness remain false.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -439,8 +457,8 @@ requests across all enabled domains.
 
 ### Frozen F01-F05 scoring contract
 
-`tests/fixtures/pi_scenarios.v1.json` is the revision-11 frozen Chinese key
-scenario corpus. Its 43 scenarios cover every one of the 35 registered
+`tests/fixtures/pi_scenarios.v1.json` is the revision-12 frozen Chinese key
+scenario corpus. Its 48 scenarios cover every one of the 37 registered
 capabilities and the
 ordinary, ambiguous, adversarial, multi-company, multi-currency, and recovery
 classes. Environment-specific Odoo record IDs are named fixture bindings, so a
@@ -523,8 +541,9 @@ release routing; substituting the raw outer registry-document SHA-256 is
 rejected.
 Missing scenarios remain in every applicable denominator and fail trace
 coverage. F01 passes only when the exact integer ratio is at least 95%; F02,
-F03, F04, and F05 require 100%. F03 covers only the 36 actually executed
-scenarios. F04 covers the 21 executed writes and requires one immutable
+F03, F04, and F05 require 100%. F03 covers only the 40 actually executed
+scenarios (17 reads and 23 writes). F04 covers the 23 executed writes and
+requires one immutable
 operation/parameter/complete-preview approval binding, recomputable operation,
 precheck and preview digests, a requester distinct from the approver, and
 approval/execution inside the trace and approval validity windows. F05 requires every
@@ -573,7 +592,7 @@ The repository does not yet contain a complete trusted live producer for the
 v3 scenario-capture schema. The hardened `/chat` path does have a separate FD4
 stream generated from verified Broker calls and refuses any final JSON not
 supported by exactly one committed event. That terminal-answer control is not
-the full tool/event trace required for the 43-scenario gate. A production
+the full tool/event trace required for the 48-scenario gate. A production
 scenario producer must retain the complete trusted journal, wait for its
 defined terminal boundary and clean child exit, and correlate normalized events
 with Broker dispatch, independent approval, and Odoo receipts. It must never

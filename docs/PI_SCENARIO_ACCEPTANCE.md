@@ -41,10 +41,12 @@ The current corpus is `tests/fixtures/pi_scenarios.v1.json`:
 
 | Property | Value |
 | --- | ---: |
-| Frozen revision | 11 |
-| Scenario count | 43 |
-| Registered capability count covered | 35 |
-| Write capability count covered | 23 |
+| Frozen revision | 12 |
+| Scenario count | 48 |
+| Registered capability count covered | 37 |
+| Write capability count covered | 24 |
+| Execution-shaped scenarios | 40 (17 reads, 23 writes) |
+| Forced-refusal scenarios | 8 |
 | Required categories | ordinary, ambiguous, adversarial, multi_company, multi_currency, recovery |
 
 The corpus is validated by `tests/test_pi_scenario_gate.py`. Corpus validation
@@ -57,19 +59,33 @@ document-lifecycle writes. Dev260 advances the checked-in fixture to revision 11
 changes the ordinary invoice-create scenario to an explicit draft-only request,
 adds canonical V2 document bindings and exact payment-term line/account
 parameters to the affected lifecycle routes, and keeps the scenario counts
-unchanged. The frozen corpus contains 43 expected
-routes: 36 execution-shaped branches, comprising 15 reads and 21 writes, plus
-7 forced refusals. These branches specify an offline interface, routing, and
+unchanged at that historical boundary. Dev265 advances the fixture to revision
+12 and adds five refund-post scenarios: customer and vendor eligibility reads,
+customer full-reconciliation and vendor partial-reconciliation writes, and a
+forced refusal when the requested "post only" semantics conflict with Odoo 19's
+automatic origin reconciliation. The current frozen corpus contains 48 expected
+routes: 40 execution-shaped branches, comprising 17 reads and 23 writes, plus
+8 forced refusals. These branches specify an offline interface, routing, and
 parameter-transit contract. They do not prove that the current runtime accepts
 the corresponding precheck, that Pi made the selection in a live conversation,
-or that Odoo executed the operation. The offline report denominators are 43 for
-F01/F02/F05, 36 for F03, and 21 for F04.
+or that Odoo executed the operation. The offline report denominators are 48 for
+F01/F02/F05, 40 for F03, and 23 for F04.
 
 In particular, the corpus retains intended routes for every registered write
 while the Dev260 payment and deferred handlers fail closed at precheck and nine
 reversal-bearing recovery methods are excluded from executable recovery. A
 synthetic trace for any such route tests scorer behavior only; it cannot be
 cited as runtime availability, production enablement, or real-Odoo evidence.
+
+The Dev265 `acct.refund.post_reconcile_eligibility.v1` exchanges preserve the
+complete eligibility result into the 31 material parameters of
+`acct.refund.post_reconcile_origin.v1`, including company, refund and origin IDs,
+both V1/V2/business bindings, selected and commercial partners, journal,
+currency, date, totals, exact reconciliation amount and outcome, both term-line
+IDs, account, residual/payment states, complete line graphs, reason, and
+idempotency key. These fixture values exercise lossless routing and approval
+binding only. They are not an eligibility receipt, Odoo write receipt, or proof
+that a live Pi conversation selected the route.
 
 Dev260 extends the three document-lifecycle write traces with four distinct
 canonical V2 digests:
@@ -101,18 +117,18 @@ requires all gates below:
 | F04 | Every executed write is bound to a distinct, unexpired, untampered approval over the exact operation, parameters, and preview | 100% |
 | F05 | Terminal answer is business-verified and has an audit receipt | 100% |
 
-F03 covers the 36 scenarios whose expected route contains an execution
-sequence: 15 reads and 21 writes. For a retained live capture, those events must
+F03 covers the 40 scenarios whose expected route contains an execution
+sequence: 17 reads and 23 writes. For a retained live capture, those events must
 come from an actual trusted Broker/Odoo exchange; an offline fixture alone
 cannot satisfy that evidence requirement. For writes, the scorer checks that
 the finalized material parameters are retained through
 `cli_input`, `prepare`, `preview`, `approval_binding`, `odoo_execution`,
 `odoo_result`, and `audit_receipt`. A missing date, company, partner, currency,
 tax, idempotency key, document binding, or recovery binding fails the scenario.
-The seven forced-refusal scenarios have no execution stages and therefore are
+The eight forced-refusal scenarios have no execution stages and therefore are
 not included in F03's denominator.
 
-F04 applies only to the 21 executed writes. It binds the same operation ID
+F04 applies only to the 23 executed writes. It binds the same operation ID
 through preparation, preview, approval, and execution; binds the canonical
 parameter and preview digests; recomputes the real operation, precheck, and
 preview digests; validates the complete `operation.preview` structure against
@@ -238,13 +254,17 @@ required by this document. Therefore:
 - the corpus is ready for scoring;
 - the local gate implementation is test-covered;
 - synthetic unit-test traces prove only scorer behavior;
+- the deterministic perfect-trace regression currently scores F01 capability
+  selection at `48/48` (`100.00%`) and F02-F05 at their required `100.00%`, but
+  those traces are generated by the test harness and are not live Pi evidence;
 - frozen execution-shaped branches define intended interfaces and routing, not
   current handler availability or successful Odoo execution;
 - the `/chat` terminal-answer evidence path is contract-tested but has not been
   retained as live Pi/Odoo evidence for the target release;
 - a caller-supplied normalized document must never be signed as acceptance
   evidence;
-- the 95% natural-language selection requirement is not yet proven; and
+- the 95% natural-language selection requirement is not yet proven by a trusted
+  live target-release capture; and
 - no Pi end-to-end scenario may be reported as business-successful without a
   matching Odoo result and audit receipt in the captured trace.
 

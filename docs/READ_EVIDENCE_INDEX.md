@@ -1,4 +1,4 @@
-# Read-evidence index: Dev264 contracts and Dev263 active admission
+# Read-evidence index: Dev265 inventory, Dev264 contracts, and Dev263 active admission
 
 Dev263 adds a Linux-only, public-key-verifiable `read-evidence-index.v3`
 active-admission path beside the legacy v2 structural checker. The public v3
@@ -24,6 +24,17 @@ production_promotion_allowed: false
 Every capability remains `verified:false` until the real raw semantic adapters
 independently recompute those facts. Signatures prove key possession and exact
 bytes; they do not prove that a summarized accounting claim is true.
+
+The current Dev265 Registry has 13 read capabilities. The newly added
+`acct.refund.post_reconcile_eligibility.v1` is mapped to the reviewed refund
+eligibility handler and to the full-raw contract inventory, is
+`contract_tested`, and is staged only for `test`. It has an empty receipt list,
+is not enabled, and has no retained target-release Odoo or accounting-oracle
+evidence. Its local contract binds the exact pristine refund/origin graphs,
+term-line/account pair, full or partial expected reconciliation outcome,
+partner-rank preconditions, and the parameters for the disabled
+`acct.refund.post_reconcile_origin.v1` write; this is not evidence that those
+facts were observed on real Odoo.
 
 ## Dev264 offline contract boundaries
 
@@ -290,9 +301,9 @@ path.
 
 After that, trusted raw Odoo, accounting-oracle, Pi E2E, release-identity, and
 security-negative producers/attestors must collect and independently validate
-all 12 read capabilities. The Dev264 offline contracts do not verify receipt
-signatures, oracle execution, collector identity, publisher signatures, the
-live ledger, or either source/retained file tree. Until those blockers close
-with target-host receipts, read Goal readiness remains false, no read
+all 13 current read capabilities. The Dev264 offline contracts do not verify
+receipt signatures, oracle execution, collector identity, publisher
+signatures, the live ledger, or either source/retained file tree. Until those
+blockers close with target-host receipts, read Goal readiness remains false, no read
 capability is production-enabled, and no business success may be reported from
 this foundation alone.

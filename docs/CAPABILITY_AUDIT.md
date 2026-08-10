@@ -42,9 +42,9 @@ receipt.
 
 ## Current development inventory
 
-The current development registry contains 35 capabilities: 12 reads and 23
-writes. All 35 have strict input/output schemas. The 12 reads are
-`contract_tested` and staged only for `test`; the 23 writes remain `declared`,
+The current development registry contains 37 capabilities: 13 reads and 24
+writes. All 37 have strict input/output schemas. The 13 reads are
+`contract_tested` and staged only for `test`; the 24 writes remain `declared`,
 with empty staged and enabled environment lists. No capability is enabled in
 any environment.
 
@@ -56,13 +56,19 @@ Dev259 adds these contracts to the preceding 30-capability inventory:
 - `acct.bill.vendor_post.v1` (write); and
 - `acct.refund.draft_cancel.v1` (write).
 
-The two reads only prove local contract and test-channel integration. They have
-zero retained real-Odoo read receipts. The three writes have source handlers
-and control-plane contracts, but no retained real-Odoo write lifecycle
-receipts. Across the complete development inventory, source/contract
-implementation is 23/23 writes; 21 reach capability-specific ORM prechecks,
+Dev265 adds these contracts to the preceding 35-capability inventory:
+
+- `acct.refund.post_reconcile_eligibility.v1` (read); and
+- `acct.refund.post_reconcile_origin.v1` (write).
+
+The three document-lifecycle reads, including the Dev265 refund-post read, only
+prove local contract and test-channel integration. They have zero retained
+real-Odoo read receipts. The four associated writes have source handlers and
+control-plane contracts, but no retained real-Odoo write lifecycle receipts.
+Across the complete development inventory, source/contract implementation is
+24/24 writes; 22 reach capability-specific ORM prechecks,
 while payment registration and deferred creation fail closed before ORM
-access. Real-Odoo write evidence remains 0/23.
+access. Real-Odoo write evidence remains 0/24.
 These facts must not be restated as sandbox verification, production
 readiness, or Goal completion.
 
@@ -72,6 +78,19 @@ relevant `customer_rank`/`supplier_rank` is exactly `0` before `action_post` and
 requires an exact value of `1` afterward. That closes the observed Odoo 19
 postcommit delta for this development slice; it is not general production
 coverage for existing-ranked partners or unreviewed module extensions.
+
+Dev265's refund-post path has a separate, capability-specific rank boundary.
+The control add-on delegates ordinary Odoo calls to the native implementation
+and permits its synchronous branch only inside the trusted process-local V3
+scope, for a non-superuser executor, the exact approved customer/supplier rank
+field, an increment of one, and the sorted de-duplicated union of the selected
+and commercial partner IDs. The increment is therefore part of the same
+transaction as refund posting and automatic origin reconciliation. Execution
+requires the exact transaction-time delta; fresh verification may accept only
+a later monotonic increment by the same Odoo executor user as the operation
+while every other field and graph identity remains bound. This is locally
+test-covered source behavior,
+not a real Odoo transaction receipt or production-safety result.
 
 The eligibility oracle and document-post handler additionally admit only a
 complete company-currency, product-line, taxless, undiscounted financial graph

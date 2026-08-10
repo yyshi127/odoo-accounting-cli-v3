@@ -78,6 +78,7 @@ class RegistryTest(unittest.TestCase):
                 "acct.diagnostics.operation_read.v1",
                 "acct.move.document_post_eligibility.v1",
                 "acct.refund.draft_cancel_eligibility.v1",
+                "acct.refund.post_reconcile_eligibility.v1",
             ],
         )
         for item in staged:
@@ -215,6 +216,69 @@ class RegistryTest(unittest.TestCase):
         self.assertEqual(basis_schema["minLength"], len(basis))
         self.assertEqual(basis_schema["maxLength"], len(basis))
         validate_value(basis, basis_schema)
+
+    def test_refund_post_reconcile_eligibility_contract_is_exact_and_staged(self) -> None:
+        by_id = {item["id"]: item for item in self.document["capabilities"]}
+        read = by_id["acct.refund.post_reconcile_eligibility.v1"]
+        write = by_id["acct.refund.post_reconcile_origin.v1"]
+
+        self.assertEqual(
+            read["input_schema"]["required"],
+            ["company_id", "move_id", "expected_move_type"],
+        )
+        self.assertIs(read["input_schema"]["additionalProperties"], False)
+        self.assertEqual(read["access"], "read")
+        self.assertEqual(read["risk_level"], "medium")
+        self.assertEqual(
+            read["odoo_permissions"], ["account.group_account_invoice"]
+        )
+        self.assertEqual(read["company_scope"], "explicit_single_company")
+        self.assertEqual(
+            read["evidence"], {"level": "contract_tested", "receipts": []}
+        )
+        self.assertEqual(read["staged_environments"], ["test"])
+        self.assertEqual(read["enabled_environments"], [])
+        output = read["output_schema"]
+        self.assertEqual(
+            output["required"],
+            [
+                "candidate_write_capability_id",
+                "basis",
+                "filters",
+                "target",
+                "eligible",
+                "eligibility_failures",
+                "failed_refund_line_ids",
+                "failed_origin_line_ids",
+                "checks",
+                "required_user_parameters",
+                "write_parameters",
+                "page",
+                "receipt",
+            ],
+        )
+        self.assertEqual(
+            output["properties"]["candidate_write_capability_id"]["enum"],
+            ["acct.refund.post_reconcile_origin.v1"],
+        )
+        self.assertEqual(
+            output["properties"]["required_user_parameters"]["items"]["enum"],
+            ["idempotency_key", "reason"],
+        )
+        write_parameters = next(
+            branch
+            for branch in output["properties"]["write_parameters"]["oneOf"]
+            if branch.get("type") == "object"
+        )
+        self.assertEqual(
+            set(write_parameters["required"]),
+            set(write["input_schema"]["required"])
+            - {"idempotency_key", "reason"},
+        )
+        self.assertEqual(
+            set(write_parameters["properties"]),
+            set(write_parameters["required"]),
+        )
 
     def test_ap_open_items_contract_matches_strict_historical_open_item_shape(self) -> None:
         item = next(

@@ -401,8 +401,8 @@ def _contracts(registry_module: ModuleType, layout: _RootLayout) -> tuple[dict[s
         for capability in sorted(capabilities, key=lambda item: item.id)
         if capability.data["access"] == "read"
     }
-    if len(contracts) != 12:
-        raise AssertionError(f"expected 12 read contracts, observed {len(contracts)}")
+    if len(contracts) != 13:
+        raise AssertionError(f"expected 13 read contracts, observed {len(contracts)}")
     return contracts, registry_module.registry_digest(capabilities)
 
 
@@ -926,7 +926,7 @@ def test_real_linux_root_active_closure_publication_and_tamper_rejection() -> No
         assert verified["mode"] == "active"
         assert verified["release_identity"] == identity
         assert verified["file_count"] == 27
-        assert len(verified["capabilities"]) == 12
+        assert len(verified["capabilities"]) == 13
         assert [item["capability_id"] for item in verified["capabilities"]] == sorted(
             contracts
         )

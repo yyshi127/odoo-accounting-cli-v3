@@ -110,6 +110,15 @@ _ALLOWED_MODELS = {
     "acct.refund.draft_cancel.v1": frozenset(
         {"account.move", "account.move.line"}
     ),
+    "acct.refund.post_reconcile_origin.v1": frozenset(
+        {
+            "account.move",
+            "account.move.line",
+            "account.partial.reconcile",
+            "account.full.reconcile",
+            "res.partner",
+        }
+    ),
     "acct.payment.register.v1": frozenset(
         {
             "account.payment",
@@ -458,8 +467,13 @@ def write_idempotency_scope(
     elif scope == "company_depreciation_move":
         value = {"depreciation_move_id": parameters["depreciation_move_id"]}
     elif scope == "company_origin_move":
+        origin_move_id = (
+            parameters["expected_origin_move_id"]
+            if capability.id == "acct.refund.post_reconcile_origin.v1"
+            else parameters.get("origin_move_id", parameters.get("move_id"))
+        )
         value = {
-            "move_id": parameters.get("origin_move_id", parameters.get("move_id"))
+            "move_id": origin_move_id
         }
     elif scope == "company_origin_operation":
         value = {"operation_id": parameters["origin_operation_id"]}

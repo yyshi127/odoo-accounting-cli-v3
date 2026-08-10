@@ -64,13 +64,13 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert payload["command"] == "registry.audit"
     assert data["registry_audit_ready"] is True
     assert data["blockers"] == []
-    assert data["total_count"] == 35
-    assert data["access_counts"] == {"read": 12, "write": 23}
-    assert data["read_count"] == 12
-    assert data["write_count"] == 23
+    assert data["total_count"] == 37
+    assert data["access_counts"] == {"read": 13, "write": 24}
+    assert data["read_count"] == 13
+    assert data["write_count"] == 24
     assert data["evidence_level_counts"] == {
-        "contract_tested": 12,
-        "declared": 23,
+        "contract_tested": 13,
+        "declared": 24,
         "odoo_verified": 0,
         "production_verified": 0,
         "sandbox_verified": 0,
@@ -83,7 +83,7 @@ def test_registry_audit_reports_complete_contract_and_closed_production_gate() -
     assert data["staged_environment_counts"] == {
         "production": 0,
         "sandbox": 0,
-        "test": 12,
+        "test": 13,
     }
     assert data["production_promotion_allowed"] is False
     assert data["real_odoo_write_performed"] is False
@@ -147,6 +147,45 @@ def test_registry_get_returns_declared_disabled_reconciliation_undo_contract() -
     assert capability["evidence"] == {"level": "declared", "receipts": []}
     assert capability.get("staged_environments", []) == []
     assert capability["enabled_environments"] == []
+
+
+def test_registry_get_returns_refund_post_read_and_disabled_write_contracts() -> None:
+    read_id = "acct.refund.post_reconcile_eligibility.v1"
+    read_result = _run("registry", "get", "--capability-id", read_id)
+
+    assert read_result.returncode == 0
+    assert read_result.stderr == ""
+    read = json.loads(read_result.stdout)["data"]["capability"]
+    assert read["id"] == read_id
+    assert read["access"] == "read"
+    assert read["evidence"] == {"level": "contract_tested", "receipts": []}
+    assert read["staged_environments"] == ["test"]
+    assert read["enabled_environments"] == []
+
+    write_id = "acct.refund.post_reconcile_origin.v1"
+    write_result = _run("registry", "get", "--capability-id", write_id)
+
+    assert write_result.returncode == 0
+    assert write_result.stderr == ""
+    write = json.loads(write_result.stdout)["data"]["capability"]
+    assert write["id"] == write_id
+    assert write["access"] == "write"
+    assert write["risk_level"] == "critical"
+    assert write["approval"] == {
+        "required": True,
+        "policy": "refund_post_reconcile_origin",
+        "ttl_seconds": 600,
+    }
+    assert write["idempotency"] == {
+        "required": True,
+        "scope": "company_origin_move",
+    }
+    assert write["recovery"] == {
+        "method": "manual_review_refund_post_reconcile_recovery"
+    }
+    assert write["evidence"] == {"level": "declared", "receipts": []}
+    assert write.get("staged_environments", []) == []
+    assert write["enabled_environments"] == []
 
 
 def test_registry_get_unknown_id_is_structured_failure() -> None:

@@ -494,7 +494,7 @@ passing composite Odoo receipt. The current target capacity and service-
 continuity gates have not passed, so production promotion remains blocked.
 
 Runtime configuration never enables a capability by itself. The registry must
-contain the same environment in the selected channel. All 23 currently
+contain the same environment in the selected channel. All 24 currently
 registered write capabilities remain closed by default. They may move to staged
 only in a dedicated sandbox after their local contract gate passes, and may
 advance again only from retained capability-specific real Odoo lifecycle
@@ -526,17 +526,19 @@ external call or an unrelated record created by an override, so fake-ORM tests
 do not satisfy this gate and a real Odoo 19 sandbox run remains mandatory.
 
 The Dev259 customer-invoice/vendor-bill posting and refund-draft-cancellation
-slices are also closed. The intended Pi workflow obtains their exact parameters
-from the matching eligibility read:
+slices and the Dev265 refund-post slice are also closed. The intended Pi
+workflow obtains their exact parameters from the matching eligibility read:
 
 - `acct.move.document_post_eligibility.v1` for
   `acct.invoice.customer_post.v1` and `acct.bill.vendor_post.v1`; and
 - `acct.refund.draft_cancel_eligibility.v1` for
-  `acct.refund.draft_cancel.v1`.
+  `acct.refund.draft_cancel.v1`; and
+- `acct.refund.post_reconcile_eligibility.v1` for
+  `acct.refund.post_reconcile_origin.v1`.
 
-Both reads are only `contract_tested`, staged for `test`, and have no retained
-real-Odoo receipt. The three writes remain `declared`, with no staged or enabled
-environment and no real-Odoo write evidence. Runtime configuration must not
+All three reads are only `contract_tested`, staged for `test`, and have no
+retained real-Odoo receipt. The four writes remain `declared`, with no staged or
+enabled environment and no real-Odoo write evidence. Runtime configuration must not
 default, invent, or copy any V1 document, V2 document, or business binding from
 an untrusted message. The current write schemas do not include an eligibility
 receipt or
@@ -551,6 +553,20 @@ Odoo 19 partner-rank postcommit delta only when the target partner's relevant
 `customer_rank`/`supplier_rank` is exactly `0` before `action_post` and exactly
 `1` afterward. It is not a general production posting implementation for
 partners with an existing rank or for unreviewed module extensions.
+
+The Dev265 refund-post path uses a different, capability-specific control add-on
+branch. `res.partner._increase_rank` remains native unless the exact refund-post
+capability context is active inside the trusted process-local V3 execution
+scope. The synchronous branch also requires a non-superuser executor, the exact
+approved `customer_rank` or `supplier_rank`, an increment of one, and the exact
+sorted selected/commercial-partner union. Runtime configuration must not inject
+these context keys or make them available through RPC; the trusted write handler
+derives them from the approved 31-parameter graph immediately around
+`action_post`. The synchronous increment shares the posting/reconciliation
+transaction, while post-commit verification permits only a later monotonic
+increment by the same Odoo executor user as the operation. No real Odoo receipt
+proves this boundary, so the capability remains disabled with manual-escalation
+recovery.
 
 The eligibility oracle and lower-level document-post write handler are both
 restricted to complete company-currency, product-line, taxless, undiscounted
@@ -590,15 +606,16 @@ readable for frozen-route audit but are rejected by the current executor.
 
 The local implementation registers 16 state-dependent recovery contracts for
 the 12 original non-terminal source-write capabilities. This recovery-catalog
-count is independent of the current registry's 23 write capabilities. The
+count is independent of the current registry's 24 write capabilities. The
 original `acct.move.draft_cancel.v1` and `acct.recovery.execute.v1` do not add
-follow-on contracts. The nine later writes also do not expand that catalog:
+follow-on contracts. The ten later writes also do not expand that catalog:
 manual-entry creation and posting require separately approved draft-cancel or
 reversal operations; `acct.move.draft_cancel.v2` is terminal; and payment
 cancellation, reconciliation undo, and bank-statement compensation retain
 explicit manual-escalation recovery policies. Customer-invoice and vendor-bill
 posting require a separately approved credit note or reversal after posting;
-refund draft cancellation is terminal. Every executable contract is
+refund draft cancellation is terminal; and refund post-and-reconcile requires
+manual escalation. Every executable contract is
 restricted to `test` and `sandbox`, has a public-ORM action and an independent
 fresh-read oracle, and rejects production execution. Payment and reconciliation
 results that already contain a prior partial or full reconciliation graph are

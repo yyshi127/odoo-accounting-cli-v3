@@ -340,7 +340,7 @@ def test_approval_entry_is_wizard_only_and_has_no_bare_client_rpc() -> None:
     init = (ADDON / "models" / "__init__.py").read_text("utf-8").splitlines()
     manifest = ast.literal_eval((ADDON / "__manifest__.py").read_text("utf-8"))
     assert "from . import approval_wizard" in init
-    assert manifest["version"] == "19.0.0.7.2"
+    assert manifest["version"] == "19.0.0.7.3"
     assert "views/approval_wizard_views.xml" in manifest["data"]
 
 

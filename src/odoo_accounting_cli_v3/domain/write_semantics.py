@@ -982,6 +982,143 @@ def _validate_refund_draft_cancel(
     }
 
 
+def _validate_refund_post_reconcile(
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    base = _validate_refund_draft_cancel(parameters)
+    computed = dict(base["computed"])
+    mode = _field(parameters, "expected_source_refund_mode")
+    if mode not in {"full", "partial"}:
+        raise WriteSemanticError(
+            "expected_source_refund_mode must be full or partial"
+        )
+    commercial_partner_id = _positive_id(
+        _field(parameters, "expected_commercial_partner_id"),
+        "expected_commercial_partner_id",
+    )
+    origin_total = _decimal(
+        _field(parameters, "expected_origin_total_amount"),
+        "expected_origin_total_amount",
+        positive=True,
+    )
+    reconcile_amount = _decimal(
+        _field(parameters, "expected_reconcile_amount"),
+        "expected_reconcile_amount",
+        positive=True,
+    )
+    total = _decimal(
+        _field(parameters, "expected_total_amount"),
+        "expected_total_amount",
+        positive=True,
+    )
+    refund_term_line_id = _positive_id(
+        _field(parameters, "expected_refund_payment_term_line_id"),
+        "expected_refund_payment_term_line_id",
+    )
+    origin_term_line_id = _positive_id(
+        _field(parameters, "expected_origin_payment_term_line_id"),
+        "expected_origin_payment_term_line_id",
+    )
+    if refund_term_line_id not in computed["expected_line_ids"]:
+        raise WriteSemanticError(
+            "expected_refund_payment_term_line_id must belong to expected_line_ids"
+        )
+    if origin_term_line_id not in computed["expected_origin_line_ids"]:
+        raise WriteSemanticError(
+            "expected_origin_payment_term_line_id must belong to "
+            "expected_origin_line_ids"
+        )
+    payment_term_account_id = _positive_id(
+        _field(parameters, "expected_payment_term_account_id"),
+        "expected_payment_term_account_id",
+    )
+    outcome = _field(parameters, "expected_reconciliation_outcome")
+    refund_payment_state = _field(
+        parameters, "expected_refund_payment_state_after"
+    )
+    origin_payment_state = _field(
+        parameters, "expected_origin_payment_state_after"
+    )
+    refund_residual = _decimal(
+        _field(parameters, "expected_refund_residual_after"),
+        "expected_refund_residual_after",
+    )
+    origin_residual = _decimal(
+        _field(parameters, "expected_origin_residual_after"),
+        "expected_origin_residual_after",
+    )
+    if refund_payment_state != "paid":
+        raise WriteSemanticError(
+            "expected_refund_payment_state_after must be paid"
+        )
+    if refund_residual != 0:
+        raise WriteSemanticError(
+            "expected_refund_residual_after must be zero"
+        )
+    if mode == "full":
+        if total != origin_total:
+            raise WriteSemanticError(
+                "full refund expected_total_amount must equal "
+                "expected_origin_total_amount"
+            )
+        if outcome != "full_origin_reversal":
+            raise WriteSemanticError(
+                "expected_reconciliation_outcome is inconsistent with full refund"
+            )
+        if origin_payment_state != "reversed":
+            raise WriteSemanticError(
+                "expected_origin_payment_state_after is inconsistent with full refund"
+            )
+        expected_origin_residual = Decimal("0")
+    else:
+        if total >= origin_total:
+            raise WriteSemanticError(
+                "partial refund expected_total_amount must be less than "
+                "expected_origin_total_amount"
+            )
+        if outcome != "partial_origin_reduction":
+            raise WriteSemanticError(
+                "expected_reconciliation_outcome is inconsistent with partial refund"
+            )
+        if origin_payment_state != "partial":
+            raise WriteSemanticError(
+                "expected_origin_payment_state_after is inconsistent with partial refund"
+            )
+        expected_origin_residual = origin_total - total
+    if reconcile_amount != total:
+        raise WriteSemanticError(
+            "expected_reconcile_amount must equal expected_total_amount"
+        )
+    if origin_residual != expected_origin_residual:
+        raise WriteSemanticError(
+            "expected_origin_residual_after is inconsistent with refund mode"
+        )
+    computed = {
+        **computed,
+            "expected_source_refund_mode": mode,
+            "expected_commercial_partner_id": commercial_partner_id,
+            "expected_origin_total_amount": _format(origin_total),
+            "expected_reconcile_amount": _format(reconcile_amount),
+            "expected_refund_payment_term_line_id": refund_term_line_id,
+            "expected_origin_payment_term_line_id": origin_term_line_id,
+            "expected_payment_term_account_id": payment_term_account_id,
+            "expected_reconciliation_outcome": outcome,
+            "expected_refund_payment_state_after": refund_payment_state,
+            "expected_origin_payment_state_after": origin_payment_state,
+            "expected_refund_residual_after": _format(refund_residual),
+            "expected_origin_residual_after": _format(origin_residual),
+    }
+    return {
+        "checks": (
+            *base["checks"],
+            "refund_post_reconcile_mode_and_outcome_explicit",
+            "refund_post_reconcile_term_lines_and_account_explicit",
+            "refund_post_reconcile_residuals_consistent",
+        ),
+        "computed": computed,
+    }
+
+
 def _validate_recovery(parameters: dict[str, Any]) -> dict[str, Any]:
     _date(_field(parameters, "recovery_date"), "recovery_date")
     digest = _field(parameters, "expected_recovery_plan_digest")
@@ -1134,6 +1271,7 @@ _VALIDATORS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "acct.bill.vendor_post.v1": lambda value: _validate_document_post(
         value, expected_move_type="in_invoice"
     ),
+    "acct.refund.post_reconcile_origin.v1": _validate_refund_post_reconcile,
     "acct.refund.draft_cancel.v1": _validate_refund_draft_cancel,
     "acct.recovery.execute.v1": _validate_recovery,
     "acct.reconciliation.undo.v1": _validate_reconciliation_undo,

@@ -6,9 +6,9 @@ remain authoritative.
 
 ## Current registered writes
 
-The current development registry contains 23 write capabilities. All 23
+The current development registry contains 24 write capabilities. All 24
 require approval and idempotency and have concrete
-`prepare/precheck/execute/verify` source paths. Twenty-one currently reach
+`prepare/precheck/execute/verify` source paths. Twenty-two currently reach
 capability-specific ORM prechecks; payment registration and deferred creation
 fail closed before ORM access. None is a registry-only placeholder, but source
 presence does not make a dormant path executable.
@@ -38,6 +38,7 @@ presence does not make a dormant path executable.
 | `acct.invoice.customer_post.v1` | Post one exact canonical pristine V3 customer-invoice draft and verify the posted graph | Pi eligibility flow, receipt correlation, and real Odoo lifecycle unverified |
 | `acct.bill.vendor_post.v1` | Post one exact canonical pristine V3 vendor-bill draft and verify the posted graph | Pi eligibility flow, receipt correlation, and real Odoo lifecycle unverified |
 | `acct.refund.draft_cancel.v1` | Cancel one exact never-posted V3 refund while preserving its posted origin | Pi eligibility flow, receipt correlation, and real Odoo lifecycle unverified |
+| `acct.refund.post_reconcile_origin.v1` | Post one exact pristine linked V3 customer/vendor refund with `action_post`, verify Odoo's exact full/partial origin-reconciliation graph, and commit its rank side effect in the same transaction | Manual recovery escalation; Pi receipt correlation and real Odoo lifecycle unverified |
 
 At this snapshot every write remains:
 
@@ -47,8 +48,8 @@ At this snapshot every write remains:
 - absent from `enabled_environments`.
 
 Local fake-ORM and service tests exercise these paths, but they are not real
-Odoo receipts. Therefore the source-development count is 23/23 while the
-real-Odoo write-evidence count is 0/23. Goal completion cannot be inferred from
+Odoo receipts. Therefore the source-development count is 24/24 while the
+real-Odoo write-evidence count is 0/24. Goal completion cannot be inferred from
 the source-development count.
 
 ## Dev260 accounting and recovery safety boundary
@@ -125,6 +126,39 @@ reversal chatter and automatic reconciliation effects that are not yet
 represented by their recovery result graphs. This review justifies the
 fail-closed boundary; it is not real-Odoo execution evidence.
 
+## Dev265 refund post-and-reconcile boundary
+
+The intended Pi flow first calls
+`acct.refund.post_reconcile_eligibility.v1`, then transfers the returned exact
+graph into the 31-parameter `acct.refund.post_reconcile_origin.v1` request,
+preview, independent approval, and execution. The write independently rebuilds
+the same company-bound pristine V3 refund and unique posted origin; binds both
+V1, canonical V2, and business digests; binds selected and commercial partners,
+journal, currency, refund date, totals, complete line IDs, the one
+receivable/payable term-line pair and account, and the expected full or partial
+reconciliation outcome. A request to post without the Odoo 19 automatic origin
+reconciliation has conflicting semantics and is refused.
+
+Execution calls `action_post` once and admits only the exact partial-reconcile
+record, optional full-reconcile graph, residuals, payment states, balanced moves,
+audit-log delta, and partner-rank side effect described by the approved graph.
+The control add-on's `res.partner._increase_rank` override is active only for
+this capability inside the trusted process-local execution scope. It rejects
+superuser or non-executor use, the wrong field, any delta other than one, and any
+partner set other than the exact sorted selected/commercial union. That branch
+uses ORM synchronously so posting, reconciliation, and rank update share one
+transaction; ordinary Odoo calls retain native behavior. The committed-anchor
+verifier admits only an unchanged rank or a later monotonic increment by the
+same Odoo executor user as the operation, and rejects rank decreases,
+other-user changes, extra records, and non-rank drift.
+
+The read is `contract_tested` and staged only for `test`. The write is critical,
+`declared`, unstaged, disabled, and has manual-escalation recovery. All current
+evidence is local source, fake-ORM/add-on, state-machine, Pi-corpus, and Bridge
+test evidence. No retained real Odoo write, duplicate, failure, verification,
+or recovery receipt exists, so this capability cannot be described as sandbox-
+or production-verified.
+
 ## Dev259 document-lifecycle boundary
 
 The intended Pi flow queries `acct.move.document_post_eligibility.v1` before
@@ -188,8 +222,9 @@ Dev260 also removes one-step posting from all three create contracts. Their
 `posting_mode` schema accepts exactly `draft`; execution and verification reject
 any non-draft state, and no create handler calls `action_post`. Customer
 invoices and vendor bills may later use their dedicated document-post
-capability after a fresh eligibility read, preview, and approval. Refund
-posting remains unavailable in this bounded slice. Refund creation is further
+capability after a fresh eligibility read, preview, and approval. Dev260 itself
+did not expose refund posting; Dev265 now provides the separate declared and
+disabled post-and-reconcile path described above. Refund creation is further
 limited to a company-currency, taxless, non-storno, fully unpaid canonical
 origin graph with exact commercial-partner and journal lineage and no external
 reconciliation, payment, statement, sale, purchase, analytic, asset, or
@@ -234,7 +269,7 @@ override review have closed that boundary.
 
 ## Missing write families
 
-The 23 writes cover the basic accounting spine, not every write operation in
+The 24 writes cover the basic accounting spine, not every write operation in
 the Goal. Additional capability contracts and handlers are still required for:
 
 1. foreign-currency payments, bank statements, FX reconciliation, rates, and

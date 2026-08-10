@@ -13,15 +13,15 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-The current Dev264 development baseline registers 35 capabilities: 12 reads
-and 23 writes. The reads are staged only for `test`; no capability is enabled
-or production-routed. All 23 writes have concrete source paths, 21 can reach
+The current Dev265 development tree registers 37 capabilities: 13 reads
+and 24 writes. The reads are staged only for `test`; no capability is enabled
+or production-routed. All 24 writes have concrete source paths, 22 can reach
 capability-specific ORM prechecks, and payment registration plus deferred
 creation stop before ORM access. All write evidence remains `declared` with no
-retained real-Odoo receipt, so the real-Odoo write-evidence count is 0/23.
+retained real-Odoo receipt, so the real-Odoo write-evidence count is 0/24.
 
-All twelve registered read capabilities now have trusted, statically admissible
-handlers for the dedicated test environment. Eleven run through the constrained
+All thirteen registered read capabilities now have trusted, statically admissible
+handlers for the dedicated test environment. Twelve run through the constrained
 Odoo read executor, including multi-company gross-balance translation; operation
 diagnostics reads only the trusted local write store. They remain
 `contract_tested` and staged for `test`, with no production enablement or
@@ -57,8 +57,9 @@ summaries, not the original Odoo/SQL-oracle/Pi/negative-control source objects,
 so even a valid cryptographic closure reports
 `external_read_evidence_verified:false` and
 `goal_evidence_admissible:false`. Sealed verification and a self-contained
-final-evidence closure are also not implemented. All 12 reads therefore remain
-`contract_tested`, test-staged, not enabled, and not Goal-evidence ready.
+final-evidence closure are also not implemented. At the Dev264 boundary, all 12
+then-registered reads therefore remained `contract_tested`, test-staged, not
+enabled, and not Goal-evidence ready.
 
 Dev264 adds two deliberately offline contract boundaries without changing that
 status. `read_evidence_raw_v3` revalidates a complete Registry, derives the
@@ -83,12 +84,32 @@ retained-copy comparison, or publisher signature verification and explicitly
 reports every such provenance claim as false. Neither validator is connected
 to the CLI or active evidence gate in Dev264.
 
+Dev265 adds one `contract_tested`, test-staged read,
+`acct.refund.post_reconcile_eligibility.v1`, and one critical, `declared`,
+unstaged and disabled write, `acct.refund.post_reconcile_origin.v1`. The read
+binds an exact pristine V3 refund/origin graph, the single receivable or payable
+term-line pair, full or partial outcome, immutable bindings, company, currency,
+journal, date, partners, rank preconditions, and expected residual/payment
+states. The write invokes `action_post` only after rebuilding that approved
+graph and accepts Odoo 19's automatic origin reconciliation only when the exact
+partial/full result graph and allowed deltas verify.
+
+For this one capability, the control add-on overrides partner rank handling only
+inside the trusted process-local V3 execution scope, for a non-superuser member
+of the executor group, the exact approved `customer_rank`/`supplier_rank`, an
+increment of one, and the exact selected/commercial-partner union. It performs
+that rank increment synchronously in the posting transaction; every ordinary
+Odoo call falls back to native behavior. Local add-on, fake-ORM, bootstrap,
+gateway, Pi-corpus, and Bridge tests cover this boundary, but no real Odoo write
+receipt exists. Recovery is manual escalation, and the capability remains
+unavailable in sandbox and production.
+
 Dev257 adds the declared, disabled
 `acct.bank.statement_compensate.v1` contract. It preserves a completed,
 verified, database-finalized bank-import graph and creates a separate
 whole-batch opposite-signed statement from the exact retained available plan;
 it is not a delete, partial correction, or implicit unreconciliation path.
-Control add-on version `19.0.0.7.2` serializes supported ORM mutations of bank
+Control add-on version `19.0.0.7.3` serializes supported ORM mutations of bank
 statements, statement lines, their linked moves and journal items, and their
 reconciliation records on the same company-and-journal transaction lock.
 Specialized compensation and generic recovery acquire the complete ordered
@@ -225,7 +246,7 @@ single-link non-symlink with exact mode `0400` or `0600`, and all ancestors must
 root-owned directories that are not group/world writable; verification also
 uses no-follow, open-file identity, before/after identity, and bounded-read
 checks. The contract-tested FD4 terminal-answer boundary is not the complete
-live Pi 43-scenario trace gate, which has not yet been evidenced for the target
+live Pi 48-scenario trace gate, which has not yet been evidenced for the target
 release. See `docs/PI_SCENARIO_ACCEPTANCE.md`.
 
 ## Development
