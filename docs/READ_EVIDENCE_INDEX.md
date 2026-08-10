@@ -1,155 +1,137 @@
-# Read-evidence index: legacy v2 status
+# Read-evidence index: Dev263 active admission
 
-Dev262 implements a strict parser and semantic checker for the legacy
-`read-evidence-index.v2` format. It is a structural-audit boundary only. It is
-not externally admissible read evidence and cannot make a registered read or
-the Goal ready. A v2 check must report
-`external_read_evidence_verified:false` and
-`goal_evidence_admissible:false`, even when all of its internal checks pass.
-It does not collect evidence, enable a capability, execute an Odoo write, or
-authorize production.
+Dev263 adds a Linux-only, public-key-verifiable `read-evidence-index.v3`
+active-admission path beside the legacy v2 structural checker. The public v3
+verifier is active-only: callers provide the index path, while the executing
+release identity, trust roots, clock, root-owner policy, active pointer, and
+publication ledger are derived internally. There is no caller-selected
+`mode`, `now`, trust path, key, owner override, or sealed-verification API.
 
-## Legacy v2 trust inputs
-
-The caller selects only the evidence index. It cannot select an attestation key,
-runtime configuration, database, company, user, principal, environment, or
-capability channel.
-
-For release `<release>`, the verifier derives and reopens this root-managed
-anchor:
+This is a cryptographic closure and publication boundary, not yet complete
+Goal evidence. The retained v3 raw bodies currently contain normalized
+contract summaries rather than the original Odoo requests/results/receipts,
+PostgreSQL oracle rows, Pi event traces, and negative-control request/response
+objects. Consequently a successfully signed closure reports:
 
 ```text
-/opt/odoo-accounting-cli-v3/trusted-artifacts/<release>.read-evidence.json
+cryptographic_closure_verified: true
+semantic_evidence_level: normalized_contract_only
+external_read_evidence_verified: false
+goal_evidence_admissible: false
+production_promotion_allowed: false
 ```
 
-The canonical v1 anchor binds the exact release identity, read runtime config
-path and SHA-256, release-specific attestation key path and SHA-256, five
-purpose-specific verifier identities and source-code digests, one complete
-execution scope, and this source parent:
+Every capability remains `verified:false` until the real raw semantic adapters
+independently recompute those facts. Signatures prove key possession and exact
+bytes; they do not prove that a summarized accounting claim is true.
+
+## Active v3 locations
+
+For executing release `<release>` and run `<run-id>`, the verifier accepts only
+the canonical active tree:
 
 ```text
-/var/lib/odoo-accounting-cli-v3/evidence-sources/<release>/
+/var/lib/odoo-accounting-cli-v3/read-evidence-v3/<release>/
+  active.json
+  runs/<run-id>/
+    index.json
+    index.json.sshsig
+    active-admission.json
+    active-admission.json.sshsig
+    ...exact signed closure members...
+
+/var/lib/odoo-accounting-cli-v3/read-evidence-v3/admissions.sqlite3
 ```
 
-The execution scope contains the Odoo instance, database name and UUID, active
-and allowed companies, Odoo user, Pi principal, environment, capability
-channel, receipt key ID, release digest, and registry digest. The runtime config
-must independently agree with the instance/database/environment/channel,
-release package, and receipt key. Every capability, artifact, source bundle,
-read receipt, and attestation must match that one trusted scope.
+The index must be canonical JSON with one trailing LF. The run directory must
+contain exactly the declared regular, single-link files and directories; links,
+hard links, special files, extras, path traversal, digest/size drift, and
+read-time replacement are rejected. File-count, tree-depth, JSON-complexity,
+per-file, and total-byte limits apply.
 
-The HMAC key file is not a caller input. Its exact path is:
+`active.json` binds the exact release, run, index digest, admission digest,
+admission payload digest, and monotonic sequence. Active verification also
+requires the same exact payload binding to be in `PUBLISHED` state in the existing
+publication ledger. A missing, stale, expired, changed, replayed, or merely
+consumed admission fails closed.
+
+## Fixed release trust
+
+The verifier first proves the executing immutable release through its deployment
+anchor and `RELEASE-MANIFEST.json`. It then derives, rather than accepts from a
+caller, these v3 trust inputs:
 
 ```text
-/etc/odoo-accounting-cli-v3/trust/read-evidence/<release>/attestation-keys.json
+/opt/odoo-accounting-cli-v3/trusted-artifacts/<release>.read-evidence-v3.json
+/etc/odoo-accounting-cli-v3/trust/read-evidence-v3/<release>/revocations
+/etc/odoo-accounting-cli-v3/trust/read-evidence-v3/<release>/roles/<role>.allowed-signers
+/usr/bin/ssh-keygen
 ```
 
-It must be a root-owned, canonical, single-link regular file with mode `0400`
-or `0600`; every ancestor must be root-managed and non-writable by group or
-world. Its raw SHA-256 and every authority/key/verifier identity are pinned by
-the release anchor. The five keys, authority IDs, verifier IDs, verifier source
-digests, and HMAC secrets must be unique and ordered by evidence purpose.
+Role filenames replace each role-name dot with `__`; for example,
+`verifier.live_odoo` uses `verifier__live_odoo.allowed-signers`.
 
-Those restrictions prevent a caller from redirecting the checker to an
-arbitrary parallel key set, but they do not create an external verifier. The
-same checker process reads all five HMAC signing secrets and the read-receipt
-verification secret, so it has the material needed to create values it later
-accepts. `collector_id`, `verifier_id`, and their source hashes are bound labels;
-string or hash inequality does not prove separate key custody or that a
-particular process executed. The anchor/runtime agreement also does not by
-itself prove the live Odoo database, company, user, principal, or authorization
-token that produced a case.
+The trust anchor pins the exact release identity, `ssh-keygen`, revocations,
+each allowed-signers file, and nine unique Ed25519 public-key fingerprints.
+Every path component is root-owned and not group/world writable. Files are
+opened with `O_NOFOLLOW`, held by descriptor, digest-checked, and passed to
+`ssh-keygen -Y verify` through `/proc/self/fd` with a fixed principal and
+namespace. Unsupported platforms fail before evidence or trust input is used.
 
-## SSHSIG foundation
+The nine non-interchangeable roles are:
 
-Dev262 adds a separate Linux-only verification foundation for detached SSHSIG
-signatures. It requires root-owned paths with no group/world write access and
-Linux `O_NOFOLLOW` plus `/proc/self/fd`. It digest-pins and keeps open the
-`ssh-keygen` executable, canonical single-Ed25519 allowed-signers file,
-revocation file, and signature, then gives the child only those inherited file
-descriptors. The subprocess uses `shell=False`, an exact principal and
-namespace, raw message bytes on stdin, a timeout, and a minimal environment.
-Unsupported hosts fail closed, and its API accepts and reports no private key
-or secret.
+- `scope`
+- `authorization`
+- `collector`
+- `admission`
+- `verifier.accounting_oracle`
+- `verifier.live_odoo`
+- `verifier.pi_e2e`
+- `verifier.release_identity`
+- `verifier.security_negative`
 
-This foundation is not wired into `read-evidence-index.v2` and is not evidence
-admission. There is not yet a v3 active-admission document, a public-key role
-chain for the collector and five verifiers, an externally signed live-scope and
-authorization-token decision, or an adapter from the retained raw Odoo, SQL
-oracle and Pi traces into that chain. Passing the SSHSIG module tests therefore
-does not change either v2 readiness flag.
+The authorization binds the release, run, scope, collector role, unique
+authorization ID, nonce digest, and half-open approval interval
+`not_before <= time < expires_at`. `admitted_at` must be inside that interval;
+active verification uses the system UTC clock and rejects the closure at or
+after expiry. Callers cannot extend or replace the approval interval.
 
-## Retained source bundles
+## Rollback-journal publication ledger
 
-Each source bundle is a direct child of the release source parent. It has one
-canonical `BUNDLE-MANIFEST.json` and an exact recursively enumerated file set.
-The manifest binds the release, trusted scope, collector identity and source
-digest, collection time, and every member path, size, and SHA-256. Paths are
-relative and canonical; links, hard links, special files, extra files, unsafe
-directories, digest drift, size drift, and read-time replacement are rejected.
-Per-file, total-size, file-count, JSON depth, node-count, and string-size limits
-apply.
+The admission store is a private SQLite database using `DELETE` rollback
+journaling, not WAL. Its parent is mode `0700`; the writer requires database
+mode `0600`, while the existing-only verifier accepts the private read-only
+mode `0400` as well as `0600`. Unsafe owners, ancestors, links, extra hard
+links, legacy WAL/SHM sidecars, or a hot rollback journal are rejected.
+Read-only verification opens an existing database only, enables query-only
+access, and never creates or recovers state. A hot journal requires the
+authorized writer recovery path before verification can continue.
+The writer may resume an interrupted first bootstrap only when the same private
+single-link inode is exactly zero-length or a strictly empty SQLite database.
+For a valid hot rollback journal it first completes SQLite recovery, closes the
+connection, confirms the same inode and no remaining sidecar, fsyncs the
+database and parent, and only then initializes the schema. Unknown objects,
+metadata, residual pages, or sidecars that do not recover cleanly are rejected.
 
-For every capability and evidence kind, the strict artifact points to the one
-canonical source member:
+Publication is one-way and replay-safe. A unique authorization/nonce/run/index
+reservation may move only `PENDING -> CONSUMED -> PUBLISHED`. The first
+transition fixes the payload binding; the second adds the exact
+admission-signature path, digest, size, and publication time. Triggers forbid
+deletion, changes to schema metadata or identity/binding columns, any other
+transition, and every change after terminal `PUBLISHED`. Repeating the same
+committed request recovers the existing decision; a conflicting idempotency or
+binding reuse is rejected. If commit durability is uncertain, the publisher
+must stop signing, inspect the durable row through the recovery lookup, and
+either resume the exact transition or leave the request rejected. It must never
+invent a new sequence or payload to hide an uncertain outcome.
 
-```text
-artifacts/<capability-id>/<evidence-kind>.json
-```
+## Strict CLI dispatch
 
-The verifier reopens that member and requires its canonical JSON body to equal
-the artifact payload. An artifact hash or signed `passed:true` is not enough.
-
-## Evidence semantics
-
-The index contains all current read capabilities and all five evidence kinds in
-sorted exact order. Each capability directory contains exactly ten files:
-
-```text
-<evidence-kind>.artifact.json
-<evidence-kind>.attestation.json
-```
-
-The legacy v2 kinds and derived structural checks are:
-
-- `live_odoo`: one or more complete requests, result bodies, and
-  `read_receipt_v2` receipts. The verifier derives `page.total_count`, recomputes
-  request/result digests and HMAC, and binds instance, database, company, user,
-  principal, environment, channel, registry, release, key, and collection time.
-- `accounting_oracle`: the same verified Odoo receipt plus a canonical oracle
-  result that must exactly equal the signed Odoo result. Its PostgreSQL witness
-  must bind database/company, repeatable-read, read-only, rollback, zero write
-  statements, unchanged pre/post state, query/row-stream digests, and the
-  recomputed oracle-result digest.
-- `pi_e2e`: a non-empty natural-language request, selected capability, identical
-  collected/CLI parameters, the fixed nine-event lifecycle, a newly verified
-  Odoo receipt, and recomputed final business-result and audit-receipt digests.
-- `security_negative`: the exact ACL denial, cross-company denial, expired
-  authorization, replay, and post-signature parameter-tamper cases. Each must
-  return its fixed error code and exit 6 with no receipt, Odoo effect, Odoo
-  write, or PostgreSQL write.
-- `release_identity`: the executing release, version, commit, manifest identity,
-  package, registry, release root, and complete capability-contract digest must
-  match values independently verified by the installed CLI.
-
-The generic verifier derives the case counts, receipt counts, read/write facts,
-and pass state from these bodies. Those facts are not accepted from attestation
-claims. Attestations bind the artifact, source-manifest digest, derived summary,
-trusted-scope digest, exact release and capability contract, collection time,
-and anchor-pinned verifier. Collector and verifier identities/source hashes must
-differ. Receipt IDs cannot be reused across the 12-by-5 evidence set.
-
-These checks reject many malformed or internally inconsistent bundles. They do
-not cure the shared-HMAC authority, labelled-role, self-asserted collection-time
-or missing external scope/authentication-admission limitations described above.
-
-## Verification commands
-
-Run only the installed immutable release launcher:
+Run only the launcher inside the exact immutable release:
 
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<release>
-INDEX=/var/lib/odoo-accounting-cli-v3/evidence/<run-id>/read-evidence-index.json
+INDEX=/var/lib/odoo-accounting-cli-v3/read-evidence-v3/<release>/runs/<run-id>/index.json
 
 "$RELEASE_DIR/bin/odoo-accounting-cli-v3" \
   evidence read-evidence-index-check \
@@ -160,27 +142,105 @@ INDEX=/var/lib/odoo-accounting-cli-v3/evidence/<run-id>/read-evidence-index.json
   --read-evidence-index "$INDEX"
 ```
 
-The same index may be passed to `evidence goal-readiness` only to obtain the
-explicit blocker and remediation output. The final-manifest checker may reopen
-it for structural diagnostics, but must not convert it into externally verified
-or Goal-admissible evidence. It ignores any key or anchor path copied into a
-retained readiness report, so a caller cannot redirect the recheck to a
-parallel trust set.
+The CLI loads the executing release identity before reading the supplied index,
+takes a bounded root-managed canonical schema snapshot, and dispatches exact v3
+only to the active v3 verifier. Exact v2 goes only to the legacy checker.
+Unknown, duplicated, non-finite, noncanonical, missing, unreadable, or swapped
+schemas are rejected without fallback. A v3-to-v2 or v2-to-v3 replacement after
+classification cannot select the other verifier.
 
-A structurally successful legacy check still returns
-`external_read_evidence_verified:false`,
-`goal_evidence_admissible:false`, `production_promotion_allowed:false`, and
-`real_odoo_write_performed:false`. Production routing remains subject to the
-separate Pi, write, sandbox, capacity, route, enablement, and final-manifest
-gates, plus the unfinished v3 public-key admission chain.
+## Legacy v2 remains diagnostic only
 
-## Current evidence status
+`read-evidence-index.v2` retains its strict source-bundle, receipt, HMAC, and
+internal semantic checks for regression diagnosis. The same process can read
+its HMAC signing material, so v2 does not establish independent public-key
+custody. Regardless of structural success, the CLI forcibly reports v2 as:
 
-Dev262 provides the legacy structural checker, source-bundle reopening,
-receipt/evidence semantic checks, CLI wiring, negative controls, and the
-standalone SSHSIG public-verification foundation. It does not yet provide the
-v3 active admission or role-signature chain, raw-evidence adapters, or an exact
-target-host source bundle produced and signed by independent roles for all 12
-reads. Fresh real Odoo, PostgreSQL-oracle and Pi evidence must be collected
-after that v3 chain exists; a v2 bundle cannot be grandfathered or merely
-re-signed. Read Goal readiness remains false and no read capability is enabled.
+```text
+evidence_protocol: hmac-v2
+external_read_evidence_verified: false
+goal_evidence_admissible: false
+production_promotion_allowed: false
+```
+
+A v2 bundle cannot be grandfathered, relabelled, or merely re-signed as v3.
+
+### Legacy v2 trust inputs
+
+The caller selects only the evidence index. It cannot select an attestation key,
+runtime configuration, database, company, user, principal, environment, or
+capability channel. For release `<release>`, the verifier derives and reopens:
+
+```text
+/opt/odoo-accounting-cli-v3/trusted-artifacts/<release>.read-evidence.json
+/var/lib/odoo-accounting-cli-v3/evidence-sources/<release>/
+/etc/odoo-accounting-cli-v3/trust/read-evidence/<release>/attestation-keys.json
+```
+
+The anchor binds the exact release identity, read runtime configuration, five
+purpose-specific verifier identities and source-code digests, and one exact
+instance/database/company/user/principal/environment/channel scope. The HMAC
+file is a root-owned, canonical, single-link regular file with mode `0400` or
+`0600`; every ancestor is root-managed and not group/world writable. Its five
+keys, authority IDs, verifier IDs, source digests, and secrets are unique and
+ordered by evidence purpose.
+
+Those restrictions stop a caller redirecting verification to a parallel key
+set, but they do not establish external verification. The checker process reads
+all signing and receipt secrets, while collector/verifier IDs and source hashes
+remain bound labels. Internal scope agreement does not itself prove which live
+Odoo database, user, principal, or authorization token produced a case.
+
+### Legacy v2 retained bundles and semantics
+
+Each source bundle is a direct child of the release source parent and has one
+canonical `BUNDLE-MANIFEST.json` plus an exact recursively enumerated file set.
+The manifest binds release, scope, collector, collection time, and every member
+path, size, and SHA-256. Links, hard links, special or extra files, unsafe
+directories, digest/size drift, and read-time replacement are rejected. Bounds
+apply to files, bytes, directories, JSON depth, nodes, and strings.
+
+For every capability and evidence kind, the artifact reopens and exactly equals
+this canonical source member; a hash or signed `passed:true` alone is rejected:
+
+```text
+artifacts/<capability-id>/<evidence-kind>.json
+```
+
+The exact sorted 12-by-5 v2 checks are:
+
+- `live_odoo`: complete requests, results, and `read_receipt_v2` receipts, with
+  recomputed counts/digests/HMAC and exact scope/release binding.
+- `accounting_oracle`: the same verified result plus an equal oracle result and
+  a database/company, repeatable-read, read-only, rollback, zero-write,
+  unchanged-state, query/row-stream witness.
+- `pi_e2e`: natural language, selected capability, identical collected/CLI
+  parameters, fixed event order, verified Odoo receipt, business result, and
+  audit-receipt bindings.
+- `security_negative`: exact ACL, cross-company, expired, replay, and
+  parameter-tamper rejections, with the fixed error/exit and no receipt or write.
+- `release_identity`: exact executing version, commit, manifest, package,
+  registry, release root, and complete capability-contract digest.
+
+The legacy verifier derives counts, read/write facts, and pass state from those
+bodies rather than trusting attestation claims. Attestations bind the source
+manifest, derived summary, scope, release, capability contract, collection time,
+and anchor-pinned verifier; receipt IDs cannot be reused across the set. These
+checks remain valuable malformed-bundle and regression controls, but do not cure
+the shared-HMAC authority or labelled-role limitations.
+
+## Remaining blockers
+
+Dev263 does not implement sealed verification or copy the complete v3 closure
+into a self-contained final-evidence bundle. The existing final-manifest path
+must therefore remain non-ready; its external source reopening is not archival
+proof. A later change must atomically retain the exact closure, verify that copy
+without the active pointer or live ledger, bind its tree digest/count/bytes into
+a new final-manifest schema, and prove the checker never reopens an external
+path.
+
+After that, real raw Odoo, accounting-oracle, Pi E2E, release-identity, and
+security-negative adapters must collect and independently validate all 12 read
+capabilities. Until both blockers close with target-host receipts, read Goal
+readiness remains false, no read capability is production-enabled, and no
+business success may be reported from this foundation alone.

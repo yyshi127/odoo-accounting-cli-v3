@@ -93,7 +93,7 @@ where practical, then record actual execution evidence separately.
   Before staging, real Odoo must prove the complete
   user/company/request/approval/move trace, exact audit-log behavior, module
   boundary, and concurrent external-chatter behavior.
-- Dev262 adds a legacy structural read-evidence checker for all 12 registered
+- Dev263 retains the legacy structural read-evidence checker for all 12 registered
   reads. The v2 index has the exact sorted capability inventory and five
   purpose-separated artifact/attestation pairs per capability. The caller may
   choose only the index; the executing release derives a root-owned trust anchor
@@ -112,18 +112,31 @@ where practical, then record actual execution evidence separately.
   Even a structurally passing v2 check must return
   `external_read_evidence_verified:false` and
   `goal_evidence_admissible:false`.
-- Dev262 also adds the isolated Linux SSHSIG public-verification foundation.
-  Non-Linux hosts test canonical parsing and fail-closed rejection only; they
-  cannot return `verified:true`. Linux tests cover a real
-  `ssh-keygen -Y verify` subprocess, exact stdin bytes,
-  principal/namespace/key/signature/revocation separation, digest pins,
-  root-managed path policy, inherited `/proc/self/fd` inputs, and
-  change-use-restore resistance. The module has not yet been connected to a v3
-  active admission, collector/verifier role signatures, live scope/auth
-  decisions, raw Odoo/SQL/Pi evidence adapters, or a v3 target-host admission
-  bundle. Passing either test set does not prove real Odoo/accounting
-  correctness, enable a read, authorize production, or make read/Goal evidence
-  ready.
+- Dev263 connects the isolated Linux SSHSIG boundary to an active-only v3
+  verifier. Tests require nine fixed unique roles, exact release-derived trust,
+  canonical active location and pointer, half-open approval time, exact closure
+  and signature bindings, and a matching terminal `PUBLISHED` ledger row. The
+  public API and CLI expose no mode, sealed path, clock, trust, key, or owner
+  override; exact v2/v3 dispatch cannot downgrade after a path swap.
+- The admission tests cover private SQLite `DELETE` rollback journaling,
+  pending-to-consumed-to-published one-way transitions, unique
+  authorization/nonce/run/index bindings, idempotent exact-request recovery,
+  conflict and replay rejection, uncertain-commit reconciliation, interrupted
+  zero/empty bootstrap recovery, real hot-bootstrap rollback, read-only lookup
+  without state creation, and rejection of unknown bootstrap metadata,
+  WAL/SHM sidecars, unsafe paths, links, tampering, and invalid timestamps. The
+  Linux root CI gate runs admission, v3, one full root-managed integration closure,
+  and the 16 real `ssh-keygen -Y verify` tests; any POSIX skip is printed and
+  fails the production-boundary gate. The integration node builds an isolated
+  12-read release under the canonical `/opt`, `/etc`, and `/var/lib` paths,
+  uses nine real Ed25519 roles plus a real `DELETE`-journal PUBLISHED ledger,
+  and proves both pre-publication and post-tamper rejection without replacing
+  production verifier boundaries.
+- Passing those tests proves cryptographic closure and publication controls,
+  not real Odoo/accounting correctness. The raw Odoo/SQL/Pi/negative bodies are
+  still normalized summaries, so v3 must report every capability unverified and
+  keep read/Goal evidence false. Sealed verification and a self-contained final
+  closure are also absent. No read is enabled and production is not authorized.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not
@@ -770,8 +783,9 @@ At the current local development checkpoint:
   Registry-embedded evidence receipt claims cannot satisfy final Goal evidence:
   current-release receipt hashes would self-reference both the registry digest
   and release manifest, and their metadata alone does not independently verify
-  artifacts or signatures. Until a publicly verifiable v3 read-evidence index
-  with active admission covers all ten capabilities, dev250 reports zero
+  artifacts or signatures. Until publicly verifiable v3 evidence includes real
+  raw semantic adapters and a self-contained final closure for all ten then-
+  registered capabilities, dev250 reports zero
   completion-ready reads and keeps Goal readiness false. The final evidence
   manifest now revalidates this report against the installed registry/handler
   set and rejects an unready, stale, inconsistent, or incomplete Goal report.
@@ -804,8 +818,15 @@ At the current local development checkpoint:
   translation now uses the constrained Odoo read executor, while operation
   diagnostics uses the trusted local persistence reader and never enters the
   Odoo executor. Static readiness is therefore 10/10, but all ten still lack
-  publicly verifiable v3 exact-release Goal evidence with active admission and
-  remain test-staged only.
+  real raw v3 exact-release Goal evidence and remain test-staged only.
+- dev263 adds strict v2/v3 CLI dispatch, the nine-role active-only SSHSIG closure,
+  and rollback-journal publication ledger. It deliberately keeps
+  `external_read_evidence_verified:false` and
+  `goal_evidence_admissible:false` because the real raw Odoo, accounting-oracle,
+  Pi E2E, release-identity, and security-negative adapters are unfinished. The
+  final-manifest v2 path also reopens an external source and does not retain or
+  sealed-verify a self-contained v3 closure. Those are explicit blockers, not
+  skipped tests or evidence of Goal completion.
 
 The 2026-07-22 Dev29 pre-release worktree validation executed 4,289 tests:
 4,017 passed, 272 platform/external-environment cases skipped, and none failed

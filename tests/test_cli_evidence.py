@@ -4294,7 +4294,7 @@ def test_evidence_read_capabilities_readiness_verifies_supplied_index():
         "odoo_accounting_cli_v3.cli._load_release_identity",
         return_value=expected_identity,
     ), patch(
-        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        "odoo_accounting_cli_v3.cli._verify_external_read_evidence_index",
         return_value=external,
     ) as verifier:
         result = CliRunner().invoke(
@@ -4338,7 +4338,7 @@ def test_evidence_read_capabilities_readiness_without_index_keeps_gate_closed():
         "odoo_accounting_cli_v3.cli._load_release_identity",
         return_value=expected_identity,
     ), patch(
-        "odoo_accounting_cli_v3.cli.verify_read_evidence_index"
+        "odoo_accounting_cli_v3.cli._verify_external_read_evidence_index"
     ) as verifier:
         result = CliRunner().invoke(
             main,
@@ -4413,7 +4413,7 @@ def test_evidence_read_evidence_index_check_is_release_and_registry_bound():
         "odoo_accounting_cli_v3.cli._load_release_identity",
         return_value=expected_identity,
     ), patch(
-        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        "odoo_accounting_cli_v3.cli._verify_external_read_evidence_index",
         return_value=external,
     ) as verifier:
         result = CliRunner().invoke(
@@ -4466,7 +4466,7 @@ def test_evidence_read_evidence_index_check_preserves_legacy_v2_blocker():
         "odoo_accounting_cli_v3.cli._load_release_identity",
         return_value=expected_identity,
     ), patch(
-        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        "odoo_accounting_cli_v3.cli._verify_external_read_evidence_index",
         return_value=external,
     ):
         result = CliRunner().invoke(
@@ -4501,7 +4501,7 @@ def test_evidence_read_evidence_index_check_returns_structured_rejection():
         "odoo_accounting_cli_v3.cli._load_release_identity",
         return_value=expected_identity,
     ), patch(
-        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        "odoo_accounting_cli_v3.cli._verify_external_read_evidence_index",
         side_effect=cli_module.ReadEvidenceIndexError("artifact digest mismatch"),
     ) as verifier:
         result = CliRunner().invoke(
@@ -6824,7 +6824,7 @@ def test_final_manifest_reverifies_read_source_without_retained_trust_selection(
         "odoo_accounting_cli_v3.cli._current_route_report",
         return_value=route,
     ), patch(
-        "odoo_accounting_cli_v3.cli.verify_read_evidence_index",
+        "odoo_accounting_cli_v3.cli._verify_external_read_evidence_index",
         side_effect=cli_module.ReadEvidenceIndexError(
             "source bundle digest mismatch"
         ),

@@ -13,7 +13,7 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-The current Dev262 development baseline registers 35 capabilities: 12 reads
+The current Dev263 development baseline registers 35 capabilities: 12 reads
 and 23 writes. The reads are staged only for `test`; no capability is enabled
 or production-routed. All 23 writes have concrete source paths, 21 can reach
 capability-specific ORM prechecks, and payment registration plus deferred
@@ -31,7 +31,7 @@ staged or enabled;
 sandbox and production remain closed until their approval, idempotency,
 verification, recovery, and evidence gates pass.
 
-Dev262 retains `read-evidence-index.v2` only as a legacy structural-audit
+Dev263 retains `read-evidence-index.v2` only as a legacy structural-audit
 format. Its checker strictly reopens the frozen source bundle and validates the
 shape and internal bindings of `accounting_oracle`, `live_odoo`, `pi_e2e`,
 `release_identity`, and `security_negative` bodies. That is useful tamper and
@@ -41,16 +41,23 @@ rather than independently held public-key identities. A v2 result must report
 `external_read_evidence_verified:false` and
 `goal_evidence_admissible:false`, regardless of its structural result.
 
-Dev262 also introduces a Linux-only SSHSIG verification foundation for the
-future public-key evidence path. It requires root-managed paths, pins the
-`ssh-keygen` executable and all trust/signature inputs by SHA-256, keeps them
-open, and invokes `ssh-keygen -Y verify` only through inherited
-`/proc/self/fd` descriptors with a fixed Ed25519 principal, namespace, and
-revocation file. Unsupported hosts fail closed. It does not yet connect that
-foundation to a v3 active-admission record,
-collector and verifier role signatures, externally bound scope/authentication,
-or real raw Odoo, PostgreSQL-oracle and Pi evidence. No Dev262 12-by-5 target
-bundle or active admission exists. All 12 reads therefore remain
+Dev263 connects the Linux-only SSHSIG boundary to an active-only v3 verifier,
+nine fixed Ed25519 roles, a signed scope and approval interval, an exact active
+record, and a SQLite `DELETE` rollback-journal publication ledger with
+trigger-enforced one-way state transitions.
+The public API derives its release trust, clock, owner policy, active pointer,
+and ledger; callers cannot select a mode, key, trust root, time, or owner
+override. Repeated publication requests recover only the identical committed
+payload, while conflicting nonce, authorization, run, index, signature, or
+sequence bindings fail closed. Expired approvals, hot rollback journals,
+replay, tampering, and non-`PUBLISHED` rows are rejected.
+
+This is not yet Goal evidence. The v3 raw bodies are normalized contract
+summaries, not the original Odoo/SQL-oracle/Pi/negative-control source objects,
+so even a valid cryptographic closure reports
+`external_read_evidence_verified:false` and
+`goal_evidence_admissible:false`. Sealed verification and a self-contained
+final-evidence closure are also not implemented. All 12 reads therefore remain
 `contract_tested`, test-staged, not enabled, and not Goal-evidence ready.
 
 Dev257 adds the declared, disabled

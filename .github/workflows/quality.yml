@@ -878,13 +878,16 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e ".[test]"
-      - name: Verify the SSHSIG production boundary as Linux root
+      - name: Verify the Dev263 read-evidence production boundary as Linux root
         shell: bash
         run: |
           set -euo pipefail
-          report="$RUNNER_TEMP/dev262-sshsig-root.xml"
-          sudo "$(command -v python)" -m pytest -q -p no:cacheprovider \
+          report="$RUNNER_TEMP/dev263-read-evidence-root.xml"
+          sudo "$(command -v python)" -m pytest -q -rs -p no:cacheprovider \
             --junitxml="$report" \
+            tests/test_read_evidence_admission.py \
+            tests/test_read_evidence_v3.py \
+            tests/test_read_evidence_v3_linux_integration.py \
             tests/test_sshsig.py
           sudo "$(command -v python)" - "$report" <<'PY'
           import sys
@@ -895,13 +898,65 @@ jobs:
           skipped = root.findall(".//skipped")
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
-          if len(tests) != 16 or skipped or failures or errors:
-              raise SystemExit(
-                  "Dev262 SSHSIG root gate did not execute exactly 16 tests: "
-                  f"tests={len(tests)} skipped={len(skipped)} "
-                  f"failures={len(failures)} errors={len(errors)}"
+          expected_counts = {
+              "test_read_evidence_admission": 67,
+              "test_read_evidence_v3": 61,
+              "test_read_evidence_v3_linux_integration": 1,
+              "test_sshsig": 16,
+          }
+
+          def exact_module(classname):
+              parts = classname.split(".")
+              matches = [module for module in expected_counts if module in parts]
+              return matches[0] if len(matches) == 1 else None
+
+          assert exact_module("tests.test_read_evidence_v3") == "test_read_evidence_v3"
+          assert (
+              exact_module("tests.test_read_evidence_v3_linux_integration")
+              == "test_read_evidence_v3_linux_integration"
+          )
+          observed_counts = {
+              module: sum(
+                  exact_module(case.get("classname", "")) == module for case in tests
               )
-          print("dev262_sshsig_root_tests=16")
+              for module in expected_counts
+          }
+          unclassified = [
+              case.get("classname", "")
+              for case in tests
+              if exact_module(case.get("classname", "")) is None
+          ]
+          if skipped:
+              for case in tests:
+                  skipped_node = case.find("skipped")
+                  if skipped_node is not None:
+                      print(
+                          "dev263_read_evidence_skipped="
+                          f"{case.get('classname', '')}.{case.get('name', '')}:"
+                          f"{skipped_node.get('message', '')}",
+                          file=sys.stderr,
+                      )
+          if (
+              len(tests) != sum(expected_counts.values())
+              or observed_counts != expected_counts
+              or unclassified
+              or skipped
+              or failures
+              or errors
+          ):
+              raise SystemExit(
+                  "Dev263 read-evidence root gate is incomplete: "
+                  f"tests={len(tests)} skipped={len(skipped)} "
+                  f"failures={len(failures)} errors={len(errors)} "
+                  f"observed_counts={observed_counts} "
+                  f"expected_counts={expected_counts} "
+                  f"unclassified={unclassified}"
+              )
+          print("dev263_read_evidence_admission_root_tests=67")
+          print("dev263_read_evidence_v3_root_tests=61")
+          print("dev263_read_evidence_v3_linux_integration_root_tests=1")
+          print("dev263_sshsig_root_tests=16")
+          print("dev263_read_evidence_root_tests=145")
           PY
       - name: Verify the tracked dev8 tool manifest and embedded Python
         run: python deployment/dev8/check_toolchain.py
@@ -1850,7 +1905,9 @@ jobs:
               broker_audit,
               historical_router,
               odoo_approver_authorizer,
+              read_evidence_admission,
               read_evidence_index,
+              read_evidence_v3,
               sshsig,
               systemd_activation,
               trusted_approval_uds,
@@ -1911,7 +1968,9 @@ jobs:
               broker_audit,
               historical_router,
               odoo_approver_authorizer,
+              read_evidence_admission,
               read_evidence_index,
+              read_evidence_v3,
               sshsig,
               systemd_activation,
               trusted_approval_uds,

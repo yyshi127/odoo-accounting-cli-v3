@@ -44,9 +44,17 @@ from .receipts import (
     verify_read_receipt,
 )
 from .read_evidence_index import (
+    EVIDENCE_INDEX_SCHEMA as LEGACY_READ_EVIDENCE_INDEX_SCHEMA,
+    LEGACY_V2_BLOCKER,
     REQUIRED_EVIDENCE_KINDS,
     ReadEvidenceIndexError,
     verify_read_evidence_index,
+)
+from .read_evidence_v3 import (
+    MAX_INDEX_BYTES as READ_EVIDENCE_V3_MAX_INDEX_BYTES,
+    ReadEvidenceV3Error,
+    detect_read_evidence_schema,
+    verify_read_evidence_v3,
 )
 from .registry import (
     PRODUCTION_READ_EVIDENCE,
@@ -5515,6 +5523,68 @@ def _read_capability_contracts(
     }
 
 
+def _verify_external_read_evidence_index(
+    evidence_index: Path,
+    *,
+    expected_release_identity: dict[str, Any],
+    expected_capability_contracts: dict[str, str],
+) -> dict[str, Any]:
+    try:
+        raw, _identity = _read_trusted_file(
+            evidence_index,
+            "read evidence index schema snapshot",
+            maximum=READ_EVIDENCE_V3_MAX_INDEX_BYTES,
+            require_root_owner=True,
+        )
+    except HistoricalRouterError as exc:
+        raise ReadEvidenceIndexError(
+            "read evidence index cannot be safely classified"
+        ) from exc
+
+    schema = detect_read_evidence_schema(raw)
+    if schema == "v3":
+        return verify_read_evidence_v3(
+            evidence_index,
+            expected_release_identity=expected_release_identity,
+        )
+    if schema == "v2":
+        legacy_report = verify_read_evidence_index(
+            evidence_index,
+            expected_release_identity=expected_release_identity,
+            expected_capability_contracts=expected_capability_contracts,
+        )
+        if type(legacy_report) is not dict:
+            raise ReadEvidenceIndexError(
+                "legacy read evidence verifier returned an invalid report"
+            )
+        blockers = legacy_report.get("blockers")
+        retained_blockers = (
+            [item for item in blockers if isinstance(item, str) and item]
+            if isinstance(blockers, list)
+            else []
+        )
+        retained_blockers.append(LEGACY_V2_BLOCKER)
+        structural_verified = legacy_report.get(
+            "legacy_v2_structural_audit_verified"
+        )
+        if type(structural_verified) is not bool:
+            structural_verified = (
+                legacy_report.get("external_read_evidence_verified") is True
+            )
+        return {
+            **legacy_report,
+            "blockers": sorted(set(retained_blockers)),
+            "evidence_protocol": "hmac-v2",
+            "external_read_evidence_verified": False,
+            "goal_evidence_admissible": False,
+            "index_kind": LEGACY_READ_EVIDENCE_INDEX_SCHEMA,
+            "legacy_v2_structural_audit_verified": structural_verified,
+            "production_promotion_allowed": False,
+            "real_odoo_write_performed": False,
+        }
+    raise ReadEvidenceIndexError("read evidence index schema is invalid")
+
+
 def _external_read_evidence_report(
     evidence_index: Path | None,
     *,
@@ -5524,12 +5594,12 @@ def _external_read_evidence_report(
     if evidence_index is None:
         return None
     try:
-        report = verify_read_evidence_index(
+        report = _verify_external_read_evidence_index(
             evidence_index,
             expected_release_identity=expected_release_identity,
             expected_capability_contracts=_read_capability_contracts(capabilities),
         )
-    except ReadEvidenceIndexError as exc:
+    except (ReadEvidenceIndexError, ReadEvidenceV3Error) as exc:
         return {
             "blockers": [str(exc)],
             "capabilities": [],
@@ -5967,12 +6037,12 @@ def evidence_read_evidence_index_check(evidence_index: Path) -> None:
     identity = _load_release_identity(command=command)
     capabilities = _load_capabilities()
     try:
-        report = verify_read_evidence_index(
+        report = _verify_external_read_evidence_index(
             evidence_index,
             expected_release_identity=identity,
             expected_capability_contracts=_read_capability_contracts(capabilities),
         )
-    except ReadEvidenceIndexError as exc:
+    except (ReadEvidenceIndexError, ReadEvidenceV3Error) as exc:
         raise CliFailure(
             command=command,
             code="read_evidence_index_rejected",

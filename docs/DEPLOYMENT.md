@@ -100,7 +100,7 @@ aggregate non-authorizing check:
 ```bash
 RELEASE_DIR=/opt/odoo-accounting-cli-v3/releases/<ROUTED_RELEASE>
 V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
-READ_EVIDENCE_INDEX=/var/lib/odoo-accounting-cli-v3/evidence/<RUN_ID>/read-evidence-index.json
+READ_EVIDENCE_INDEX=/var/lib/odoo-accounting-cli-v3/read-evidence-v3/<ROUTED_RELEASE>/runs/<RUN_ID>/index.json
 "$V3_CLI" evidence read-capabilities-readiness \
   --read-evidence-index "$READ_EVIDENCE_INDEX" \
   > <READ_CAPABILITIES_READINESS_JSON>
@@ -127,8 +127,10 @@ READ_EVIDENCE_INDEX=/var/lib/odoo-accounting-cli-v3/evidence/<RUN_ID>/read-evide
   --expected-registry-digest <REGISTRY_DIGEST>
 ```
 
-The Dev262 `read-evidence-index.v2` input in this example is diagnostic only.
-Even when every legacy structural check passes, it must contribute
+Dev263 dispatches an exact canonical v3 index only to the active-only SSHSIG
+verifier. The caller cannot select a sealed mode, clock, key, trust root, or
+owner override. Exact v2 remains diagnostic only and is forcibly
+non-admissible. The current v3 normalized raw summaries also contribute
 `external_read_evidence_verified:false` and
 `goal_evidence_admissible:false`; consequently the aggregate must remain
 blocked. Do not treat this command sequence as a read or Goal promotion
@@ -153,16 +155,17 @@ covering exact-release `live_odoo`, `accounting_oracle`, `pi_e2e`,
 `release_identity`, and `security_negative` artifacts. Registry-embedded
 receipt metadata is diagnostic only: it cannot authorize Goal completion
 because it is neither an independent artifact verification nor a trusted
-current-release evidence input. Dev262's HMAC v2 implementation is only the
-legacy structural audit described in `docs/READ_EVIDENCE_INDEX.md`; its
+current-release evidence input. Dev263's retained HMAC v2 implementation is only
+the legacy structural audit described in `docs/READ_EVIDENCE_INDEX.md`; its
 root-derived key paths and internally consistent scope do not make it externally
-admissible. The new Linux root-managed, pinned-FD SSHSIG public verification
-module is foundation only. Read
-Goal readiness remains false until a later v3 contract adds an active signed
-admission, independently held collector/verifier role signatures, externally
-bound runtime scope and authentication decisions, adapters for the real raw
-Odoo/SQL/Pi evidence, and a complete target-host evidence run. A copied
-readiness JSON or a structurally passing v2 index cannot replace those sources.
+admissible. The Linux root-managed, pinned-FD SSHSIG path now verifies an active
+record, nine fixed roles, a half-open approval interval, and a `PUBLISHED` row in
+the rollback-journal admission ledger. Read Goal readiness nevertheless remains
+false until adapters validate the real raw Odoo/SQL/Pi and negative-control
+objects, the complete v3 closure is retained and independently rechecked inside
+a self-contained final bundle, and a complete target-host evidence run passes.
+A copied readiness JSON or a structurally passing v2 index cannot replace those
+sources.
 Contract-tested handlers remain executable only in their staged channel. If a
 write evidence index is supplied, the aggregate also cross-checks it against
 the retained write-pipeline report for
@@ -269,6 +272,15 @@ same release identity and SHA-256 digests for these retained artifacts:
 - `write_evidence_index`
 - `goal_readiness_report`
 
+Dev263 does not copy the complete v3 read-evidence tree into this v2 final
+manifest and has no public sealed verifier. The checker still reopens the active
+external index referenced by the readiness report. Therefore this packet is not
+self-contained archival proof and must remain non-ready while the read Goal gate
+is false. The following commands are retained for diagnostic packet integrity;
+they are not a production-promotion procedure. A later manifest schema must
+copy the exact closure, bind its tree digest/count/bytes, verify only the retained
+copy, and prove that checking never reopens an external path.
+
 Assemble and validate the retained handoff manifest with:
 
 ```bash
@@ -338,9 +350,10 @@ V3_CLI="$RELEASE_DIR/bin/odoo-accounting-cli-v3"
 ```
 
 The assembler and checker are both read-only with respect to Odoo and
-PostgreSQL. They do not make a business-success claim; they only prove that the
-final review packet is complete, untampered, and bound to the exact deployed
-release before a human production promotion review.
+PostgreSQL. They do not make a business-success claim. In Dev263 they prove only
+that the listed JSON review artifacts are untampered and bound to the exact
+deployed release; they do not prove a retained v3 read closure and cannot support
+production promotion.
 Neither `goal-readiness` nor `final-evidence-manifest-check` accepts the
 recomputation check's booleans by assertion. Each derives the fixed key path
 `/etc/odoo-accounting-cli-v3/trust/pi-evidence/<executing-release>/attestation-keys.json`,
@@ -359,6 +372,7 @@ therefore fail closed.
   packages/odoo-accounting-cli-v3-<version>-<commit12>.tar.gz
   releases/<version>-<commit12>/
   trusted-artifacts/<version>-<commit12>.json
+  trusted-artifacts/<version>-<commit12>.read-evidence-v3.json
   dependency-images/<version>-<commit12>.squashfs
   dependency-anchors/<version>-<commit12>.json
   dependencies/<version>-<commit12>/
@@ -370,6 +384,8 @@ therefore fail closed.
   effect-finalizer-runtime-manifest.json
   effect-finalizer/attestation.hmac
   effect-finalizer/finalizer.pgpass
+  trust/read-evidence-v3/<version>-<commit12>/revocations
+  trust/read-evidence-v3/<version>-<commit12>/roles/<role>.allowed-signers
   dependencies/<version>-<commit12>/odoo-server19.conf
   secrets/test/auth.hmac
   secrets/test/receipt.hmac
@@ -390,11 +406,34 @@ therefore fail closed.
   write-state.sqlite3
   trusted-sessions.sqlite3
   broker-audit.sqlite3
+/var/lib/odoo-accounting-cli-v3/read-evidence-v3/
+  admissions.sqlite3
+  <version>-<commit12>/active.json
+  <version>-<commit12>/runs/<run-id>/index.json
 /var/lib/odoo-accounting-cli-v3-broker/
   # systemd-managed private broker HOME only; no accounting state is implicit
 /var/lib/odoo-accounting-cli-v3-effect-finalizer/
   attempts.sqlite3
 ```
+
+In the trust directory, replace role-name dots with `__`; for example,
+`verifier.live_odoo` is stored as
+`roles/verifier__live_odoo.allowed-signers`.
+
+The read-evidence admission parent must be private mode `0700`. The authorized
+writer requires the SQLite database to be mode `0600`; the existing-only
+verifier also accepts private read-only mode `0400`. It uses SQLite `DELETE`
+rollback journaling. Do not create WAL/SHM sidecars, repair a hot rollback
+journal through the read-only verifier, or place evidence/trust material under
+`/root`. Publication recovery must use the authorized writer: reconcile an
+uncertain commit by looking up the exact authorization/payload/sequence, then
+resume only that same one-way transition to `PUBLISHED`.
+An interrupted first bootstrap is recoverable only from the same private
+single-link inode when it is zero-length, strictly empty, or becomes strictly
+empty after verified SQLite hot-journal recovery. Unknown schema objects,
+metadata, residual pages, unsafe sidecars, or inode replacement require an
+operator investigation; do not delete or recreate the ledger merely to make a
+check pass.
 
 The V2 tree under `/mnt/odoo/odoo19/custom/tools/` and the Pi Bridge copy of V2
 must be inventoried before and after deployment and must not change.
@@ -732,8 +771,9 @@ The command always renders `environment:sandbox` and
 root-managed install actions, and keeps `business_succeeded:false`. It does not
 create secrets, write `/etc`, open Odoo, or prove a real read result. A
 generated plan becomes usable only after the installed file is reloaded by the
-exact release and the future v3 public-key admission and real-evidence gates
-below pass. A legacy v2 structural result cannot satisfy this condition.
+exact release and both the Dev263 active public-key admission and future real
+raw-evidence gates pass. The current normalized v3 closure and a legacy v2
+structural result cannot satisfy this condition.
 When `--measure-existing-files` is used, the command computes SHA-256 digests
 from the supplied local paths. If an operator also supplies a digest and it does
 not match the measured file, the plan remains non-configurable and reports a
