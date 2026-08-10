@@ -1,4 +1,4 @@
-# Read-evidence index: Dev263 active admission
+# Read-evidence index: Dev264 contracts and Dev263 active admission
 
 Dev263 adds a Linux-only, public-key-verifiable `read-evidence-index.v3`
 active-admission path beside the legacy v2 structural checker. The public v3
@@ -24,6 +24,55 @@ production_promotion_allowed: false
 Every capability remains `verified:false` until the real raw semantic adapters
 independently recompute those facts. Signatures prove key possession and exact
 bytes; they do not prove that a summarized accounting claim is true.
+
+## Dev264 offline contract boundaries
+
+Dev264 adds two library-only validators; it does not change the public v3
+index verifier or CLI dispatch.
+
+`read_evidence_raw_v3.validate_full_raw_evidence` revalidates the supplied
+complete `Capability` tuple, requires its full Registry digest to match the
+supplied release identity, derives every read capability and contract, binds
+the exact canonical v3 scope plus trailing-LF digest, and supports four distinct
+offline contracts. `live_odoo` and `accounting_oracle` validate successful
+requests/results/receipts against Registry schemas and bind the explicitly
+declared request, result, and oracle company fields;
+`release_identity` validates release and scope bindings; `security_negative`
+validates the request, exact error, authentication witness, zero-side-effect
+witness, and absence of a receipt. It rejects `pi_e2e` and directs that full raw
+exchange to the existing `PiEvidenceVerifier`; duplicating its broker
+request/response, timing, operation-snapshot, and special-route contract would
+create a second incompatible trust boundary. The release identity, Registry,
+and scope are still authenticated inputs from a future trusted collector
+context; this function does not create that trust. It does not verify
+read-receipt signatures or independently attest an SQL oracle's implementation,
+query semantics, company-scoped database execution, or read-only transaction.
+A disclosed technical rate-source company is type-checked without treating it
+as a requested business company.
+Its only positive claim is
+`full_raw_contract_validated:true`; trusted source, external evidence, Goal,
+and production claims remain false.
+
+`read_evidence_publication.validate_publication_receipt_contract` accepts only
+bounded canonical JSON bytes with one LF and validates the exact future receipt
+schema, fixed admission paths, digests, counts, sizes, half-open authorization
+times, and deterministic receipt ID. It accepts no ledger object, filesystem
+path, key, trust root, clock, closure binding, or signature material. A
+structurally valid receipt therefore reports all of these as false:
+
+```text
+ledger_provenance_verified: false
+source_closure_verified: false
+retained_closure_verified: false
+publisher_signature_verified: false
+external_read_evidence_verified: false
+goal_evidence_admissible: false
+production_promotion_allowed: false
+```
+
+Neither Dev264 validator is a signing API, a sealed verifier, an active-index
+adapter, or a promotion hook. Their schemas are foundations for later trusted
+producer and final-bundle work, not evidence that such work already exists.
 
 ## Active v3 locations
 
@@ -231,7 +280,7 @@ the shared-HMAC authority or labelled-role limitations.
 
 ## Remaining blockers
 
-Dev263 does not implement sealed verification or copy the complete v3 closure
+Dev264 does not implement sealed verification or copy the complete v3 closure
 into a self-contained final-evidence bundle. The existing final-manifest path
 must therefore remain non-ready; its external source reopening is not archival
 proof. A later change must atomically retain the exact closure, verify that copy
@@ -239,8 +288,11 @@ without the active pointer or live ledger, bind its tree digest/count/bytes into
 a new final-manifest schema, and prove the checker never reopens an external
 path.
 
-After that, real raw Odoo, accounting-oracle, Pi E2E, release-identity, and
-security-negative adapters must collect and independently validate all 12 read
-capabilities. Until both blockers close with target-host receipts, read Goal
-readiness remains false, no read capability is production-enabled, and no
-business success may be reported from this foundation alone.
+After that, trusted raw Odoo, accounting-oracle, Pi E2E, release-identity, and
+security-negative producers/attestors must collect and independently validate
+all 12 read capabilities. The Dev264 offline contracts do not verify receipt
+signatures, oracle execution, collector identity, publisher signatures, the
+live ledger, or either source/retained file tree. Until those blockers close
+with target-host receipts, read Goal readiness remains false, no read
+capability is production-enabled, and no business success may be reported from
+this foundation alone.

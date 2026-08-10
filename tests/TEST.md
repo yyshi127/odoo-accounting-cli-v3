@@ -137,6 +137,34 @@ where practical, then record actual execution evidence separately.
   still normalized summaries, so v3 must report every capability unverified and
   keep read/Goal evidence false. Sealed verification and a self-contained final
   closure are also absent. No read is enabled and production is not authorized.
+- Dev264 adds a separate full-raw contract suite driven by the validated 35-item
+  Registry rather than synthetic capability hashes. Parameterized checks prove
+  all 12 read inputs and outputs conform to their real schemas, scope bytes bind
+  their canonical trailing-LF digest, and explicitly declared request,
+  disclosed-result, and oracle parameter/source-record company fields cannot
+  escape the requested scope. Technical-rate root companies are checked by
+  their explicit live-result relationship or type-checked oracle provenance
+  field rather than misclassified as business-scope companies. Successful
+  Odoo/oracle cases bind
+  their exact request/result/receipt objects. Release cases bind identity/scope;
+  negative cases bind requests, exact failures, authentication and
+  zero-side-effect witnesses while requiring no receipt. `pi_e2e` is explicitly
+  rejected and
+  delegated to the existing `PiEvidenceVerifier`, so this suite does not invent
+  a second broker exchange contract. The validator deliberately does not verify
+  receipt signatures, trusted producer identity, SQL-oracle implementation or
+  query semantics, company-scoped database execution, or the read-only
+  transaction. A structurally valid document keeps source trust, external
+  evidence, Goal, and
+  production false.
+- Dev264 also adds a publication-receipt contract suite. It checks only bounded
+  canonical JSON, exact fields and fixed admission paths, digest/count/size
+  relations, half-open authorization times, and the deterministic receipt ID.
+  Tests prove self-asserted PUBLISHED state, signature metadata, and closure
+  hashes never set ledger, source-tree, retained-tree, publisher-signature,
+  external, Goal, or production verification true. The module exposes no
+  ledger, filesystem, key, trust-root, builder, signer, or verifier input and is
+  not connected to the CLI.
 - Unit mocks can test contracts and control flow, but cannot satisfy a real-Odoo
   or financial-correctness gate.
 - V2 remains available during V3 side-by-side construction; V3 tests must not

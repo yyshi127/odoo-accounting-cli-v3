@@ -166,6 +166,26 @@ objects, the complete v3 closure is retained and independently rechecked inside
 a self-contained final bundle, and a complete target-host evidence run passes.
 A copied readiness JSON or a structurally passing v2 index cannot replace those
 sources.
+
+Dev264 adds no deployment or promotion command. Its two new modules are offline
+contracts for later trusted integrations. `read_evidence_raw_v3` revalidates a
+complete Registry and the exact v3 scope. Successful Odoo/oracle cases validate
+request/result/receipt schemas and explicitly declared company bindings;
+release cases validate identity/scope; security-negative cases validate
+requests, exact failures,
+authentication/zero-side-effect witnesses, and no receipt. `pi_e2e` fails
+closed and must use the existing `PiEvidenceVerifier` for the real broker
+exchange contract. The module does not verify receipt signatures, producer
+identity, SQL-oracle implementation or query semantics, company-scoped
+database execution, or the read-only transaction.
+`read_evidence_publication` validates only canonical future receipt bytes; it
+does not open the publication ledger, scan source or retained trees, or verify
+a publisher signature. Neither module is called by the CLI in Dev264, and
+neither can make external evidence, Goal readiness, production promotion, or
+business-success claims true. Operators must not treat a passing contract
+validation as a substitute for the active v3 command above or for the future
+self-contained final-bundle verifier.
+
 Contract-tested handlers remain executable only in their staged channel. If a
 write evidence index is supplied, the aggregate also cross-checks it against
 the retained write-pipeline report for
@@ -272,7 +292,7 @@ same release identity and SHA-256 digests for these retained artifacts:
 - `write_evidence_index`
 - `goal_readiness_report`
 
-Dev263 does not copy the complete v3 read-evidence tree into this v2 final
+Dev264 does not copy the complete v3 read-evidence tree into this v2 final
 manifest and has no public sealed verifier. The checker still reopens the active
 external index referenced by the readiness report. Therefore this packet is not
 self-contained archival proof and must remain non-ready while the read Goal gate

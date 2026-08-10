@@ -13,7 +13,7 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-The current Dev263 development baseline registers 35 capabilities: 12 reads
+The current Dev264 development baseline registers 35 capabilities: 12 reads
 and 23 writes. The reads are staged only for `test`; no capability is enabled
 or production-routed. All 23 writes have concrete source paths, 21 can reach
 capability-specific ORM prechecks, and payment registration plus deferred
@@ -59,6 +59,29 @@ so even a valid cryptographic closure reports
 `goal_evidence_admissible:false`. Sealed verification and a self-contained
 final-evidence closure are also not implemented. All 12 reads therefore remain
 `contract_tested`, test-staged, not enabled, and not Goal-evidence ready.
+
+Dev264 adds two deliberately offline contract boundaries without changing that
+status. `read_evidence_raw_v3` revalidates a complete Registry, derives the
+exact 12 read-capability contracts, and binds the canonical v3 scope. Its
+`live_odoo` and `accounting_oracle` contracts check successful
+request/result/receipt shapes against the real input/output schemas and bind
+the explicitly declared request, result, and oracle company fields;
+`release_identity` checks release/scope bindings; `security_negative`
+checks requests, exact errors, authentication witnesses, and zero side effects
+with no receipt. Pi full-raw evidence is deliberately rejected here and remains
+the responsibility of the existing `PiEvidenceVerifier`, whose real broker
+exchange contract is not duplicated. The raw validator does not verify receipt
+signatures, the oracle implementation or query semantics, company-scoped
+database execution, read-only transaction, or a trusted producer/attestor.
+A disclosed technical rate-source company is type-checked but is not
+misclassified as a requested business company.
+A successful result still reports source trust, external evidence, Goal
+admission, and production promotion as false.
+`read_evidence_publication` validates only the canonical JSON contract for a
+future publication receipt. It performs no ledger lookup, filesystem scan,
+retained-copy comparison, or publisher signature verification and explicitly
+reports every such provenance claim as false. Neither validator is connected
+to the CLI or active evidence gate in Dev264.
 
 Dev257 adds the declared, disabled
 `acct.bank.statement_compensate.v1` contract. It preserves a completed,
