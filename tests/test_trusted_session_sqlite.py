@@ -1592,7 +1592,8 @@ def test_persistently_restricted_sqlite_sidecar_is_rejected_after_bounded_rechec
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = (tmp_path / "sessions.sqlite3").resolve()
-    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=10)
+    store = SQLiteTrustedSessionStore(path)
+    store.busy_timeout_ms = 10
     sidecar = Path(f"{path}-shm")
     sidecar.write_bytes(b"persistently restricted trusted-session sidecar")
     sidecar.chmod(0o400)
@@ -1686,7 +1687,8 @@ def test_continuously_replaced_sqlite_sidecar_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = (tmp_path / "sessions.sqlite3").resolve()
-    store = SQLiteTrustedSessionStore(path, busy_timeout_ms=10)
+    store = SQLiteTrustedSessionStore(path)
+    store.busy_timeout_ms = 10
     sidecar = Path(f"{path}-shm")
     sidecar.write_bytes(b"unstable trusted-session sidecar")
     sidecar.chmod(0o600)

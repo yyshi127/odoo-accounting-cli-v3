@@ -105,8 +105,10 @@ jobs:
               failures += 1
               path = case.get("file") or ".github/workflows/quality.yml"
               line = int(case.get("line") or "0") + 1
-              title = f"pytest: {case.get('classname', '')}.{case.get('name', '')}"
+              node = f"{case.get('classname', '')}.{case.get('name', '')}"
+              title = f"pytest: {node}"
               detail = problem.get("message") or problem.text or problem.tag
+              detail = f"{node}: {detail}"
               print(
                   f"::error file={escape(path, property_value=True)},"
                   f"line={line},title={escape(title, property_value=True)}::"
