@@ -185,13 +185,14 @@ broker/authority state, then follow the returned recovery guidance.
 Run the bridge contract tests with:
 
 ```text
-npm ci --ignore-scripts
+npm ci --ignore-scripts --omit=dev --omit=optional --no-audit --registry=https://registry.npmjs.org/
 npm test
-npm audit --omit=dev
+npm audit --omit=dev --omit=optional --audit-level=info --registry=https://registry.npmjs.org/
 ```
 
 `npm audit` must be clean (or an explicitly reviewed, release-bound exception
-must exist) before production promotion. At the time of this development
-snapshot the pinned Pi dependency tree still produces a nonzero audit result;
-root-level `overrides` do not repair the package's published shrinkwrap
-reproducibly and therefore are not treated as a fix.
+must exist) before production promotion. The Dev266 lock pins the official Pi
+0.84.1 tarball, binds every registry package with SHA-512, omits optional native
+packages from the headless runtime, and has a zero-vulnerability production
+audit. Root-level `overrides` that are defeated by a package's published
+shrinkwrap are not treated as a reproducible fix.

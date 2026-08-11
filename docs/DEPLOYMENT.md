@@ -1706,8 +1706,10 @@ dependency-free session-resolver module with
 `PI_BRIDGE_AUTHENTICATED_SESSION_RESOLVER_SHA256`, require the verified V3
 identity, and install the executing Pi Bridge runtime files byte-for-byte from
 that exact release. Follow `deployment/dev11/README.md` to run
-`npm ci --ignore-scripts --omit=dev` in a new root-owned staging runtime and
-create the one external Pi runtime anchor. Bootstrap must match every tracked
+`npm ci --ignore-scripts --omit=dev --omit=optional --no-audit` and the matching
+zero-vulnerability production audit against the official npm registry in a new
+root-owned staging runtime, then create the one external Pi runtime anchor.
+Bootstrap must match every tracked
 Bridge member to the release manifest and match the exact Node executable plus
 the complete installed dependency file/symlink set to that external runtime
 anchor. All paths are canonical, single-link where regular, root-owned, and
@@ -1730,12 +1732,17 @@ by the Pi service identity, the Pi process receives only the opaque session
 handle on inherited descriptor 3, the resolver path/hash are absent from its environment, and an
 unsafe path, changed module, missing hash, wrong UDS peer, mismatched
 action/protocol, or caller-selected release is rejected before execution.
-Retain a clean `npm audit --omit=dev` report for that exact installed runtime,
-or an explicitly reviewed release-bound exception. A root `overrides` entry
-that is defeated by a transitive package's published shrinkwrap is not evidence
-of remediation. The current pinned Pi dependency closure has a nonzero audit
-result and is therefore a production-promotion blocker until a reproducible
-fixed closure or reviewed exception exists.
+Retain a clean `npm audit --omit=dev --omit=optional` report for that exact
+installed runtime, or an explicitly reviewed release-bound exception. A root
+`overrides` entry that is defeated by a transitive package's published
+shrinkwrap is not evidence of remediation. Dev266 pins the exact official Pi
+`0.84.1` tarball URL and regenerates the root lock with npm `10.9.3`; every
+registry tarball is bound by SHA-512, and the headless install omits optional
+native packages. The locked closure resolves `undici` `8.9.0`,
+`brace-expansion` `5.0.9`, and `protobufjs` `7.6.5`. Installation and audit use
+`https://registry.npmjs.org/` explicitly. Any nonzero audit is a
+production-promotion blocker until a reproducible fixed closure or reviewed
+release-bound exception exists.
 
 The hardened `/chat` response must also pass the FD4 final-evidence boundary:
 the release-bound extension emits only Broker-verified terminal events, closes

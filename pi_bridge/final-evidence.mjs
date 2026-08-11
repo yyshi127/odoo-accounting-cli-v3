@@ -496,7 +496,7 @@ export function collectFinalEvidenceStream(stream) {
 	});
 }
 
-// Pi 0.80.6 print mode writes exactly one host-owned LF after each assistant
+// Pi 0.84.1 print mode writes exactly one host-owned LF after each assistant
 // text block. Removing only that framing byte preserves strict canonical JSON.
 export function decodePiPrintFinalAnswer(buffer) {
 	if (!Buffer.isBuffer(buffer)) reject("final_answer_rejected");

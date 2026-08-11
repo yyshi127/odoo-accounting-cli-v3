@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
 	FINAL_EVIDENCE_COMMIT_TYPE,
@@ -750,6 +755,168 @@ test("parent evidence collection requires clean EOF and enforces its byte bound"
 });
 
 test("Pi print framing removes only its one host-owned LF", () => {
+	const bridgeRoot = path.resolve(
+		path.dirname(fileURLToPath(import.meta.url)),
+		"..",
+	);
+	const piRoot = path.join(
+		bridgeRoot,
+		"node_modules",
+		"@earendil-works",
+		"pi-coding-agent",
+	);
+	const piPackage = JSON.parse(readFileSync(
+		path.join(piRoot, "package.json"),
+		"utf8",
+	));
+	assert.equal(piPackage.version, "0.84.1");
+	assert.equal(piPackage.bin?.pi, "dist/cli.js");
+	const piCli = path.join(piRoot, piPackage.bin.pi);
+	const piAiEntry = path.join(
+		bridgeRoot,
+		"node_modules",
+		"@earendil-works",
+		"pi-ai",
+		"dist",
+		"index.js",
+	);
+	const odooExtensionPath = path.join(bridgeRoot, "extensions", "odoo-tools.ts");
+	const outputText = '{"ok":true,"source":"pi-0.84.1-print"}';
+	const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), "pi0841-framing-"));
+	try {
+		const providerPath = path.join(temporaryRoot, "deterministic-provider.mjs");
+		writeFileSync(providerPath, `
+import { createAssistantMessageEventStream } from ${JSON.stringify(
+	pathToFileURL(piAiEntry).href
+)};
+
+const outputText = ${JSON.stringify(outputText)};
+
+export default function (pi) {
+  pi.registerProvider("odoo-smoke", {
+    name: "Odoo smoke provider",
+    baseUrl: "http://127.0.0.1:1",
+    apiKey: "smoke-only-not-a-secret",
+    api: "openai-completions",
+    models: [{
+      id: "framing",
+      name: "Framing smoke",
+      reasoning: false,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 4096,
+      maxTokens: 128,
+    }],
+    streamSimple(model, context) {
+      if (!context.tools?.some((tool) => tool.name === "odoo_get_context")) {
+        throw new Error("odoo-tools.ts did not register odoo_get_context");
+      }
+      const stream = createAssistantMessageEventStream();
+      queueMicrotask(() => {
+        const message = {
+          role: "assistant",
+          content: [],
+          api: model.api,
+          provider: model.provider,
+          model: model.id,
+          usage: {
+            input: 0,
+            output: 0,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 0,
+            cost: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              total: 0,
+            },
+          },
+          stopReason: "pending",
+          timestamp: 0,
+        };
+        stream.push({ type: "start", partial: message });
+        message.content.push({ type: "text", text: "" });
+        stream.push({ type: "text_start", contentIndex: 0, partial: message });
+        message.content[0].text += outputText;
+        stream.push({
+          type: "text_delta",
+          contentIndex: 0,
+          delta: outputText,
+          partial: message,
+        });
+        stream.push({
+          type: "text_end",
+          contentIndex: 0,
+          content: outputText,
+          partial: message,
+        });
+        message.stopReason = "stop";
+        stream.push({ type: "done", reason: "stop", message });
+        stream.end();
+      });
+      return stream;
+    },
+  });
+}
+`, { encoding: "utf8", mode: 0o600 });
+		const environment = Object.fromEntries(Object.entries({
+			SystemRoot: process.platform === "win32" ? process.env.SystemRoot : undefined,
+			TEMP: temporaryRoot,
+			TMP: temporaryRoot,
+			HOME: temporaryRoot,
+			USERPROFILE: temporaryRoot,
+			PI_CODING_AGENT_DIR: path.join(temporaryRoot, "agent"),
+			PI_CODING_AGENT_SESSION_DIR: path.join(temporaryRoot, "sessions"),
+			PI_OFFLINE: "1",
+			PI_SKIP_VERSION_CHECK: "1",
+			PI_BRIDGE_HARDENED_V3_ONLY: "0",
+			NO_COLOR: "1",
+		}).filter(([, value]) => value !== undefined));
+		const completed = spawnSync(process.execPath, [
+			piCli,
+			"--offline",
+			"--no-session",
+			"--no-builtin-tools",
+			"--no-context-files",
+			"--no-extensions",
+			"--no-skills",
+			"--no-prompt-templates",
+			"--no-themes",
+			"--extension",
+			odooExtensionPath,
+			"--extension",
+			providerPath,
+			"--tools",
+			"odoo_get_context",
+			"--provider",
+			"odoo-smoke",
+			"--model",
+			"framing",
+			"--approve",
+			"--print",
+			"framing smoke",
+		], {
+			cwd: temporaryRoot,
+			encoding: null,
+			env: environment,
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: 30000,
+			windowsHide: true,
+		});
+		const expected = Buffer.from(`${outputText}\n`, "utf8");
+		assert.equal(completed.error, undefined);
+		assert.equal(completed.signal, null);
+		assert.equal(completed.status, 0, completed.stderr?.toString("utf8"));
+		assert.deepEqual(completed.stderr, Buffer.alloc(0));
+		assert.deepEqual(completed.stdout, expected);
+		assert.equal(completed.stdout.at(-1), 0x0a);
+		assert.notEqual(completed.stdout.at(-2), 0x0a);
+	} finally {
+		rmSync(temporaryRoot, { force: true, maxRetries: 3, recursive: true });
+	}
+
 	const canonical = Buffer.from(`${CLARIFICATION_ANSWER}\n`, "utf8");
 	assert.equal(
 		decodePiPrintFinalAnswer(canonical),

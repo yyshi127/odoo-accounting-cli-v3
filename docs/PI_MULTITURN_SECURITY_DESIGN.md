@@ -162,9 +162,12 @@ as “approve” or “I agree” must not change approval state.
 
 ## Trusted Pi event capture
 
-Pi 0.80.6 supports JSON event output for assistant, tool start/end, agent end,
+Pi 0.84.1 supports JSON event output for assistant, tool start/end, agent end,
 and agent-settled events. Replace print-only capture with strict JSON event
-capture before treating a trace as evidence.
+capture before treating a trace as evidence. Its `message_update` events carry
+deltas rather than cumulative message state, so the trusted producer must
+reconstruct each message from `message_start` through `message_end` and reject
+missing, duplicate, or out-of-order deltas.
 
 The parent process must:
 

@@ -36,11 +36,16 @@ writable objects. Use the exact canonical release name in every path below.
 
    ```sh
    env -i HOME=/root PATH=/usr/bin:/bin \
-     /usr/bin/npm ci --ignore-scripts --omit=dev
+     /usr/bin/npm ci --ignore-scripts --omit=dev --omit=optional --no-audit \
+       --registry=https://registry.npmjs.org/
+   env -i HOME=/root PATH=/usr/bin:/bin \
+     /usr/bin/npm audit --omit=dev --omit=optional --audit-level=info \
+       --registry=https://registry.npmjs.org/
    ```
 
-   The lock is authoritative; scripts, network updates, and manual dependency
-   edits are forbidden after this step. Recursively use no-dereference chown
+   The lock is authoritative, and the audit must report zero vulnerabilities;
+   scripts, network updates, and manual dependency edits are forbidden after
+   this step. Recursively use no-dereference chown
    (`chown -hR`) to set every file and symlink owner/group to
    `root:root` and remove group/world write permission.
 3. From the same canonical release, create the external binding once:

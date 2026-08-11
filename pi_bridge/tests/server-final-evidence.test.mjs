@@ -443,6 +443,10 @@ test("the real chat launch path computes broker enablement before FD3 write", as
 	});
 	try {
 		await started;
+		const healthResponse = await fetch(`http://127.0.0.1:${port}/health`);
+		const healthPayload = await healthResponse.json();
+		assert.equal(healthResponse.status, 200);
+		assert.equal(healthPayload.piAgent, "0.84.1");
 		const response = await fetch(`http://127.0.0.1:${port}/chat`, {
 			body: JSON.stringify({ message: "exercise runPiChat" }),
 			headers: { "Content-Type": "application/json" },

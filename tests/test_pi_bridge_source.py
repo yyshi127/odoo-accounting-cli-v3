@@ -13,7 +13,10 @@ def test_pi_ci_requires_an_exact_no_skip_root_integration_tap_summary():
 
     for required in (
         "PI_BRIDGE_RUN_ROOT_INTEGRATION=1",
-        "npm test -- --test-reporter=tap",
+        "npm ci --ignore-scripts --omit=dev --omit=optional --no-audit",
+        "npm audit --omit=dev --omit=optional --audit-level=info",
+        "--registry=https://registry.npmjs.org/",
+        "npm test | tee \"$tap_report\"",
         '"tests": 242',
         '"pass": 242',
         '"fail": 0',
@@ -231,6 +234,7 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     assert 'configuredPiModel = process.env.PI_AGENT_MODEL || ""' in server
     assert "configuredProvider: configuredPiProvider" in server
     assert "configuredModel: configuredPiModel" in server
+    assert "bootstrapAttestation?.runtimeBinding?.pi_version" in server
     assert "hardenedSystemPrompt," in server
     assert "SYSTEM_PROMPT.md" in server
     assert '"pi_bridge/SYSTEM_PROMPT.md"' in release_binding
@@ -271,9 +275,15 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     assert "must never mint an approval" in readme
     assert package["private"] is True
     assert package["dependencies"] == {
-        "@earendil-works/pi-coding-agent": "0.80.6"
+        "@earendil-works/pi-coding-agent": (
+            "https://registry.npmjs.org/@earendil-works/pi-coding-agent/"
+            "-/pi-coding-agent-0.84.1.tgz"
+        )
     }
     assert "trusted-broker.test.mjs" in package["scripts"]["test"]
+    assert package["scripts"]["test"].startswith(
+        "node --test --test-reporter=tap "
+    )
     assert "bootstrap.test.mjs" in package["scripts"]["test"]
     assert "release-binding.test.mjs" in package["scripts"]["test"]
     assert "tool-policy.test.mjs" in package["scripts"]["test"]
@@ -283,4 +293,13 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     assert package_lock["lockfileVersion"] == 3
     assert package_lock["packages"][
         "node_modules/@earendil-works/pi-coding-agent"
-    ]["version"] == "0.80.6"
+    ]["version"] == "0.84.1"
+    locked_network_packages = {
+        name: metadata
+        for name, metadata in package_lock["packages"].items()
+        if name
+    }
+    assert locked_network_packages
+    for metadata in locked_network_packages.values():
+        assert metadata["resolved"].startswith("https://registry.npmjs.org/")
+        assert metadata["integrity"].startswith("sha512-")

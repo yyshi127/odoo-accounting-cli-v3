@@ -98,11 +98,32 @@ const bootstrapContext = await loadBootstrapContext();
 const bootstrapAttestation = bootstrapContext?.attestation;
 const host = process.env.PI_AGENT_BRIDGE_HOST || "127.0.0.1";
 const port = Number(process.env.PI_AGENT_BRIDGE_PORT || 18787);
-const packageJsonPath = path.join(__dirname, "package.json");
-const packageJson = fs.existsSync(packageJsonPath)
-  ? JSON.parse(fs.readFileSync(packageJsonPath, "utf8"))
-  : {};
-const piVersion = packageJson.dependencies?.["@earendil-works/pi-coding-agent"] || "unknown";
+
+function installedPiVersion() {
+  try {
+    const packageDocument = JSON.parse(fs.readFileSync(path.join(
+      __dirname,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "package.json",
+    ), "utf8"));
+    if (
+      packageDocument?.name === "@earendil-works/pi-coding-agent"
+      && typeof packageDocument.version === "string"
+      && /^\d+\.\d+\.\d+$/.test(packageDocument.version)
+    ) {
+      return packageDocument.version;
+    }
+  } catch {
+    // Legacy startup reports an unknown version when its install is unavailable.
+  }
+  return "unknown";
+}
+
+const piVersion = typeof bootstrapAttestation?.runtimeBinding?.pi_version === "string"
+  ? bootstrapAttestation.runtimeBinding.pi_version
+  : installedPiVersion();
 const piBin = typeof bootstrapAttestation?.piEntrypoint === "string"
   ? bootstrapAttestation.piEntrypoint
   : "";

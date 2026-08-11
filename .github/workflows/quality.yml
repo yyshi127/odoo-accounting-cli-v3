@@ -993,7 +993,14 @@ jobs:
           cache-dependency-path: pi_bridge/package-lock.json
       - name: Install the locked Pi runtime without package scripts
         working-directory: pi_bridge
-        run: npm ci --ignore-scripts
+        run: >-
+          npm ci --ignore-scripts --omit=dev --omit=optional --no-audit
+          --registry=https://registry.npmjs.org/
+      - name: Reject vulnerable locked Pi production dependencies
+        working-directory: pi_bridge
+        run: >-
+          npm audit --omit=dev --omit=optional --audit-level=info
+          --registry=https://registry.npmjs.org/
       - name: Verify Pi bridge syntax and security contracts
         working-directory: pi_bridge
         run: |
@@ -1009,7 +1016,7 @@ jobs:
           node --check extensions/odoo-v3-cli.mjs
           tap_report="$RUNNER_TEMP/pi-bridge-root-integration.tap"
           PI_BRIDGE_RUN_ROOT_INTEGRATION=1 \
-            npm test -- --test-reporter=tap | tee "$tap_report"
+            npm test | tee "$tap_report"
           /usr/bin/python3 - "$tap_report" <<'PY'
           import re
           import sys

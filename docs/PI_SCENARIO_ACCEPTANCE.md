@@ -183,7 +183,7 @@ The binding document has exactly this shape:
 
 ```json
 {
-  "pi_agent_version": "0.80.6",
+  "pi_agent_version": "0.84.1",
   "pi_bridge_version": "<release-bound-version>",
   "provider": "<root-configured-provider>",
   "model": "<root-configured-model>",
@@ -268,9 +268,11 @@ required by this document. Therefore:
 - no Pi end-to-end scenario may be reported as business-successful without a
   matching Odoo result and audit receipt in the captured trace.
 
-A future trusted producer must derive events from the pinned Pi 0.80.6 JSON
+A future trusted producer must derive events from the pinned Pi 0.84.1 JSON
 event stream, wait for `agent_settled`, clean EOF, and child exit zero, retain
-the raw stream, and correlate tool calls with trusted Broker dispatch,
+the raw stream, reconstruct delta-based `message_update` events only between
+matching `message_start` and `message_end` boundaries, and correlate tool calls
+with trusted Broker dispatch,
 independent approval, and Odoo receipt records. `agent_end` alone is not a
 stable terminal event because retry, compaction, or queued continuation may
 follow it.

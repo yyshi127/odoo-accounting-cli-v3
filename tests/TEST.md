@@ -160,7 +160,15 @@ where practical, then record actual execution evidence separately.
   and closes both pidfds if the explicit process-armed handshake fails. The Pi
   CI gate requires the Node 22 root-integration TAP summary to contain exactly
   242 tests, 242 passes, and zero failures, cancellations, skips, or todos. The
-  exact no-skip Dev9 gate contains 51 runner nodes plus 7 Linux boundary nodes.
+  same job installs the exact official Pi `0.84.1` tarball from the npm
+  `10.9.3` root lock, requires SHA-512 for every registry package, omits
+  optional native packages, and requires `npm audit --omit=dev --omit=optional`
+  to report zero vulnerabilities. The framing test launches the installed Pi
+  binary with a local deterministic provider and proves that the real extension
+  loader registers the canonical Odoo tool before accepting the single-LF
+  stdout contract.
+  The exact no-skip Dev9 gate contains 51 runner nodes plus 7 Linux boundary
+  nodes.
   Dev266 also repairs the Dev29 runtime trace default-parent isolation and keeps
   the Dev9 GCOV state path in the exact writable mount set. These are CI and
   runtime hardening changes only: no capability was added, staged, enabled, or

@@ -330,15 +330,32 @@ function readPiDependencySpec(releaseRoot) {
 	);
 	const lock = strictJson(lockContent, "Pi dependency lock");
 	const packageName = "@earendil-works/pi-coding-agent";
-	const expectedVersion = packageDocument?.dependencies?.[packageName];
+	const expectedSpec = packageDocument?.dependencies?.[packageName];
 	const nodeEngine = packageDocument?.engines?.node;
 	const rootPackage = lock?.packages?.[""];
 	const lockedPackage = lock?.packages?.[`node_modules/${packageName}`];
+	const expectedVersion = lockedPackage?.version;
+	const expectedTarball = typeof expectedVersion === "string"
+		? `https://registry.npmjs.org/@earendil-works/pi-coding-agent/-/pi-coding-agent-${expectedVersion}.tgz`
+		: "";
+	const lockedMembers = Object.entries(lock?.packages ?? {})
+		.filter(([name]) => name !== "")
+		.map(([, item]) => item);
 	if (
 		lock?.lockfileVersion !== 3
+		|| typeof expectedSpec !== "string"
 		|| typeof expectedVersion !== "string"
-		|| expectedVersion !== rootPackage?.dependencies?.[packageName]
-		|| expectedVersion !== lockedPackage?.version
+		|| !/^\d+\.\d+\.\d+$/.test(expectedVersion)
+		|| expectedSpec !== expectedTarball
+		|| expectedSpec !== rootPackage?.dependencies?.[packageName]
+		|| expectedSpec !== lockedPackage?.resolved
+		|| lockedMembers.length === 0
+		|| lockedMembers.some((item) => (
+			typeof item?.resolved !== "string"
+			|| !item.resolved.startsWith("https://registry.npmjs.org/")
+			|| typeof item?.integrity !== "string"
+			|| !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.integrity)
+		))
 		|| typeof lockedPackage?.integrity !== "string"
 		|| !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(lockedPackage.integrity)
 		|| JSON.stringify(lockedPackage.bin) !== JSON.stringify({ pi: "dist/cli.js" })
@@ -348,6 +365,7 @@ function readPiDependencySpec(releaseRoot) {
 	}
 	assertSupportedNode(nodeEngine);
 	return Object.freeze({
+		expectedSpec,
 		expectedVersion,
 		lockSha256: createHash("sha256").update(lockContent).digest("hex"),
 		nodeEngine,
