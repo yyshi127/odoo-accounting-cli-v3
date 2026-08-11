@@ -519,7 +519,7 @@ def _sign(path: Path, *, role: str, v3: ModuleType, keys: dict[str, Path]) -> Pa
     generated = Path(f"{path}.sig")
     if os.path.lexists(signature) or os.path.lexists(generated):
         raise AssertionError(f"signature target already exists: {path}")
-    subprocess.run(
+    completed = subprocess.run(
         [
             str(SSH_KEYGEN),
             "-Y",
@@ -530,11 +530,29 @@ def _sign(path: Path, *, role: str, v3: ModuleType, keys: dict[str, Path]) -> Pa
             v3.ROLE_BINDINGS[role].namespace,
             str(path),
         ],
-        check=True,
+        check=False,
         env={"LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
+    if completed.returncode != 0:
+        key_metadata = keys[role].lstat()
+        payload_metadata = path.lstat()
+        stderr = completed.stderr.decode("utf-8", "replace").strip()
+        if len(stderr) > 1000:
+            stderr = f"{stderr[:997]}..."
+        raise AssertionError(
+            "ssh-keygen detached signing failed: "
+            f"role={role} exit={completed.returncode} stderr={stderr!r} "
+            f"euid={os.geteuid()} egid={os.getegid()} "
+            f"key_mode={stat.S_IMODE(key_metadata.st_mode):o} "
+            f"key_uid={key_metadata.st_uid} key_gid={key_metadata.st_gid} "
+            f"key_nlink={key_metadata.st_nlink} "
+            f"payload_mode={stat.S_IMODE(payload_metadata.st_mode):o} "
+            f"payload_uid={payload_metadata.st_uid} "
+            f"payload_gid={payload_metadata.st_gid} "
+            f"payload_nlink={payload_metadata.st_nlink}"
+        )
     if not generated.is_file() or generated.is_symlink():
         raise AssertionError(f"ssh-keygen did not create a detached signature: {path}")
     generated.replace(signature)
