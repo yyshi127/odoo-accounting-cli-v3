@@ -480,6 +480,29 @@ def _generate_trust(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        key_descriptor = os.open(
+            private_key,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
+        try:
+            generated_key = os.fstat(key_descriptor)
+            if (
+                not stat.S_ISREG(generated_key.st_mode)
+                or generated_key.st_nlink != 1
+                or generated_key.st_uid != 0
+                or generated_key.st_gid != 0
+            ):
+                raise AssertionError(f"generated private key is unsafe: {role}")
+            os.fchmod(key_descriptor, 0o600)
+            hardened_key = os.fstat(key_descriptor)
+            if (
+                (hardened_key.st_dev, hardened_key.st_ino)
+                != (generated_key.st_dev, generated_key.st_ino)
+                or stat.S_IMODE(hardened_key.st_mode) != 0o600
+            ):
+                raise AssertionError(f"generated private key was not hardened: {role}")
+        finally:
+            os.close(key_descriptor)
         public_fields = Path(f"{private_key}.pub").read_text("ascii").split()
         if len(public_fields) < 2 or public_fields[0] != "ssh-ed25519":
             raise AssertionError(f"generated role key is not Ed25519: {role}")

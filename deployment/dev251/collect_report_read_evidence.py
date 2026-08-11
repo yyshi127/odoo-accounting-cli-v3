@@ -1082,14 +1082,13 @@ def _discard_pending_directory(path: Path) -> None:
         raise CollectionError("refusing to remove an unexpected pending directory")
     if path.is_symlink():
         raise CollectionError("pending evidence became a symlink")
-    if os.name == "nt":
-        for member in sorted(
-            path.rglob("*"),
-            key=lambda item: len(item.parts),
-            reverse=True,
-        ):
-            os.chmod(member, 0o700 if member.is_dir() else 0o600)
-        os.chmod(path, 0o700)
+    for member in sorted(
+        path.rglob("*"),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        os.chmod(member, 0o700 if member.is_dir() else 0o600)
+    os.chmod(path, 0o700)
     shutil.rmtree(path)
 
 

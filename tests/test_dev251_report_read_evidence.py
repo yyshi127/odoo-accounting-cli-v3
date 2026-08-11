@@ -736,9 +736,11 @@ def _workspace(
         destination = release_root / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(payload)
-    (release_root / "RELEASE-MANIFEST.json").write_bytes(
-        RELEASE_MANIFEST_PAYLOAD
-    )
+    release_manifest = release_root / "RELEASE-MANIFEST.json"
+    release_manifest.write_bytes(RELEASE_MANIFEST_PAYLOAD)
+    if os.name == "posix":
+        release_manifest.chmod(0o444)
+        (release_root / "registry" / "capabilities.json").chmod(0o444)
     package = (
         tmp_path
         / "packages"
@@ -759,6 +761,8 @@ def _workspace(
         )
         + b"\n"
     )
+    if os.name == "posix":
+        trusted_artifact.chmod(0o444)
     runtime_root = tmp_path / "runtime"
     runtime_root.mkdir()
     (runtime_root / "odoo-python").write_bytes(ODOO_PYTHON_PAYLOAD)
