@@ -6,6 +6,26 @@ ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "pi_bridge"
 
 
+def test_pi_ci_requires_an_exact_no_skip_root_integration_tap_summary():
+    workflow = (ROOT / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        "PI_BRIDGE_RUN_ROOT_INTEGRATION=1",
+        "npm test -- --test-reporter=tap",
+        '"tests": 242',
+        '"pass": 242',
+        '"fail": 0',
+        '"cancelled": 0',
+        '"skipped": 0',
+        '"todo": 0',
+        "if len(matches) != 1:",
+        "if observed != expected:",
+    ):
+        assert required in workflow
+
+
 def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_override():
     server = (BRIDGE / "server.mjs").read_text(encoding="utf-8")
     runner = (BRIDGE / "extensions" / "odoo-v3-cli.mjs").read_text(
@@ -188,7 +208,15 @@ def test_canonical_pi_bridge_is_release_owned_and_has_no_caller_identity_overrid
     assert "resolveAuthenticatedBrokerSession" in server
     assert '? ["ignore", "pipe", "pipe", "pipe", "pipe"]' in server
     assert 'collectFinalEvidenceStream(child.stdio[4])' in server
-    assert "child.stdio[3].end" in server
+    assert """const brokerHandleWriteOutcome = writeBrokerSessionHandle(
+      child.stdio[3],
+      brokerEnabled ? brokerSessionHandle : "",
+    ).then(""" in server
+    assert "const brokerWriteOutcome = await brokerHandleWriteOutcome" in server
+    assert "if (!brokerWriteOutcome.ok) throw brokerWriteOutcome.error" in server
+    assert "child.stdio[3].end" not in server
+    assert "export function writeBrokerSessionHandle(" in trusted_session
+    assert 'stream.end(sessionHandle, "utf8")' in trusted_session
     assert "createFinalResultDeliverer" in server
     assert "result.deliver" in final_result_delivery
     assert "sessionHandleProvider" in final_result_delivery

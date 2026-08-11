@@ -28,6 +28,7 @@ import {
   loadAuthenticatedSessionResolver,
   resolveAuthenticatedBrokerSession,
   validBrokerSessionHandle,
+  writeBrokerSessionHandle,
 } from "./trusted-session.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -663,7 +664,16 @@ function runPiChat({
         ? ["ignore", "pipe", "pipe", "pipe", "pipe"]
         : ["ignore", "pipe", "pipe", "pipe"],
     });
-    child.stdio[3].end(brokerEnabled ? brokerSessionHandle : "", "utf8");
+    const brokerHandleWriteOutcome = writeBrokerSessionHandle(
+      child.stdio[3],
+      brokerEnabled ? brokerSessionHandle : "",
+    ).then(
+      () => ({ ok: true }),
+      (error) => {
+        if (hardenedV3Only) child.kill("SIGTERM");
+        return { error, ok: false };
+      },
+    );
     const evidenceOutcome = finalEvidenceEnabled
       ? collectFinalEvidenceStream(child.stdio[4]).then(
           (buffer) => ({ buffer, ok: true }),
@@ -724,6 +734,8 @@ function runPiChat({
       if (settled) return;
       clearTimeout(timer);
       void (async () => {
+        const brokerWriteOutcome = await brokerHandleWriteOutcome;
+        if (!brokerWriteOutcome.ok) throw brokerWriteOutcome.error;
         if (stdoutFailure !== null) throw stdoutFailure;
         if (stderrFailure !== null) throw stderrFailure;
         const stdout = Buffer.concat(stdoutChunks, stdoutBytes);

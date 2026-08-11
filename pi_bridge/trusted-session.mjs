@@ -6,6 +6,53 @@ const BROKER_SESSION_HANDLE = /^[A-Za-z0-9._~-]{32,512}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const MAX_RESOLVER_BYTES = 256 * 1024;
 
+export class BrokerSessionWriteError extends Error {
+	constructor() {
+		super("Authenticated broker session write failed");
+		this.name = "BrokerSessionWriteError";
+		this.code = "broker_session_write_failed";
+	}
+}
+
+export function writeBrokerSessionHandle(stream, sessionHandle) {
+	if (
+		stream === null
+		|| typeof stream !== "object"
+		|| typeof stream.once !== "function"
+		|| typeof stream.end !== "function"
+		|| typeof sessionHandle !== "string"
+	) {
+		return Promise.reject(new BrokerSessionWriteError());
+	}
+	return new Promise((resolve, reject) => {
+		let finished = false;
+		let settled = false;
+		const fail = () => {
+			if (settled) return;
+			settled = true;
+			reject(new BrokerSessionWriteError());
+		};
+		stream.once("finish", () => {
+			finished = true;
+		});
+		stream.once("error", fail);
+		stream.once("close", () => {
+			if (!finished) {
+				fail();
+				return;
+			}
+			if (settled) return;
+			settled = true;
+			resolve();
+		});
+		try {
+			stream.end(sessionHandle, "utf8");
+		} catch {
+			fail();
+		}
+	});
+}
+
 export function validBrokerSessionHandle(value) {
 	return typeof value === "string" && BROKER_SESSION_HANDLE.test(value);
 }

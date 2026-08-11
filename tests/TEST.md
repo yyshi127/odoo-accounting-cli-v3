@@ -130,10 +130,41 @@ where practical, then record actual execution evidence separately.
   Linux root CI gate runs admission, v3, one full root-managed integration closure,
   and the 16 real `ssh-keygen -Y verify` tests; any POSIX skip is printed and
   fails the production-boundary gate. The integration node builds an isolated
-  12-read release under the canonical `/opt`, `/etc`, and `/var/lib` paths,
+  13-read release under the canonical `/opt`, `/etc`, and `/var/lib` paths,
   uses nine real Ed25519 roles plus a real `DELETE`-journal PUBLISHED ledger,
   and proves both pre-publication and post-tamper rejection without replacing
   production verifier boundaries.
+- Dev266 adds process-wide SQLite lifecycle tests for the admission ledger,
+  including active-transaction preflight isolation, one-new-plus-idempotent
+  recovery under threads and eight independent processes, and two distinct
+  process writers serialized through post-close durability confirmation. The
+  fixed-inode writer-lock tests cover private metadata, unsafe symlink,
+  hard-link, FIFO and mode rejection, bounded contention, and reuse after a
+  timed-out contender. The remaining absolute deadline is reused for SQLite
+  connect, `BEGIN IMMEDIATE`, and commit waits after lock acquisition. A
+  published verifier must wait for post-close writer confirmation, and a failed
+  writer-lock release must return outcome-unknown while an exact retry recovers
+  the committed row. The suite also covers a
+  journal deleted between `lstat` and `open`, malicious replacement,
+  direct-descriptor phase rejection, descriptor-close poisoning, and
+  preservation of commit-outcome uncertainty across connection-close and
+  post-close durability failures. A post-close path swap before fsync must also
+  be detected by binding the SQLite-serialized committed image, durability
+  descriptor, and `O_NOFOLLOW` post-close reopen to one SHA-256 content identity
+  while the confirmation fd remains open; its close must also succeed. The exact
+  Linux root gate contains 84 admission nodes and 280 nodes across
+  admission, publication, full-raw, active-v3, Linux integration, and SSHSIG;
+  any failure, error, skip, unclassified node, or count drift fails the gate.
+- Dev266 also verifies the Pi Bridge FD3 write before accepting child output or
+  FD4 evidence, rejects an unread/reset pipe without leaking the session handle,
+  and closes both pidfds if the explicit process-armed handshake fails. The Pi
+  CI gate requires the Node 22 root-integration TAP summary to contain exactly
+  242 tests, 242 passes, and zero failures, cancellations, skips, or todos. The
+  exact no-skip Dev9 gate contains 51 runner nodes plus 7 Linux boundary nodes.
+  Dev266 also repairs the Dev29 runtime trace default-parent isolation and keeps
+  the Dev9 GCOV state path in the exact writable mount set. These are CI and
+  runtime hardening changes only: no capability was added, staged, enabled, or
+  granted real-Odoo evidence.
 - Passing those tests proves cryptographic closure and publication controls,
   not real Odoo/accounting correctness. The raw Odoo/SQL/Pi/negative bodies are
   still normalized summaries, so v3 must report every capability unverified and

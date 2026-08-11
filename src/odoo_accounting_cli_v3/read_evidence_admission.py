@@ -12,12 +12,14 @@ decisions always use the host UTC clock.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
 import sqlite3
 import stat
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,7 +28,18 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 
+if os.name == "posix":
+    import fcntl
+else:  # pragma: no cover - exercised by the Windows test matrix
+    fcntl = None  # type: ignore[assignment]
+
+from .monotonic_deadline import bounded_sqlite_operation_deadline
 from .operations import canonical_json
+from .sqlite_process_lifecycle import (
+    SQLiteProcessLifecycleError,
+    SQLiteProcessLifecycleLease,
+    process_sqlite_lifecycle,
+)
 
 
 READ_EVIDENCE_ADMISSION_SCHEMA_VERSION = 1
@@ -46,6 +59,10 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _RELEASE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+_SQLITE_SETUP_RETRY_INITIAL_SECONDS = 0.001
+_SQLITE_SETUP_RETRY_MAX_SECONDS = 0.025
+_WRITER_LOCK_SUFFIX = ".writer.lock"
+_WriterLock = tuple[int, tuple[int, int], int] | None
 _RELEASE_IDENTITY_FIELDS = frozenset(
     {
         "commit",
@@ -525,6 +542,360 @@ class SQLiteReadEvidenceAdmissionStore:
         self._bootstrap_sidecar_observed = False
         self._zero_length_database_observed = False
 
+    @contextmanager
+    def _database_lifecycle(
+        self, *, retry_deadline: float | None = None
+    ) -> Iterator[SQLiteProcessLifecycleLease]:
+        timeout_seconds = self.busy_timeout_ms / 1000
+        if retry_deadline is not None:
+            timeout_seconds = retry_deadline - time.monotonic()
+            if timeout_seconds <= 0:
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission operation deadline was exceeded"
+                )
+        try:
+            with process_sqlite_lifecycle(timeout_seconds) as lease:
+                yield lease
+        except SQLiteProcessLifecycleError as exc:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission SQLite lifecycle is unavailable"
+            ) from exc
+
+    @property
+    def _writer_lock_path(self) -> Path:
+        return Path(f"{self.path}{_WRITER_LOCK_SUFFIX}")
+
+    def _verify_writer_lock_file(
+        self, descriptor: int, expected: tuple[int, int]
+    ) -> None:
+        self._prepare_parent(create_missing=False)
+        try:
+            opened = os.fstat(descriptor)
+            metadata = self._writer_lock_path.lstat()
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not stat.S_ISREG(metadata.st_mode)
+                or self._writer_lock_path.is_symlink()
+                or (opened.st_dev, opened.st_ino) != expected
+                or (metadata.st_dev, metadata.st_ino) != expected
+                or opened.st_uid != os.geteuid()
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or metadata.st_nlink != 1
+            ):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission writer lock file is invalid"
+                )
+        except ReadEvidenceAdmissionError:
+            raise
+        except OSError as exc:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission writer lock file cannot be verified"
+            ) from exc
+
+    def _open_writer_lock_file(
+        self,
+        lease: SQLiteProcessLifecycleLease,
+        *,
+        create: bool,
+    ) -> tuple[int, tuple[int, int]]:
+        lease.require_file_phase()
+        self._prepare_parent(create_missing=False)
+        if os.name != "posix" or fcntl is None or not hasattr(os, "O_NOFOLLOW"):
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission writer lock requires POSIX flock and "
+                "O_NOFOLLOW"
+            )
+        descriptor: int | None = None
+        try:
+            flags = (
+                os.O_RDWR
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+                | os.O_NOFOLLOW
+            )
+            if create:
+                try:
+                    descriptor = os.open(
+                        self._writer_lock_path,
+                        flags | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                except FileExistsError:
+                    descriptor = os.open(self._writer_lock_path, flags)
+                else:
+                    os.fchmod(descriptor, 0o600)
+            else:
+                descriptor = os.open(self._writer_lock_path, flags)
+            opened = os.fstat(descriptor)
+            expected = (opened.st_dev, opened.st_ino)
+            self._verify_writer_lock_file(descriptor, expected)
+            return descriptor, expected
+        except BaseException as exc:
+            if isinstance(exc, ReadEvidenceAdmissionError):
+                failure = exc
+            elif isinstance(exc, OSError):
+                failure = ReadEvidenceAdmissionError(
+                    "read evidence admission writer lock file cannot be secured"
+                )
+                failure.__cause__ = exc
+            else:
+                failure = exc
+            if descriptor is not None:
+                try:
+                    self._close_descriptor(
+                        descriptor,
+                        lease,
+                        label="read evidence admission writer lock",
+                    )
+                except BaseException as cleanup_error:
+                    failure.add_note(
+                        "admission writer lock open cleanup also failed: "
+                        f"{cleanup_error}"
+                    )
+            raise failure
+
+    def _acquire_writer_lock(
+        self,
+        retry_deadline: float,
+        *,
+        owner_process_id: int,
+        lease: SQLiteProcessLifecycleLease,
+        create: bool,
+    ) -> _WriterLock:
+        if os.name != "posix":
+            return None
+        assert fcntl is not None
+        if os.getpid() != owner_process_id:
+            raise ReadEvidenceAdmissionError(
+                "fork child cannot acquire an inherited admission writer lock"
+            )
+        descriptor, expected = self._open_writer_lock_file(lease, create=create)
+        acquired = False
+        retry_delay = _SQLITE_SETUP_RETRY_INITIAL_SECONDS
+        try:
+            while True:
+                if os.getpid() != owner_process_id:
+                    raise ReadEvidenceAdmissionError(
+                        "fork child cannot acquire an inherited admission writer lock"
+                    )
+                if retry_deadline - time.monotonic() <= 0:
+                    raise ReadEvidenceAdmissionError(
+                        "read evidence admission writer lock deadline was exceeded"
+                    )
+                self._verify_writer_lock_file(descriptor, expected)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    if os.getpid() != owner_process_id:
+                        raise ReadEvidenceAdmissionError(
+                            "fork child cannot retain an inherited admission writer lock"
+                        )
+                    self._verify_writer_lock_file(descriptor, expected)
+                    return descriptor, expected, owner_process_id
+                except OSError as exc:
+                    if exc.errno == errno.EINTR:
+                        continue
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                        raise ReadEvidenceAdmissionError(
+                            "read evidence admission writer lock acquisition failed"
+                        ) from exc
+                remaining_seconds = retry_deadline - time.monotonic()
+                if remaining_seconds <= 0:
+                    raise ReadEvidenceAdmissionError(
+                        "read evidence admission writer lock deadline was exceeded"
+                    )
+                time.sleep(min(retry_delay, remaining_seconds))
+                retry_delay = min(
+                    retry_delay * 2.0,
+                    _SQLITE_SETUP_RETRY_MAX_SECONDS,
+                )
+        except BaseException as exc:
+            if acquired and os.getpid() == owner_process_id:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except BaseException as cleanup_error:
+                    exc.add_note(
+                        "admission writer lock cleanup unlock also failed: "
+                        f"{cleanup_error}"
+                    )
+            try:
+                self._close_descriptor(
+                    descriptor,
+                    lease,
+                    label="read evidence admission writer lock",
+                )
+            except BaseException as cleanup_error:
+                exc.add_note(
+                    "admission writer lock cleanup close also failed: "
+                    f"{cleanup_error}"
+                )
+            raise
+
+    def _release_writer_lock(
+        self,
+        lock: _WriterLock,
+        lease: SQLiteProcessLifecycleLease,
+    ) -> None:
+        if lock is None:
+            return
+        assert fcntl is not None
+        descriptor, expected, owner_process_id = lock
+        if os.getpid() != owner_process_id:
+            try:
+                self._close_descriptor(
+                    descriptor,
+                    lease,
+                    label="fork child admission writer lock",
+                )
+            except BaseException as close_error:
+                raise ReadEvidenceAdmissionError(
+                    "fork child writer lock descriptor could not be closed"
+                ) from close_error
+            raise ReadEvidenceAdmissionError(
+                "fork child cannot release an inherited admission writer lock"
+            )
+        failure: BaseException | None = None
+        try:
+            self._verify_writer_lock_file(descriptor, expected)
+        except BaseException as exc:
+            failure = exc
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except BaseException as exc:
+            if isinstance(exc, OSError):
+                unlock_error: BaseException = ReadEvidenceAdmissionError(
+                    "read evidence admission writer lock release failed"
+                )
+                unlock_error.__cause__ = exc
+            else:
+                unlock_error = exc
+            if failure is None:
+                failure = unlock_error
+            else:
+                failure.add_note(str(unlock_error))
+        try:
+            self._close_descriptor(
+                descriptor,
+                lease,
+                label="read evidence admission writer lock",
+            )
+        except BaseException as close_error:
+            if failure is None:
+                failure = close_error
+            else:
+                failure.add_note(str(close_error))
+        if failure is not None:
+            raise failure
+
+    def _require_writer_lock(self, lock: _WriterLock) -> None:
+        if os.name != "posix":
+            return
+        if lock is None:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission writer lock is missing"
+            )
+        descriptor, expected, owner_process_id = lock
+        if os.getpid() != owner_process_id:
+            raise ReadEvidenceAdmissionError(
+                "fork child cannot use an inherited admission writer lock"
+            )
+        self._verify_writer_lock_file(descriptor, expected)
+
+    @contextmanager
+    def _writer_lock(
+        self,
+        retry_deadline: float,
+        lease: SQLiteProcessLifecycleLease,
+        *,
+        create: bool,
+        commit_outcome_unknown_on_release: bool,
+    ) -> Iterator[_WriterLock]:
+        owner_process_id = os.getpid()
+        lock = self._acquire_writer_lock(
+            retry_deadline,
+            owner_process_id=owner_process_id,
+            lease=lease,
+            create=create,
+        )
+        try:
+            yield lock
+        except BaseException as body_error:
+            try:
+                self._release_writer_lock(lock, lease)
+            except BaseException as cleanup_error:
+                body_error.add_note(
+                    "admission writer lock cleanup also failed: "
+                    f"{cleanup_error}"
+                )
+            raise
+        else:
+            try:
+                self._release_writer_lock(lock, lease)
+            except BaseException as cleanup_error:
+                if commit_outcome_unknown_on_release:
+                    raise ReadEvidenceAdmissionCommitOutcomeUnknown(
+                        "read evidence admission durable confirmation completed but "
+                        "writer lock release could not be confirmed; reconcile before "
+                        "signing"
+                    ) from cleanup_error
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission read lock release could not be confirmed"
+                ) from cleanup_error
+
+    def _operation_deadline(self) -> float:
+        try:
+            return bounded_sqlite_operation_deadline(self.busy_timeout_ms)
+        except (TimeoutError, ValueError) as exc:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission operation deadline is unavailable"
+            ) from exc
+
+    def _remaining_operation_seconds(self, retry_deadline: float) -> float:
+        remaining_seconds = retry_deadline - time.monotonic()
+        if remaining_seconds <= 0:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission operation deadline was exceeded"
+            )
+        return min(self.busy_timeout_ms / 1000, remaining_seconds)
+
+    def _remaining_busy_timeout_ms(self, retry_deadline: float) -> int:
+        remaining_seconds = self._remaining_operation_seconds(retry_deadline)
+        return min(
+            self.busy_timeout_ms,
+            max(0, int(remaining_seconds * 1000)),
+        )
+
+    @contextmanager
+    def _exclusive_database_lifecycle(
+        self,
+    ) -> Iterator[tuple[SQLiteProcessLifecycleLease, _WriterLock, float]]:
+        retry_deadline = self._operation_deadline()
+        with self._database_lifecycle(retry_deadline=retry_deadline) as lease:
+            with self._writer_lock(
+                retry_deadline,
+                lease,
+                create=True,
+                commit_outcome_unknown_on_release=True,
+            ) as lock:
+                yield lease, lock, retry_deadline
+
+    @contextmanager
+    def _reader_database_lifecycle(
+        self,
+    ) -> Iterator[tuple[SQLiteProcessLifecycleLease, float]]:
+        retry_deadline = self._operation_deadline()
+        with self._database_lifecycle(retry_deadline=retry_deadline) as lease:
+            with self._writer_lock(
+                retry_deadline,
+                lease,
+                create=False,
+                commit_outcome_unknown_on_release=False,
+            ):
+                yield lease, retry_deadline
+
     @staticmethod
     def _verify_ancestor_chain(directory: Path) -> None:
         current = directory
@@ -604,9 +975,33 @@ class SQLiteReadEvidenceAdmissionStore:
         finally:
             os.close(descriptor)
 
+    @staticmethod
+    def _close_descriptor(
+        descriptor: int,
+        lease: SQLiteProcessLifecycleLease,
+        *,
+        label: str,
+    ) -> None:
+        try:
+            os.close(descriptor)
+        except BaseException as exc:
+            try:
+                lease.poison(f"{label} descriptor close was not confirmed")
+            except BaseException as poison_error:
+                exc.add_note(f"SQLite lifecycle poison also failed: {poison_error}")
+            if isinstance(exc, OSError):
+                raise ReadEvidenceAdmissionError(
+                    f"{label} descriptor close was not confirmed"
+                ) from exc
+            raise
+
     def _secure_database_file(
-        self, *, allow_create: bool | None = None
+        self,
+        *,
+        allow_create: bool | None = None,
+        lease: SQLiteProcessLifecycleLease,
     ) -> tuple[int, int]:
+        lease.require_file_phase()
         descriptor: int | None = None
         try:
             if allow_create is None:
@@ -630,8 +1025,13 @@ class SQLiteReadEvidenceAdmissionStore:
                     if os.name == "posix":
                         os.fchmod(descriptor, 0o600)
                     os.fsync(descriptor)
-                    os.close(descriptor)
+                    closing = descriptor
                     descriptor = None
+                    self._close_descriptor(
+                        closing,
+                        lease,
+                        label="read evidence admission database creation",
+                    )
                     self._fsync_directory(self.path.parent)
             if any(
                 os.path.lexists(Path(f"{self.path}{suffix}"))
@@ -684,13 +1084,17 @@ class SQLiteReadEvidenceAdmissionStore:
                 )
             if opened.st_size == 0 and metadata.st_size == 0:
                 self._zero_length_database_observed = True
-            self._verify_sidecars()
+            expected = opened.st_dev, opened.st_ino
+            self._verify_sidecars(
+                expected_identity=expected,
+                lease=lease,
+            )
             if (
                 self._zero_length_database_observed
                 and not self._bootstrap_sidecar_observed
             ):
                 self._bootstrap_initialization_allowed = True
-            return opened.st_dev, opened.st_ino
+            return expected
         except ReadEvidenceAdmissionError:
             raise
         except OSError as exc:
@@ -699,11 +1103,20 @@ class SQLiteReadEvidenceAdmissionStore:
             ) from exc
         finally:
             if descriptor is not None:
-                os.close(descriptor)
+                closing = descriptor
+                descriptor = None
+                self._close_descriptor(
+                    closing,
+                    lease,
+                    label="read evidence admission database",
+                )
 
-    def _secure_existing_database_readonly(self) -> tuple[int, int]:
+    def _secure_existing_database_readonly(
+        self, lease: SQLiteProcessLifecycleLease
+    ) -> tuple[int, int]:
         """Verify an existing ledger using only a read descriptor."""
 
+        lease.require_file_phase()
         descriptor: int | None = None
         try:
             self._verify_ancestor_chain(self.path.parent)
@@ -759,11 +1172,14 @@ class SQLiteReadEvidenceAdmissionStore:
                 raise ReadEvidenceAdmissionError(
                     "read evidence admission database file is not private"
                 )
+            expected = opened.st_dev, opened.st_ino
             self._verify_sidecars(
+                expected_identity=expected,
+                lease=lease,
                 read_only=True,
                 reject_rollback_journal=True,
             )
-            return opened.st_dev, opened.st_ino
+            return expected
         except ReadEvidenceAdmissionError:
             raise
         except OSError as exc:
@@ -772,14 +1188,49 @@ class SQLiteReadEvidenceAdmissionStore:
             ) from exc
         finally:
             if descriptor is not None:
-                os.close(descriptor)
+                closing = descriptor
+                descriptor = None
+                self._close_descriptor(
+                    closing,
+                    lease,
+                    label="read evidence admission read-only database",
+                )
 
-    def _verify_database_file(self, expected: tuple[int, int]) -> None:
-        self._verify_database_file_access(expected, read_only=False)
+    def _verify_database_file(
+        self,
+        expected: tuple[int, int],
+        lease: SQLiteProcessLifecycleLease,
+    ) -> None:
+        self._verify_database_file_access(
+            expected,
+            read_only=False,
+            lease=lease,
+        )
 
     def _verify_database_file_access(
-        self, expected: tuple[int, int], *, read_only: bool
+        self,
+        expected: tuple[int, int],
+        *,
+        read_only: bool,
+        lease: SQLiteProcessLifecycleLease,
     ) -> None:
+        lease.require_file_phase()
+        self._verify_database_path(expected, read_only=read_only)
+        self._verify_sidecars(
+            expected_identity=expected,
+            lease=lease,
+            read_only=read_only,
+            reject_rollback_journal=read_only,
+        )
+
+    def _verify_database_path(
+        self,
+        expected: tuple[int, int],
+        *,
+        read_only: bool,
+    ) -> None:
+        """Validate the live DB pathname without opening another descriptor."""
+
         try:
             metadata = self.path.lstat()
             if (
@@ -802,10 +1253,6 @@ class SQLiteReadEvidenceAdmissionStore:
                 raise ReadEvidenceAdmissionError(
                     "read evidence admission database file is not private"
                 )
-            self._verify_sidecars(
-                read_only=read_only,
-                reject_rollback_journal=read_only,
-            )
         except ReadEvidenceAdmissionError:
             raise
         except OSError as exc:
@@ -813,12 +1260,101 @@ class SQLiteReadEvidenceAdmissionStore:
                 "read evidence admission database path cannot be verified"
             ) from exc
 
+    @staticmethod
+    def _database_stat_fingerprint(metadata: Any) -> tuple[int, ...]:
+        return (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_mode,
+            metadata.st_nlink,
+            getattr(metadata, "st_uid", 0),
+            getattr(metadata, "st_gid", 0),
+            metadata.st_size,
+            metadata.st_mtime_ns,
+            metadata.st_ctime_ns,
+        )
+
+    def _verify_database_fingerprint(
+        self,
+        expected: tuple[int, ...],
+    ) -> None:
+        try:
+            metadata = self.path.lstat()
+            if (
+                self.path.is_symlink()
+                or self._database_stat_fingerprint(metadata) != expected
+            ):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission database metadata changed after close"
+                )
+        except ReadEvidenceAdmissionError:
+            raise
+        except OSError as exc:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission database metadata cannot be verified"
+            ) from exc
+
+    @classmethod
+    def _database_content_identity(cls, descriptor: int) -> tuple[int, str]:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission database content source is not regular"
+            )
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        total_size = 0
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total_size += len(chunk)
+        after = os.fstat(descriptor)
+        if (
+            cls._database_stat_fingerprint(after)
+            != cls._database_stat_fingerprint(before)
+            or total_size != after.st_size
+        ):
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission database changed while hashing content"
+            )
+        return total_size, digest.hexdigest()
+
+    def _verify_disappeared_rollback_sidecar(
+        self,
+        sidecar: Path,
+        expected_identity: tuple[int, int],
+    ) -> None:
+        """Accept only a journal deletion with an unchanged private DB path."""
+
+        try:
+            if os.path.lexists(sidecar):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission rollback journal changed while checked"
+                )
+            self._prepare_parent(create_missing=False)
+            self._verify_database_path(expected_identity, read_only=False)
+            if os.path.lexists(sidecar):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission rollback journal reappeared while checked"
+                )
+        except ReadEvidenceAdmissionError:
+            raise
+        except OSError as exc:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission rollback journal disappearance cannot be verified"
+            ) from exc
+
     def _verify_sidecars(
         self,
         *,
+        expected_identity: tuple[int, int],
+        lease: SQLiteProcessLifecycleLease,
         read_only: bool = False,
         reject_rollback_journal: bool = False,
     ) -> None:
+        lease.require_file_phase()
         for suffix in ("-wal", "-shm"):
             if os.path.lexists(Path(f"{self.path}{suffix}")):
                 raise ReadEvidenceAdmissionError(
@@ -831,7 +1367,14 @@ class SQLiteReadEvidenceAdmissionStore:
             raise ReadEvidenceAdmissionError(
                 "read evidence admission rollback journal requires writer recovery"
             )
-        initial = sidecar.lstat()
+        try:
+            initial = sidecar.lstat()
+        except FileNotFoundError:
+            self._verify_disappeared_rollback_sidecar(
+                sidecar,
+                expected_identity,
+            )
+            return
         if (
             not stat.S_ISREG(initial.st_mode)
             or sidecar.is_symlink()
@@ -850,10 +1393,24 @@ class SQLiteReadEvidenceAdmissionStore:
             )
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        descriptor = os.open(sidecar, flags)
+        try:
+            descriptor = os.open(sidecar, flags)
+        except FileNotFoundError:
+            self._verify_disappeared_rollback_sidecar(
+                sidecar,
+                expected_identity,
+            )
+            return
         try:
             opened = os.fstat(descriptor)
-            metadata = sidecar.lstat()
+            try:
+                metadata = sidecar.lstat()
+            except FileNotFoundError:
+                self._verify_disappeared_rollback_sidecar(
+                    sidecar,
+                    expected_identity,
+                )
+                return
             if (
                 not stat.S_ISREG(opened.st_mode)
                 or not stat.S_ISREG(metadata.st_mode)
@@ -880,7 +1437,11 @@ class SQLiteReadEvidenceAdmissionStore:
                     "read evidence admission SQLite sidecar is not private"
                 )
         finally:
-            os.close(descriptor)
+            self._close_descriptor(
+                descriptor,
+                lease,
+                label="read evidence admission rollback journal",
+            )
 
     def _verify_no_bootstrap_sidecars(self) -> None:
         if any(
@@ -892,35 +1453,57 @@ class SQLiteReadEvidenceAdmissionStore:
             )
 
     def _recover_writer_rollback_journal(
-        self, expected: tuple[int, int]
+        self,
+        expected: tuple[int, int],
+        lease: SQLiteProcessLifecycleLease,
+        retry_deadline: float,
     ) -> None:
+        lease.require_file_phase()
         connection: sqlite3.Connection | None = None
         try:
-            connection = sqlite3.connect(
-                self.path,
-                timeout=self.busy_timeout_ms / 1000,
-                isolation_level=None,
-            )
-            connection.row_factory = sqlite3.Row
-            self._configure(connection)
-            connection.execute("SELECT COUNT(*) FROM sqlite_master").fetchone()
-            self._verify_integrity(connection)
-            self._verify_database_file(expected)
+            with lease.connection_phase() as connection_phase:
+                connection_phase.connecting()
+                try:
+                    connection = sqlite3.connect(
+                        self.path,
+                        timeout=self._remaining_operation_seconds(retry_deadline),
+                        isolation_level=None,
+                    )
+                except BaseException:
+                    connection_phase.connect_failed()
+                    raise
+                connection_phase.opened()
+                try:
+                    connection.row_factory = sqlite3.Row
+                    self._configure(connection, retry_deadline=retry_deadline)
+                    connection.execute(
+                        "SELECT COUNT(*) FROM sqlite_master"
+                    ).fetchone()
+                    self._verify_integrity(connection)
+                    self._verify_database_path(expected, read_only=False)
+                finally:
+                    connection.close()
+                    connection = None
+                    connection_phase.closed()
         except ReadEvidenceAdmissionError:
             raise
         except sqlite3.Error as exc:
             raise ReadEvidenceAdmissionError(
                 "read evidence admission writer recovery failed"
             ) from exc
-        finally:
-            if connection is not None:
-                connection.close()
-        self._verify_database_file(expected)
+        self._verify_database_file(expected, lease)
         self._verify_no_bootstrap_sidecars()
-        self._fsync_database()
+        self._fsync_database(expected, lease)
 
-    def _configure(self, connection: sqlite3.Connection) -> None:
-        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+    def _configure(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        retry_deadline: float,
+    ) -> None:
+        connection.execute(
+            f"PRAGMA busy_timeout = {self._remaining_busy_timeout_ms(retry_deadline)}"
+        )
         mode = connection.execute("PRAGMA journal_mode = DELETE").fetchone()[0]
         if str(mode).lower() != "delete":
             raise ReadEvidenceAdmissionError(
@@ -937,17 +1520,29 @@ class SQLiteReadEvidenceAdmissionStore:
                 "read evidence admission database requires foreign keys"
             )
 
-    def _configure_read_only(self, connection: sqlite3.Connection) -> None:
-        connection.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+    def _configure_read_only(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        retry_deadline: float,
+    ) -> None:
+        connection.execute(
+            f"PRAGMA busy_timeout = {self._remaining_busy_timeout_ms(retry_deadline)}"
+        )
         connection.execute("PRAGMA query_only = ON")
         if connection.execute("PRAGMA query_only").fetchone()[0] != 1:
             raise ReadEvidenceAdmissionError(
                 "read evidence admission lookup requires query-only SQLite"
             )
 
-    def _verify_rollback_header(self, expected: tuple[int, int]) -> None:
+    def _verify_rollback_header(
+        self,
+        expected: tuple[int, int],
+        lease: SQLiteProcessLifecycleLease,
+    ) -> None:
         """Verify rollback journaling from the database header without a PRAGMA."""
 
+        lease.require_file_phase()
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(self.path, flags)
@@ -959,7 +1554,11 @@ class SQLiteReadEvidenceAdmissionStore:
                 )
             header = os.read(descriptor, 20)
         finally:
-            os.close(descriptor)
+            self._close_descriptor(
+                descriptor,
+                lease,
+                label="read evidence admission rollback-header database",
+            )
         if (
             len(header) != 20
             or header[:16] != b"SQLite format 3\x00"
@@ -970,32 +1569,65 @@ class SQLiteReadEvidenceAdmissionStore:
             )
 
     @contextmanager
-    def _read_connection(self) -> Iterator[sqlite3.Connection]:
+    def _read_connection(
+        self,
+        lease: SQLiteProcessLifecycleLease | None = None,
+        *,
+        retry_deadline: float | None = None,
+    ) -> Iterator[sqlite3.Connection]:
         """Open one existing-only, query-only SQLite snapshot."""
 
-        expected = self._secure_existing_database_readonly()
-        self._verify_rollback_header(expected)
+        if lease is None:
+            with self._reader_database_lifecycle() as (acquired, acquired_deadline):
+                with self._read_connection(
+                    acquired,
+                    retry_deadline=acquired_deadline,
+                ) as connection:
+                    yield connection
+            return
+        lease.require_file_phase()
+        if retry_deadline is None:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission read deadline is missing"
+            )
+        expected = self._secure_existing_database_readonly(lease)
+        self._verify_rollback_header(expected, lease)
         connection: sqlite3.Connection | None = None
         try:
-            uri = f"{self.path.as_uri()}?mode=ro"
-            connection = sqlite3.connect(
-                uri,
-                uri=True,
-                timeout=self.busy_timeout_ms / 1000,
-                isolation_level=None,
-            )
-            connection.row_factory = sqlite3.Row
-            self._configure_read_only(connection)
-            self._verify_database_file_access(expected, read_only=True)
-            connection.execute("BEGIN")
-            try:
-                yield connection
-            except BaseException:
-                if connection.in_transaction:
+            with lease.connection_phase() as connection_phase:
+                connection_phase.connecting()
+                try:
+                    uri = f"{self.path.as_uri()}?mode=ro"
+                    connection = sqlite3.connect(
+                        uri,
+                        uri=True,
+                        timeout=self._remaining_operation_seconds(retry_deadline),
+                        isolation_level=None,
+                    )
+                except BaseException:
+                    connection_phase.connect_failed()
+                    raise
+                connection_phase.opened()
+                try:
+                    connection.row_factory = sqlite3.Row
+                    self._configure_read_only(
+                        connection,
+                        retry_deadline=retry_deadline,
+                    )
+                    self._verify_database_path(expected, read_only=True)
+                    connection.execute("BEGIN")
+                    try:
+                        yield connection
+                    except BaseException:
+                        if connection.in_transaction:
+                            connection.rollback()
+                        raise
+                    self._verify_database_path(expected, read_only=True)
                     connection.rollback()
-                raise
-            self._verify_database_file_access(expected, read_only=True)
-            connection.rollback()
+                finally:
+                    connection.close()
+                    connection = None
+                    connection_phase.closed()
         except ReadEvidenceAdmissionError:
             raise
         except sqlite3.Error as exc:
@@ -1003,51 +1635,135 @@ class SQLiteReadEvidenceAdmissionStore:
                 "read evidence admission read-only lookup failed"
             ) from exc
         finally:
-            if connection is not None:
-                connection.close()
-            self._verify_database_file_access(expected, read_only=True)
+            if connection is None:
+                self._verify_database_file_access(
+                    expected,
+                    read_only=True,
+                    lease=lease,
+                )
 
     @contextmanager
     def _transaction(
-        self, *, expected_identity: tuple[int, int] | None = None
+        self,
+        *,
+        expected_identity: tuple[int, int] | None = None,
+        lease: SQLiteProcessLifecycleLease | None = None,
+        writer_lock: _WriterLock = None,
+        retry_deadline: float | None = None,
     ) -> Iterator[sqlite3.Connection]:
-        expected = self._secure_database_file()
+        if lease is None:
+            with self._exclusive_database_lifecycle() as (
+                acquired,
+                acquired_lock,
+                acquired_deadline,
+            ):
+                with self._transaction(
+                    expected_identity=expected_identity,
+                    lease=acquired,
+                    writer_lock=acquired_lock,
+                    retry_deadline=acquired_deadline,
+                ) as connection:
+                    yield connection
+            return
+        lease.require_file_phase()
+        if retry_deadline is None:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission write deadline is missing"
+            )
+        self._require_writer_lock(writer_lock)
+        expected = self._secure_database_file(lease=lease)
         if expected_identity is not None and expected != expected_identity:
             raise ReadEvidenceAdmissionError(
                 "read evidence admission database changed before transaction"
             )
         connection: sqlite3.Connection | None = None
         committed = False
+        committed_content: tuple[int, str] | None = None
+        unknown_commit_error: ReadEvidenceAdmissionCommitOutcomeUnknown | None = None
         try:
-            connection = sqlite3.connect(
-                self.path,
-                timeout=self.busy_timeout_ms / 1000,
-                isolation_level=None,
-            )
-            connection.row_factory = sqlite3.Row
-            self._configure(connection)
-            self._verify_database_file(expected)
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                yield connection
-            except BaseException:
-                if connection.in_transaction:
-                    connection.rollback()
-                raise
-            self._verify_database_file(expected)
-            try:
-                _commit_connection(connection)
-                committed = True
-            except BaseException as exc:
+            with lease.connection_phase() as connection_phase:
+                connection_phase.connecting()
                 try:
-                    if connection.in_transaction:
-                        connection.rollback()
-                except BaseException as rollback_error:
-                    exc.add_note(f"admission rollback also failed: {rollback_error}")
-                raise ReadEvidenceAdmissionCommitOutcomeUnknown(
-                    "read evidence admission commit outcome is unknown; "
-                    "reconcile durable state and do not sign this attempt"
-                ) from exc
+                    connection = sqlite3.connect(
+                        self.path,
+                        timeout=self._remaining_operation_seconds(retry_deadline),
+                        isolation_level=None,
+                    )
+                except BaseException:
+                    connection_phase.connect_failed()
+                    raise
+                connection_phase.opened()
+                try:
+                    connection.row_factory = sqlite3.Row
+                    self._configure(connection, retry_deadline=retry_deadline)
+                    self._verify_database_path(expected, read_only=False)
+                    serialize_database = getattr(connection, "serialize", None)
+                    if not callable(serialize_database):
+                        raise ReadEvidenceAdmissionError(
+                            "read evidence admission requires SQLite serialization"
+                        )
+                    connection.execute(
+                        "PRAGMA busy_timeout = "
+                        f"{self._remaining_busy_timeout_ms(retry_deadline)}"
+                    )
+                    self._remaining_operation_seconds(retry_deadline)
+                    connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        yield connection
+                    except BaseException:
+                        if connection.in_transaction:
+                            connection.rollback()
+                        raise
+                    self._verify_database_path(expected, read_only=False)
+                    self._require_writer_lock(writer_lock)
+                    try:
+                        connection.execute(
+                            "PRAGMA busy_timeout = "
+                            f"{self._remaining_busy_timeout_ms(retry_deadline)}"
+                        )
+                        self._remaining_operation_seconds(retry_deadline)
+                        _commit_connection(connection)
+                        if connection.in_transaction:
+                            raise ReadEvidenceAdmissionError(
+                                "read evidence admission commit did not leave autocommit"
+                            )
+                        serialized = serialize_database(name="main")
+                        committed_content = (
+                            len(serialized),
+                            hashlib.sha256(serialized).hexdigest(),
+                        )
+                        committed = True
+                    except BaseException as exc:
+                        try:
+                            if connection.in_transaction:
+                                connection.rollback()
+                        except BaseException as rollback_error:
+                            exc.add_note(
+                                f"admission rollback also failed: {rollback_error}"
+                            )
+                        unknown_commit_error = ReadEvidenceAdmissionCommitOutcomeUnknown(
+                            "read evidence admission commit outcome is unknown; "
+                            "reconcile durable state and do not sign this attempt"
+                        )
+                        raise unknown_commit_error from exc
+                finally:
+                    try:
+                        connection.close()
+                    except BaseException as close_error:
+                        if unknown_commit_error is not None:
+                            unknown_commit_error.add_note(
+                                f"connection close also failed: {close_error}"
+                            )
+                            raise unknown_commit_error
+                        if committed:
+                            raise ReadEvidenceAdmissionCommitOutcomeUnknown(
+                                "read evidence admission was committed but connection "
+                                "close could not be confirmed; reconcile before signing"
+                            ) from close_error
+                        raise
+                    else:
+                        connection = None
+                        connection_phase.closed()
         except (ReadEvidenceAdmissionError, ReadEvidenceAdmissionConflict):
             raise
         except sqlite3.IntegrityError as exc:
@@ -1059,46 +1775,153 @@ class SQLiteReadEvidenceAdmissionStore:
                 "read evidence admission SQLite transaction failed"
             ) from exc
         finally:
-            close_error: BaseException | None = None
-            if connection is not None:
+            if connection is None:
                 try:
-                    connection.close()
-                except BaseException as exc:
-                    close_error = exc
-            try:
-                self._verify_database_file(expected)
-                self._fsync_database()
-            except BaseException as verification_error:
-                if close_error is not None:
-                    verification_error.add_note(
-                        f"SQLite close also failed: {close_error}"
+                    self._verify_database_file(expected, lease)
+                    self._fsync_database(
+                        expected,
+                        lease,
+                        expected_content=committed_content,
                     )
-                if committed:
-                    raise ReadEvidenceAdmissionCommitOutcomeUnknown(
-                        "read evidence admission was committed but durable cleanup "
-                        "could not be confirmed; reconcile before signing"
-                    ) from verification_error
-                raise
-            if close_error is not None:
-                if committed:
-                    raise ReadEvidenceAdmissionCommitOutcomeUnknown(
-                        "read evidence admission was committed but connection close "
-                        "could not be confirmed; reconcile before signing"
-                    ) from close_error
-                raise close_error
+                except BaseException as verification_error:
+                    if unknown_commit_error is not None:
+                        unknown_commit_error.add_note(
+                            "post-close durability verification also failed: "
+                            f"{verification_error}"
+                        )
+                        raise unknown_commit_error
+                    if committed:
+                        raise ReadEvidenceAdmissionCommitOutcomeUnknown(
+                            "read evidence admission was committed but durable cleanup "
+                            "could not be confirmed; reconcile before signing"
+                        ) from verification_error
+                    raise
 
-    def _fsync_database(self) -> None:
+    def _fsync_database(
+        self,
+        expected: tuple[int, int],
+        lease: SQLiteProcessLifecycleLease,
+        *,
+        expected_content: tuple[int, str] | None = None,
+    ) -> None:
+        lease.require_file_phase()
         # Windows rejects fsync on a descriptor opened read-only.  These are
-        # ledger-owned SQLite file, so an O_RDWR durability descriptor is the
+        # ledger-owned SQLite files, so an O_RDWR durability descriptor is the
         # portable choice; O_NOFOLLOW still protects POSIX path resolution.
         flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(self.path, flags)
+
+        def verify_descriptor() -> tuple[int, ...]:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != expected
+            ):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission durability database path changed while open"
+                )
+            if opened.st_nlink != 1:
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission database must have exactly one hard link"
+                )
+            if os.name == "posix" and (
+                opened.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+            ):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission database file is not private"
+                )
+            self._verify_database_path(expected, read_only=False)
+            live = self.path.lstat()
+            opened_fingerprint = self._database_stat_fingerprint(opened)
+            if self._database_stat_fingerprint(live) != opened_fingerprint:
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission durability database metadata changed"
+                )
+            return opened_fingerprint
+
+        final_content: tuple[int, str] | None = None
+        final_fingerprint: tuple[int, ...] | None = None
         try:
+            initial_fingerprint = verify_descriptor()
             os.fsync(descriptor)
+            synced_fingerprint = verify_descriptor()
+            if synced_fingerprint != initial_fingerprint:
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission durability database changed during fsync"
+                )
+            synced_content = self._database_content_identity(descriptor)
+            if expected_content is not None and synced_content != expected_content:
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission committed database content changed before "
+                    "durability confirmation"
+                )
+            self._fsync_directory(self.path.parent)
+            self._verify_database_file(expected, lease)
+            final_fingerprint = verify_descriptor()
+            if final_fingerprint != synced_fingerprint:
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission durability database changed after fsync"
+                )
+            final_content = self._database_content_identity(descriptor)
+            if final_content != synced_content:
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission database content changed after fsync"
+                )
         finally:
-            os.close(descriptor)
-        self._fsync_directory(self.path.parent)
+            self._close_descriptor(
+                descriptor,
+                lease,
+                label="read evidence admission durability database",
+            )
+        if final_content is None or final_fingerprint is None:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission durability content was not confirmed"
+            )
+        verification_descriptor: int | None = None
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NOFOLLOW", 0)
+            verification_descriptor = os.open(self.path, flags)
+            opened = os.fstat(verification_descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != expected
+                or self._database_stat_fingerprint(opened) != final_fingerprint
+            ):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission database metadata changed after close"
+                )
+            self._verify_database_fingerprint(final_fingerprint)
+            self._verify_database_file(expected, lease)
+            # This open-fd/path/content equality is the success linearization
+            # point. Arbitrary code running as the private ledger owner is an
+            # explicit external trust boundary; no finite post-close pathname
+            # polling can prevent that owner from replacing the file later.
+            if (
+                self._database_content_identity(verification_descriptor)
+                != final_content
+            ):
+                raise ReadEvidenceAdmissionError(
+                    "read evidence admission database content changed after close"
+                )
+            self._verify_database_fingerprint(final_fingerprint)
+        except ReadEvidenceAdmissionError:
+            raise
+        except OSError as exc:
+            raise ReadEvidenceAdmissionError(
+                "read evidence admission database content cannot be verified after close"
+            ) from exc
+        finally:
+            if verification_descriptor is not None:
+                self._close_descriptor(
+                    verification_descriptor,
+                    lease,
+                    label=(
+                        "read evidence admission post-close content verification database"
+                    ),
+                )
 
     @staticmethod
     def _schema_objects(connection: sqlite3.Connection) -> tuple[sqlite3.Row, ...]:
@@ -1144,12 +1967,20 @@ class SQLiteReadEvidenceAdmissionStore:
                 "read evidence admission bootstrap metadata is not empty"
             )
 
-    def _preflight_writer_initialization(self) -> tuple[int, int]:
-        expected = self._secure_database_file()
+    def _preflight_writer_initialization(
+        self,
+        lease: SQLiteProcessLifecycleLease,
+        retry_deadline: float,
+    ) -> tuple[int, int]:
+        expected = self._secure_database_file(lease=lease)
         if self._bootstrap_sidecar_observed:
-            self._recover_writer_rollback_journal(expected)
+            self._recover_writer_rollback_journal(
+                expected,
+                lease,
+                retry_deadline,
+            )
             self._bootstrap_sidecar_observed = False
-            recovered = self._secure_database_file()
+            recovered = self._secure_database_file(lease=lease)
             if recovered != expected or self._bootstrap_sidecar_observed:
                 raise ReadEvidenceAdmissionError(
                     "read evidence admission database changed during writer recovery"
@@ -1158,7 +1989,10 @@ class SQLiteReadEvidenceAdmissionStore:
             self._verify_no_bootstrap_sidecars()
             self._bootstrap_initialization_allowed = True
             return expected
-        with self._read_connection() as connection:
+        with self._read_connection(
+            lease,
+            retry_deadline=retry_deadline,
+        ) as connection:
             if not self._schema_objects(connection):
                 self._verify_empty_bootstrap(connection)
                 self._bootstrap_initialization_allowed = True
@@ -1170,31 +2004,48 @@ class SQLiteReadEvidenceAdmissionStore:
 
     def _initialize(self) -> None:
         if not self._allow_create:
-            with self._read_connection() as connection:
+            with self._reader_database_lifecycle() as (lease, retry_deadline):
+                with self._read_connection(
+                    lease,
+                    retry_deadline=retry_deadline,
+                ) as connection:
+                    self._verify_schema(connection)
+                    self._verify_integrity(connection)
+                    self._verify_rows(connection)
+            return
+        with self._exclusive_database_lifecycle() as (
+            lease,
+            writer_lock,
+            retry_deadline,
+        ):
+            expected = self._preflight_writer_initialization(
+                lease,
+                retry_deadline,
+            )
+            with self._transaction(
+                expected_identity=expected,
+                lease=lease,
+                writer_lock=writer_lock,
+                retry_deadline=retry_deadline,
+            ) as connection:
+                if not self._schema_objects(connection):
+                    if not self._bootstrap_initialization_allowed:
+                        raise ReadEvidenceAdmissionError(
+                            "read evidence admission schema is missing"
+                        )
+                    self._verify_empty_bootstrap(connection)
+                    for statement in _TABLES.values():
+                        connection.execute(statement)
+                    connection.execute(
+                        "INSERT INTO read_evidence_admission_schema_meta(key, value) "
+                        "VALUES('schema_version', ?)",
+                        (str(READ_EVIDENCE_ADMISSION_SCHEMA_VERSION),),
+                    )
+                    for statement in _TRIGGERS.values():
+                        connection.execute(statement)
                 self._verify_schema(connection)
                 self._verify_integrity(connection)
                 self._verify_rows(connection)
-            return
-        expected = self._preflight_writer_initialization()
-        with self._transaction(expected_identity=expected) as connection:
-            if not self._schema_objects(connection):
-                if not self._bootstrap_initialization_allowed:
-                    raise ReadEvidenceAdmissionError(
-                        "read evidence admission schema is missing"
-                    )
-                self._verify_empty_bootstrap(connection)
-                for statement in _TABLES.values():
-                    connection.execute(statement)
-                connection.execute(
-                    "INSERT INTO read_evidence_admission_schema_meta(key, value) "
-                    "VALUES('schema_version', ?)",
-                    (str(READ_EVIDENCE_ADMISSION_SCHEMA_VERSION),),
-                )
-                for statement in _TRIGGERS.values():
-                    connection.execute(statement)
-            self._verify_schema(connection)
-            self._verify_integrity(connection)
-            self._verify_rows(connection)
         self._bootstrap_initialization_allowed = False
         self._bootstrap_sidecar_observed = False
         self._zero_length_database_observed = False

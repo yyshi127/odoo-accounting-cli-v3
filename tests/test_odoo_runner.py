@@ -207,12 +207,14 @@ def test_dependency_mount_attestation_requires_exact_readonly_and_writable_sets(
         "receipt_secret_path": tmp_path / "secrets" / "receipt.hmac",
         "auth_state_path": tmp_path / "state" / "auth" / "state.sqlite3",
         "receipt_state_path": tmp_path / "state" / "receipt" / "state.sqlite3",
+        "gcov_state_path": tmp_path / "state" / "gcov",
     }
     config = SimpleNamespace(**dependency_paths)
     readonly = os.ST_RDONLY
     writable = {
         dependency_paths["auth_state_path"].parent,
         dependency_paths["receipt_state_path"].parent,
+        dependency_paths["gcov_state_path"],
         Path(FIXED_CHILD_ENVIRONMENT["HOME"]),
     }
 
@@ -246,6 +248,20 @@ def test_dependency_mount_attestation_requires_exact_readonly_and_writable_sets(
         ),
     )
     with pytest.raises(OdooRunnerError, match="auth_state_parent.*writable"):
+        _require_immutable_dependency_mounts(config)
+
+    monkeypatch.setattr(
+        os,
+        "statvfs",
+        lambda path: SimpleNamespace(
+            f_flag=readonly
+            if Path(path) == dependency_paths["gcov_state_path"]
+            else 0
+            if Path(path) in writable
+            else readonly
+        ),
+    )
+    with pytest.raises(OdooRunnerError, match="gcov_state_path.*writable"):
         _require_immutable_dependency_mounts(config)
 
 
@@ -1187,6 +1203,7 @@ grandchild_source = (
     "stream.sendall(f'READY:{os.getpid()}:{os.getpgrp()}\\n'.encode('ascii'))\n"
     "if stream.recv(1) != b'A':\n"
     "    raise SystemExit(90)\n"
+    "stream.sendall(b'K')\n"
     "os.write(ready_fd, b'R')\n"
     "os.close(ready_fd)\n"
     "if stream.recv(1) == b'C':\n"
@@ -1296,8 +1313,69 @@ def _ready_process_handles(control: socket.socket) -> tuple[int, int]:
     except BaseException:
         os.close(inner_pidfd)
         raise
-    control.sendall(b"A")
+    try:
+        control.sendall(b"A")
+        armed = control.recv(1)
+        assert armed == b"K", armed
+    except BaseException as exc:
+        for descriptor in (group_leader_pidfd, inner_pidfd):
+            try:
+                os.close(descriptor)
+            except BaseException as cleanup_exc:
+                exc.add_note(
+                    f"failed to close pidfd {descriptor} after handshake failure: "
+                    f"{cleanup_exc!r}"
+                )
+        raise
     return inner_pidfd, group_leader_pidfd
+
+
+@pytest.mark.parametrize(
+    "failure_point", ["send", "recv", "confirmation", "cleanup"]
+)
+def test_ready_process_handles_closes_pidfds_when_handshake_fails(
+    monkeypatch: pytest.MonkeyPatch, failure_point: str
+) -> None:
+    control = Mock(spec=socket.socket)
+    primary_error = ConnectionResetError("handshake failed")
+    control.recv.side_effect = [b"READY:101:102\n", b"K"]
+    if failure_point == "send":
+        control.sendall.side_effect = primary_error
+    elif failure_point in {"recv", "cleanup"}:
+        control.recv.side_effect = [b"READY:101:102\n", primary_error]
+    else:
+        control.recv.side_effect = [b"READY:101:102\n", b"X"]
+
+    pidfd_open = Mock(side_effect=[201, 202])
+    closed: list[int] = []
+    monkeypatch.setattr(os, "getpgrp", lambda: 999, raising=False)
+    monkeypatch.setattr(os, "pidfd_open", pidfd_open, raising=False)
+
+    def close_pidfd(descriptor: int) -> None:
+        closed.append(descriptor)
+        if failure_point == "cleanup" and descriptor == 202:
+            raise OSError("pidfd close failed")
+
+    monkeypatch.setattr(os, "close", close_pidfd)
+
+    expected_error = (
+        AssertionError if failure_point == "confirmation" else type(primary_error)
+    )
+    with pytest.raises(expected_error) as raised:
+        _ready_process_handles(control)
+
+    if failure_point != "confirmation":
+        assert raised.value is primary_error
+    if failure_point == "cleanup":
+        assert raised.value.__notes__ == [
+            "failed to close pidfd 202 after handshake failure: "
+            "OSError('pidfd close failed')"
+        ]
+    assert pidfd_open.call_args_list == [
+        unittest.mock.call(101),
+        unittest.mock.call(102),
+    ]
+    assert closed == [202, 201]
 
 
 def _assert_tree_closed_without_commit(

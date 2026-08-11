@@ -27,17 +27,20 @@ OPT_ROOT = Path("/opt/odoo-accounting-cli-v3")
 ETC_ROOT = Path("/etc/odoo-accounting-cli-v3")
 VAR_ROOT = Path("/var/lib/odoo-accounting-cli-v3")
 LEDGER_PATH = VAR_ROOT / "read-evidence-v3" / "admissions.sqlite3"
+LEDGER_LOCK_PATH = Path(f"{LEDGER_PATH}.writer.lock")
 SSH_KEYGEN = Path("/usr/bin/ssh-keygen")
 
 SOURCE_MEMBERS = (
     "VERSION",
     "registry/capabilities.json",
     "src/odoo_accounting_cli_v3/__init__.py",
+    "src/odoo_accounting_cli_v3/monotonic_deadline.py",
     "src/odoo_accounting_cli_v3/operations.py",
     "src/odoo_accounting_cli_v3/read_evidence_admission.py",
     "src/odoo_accounting_cli_v3/read_evidence_v3.py",
     "src/odoo_accounting_cli_v3/registry.py",
     "src/odoo_accounting_cli_v3/release.py",
+    "src/odoo_accounting_cli_v3/sqlite_process_lifecycle.py",
     "src/odoo_accounting_cli_v3/sshsig.py",
 )
 PI_EVENT_ORDER = (
@@ -141,6 +144,7 @@ class _RootLayout:
         self._unique_files: dict[Path, tuple[int, int]] = {}
         self._created_parents: dict[Path, tuple[int, int]] = {}
         self._ledger_identity: tuple[int, int] | None = None
+        self._writer_lock_identity: tuple[int, int] | None = None
 
     @staticmethod
     def _identity(path: Path) -> tuple[int, int]:
@@ -229,6 +233,7 @@ class _RootLayout:
         parent = LEDGER_PATH.parent
         metadata = parent.lstat()
         ledger_metadata = LEDGER_PATH.lstat()
+        writer_lock_metadata = LEDGER_LOCK_PATH.lstat()
         if (
             not stat.S_ISDIR(metadata.st_mode)
             or stat.S_IMODE(metadata.st_mode) != 0o700
@@ -236,8 +241,14 @@ class _RootLayout:
             or self._identity(LEDGER_PATH) != self._ledger_identity
             or stat.S_IMODE(ledger_metadata.st_mode) != 0o600
             or ledger_metadata.st_size == 0
+            or LEDGER_LOCK_PATH.is_symlink()
+            or not stat.S_ISREG(writer_lock_metadata.st_mode)
+            or writer_lock_metadata.st_nlink != 1
+            or writer_lock_metadata.st_uid != 0
+            or stat.S_IMODE(writer_lock_metadata.st_mode) != 0o600
         ):
             raise AssertionError("admission store did not recover the owned bootstrap")
+        self._writer_lock_identity = self._identity(LEDGER_LOCK_PATH)
 
     def _safe_unlink(self, path: Path, identity: tuple[int, int]) -> None:
         self._assert_allowed(path)
@@ -314,6 +325,26 @@ class _RootLayout:
                             f"refusing to remove unsafe SQLite sidecar: {sidecar}"
                     )
                     sidecar.unlink()
+            if self._lexists(LEDGER_LOCK_PATH):
+                writer_lock_metadata = LEDGER_LOCK_PATH.lstat()
+                writer_lock_identity = self._identity(LEDGER_LOCK_PATH)
+                if (
+                    LEDGER_LOCK_PATH.is_symlink()
+                    or not stat.S_ISREG(writer_lock_metadata.st_mode)
+                    or writer_lock_metadata.st_nlink != 1
+                    or writer_lock_metadata.st_uid != 0
+                    or stat.S_IMODE(writer_lock_metadata.st_mode) != 0o600
+                    or (
+                        self._writer_lock_identity is not None
+                        and writer_lock_identity != self._writer_lock_identity
+                    )
+                ):
+                    raise AssertionError(
+                        "refusing to remove an unsafe admission writer lock"
+                    )
+                self._safe_unlink(LEDGER_LOCK_PATH, writer_lock_identity)
+            elif self._writer_lock_identity is not None:
+                raise AssertionError("admission writer lock disappeared before cleanup")
             self._safe_unlink(LEDGER_PATH, self._ledger_identity)
         for path, identity in sorted(
             self._created_parents.items(),

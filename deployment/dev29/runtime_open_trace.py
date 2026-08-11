@@ -2839,9 +2839,11 @@ def recover_stale_private_staging(
 class PrivateTraceStaging:
     """Root-only O_EXCL/0600 staging sealed as mode-0400 audit evidence."""
 
-    def __init__(self, run_id: str, *, parent: Path = STAGING_PARENT) -> None:
+    def __init__(self, run_id: str, *, parent: Path | None = None) -> None:
         if not isinstance(run_id, str) or NAME.fullmatch(run_id) is None:
             raise RuntimeOpenTraceError("runtime trace run id is invalid")
+        if parent is None:
+            parent = STAGING_PARENT
         parent = Path(parent)
         if not parent.is_absolute():
             raise RuntimeOpenTraceError("private trace staging parent is invalid")

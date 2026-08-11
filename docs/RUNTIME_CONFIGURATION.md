@@ -397,6 +397,14 @@ the current release headers. The trusted broker, not Pi, selects any retained
 historical release and returns the verified executed release/registry identity.
 None of these settings enables a registry capability.
 
+Dev266 installs the file-descriptor error, finish, and close observers before
+writing FD3 and awaits the write outcome before accepting child stdout or final
+evidence. A reset, premature close, or synchronous write failure is normalized
+to `broker_session_write_failed`; the hardened path terminates the child and
+fails closed without exposing the handle or raw pipe error. This proves the
+parent-side write outcome, not child consumption. The child must still read and
+use the handle successfully through the authenticated broker protocol.
+
 ## Broker response verification and attempt audit
 
 Every current or retained route has its own

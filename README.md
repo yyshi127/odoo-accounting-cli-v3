@@ -13,7 +13,7 @@ This directory is the only local source root for V3. The V2 Odoo module,
 historical remote snapshots, and deployment staging directories are external
 inputs and must not contain V3 source files.
 
-The current Dev265 development tree registers 37 capabilities: 13 reads
+The current Dev266 development tree registers 37 capabilities: 13 reads
 and 24 writes. The reads are staged only for `test`; no capability is enabled
 or production-routed. All 24 writes have concrete source paths, 22 can reach
 capability-specific ORM prechecks, and payment registration plus deferred
@@ -51,6 +51,32 @@ override. Repeated publication requests recover only the identical committed
 payload, while conflicting nonce, authorization, run, index, signature, or
 sequence bindings fail closed. Expired approvals, hot rollback journals,
 replay, tampering, and non-`PUBLISHED` rows are rejected.
+
+Dev266 hardens that admission ledger without changing the capability inventory
+or enabling any route. Every in-process SQLite connection and direct database
+file check now shares one process-wide lifecycle lease. Independent writers and
+existing-only verifier snapshots also contend on one persistent, private,
+fixed-inode `.writer.lock`; readers open but never create it. A writer acquires
+the lock before preflight and holds it through `BEGIN IMMEDIATE`, commit,
+connection close, fsync, the post-close content check, and
+confirmation-descriptor close.
+A rollback journal that vanishes during a writer preflight is accepted only
+after the same private database inode and parent are reverified and the journal
+remains absent; replacement, reappearance, unsafe metadata, and every other
+I/O error fail closed. The durability descriptor and live path must still
+identify that same inode before and after fsync, followed by one final full
+path/sidecar check.
+After commit, the still-open SQLite connection serializes the exact committed
+database image. The fsynced descriptor and an `O_NOFOLLOW` post-close reopen
+must both produce that same SHA-256 content identity in addition to matching
+the private path metadata, so immediate inode reuse cannot disguise different
+ledger bytes even on a filesystem with coarse timestamps. The linearization
+point is this equality while the confirmation descriptor remains open; an
+unconfirmed close still returns outcome-unknown. As documented in runtime
+configuration, arbitrary code running later as the private state-file owner is
+outside this software-only boundary and still blocks production promotion.
+Unknown commit outcomes retain their mandatory reconciliation error
+even if connection close or post-close durability verification also fails.
 
 This is not yet Goal evidence. The v3 raw bodies are normalized contract
 summaries, not the original Odoo/SQL-oracle/Pi/negative-control source objects,

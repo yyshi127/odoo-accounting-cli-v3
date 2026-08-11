@@ -1,4 +1,4 @@
-# Read-evidence index: Dev265 inventory, Dev264 contracts, and Dev263 active admission
+# Read-evidence index: Dev266 inventory, Dev264 contracts, and Dev263 active admission
 
 Dev263 adds a Linux-only, public-key-verifiable `read-evidence-index.v3`
 active-admission path beside the legacy v2 structural checker. The public v3
@@ -25,7 +25,7 @@ Every capability remains `verified:false` until the real raw semantic adapters
 independently recompute those facts. Signatures prove key possession and exact
 bytes; they do not prove that a summarized accounting claim is true.
 
-The current Dev265 Registry has 13 read capabilities. The newly added
+The current Dev266 Registry has 13 read capabilities. The newly added
 `acct.refund.post_reconcile_eligibility.v1` is mapped to the reviewed refund
 eligibility handler and to the full-raw contract inventory, is
 `contract_tested`, and is staged only for `test`. It has an empty receipt list,
@@ -172,6 +172,39 @@ For a valid hot rollback journal it first completes SQLite recovery, closes the
 connection, confirms the same inode and no remaining sidecar, fsyncs the
 database and parent, and only then initializes the schema. Unknown objects,
 metadata, residual pages, or sidecars that do not recover cleanly are rejected.
+
+Dev266 serializes every admission-store SQLite connection lifecycle and every
+direct database or sidecar descriptor check within one process-wide lease. No
+direct descriptor is opened or closed while a SQLite connection is active;
+independent writers and existing-only verifier snapshots first contend on the
+persistent `admissions.sqlite3.writer.lock`; readers require it to exist and
+never create it. Writers then contend on SQLite's database locks and
+`BEGIN IMMEDIATE`. The lock is a fixed inode in the same private parent: it must
+be a current-euid-owned, mode `0600`, single-link regular file opened with
+`O_NOFOLLOW`, and it is never unlinked. It remains held from before writer
+preflight through commit, connection close, fsync, the post-close content check,
+and confirmation-descriptor close, so a verifier cannot observe `PUBLISHED`
+before that confirmation completes. One absolute monotonic deadline spans the
+process lease, lock acquisition, SQLite connection, `BEGIN IMMEDIATE`, and
+commit waits; a later phase cannot reset the caller's elapsed lock budget. If a
+legitimate `DELETE` journal disappears
+between `lstat` and `open`, the writer accepts that race only after rechecking
+the private parent, the exact database inode, and continued journal absence.
+Replacement, reappearance, an unexpected error, or an unconfirmed descriptor
+close rejects the operation. The fsync descriptor and live path must match the
+pre-transaction device/inode before and after fsync. After commit, the still-open
+SQLite connection serializes the exact committed database image; the fsynced
+descriptor and an `O_NOFOLLOW` post-close reopen must both match its SHA-256
+content identity as well as the complete private file fingerprint and sidecar
+state. This rejects an immediately reused inode carrying different bytes even
+when filesystem timestamps collide. That equality, while the confirmation fd
+is still open, is the success linearization point; close or writer-lock release
+failure is outcome-unknown. Arbitrary later mutation by code running as the
+private ledger owner is the existing external-trust boundary, not a claimed
+software defense.
+A commit with an unknown outcome remains an
+unknown-outcome reconciliation case even when close, path verification, or
+fsync also fails; it is never downgraded to a replayable ordinary failure.
 
 Publication is one-way and replay-safe. A unique authorization/nonce/run/index
 reservation may move only `PENDING -> CONSUMED -> PUBLISHED`. The first

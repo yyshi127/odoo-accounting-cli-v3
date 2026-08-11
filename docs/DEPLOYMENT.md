@@ -428,6 +428,7 @@ therefore fail closed.
   broker-audit.sqlite3
 /var/lib/odoo-accounting-cli-v3/read-evidence-v3/
   admissions.sqlite3
+  admissions.sqlite3.writer.lock
   <version>-<commit12>/active.json
   <version>-<commit12>/runs/<run-id>/index.json
 /var/lib/odoo-accounting-cli-v3-broker/
@@ -448,6 +449,14 @@ journal through the read-only verifier, or place evidence/trust material under
 `/root`. Publication recovery must use the authorized writer: reconcile an
 uncertain commit by looking up the exact authorization/payload/sequence, then
 resume only that same one-way transition to `PUBLISHED`.
+The persistent `admissions.sqlite3.writer.lock` must remain a mode `0600`,
+single-link regular file owned by the admission service effective UID in that
+same private parent. Writers create it once; existing-only verifiers only open
+it. Do not unlink, rename, replace, hard-link, or relax the permissions of this
+fixed lock inode while the ledger remains in service. During an upgrade from a
+ledger that predates this lock, complete the authorized writer initialization
+before enabling the verifier; the verifier fails closed and creates nothing if
+the lock is absent.
 An interrupted first bootstrap is recoverable only from the same private
 single-link inode when it is zero-length, strictly empty, or becomes strictly
 empty after verified SQLite hot-journal recovery. Unknown schema objects,

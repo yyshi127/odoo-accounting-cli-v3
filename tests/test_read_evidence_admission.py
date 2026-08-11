@@ -1,21 +1,35 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import inspect
 import json
+import multiprocessing
 import os
+import queue
 import sqlite3
 import stat
 import subprocess
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from odoo_accounting_cli_v3 import read_evidence_admission as admission_module
+if os.name == "posix":
+    import fcntl
+else:  # pragma: no cover - exercised by the Windows test matrix
+    fcntl = None  # type: ignore[assignment]
+
+from odoo_accounting_cli_v3 import (
+    read_evidence_admission as admission_module,
+    sqlite_process_lifecycle,
+)
 from odoo_accounting_cli_v3.read_evidence_admission import (
     ACTIVE_ADMISSION_SCHEMA,
     ADMISSION_ARTIFACT_SIGNATURE_PATH,
@@ -300,6 +314,823 @@ def test_concurrent_exact_requests_have_one_consumption_and_fixed_recoveries(
         ).fetchone()[0] == 1
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX rollback sidecar race")
+def test_writer_accepts_journal_deleted_between_lstat_and_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    journal = Path(f"{store.path}-journal")
+    journal.write_bytes(b"")
+    os.chmod(journal, 0o600)
+    real_open = admission_module.os.open
+    deleted = False
+
+    def delete_before_open(path: object, flags: int, *args: object) -> int:
+        nonlocal deleted
+        if Path(path) == journal and not deleted:
+            deleted = True
+            journal.unlink()
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(admission_module.os, "open", delete_before_open)
+    metadata = store.path.stat()
+
+    with store._database_lifecycle() as lease:
+        assert store._secure_database_file(lease=lease) == (
+            metadata.st_dev,
+            metadata.st_ino,
+        )
+    assert deleted is True
+    assert not journal.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX rollback sidecar race")
+def test_writer_rejects_journal_replacement_after_disappearing_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    journal = Path(f"{store.path}-journal")
+    replacement = store.path.parent / "replacement-journal"
+    journal.write_bytes(b"")
+    replacement.write_bytes(b"replacement")
+    os.chmod(journal, 0o600)
+    os.chmod(replacement, 0o600)
+    real_open = admission_module.os.open
+    replaced = False
+
+    def replace_before_open(path: object, flags: int, *args: object) -> int:
+        nonlocal replaced
+        if Path(path) == journal and not replaced:
+            replaced = True
+            journal.unlink()
+            journal.symlink_to(replacement)
+            raise FileNotFoundError(
+                errno.ENOENT,
+                os.strerror(errno.ENOENT),
+                str(journal),
+            )
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(admission_module.os, "open", replace_before_open)
+
+    with pytest.raises(ReadEvidenceAdmissionError, match="journal changed"):
+        with store._database_lifecycle() as lease:
+            store._secure_database_file(lease=lease)
+    assert replaced is True
+    assert journal.is_symlink()
+
+
+def test_direct_fd_check_is_rejected_in_connection_phase_without_poisoning(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    metadata = store.path.stat()
+
+    with pytest.raises(ReadEvidenceAdmissionError, match="lifecycle"):
+        with store._database_lifecycle() as lease:
+            with lease.connection_phase():
+                store._verify_sidecars(
+                    expected_identity=(metadata.st_dev, metadata.st_ino),
+                    lease=lease,
+                )
+
+    decision = store.consume(_request())
+    assert decision.recovered is False
+    assert decision.sequence == 1
+
+
+def test_unconfirmed_database_descriptor_close_poisons_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_close = admission_module.os.close
+    for label, close_error in (
+        ("os-error", OSError("simulated unconfirmed database descriptor close")),
+        ("keyboard-interrupt", KeyboardInterrupt()),
+    ):
+        gate = sqlite_process_lifecycle._ProcessSQLiteLifecycle()
+        monkeypatch.setattr(
+            sqlite_process_lifecycle,
+            "_PROCESS_SQLITE_LIFECYCLE",
+            gate,
+        )
+        case_root = tmp_path / label
+        case_root.mkdir()
+        store = _store(case_root)
+        database = store.path.stat()
+        leaked: list[int] = []
+
+        def fail_database_close(descriptor: int) -> None:
+            opened = os.fstat(descriptor)
+            if not leaked and (opened.st_dev, opened.st_ino) == (
+                database.st_dev,
+                database.st_ino,
+            ):
+                leaked.append(descriptor)
+                raise close_error
+            real_close(descriptor)
+
+        monkeypatch.setattr(admission_module.os, "close", fail_database_close)
+        try:
+            if isinstance(close_error, OSError):
+                with pytest.raises(ReadEvidenceAdmissionError, match="descriptor close"):
+                    store.consume(_request())
+            else:
+                with pytest.raises(KeyboardInterrupt):
+                    store.consume(_request())
+            assert leaked
+            assert gate.poisoned is True
+            monkeypatch.setattr(admission_module.os, "close", real_close)
+            with pytest.raises(
+                ReadEvidenceAdmissionError, match="lifecycle is unavailable"
+            ):
+                store.consume(_request())
+        finally:
+            monkeypatch.setattr(admission_module.os, "close", real_close)
+            for descriptor in leaked:
+                real_close(descriptor)
+
+
+def test_concurrent_preflight_waits_for_active_transaction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    real_commit = admission_module._commit_connection
+    real_secure = store._secure_database_file
+    commit_entered = threading.Event()
+    release_commit = threading.Event()
+    contender_started = threading.Event()
+    contender_preflight = threading.Event()
+    contender_thread_id: list[int] = []
+
+    def blocking_first_commit(connection: sqlite3.Connection) -> None:
+        if not commit_entered.is_set():
+            commit_entered.set()
+            if not release_commit.wait(timeout=5):
+                raise AssertionError("timed out waiting to release the first commit")
+        real_commit(connection)
+
+    def recording_secure(*args: object, **kwargs: object) -> tuple[int, int]:
+        if contender_thread_id and threading.get_ident() == contender_thread_id[0]:
+            contender_preflight.set()
+        return real_secure(*args, **kwargs)
+
+    def consume_as_contender():
+        contender_thread_id.append(threading.get_ident())
+        contender_started.set()
+        return store.consume(_request())
+
+    monkeypatch.setattr(admission_module, "_commit_connection", blocking_first_commit)
+    monkeypatch.setattr(store, "_secure_database_file", recording_secure)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(store.consume, _request())
+        assert commit_entered.wait(timeout=5)
+        second = executor.submit(consume_as_contender)
+        assert contender_started.wait(timeout=5)
+        try:
+            assert not contender_preflight.wait(timeout=0.25)
+        finally:
+            release_commit.set()
+        decisions = [first.result(timeout=5), second.result(timeout=5)]
+
+    assert sum(not decision.recovered for decision in decisions) == 1
+    assert len({decision.payload_sha256 for decision in decisions}) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process concurrency contract")
+def test_concurrent_exact_requests_are_atomic_across_processes(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    start = store.path.parent / "process-start"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    not_before = (now - timedelta(minutes=1)).isoformat()
+    expires_at = (now + timedelta(minutes=5)).isoformat()
+    child = r"""
+import json
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+from odoo_accounting_cli_v3.read_evidence_admission import (
+    ADMISSION_INDEX_PATH,
+    ADMISSION_INDEX_SIGNATURE_PATH,
+    ReadEvidenceAdmissionRequest,
+    SQLiteReadEvidenceAdmissionStore,
+)
+
+path = Path(sys.argv[1])
+ready = Path(sys.argv[2])
+start = Path(sys.argv[3])
+store = SQLiteReadEvidenceAdmissionStore.open_existing(path)
+ready.write_text("ready", encoding="utf-8")
+deadline = time.monotonic() + 15
+while not start.exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("process start barrier timed out")
+    time.sleep(0.005)
+request = ReadEvidenceAdmissionRequest(
+    release_identity={
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev263-test",
+    },
+    index_path=ADMISSION_INDEX_PATH,
+    index_sha256="5" * 64,
+    index_size=4096,
+    index_signature_path=ADMISSION_INDEX_SIGNATURE_PATH,
+    index_signature_sha256="6" * 64,
+    index_signature_size=256,
+    closure_tree_sha256="a" * 64,
+    closure_file_count=37,
+    closure_total_bytes=123456,
+    scope_sha256="b" * 64,
+    authorization_id="authz-dev263-0001",
+    authorization_sha256="7" * 64,
+    nonce_sha256="8" * 64,
+    run_id="run-dev263-0001",
+    authorization_not_before=datetime.fromisoformat(sys.argv[4]),
+    authorization_expires_at=datetime.fromisoformat(sys.argv[5]),
+)
+decision = store.consume(request)
+print(json.dumps({
+    "payload_sha256": decision.payload_sha256,
+    "recovered": decision.recovered,
+    "sequence": decision.sequence,
+}, sort_keys=True))
+"""
+    environment = os.environ.copy()
+    source_root = str(Path(admission_module.__file__).resolve().parents[1])
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part
+        for part in (source_root, environment.get("PYTHONPATH", ""))
+        if part
+    )
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                child,
+                str(store.path),
+                str(store.path.parent / f"process-ready-{index}"),
+                str(start),
+                not_before,
+                expires_at,
+            ],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(8)
+    ]
+    results: list[dict[str, object]] = []
+    try:
+        ready_paths = [
+            store.path.parent / f"process-ready-{index}" for index in range(8)
+        ]
+        deadline = time.monotonic() + 15
+        while not all(path.exists() for path in ready_paths):
+            statuses = [process.poll() for process in processes]
+            assert all(status is None for status in statuses), (
+                f"admission child exited before barrier: {statuses}"
+            )
+            assert time.monotonic() < deadline, "admission children missed barrier"
+            time.sleep(0.005)
+        start.write_text("start", encoding="utf-8")
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=20)
+            assert process.returncode == 0, stderr
+            results.append(json.loads(stdout))
+    finally:
+        start.touch(exist_ok=True)
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=5)
+
+    assert sum(not result["recovered"] for result in results) == 1
+    assert len({result["payload_sha256"] for result in results}) == 1
+    assert {result["sequence"] for result in results} == {1}
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="POSIX writer lock contract",
+)
+def test_distinct_process_writers_wait_through_post_close_confirmation(
+    tmp_path: Path,
+) -> None:
+    assert fcntl is not None
+    store = _store(tmp_path)
+    release_first = store.path.parent / "release-first"
+    first_after_close = store.path.parent / "first-after-close"
+    second_started = store.path.parent / "second-started"
+    second_entered_database = store.path.parent / "second-entered-database"
+    child = r"""
+import json
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from odoo_accounting_cli_v3.read_evidence_admission import (
+    ADMISSION_INDEX_PATH,
+    ADMISSION_INDEX_SIGNATURE_PATH,
+    ReadEvidenceAdmissionRequest,
+    SQLiteReadEvidenceAdmissionStore,
+)
+
+path = Path(sys.argv[1])
+role = sys.argv[2]
+first_after_close = Path(sys.argv[3])
+release_first = Path(sys.argv[4])
+second_started = Path(sys.argv[5])
+second_entered_database = Path(sys.argv[6])
+if role == "second":
+    second_started.write_text("started", encoding="utf-8")
+store = SQLiteReadEvidenceAdmissionStore.open_existing(path, busy_timeout_ms=10000)
+
+if role == "first":
+    real_fsync_database = store._fsync_database
+
+    def wait_after_close(*args, **kwargs):
+        first_after_close.write_text("ready", encoding="utf-8")
+        deadline = time.monotonic() + 20
+        while not release_first.exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("first writer release barrier timed out")
+            time.sleep(0.005)
+        return real_fsync_database(*args, **kwargs)
+
+    store._fsync_database = wait_after_close
+    values = {
+        "authorization_id": "authz-dev266-distinct-1",
+        "authorization_sha256": "7" * 64,
+        "nonce_sha256": "8" * 64,
+        "run_id": "run-dev266-distinct-1",
+        "index_sha256": "5" * 64,
+        "index_signature_sha256": "6" * 64,
+        "closure_tree_sha256": "a" * 64,
+        "scope_sha256": "b" * 64,
+    }
+else:
+    real_secure_database = store._secure_database_file
+
+    def record_database_entry(*args, **kwargs):
+        second_entered_database.write_text("entered", encoding="utf-8")
+        return real_secure_database(*args, **kwargs)
+
+    store._secure_database_file = record_database_entry
+    values = {
+        "authorization_id": "authz-dev266-distinct-2",
+        "authorization_sha256": "9" * 64,
+        "nonce_sha256": "0" * 64,
+        "run_id": "run-dev266-distinct-2",
+        "index_sha256": "c" * 64,
+        "index_signature_sha256": "d" * 64,
+        "closure_tree_sha256": "e" * 64,
+        "scope_sha256": "f" * 64,
+    }
+now = datetime.now(timezone.utc).replace(microsecond=0)
+decision = store.consume(ReadEvidenceAdmissionRequest(
+    release_identity={
+        "commit": "1" * 40,
+        "manifest_sha256": "2" * 64,
+        "package_sha256": "3" * 64,
+        "registry_digest": "4" * 64,
+        "release": "0.1.0.dev266-test",
+    },
+    index_path=ADMISSION_INDEX_PATH,
+    index_sha256=values["index_sha256"],
+    index_size=4096,
+    index_signature_path=ADMISSION_INDEX_SIGNATURE_PATH,
+    index_signature_sha256=values["index_signature_sha256"],
+    index_signature_size=256,
+    closure_tree_sha256=values["closure_tree_sha256"],
+    closure_file_count=37,
+    closure_total_bytes=123456,
+    scope_sha256=values["scope_sha256"],
+    authorization_id=values["authorization_id"],
+    authorization_sha256=values["authorization_sha256"],
+    nonce_sha256=values["nonce_sha256"],
+    run_id=values["run_id"],
+    authorization_not_before=now - timedelta(minutes=1),
+    authorization_expires_at=now + timedelta(minutes=5),
+))
+print(json.dumps({
+    "authorization_id": values["authorization_id"],
+    "recovered": decision.recovered,
+    "sequence": decision.sequence,
+}, sort_keys=True))
+"""
+    environment = os.environ.copy()
+    source_root = str(Path(admission_module.__file__).resolve().parents[1])
+    environment["PYTHONPATH"] = os.pathsep.join(
+        part
+        for part in (source_root, environment.get("PYTHONPATH", ""))
+        if part
+    )
+
+    def start_child(role: str) -> subprocess.Popen[str]:
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                child,
+                str(store.path),
+                role,
+                str(first_after_close),
+                str(release_first),
+                str(second_started),
+                str(second_entered_database),
+            ],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def wait_for(path: Path, processes: tuple[subprocess.Popen[str], ...]) -> None:
+        deadline = time.monotonic() + 15
+        while not path.exists():
+            assert all(process.poll() is None for process in processes)
+            assert time.monotonic() < deadline, f"barrier timed out: {path.name}"
+            time.sleep(0.005)
+
+    first = start_child("first")
+    second: subprocess.Popen[str] | None = None
+    outputs: list[dict[str, object]] = []
+    try:
+        wait_for(first_after_close, (first,))
+        lock_descriptor = os.open(
+            store._writer_lock_path,
+            os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW,
+        )
+        try:
+            with pytest.raises(BlockingIOError) as caught:
+                fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert caught.value.errno in (errno.EACCES, errno.EAGAIN)
+        finally:
+            os.close(lock_descriptor)
+
+        second = start_child("second")
+        wait_for(second_started, (first, second))
+        time.sleep(0.25)
+        assert second.poll() is None
+        assert not second_entered_database.exists()
+
+        release_first.write_text("release", encoding="utf-8")
+        for process in (first, second):
+            stdout, stderr = process.communicate(timeout=30)
+            assert process.returncode == 0, stderr
+            outputs.append(json.loads(stdout))
+    finally:
+        release_first.touch(exist_ok=True)
+        for process in (first, second):
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=5)
+
+    assert {output["sequence"] for output in outputs} == {1, 2}
+    assert {output["recovered"] for output in outputs} == {False}
+    assert {output["authorization_id"] for output in outputs} == {
+        "authz-dev266-distinct-1",
+        "authz-dev266-distinct-2",
+    }
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT sequence, authorization_id FROM read_evidence_admissions "
+            "ORDER BY sequence"
+        ).fetchall() == [
+            (1, "authz-dev266-distinct-1"),
+            (2, "authz-dev266-distinct-2"),
+        ]
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="POSIX writer lock contract",
+)
+def test_writer_lock_is_persistent_private_bounded_and_rejects_unsafe_files(
+    tmp_path: Path,
+) -> None:
+    assert fcntl is not None
+    store = _store(tmp_path)
+    lock_path = store._writer_lock_path
+    metadata = lock_path.lstat()
+    original_identity = (metadata.st_dev, metadata.st_ino)
+    assert stat.S_ISREG(metadata.st_mode)
+    assert metadata.st_uid == os.geteuid()
+    assert stat.S_IMODE(metadata.st_mode) == 0o600
+    assert metadata.st_nlink == 1
+
+    store.consume(_request())
+    assert (lock_path.stat().st_dev, lock_path.stat().st_ino) == original_identity
+
+    contender = SQLiteReadEvidenceAdmissionStore.open_existing(
+        store.path, busy_timeout_ms=250
+    )
+    held = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+    fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    timed_request = _request(
+        authorization_id="authz-dev266-lock-timeout",
+        authorization_sha256="9" * 64,
+        nonce_sha256="0" * 64,
+        run_id="run-dev266-lock-timeout",
+        index_sha256="c" * 64,
+        index_signature_sha256="d" * 64,
+        closure_tree_sha256="e" * 64,
+        scope_sha256="f" * 64,
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(ReadEvidenceAdmissionError, match="lock deadline"):
+            contender.consume(timed_request)
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        os.close(held)
+    assert time.monotonic() - started < 2
+    assert contender.consume(timed_request).sequence == 2
+
+    cases: list[tuple[str, str]] = []
+    wrong_mode_parent = tmp_path / "wrong-mode-lock"
+    wrong_mode_parent.mkdir(mode=0o700)
+    wrong_mode_lock = wrong_mode_parent / "admission.sqlite3.writer.lock"
+    wrong_mode_lock.write_bytes(b"")
+    wrong_mode_lock.chmod(0o640)
+    cases.append(("wrong-mode-lock", "invalid"))
+
+    symlink_parent = tmp_path / "symlink-lock"
+    symlink_parent.mkdir(mode=0o700)
+    symlink_target = symlink_parent / "target"
+    symlink_target.write_bytes(b"")
+    symlink_target.chmod(0o600)
+    (symlink_parent / "admission.sqlite3.writer.lock").symlink_to(symlink_target)
+    cases.append(("symlink-lock", "cannot be secured"))
+
+    hardlink_parent = tmp_path / "hardlink-lock"
+    hardlink_parent.mkdir(mode=0o700)
+    hardlink_target = hardlink_parent / "target"
+    hardlink_target.write_bytes(b"")
+    hardlink_target.chmod(0o600)
+    os.link(hardlink_target, hardlink_parent / "admission.sqlite3.writer.lock")
+    cases.append(("hardlink-lock", "invalid"))
+
+    fifo_parent = tmp_path / "fifo-lock"
+    fifo_parent.mkdir(mode=0o700)
+    os.mkfifo(fifo_parent / "admission.sqlite3.writer.lock", mode=0o600)
+    cases.append(("fifo-lock", "invalid"))
+
+    for parent_name, message in cases:
+        path = (tmp_path / parent_name / "admission.sqlite3").resolve()
+        with pytest.raises(ReadEvidenceAdmissionError, match=message):
+            SQLiteReadEvidenceAdmissionStore(path)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="POSIX writer lock contract",
+)
+def test_published_reader_waits_for_post_close_confirmation(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    consumed = store.consume(_request())
+    context = multiprocessing.get_context("fork")
+    writer_paused = context.Event()
+    release_writer = context.Event()
+    reader_started = context.Event()
+    results = context.Queue()
+
+    def publish_then_fail_confirmation() -> None:
+        child_store = SQLiteReadEvidenceAdmissionStore.open_existing(store.path)
+
+        def fail_after_release(*args: object, **kwargs: object) -> None:
+            del args, kwargs
+            writer_paused.set()
+            if not release_writer.wait(timeout=20):
+                raise RuntimeError("writer release barrier timed out")
+            raise OSError("simulated post-close confirmation failure")
+
+        child_store._fsync_database = fail_after_release  # type: ignore[method-assign]
+        try:
+            _mark_published(child_store, consumed.payload_sha256)
+        except ReadEvidenceAdmissionCommitOutcomeUnknown:
+            results.put(("writer", "outcome-unknown"))
+        else:  # pragma: no cover - the injected confirmation failure is mandatory
+            results.put(("writer", "unexpected-success"))
+
+    def verify_published() -> None:
+        reader_started.set()
+        child_store = SQLiteReadEvidenceAdmissionStore.open_existing(store.path)
+        published = child_store.require_published(
+            authorization_id=_request().authorization_id,
+            payload_sha256=consumed.payload_sha256,
+            sequence=consumed.sequence,
+            admission_signature_sha256="d" * 64,
+        )
+        results.put(("reader", published.state.value))
+
+    writer = context.Process(target=publish_then_fail_confirmation)
+    reader: multiprocessing.Process | None = None
+    writer.start()
+    try:
+        assert writer_paused.wait(timeout=15)
+        reader = context.Process(target=verify_published)
+        reader.start()
+        assert reader_started.wait(timeout=15)
+        with pytest.raises(queue.Empty):
+            results.get(timeout=0.25)
+        assert writer.is_alive()
+        assert reader.is_alive()
+
+        release_writer.set()
+        outcomes = {results.get(timeout=20), results.get(timeout=20)}
+        writer.join(timeout=20)
+        reader.join(timeout=20)
+    finally:
+        release_writer.set()
+        for process in (writer, reader):
+            if process is not None and process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+    assert writer.exitcode == 0
+    assert reader is not None and reader.exitcode == 0
+    assert outcomes == {
+        ("writer", "outcome-unknown"),
+        ("reader", AdmissionState.PUBLISHED.value),
+    }
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_NOFOLLOW"),
+    reason="POSIX writer lock contract",
+)
+def test_writer_lock_release_failure_returns_unknown_and_exact_retry_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert fcntl is not None
+    store = _store(tmp_path)
+    real_flock = fcntl.flock
+    release_errors: list[BaseException] = []
+    failed_descriptors: list[int] = []
+
+    def fail_first_release(descriptor: int, operation: int) -> object:
+        if operation == fcntl.LOCK_UN and release_errors:
+            failed_descriptors.append(descriptor)
+            raise release_errors.pop(0)
+        return real_flock(descriptor, operation)
+
+    monkeypatch.setattr(fcntl, "flock", fail_first_release)
+    release_errors.append(OSError(errno.EIO, "simulated writer lock release failure"))
+    with pytest.raises(ReadEvidenceAdmissionCommitOutcomeUnknown):
+        store.consume(_request())
+
+    assert not release_errors
+    with pytest.raises(OSError) as closed:
+        os.fstat(failed_descriptors[-1])
+    assert closed.value.errno == errno.EBADF
+    recovered = store.consume(_request())
+    assert recovered.sequence == 1
+    assert recovered.recovered is True
+
+    release_errors.append(KeyboardInterrupt())
+    with pytest.raises(ReadEvidenceAdmissionCommitOutcomeUnknown):
+        store.consume(_request())
+    assert not release_errors
+    with pytest.raises(OSError) as closed:
+        os.fstat(failed_descriptors[-1])
+    assert closed.value.errno == errno.EBADF
+    recovered = store.consume(_request())
+    assert recovered.sequence == 1
+    assert recovered.recovered is True
+
+    published = _mark_published(store, recovered.payload_sha256)
+    release_errors.append(KeyboardInterrupt())
+    with pytest.raises(ReadEvidenceAdmissionError, match="read lock release"):
+        store.require_published(
+            authorization_id=_request().authorization_id,
+            payload_sha256=published.payload_sha256,
+            sequence=published.sequence,
+            admission_signature_sha256="d" * 64,
+        )
+    assert not release_errors
+    with pytest.raises(OSError) as closed:
+        os.fstat(failed_descriptors[-1])
+    assert closed.value.errno == errno.EBADF
+    assert (
+        store.require_published(
+            authorization_id=_request().authorization_id,
+            payload_sha256=published.payload_sha256,
+            sequence=published.sequence,
+            admission_signature_sha256="d" * 64,
+        ).state
+        is AdmissionState.PUBLISHED
+    )
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM read_evidence_admissions"
+        ).fetchone()[0] == 1
+
+
+def test_writer_reuses_remaining_deadline_for_sqlite_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteReadEvidenceAdmissionStore(
+        (tmp_path / "private" / "admission.sqlite3").resolve(),
+        busy_timeout_ms=250,
+    )
+    now = {"value": 100.0}
+    observed_connect_timeouts: list[float] = []
+    deadline_events: list[tuple[str, int | None]] = []
+    deadline_mode: dict[str, int | bool | None] = {
+        "expire_after_busy_timeout": None,
+        "advance_at_begin": True,
+    }
+    real_acquire = store._acquire_writer_lock
+    real_connect = admission_module.sqlite3.connect
+
+    def consume_lock_budget(*args: object, **kwargs: object):
+        lock = real_acquire(*args, **kwargs)
+        now["value"] = 100.1
+        return lock
+
+    def recording_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        observed_connect_timeouts.append(float(kwargs["timeout"]))
+        connection = real_connect(*args, **kwargs)
+        busy_timeout_count = 0
+
+        def record(statement: str) -> None:
+            nonlocal busy_timeout_count
+            normalized = statement.strip().upper()
+            prefix = "PRAGMA BUSY_TIMEOUT = "
+            if normalized.startswith(prefix):
+                busy_timeout_count += 1
+                deadline_events.append(
+                    ("busy-timeout", int(normalized.removeprefix(prefix)))
+                )
+                if (
+                    deadline_mode["expire_after_busy_timeout"]
+                    == busy_timeout_count
+                ):
+                    now["value"] = 100.251
+            elif normalized == "BEGIN IMMEDIATE":
+                deadline_events.append(("begin", None))
+                if deadline_mode["advance_at_begin"]:
+                    now["value"] = 100.2495
+            elif normalized == "COMMIT":
+                deadline_events.append(("commit", None))
+
+        connection.set_trace_callback(record)
+        return connection
+
+    monkeypatch.setattr(
+        admission_module,
+        "bounded_sqlite_operation_deadline",
+        lambda _configured_ms: 100.25,
+    )
+    monkeypatch.setattr(admission_module.time, "monotonic", lambda: now["value"])
+    monkeypatch.setattr(store, "_acquire_writer_lock", consume_lock_budget)
+    monkeypatch.setattr(admission_module.sqlite3, "connect", recording_connect)
+
+    assert store.consume(_request()).sequence == 1
+    assert observed_connect_timeouts == [pytest.approx(0.15)]
+    assert deadline_events == [
+        ("busy-timeout", 150),
+        ("busy-timeout", 150),
+        ("begin", None),
+        ("busy-timeout", 0),
+        ("commit", None),
+    ]
+
+    deadline_events.clear()
+    deadline_mode.update(expire_after_busy_timeout=2, advance_at_begin=False)
+    now["value"] = 100.0
+    with pytest.raises(ReadEvidenceAdmissionError, match="deadline was exceeded"):
+        store.consume(_request())
+    assert deadline_events == [
+        ("busy-timeout", 150),
+        ("busy-timeout", 150),
+    ]
+
+    deadline_events.clear()
+    deadline_mode.update(expire_after_busy_timeout=3, advance_at_begin=False)
+    now["value"] = 100.0
+    with pytest.raises(ReadEvidenceAdmissionCommitOutcomeUnknown) as caught:
+        store.consume(_request())
+    assert isinstance(caught.value.__cause__, ReadEvidenceAdmissionError)
+    assert "deadline was exceeded" in str(caught.value.__cause__)
+    assert deadline_events == [
+        ("busy-timeout", 150),
+        ("busy-timeout", 150),
+        ("begin", None),
+        ("busy-timeout", 150),
+    ]
+
+
 def test_concurrent_collision_allows_only_one_new_admission(tmp_path: Path) -> None:
     store = _store(tmp_path)
     first = _request()
@@ -449,6 +1280,7 @@ def test_existing_lookup_uses_mode_ro_query_only_without_file_mutation(
     tracked_paths = (
         store.path.parent,
         store.path,
+        store._writer_lock_path,
         Path(f"{store.path}-journal"),
         Path(f"{store.path}-wal"),
         Path(f"{store.path}-shm"),
@@ -572,9 +1404,23 @@ def test_open_existing_never_creates_a_missing_or_empty_ledger(tmp_path: Path) -
     empty_parent.mkdir(mode=0o700)
     empty = empty_parent / "admissions.sqlite3"
     empty.touch(mode=0o600)
-    with pytest.raises(ReadEvidenceAdmissionError, match="schema"):
+    with pytest.raises(ReadEvidenceAdmissionError, match="schema|writer lock"):
         SQLiteReadEvidenceAdmissionStore.open_existing(empty.absolute())
     assert empty.stat().st_size == 0
+    assert not Path(f"{empty}.writer.lock").exists()
+
+    if os.name == "posix":
+        created = SQLiteReadEvidenceAdmissionStore(
+            (tmp_path / "created" / "admissions.sqlite3").resolve()
+        )
+        copied_parent = tmp_path / "valid-without-lock"
+        copied_parent.mkdir(mode=0o700)
+        copied = (copied_parent / "admissions.sqlite3").resolve()
+        copied.write_bytes(created.path.read_bytes())
+        copied.chmod(0o600)
+        with pytest.raises(ReadEvidenceAdmissionError, match="writer lock"):
+            SQLiteReadEvidenceAdmissionStore.open_existing(copied)
+        assert not Path(f"{copied}.writer.lock").exists()
 
 
 def test_hot_rollback_journal_is_read_only_fail_closed_then_writer_recovers(
@@ -829,6 +1675,7 @@ def test_request_copies_release_identity_and_rejects_extra_fields() -> None:
 
 def test_commit_failure_returns_no_signable_payload(tmp_path: Path, monkeypatch) -> None:
     store = _store(tmp_path)
+    real_commit = admission_module._commit_connection
 
     def fail_commit(_connection: sqlite3.Connection) -> None:
         raise sqlite3.OperationalError("simulated durable commit failure")
@@ -836,6 +1683,132 @@ def test_commit_failure_returns_no_signable_payload(tmp_path: Path, monkeypatch)
     monkeypatch.setattr(admission_module, "_commit_connection", fail_commit)
     with pytest.raises(ReadEvidenceAdmissionError, match="commit outcome"):
         store.consume(_request())
+    monkeypatch.setattr(admission_module, "_commit_connection", real_commit)
+
+    decision = store.consume(_request())
+    assert decision.recovered is False
+    assert decision.sequence == 1
+
+
+def test_unknown_commit_outcome_survives_connection_close_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    gate = sqlite_process_lifecycle._ProcessSQLiteLifecycle()
+    monkeypatch.setattr(
+        sqlite_process_lifecycle,
+        "_PROCESS_SQLITE_LIFECYCLE",
+        gate,
+    )
+    real_connect = admission_module.sqlite3.connect
+    real_commit = admission_module._commit_connection
+    connections: list[sqlite3.Connection] = []
+
+    class CloseFailingConnection(sqlite3.Connection):
+        def close(self) -> None:
+            raise sqlite3.OperationalError("simulated connection close failure")
+
+    def close_failing_connect(
+        *args: object, **kwargs: object
+    ) -> sqlite3.Connection:
+        kwargs["factory"] = CloseFailingConnection
+        connection = real_connect(*args, **kwargs)  # type: ignore[arg-type]
+        connections.append(connection)
+        return connection
+
+    def commit_then_raise(connection: sqlite3.Connection) -> None:
+        real_commit(connection)
+        raise sqlite3.OperationalError("simulated lost commit acknowledgement")
+
+    monkeypatch.setattr(admission_module.sqlite3, "connect", close_failing_connect)
+    monkeypatch.setattr(admission_module, "_commit_connection", commit_then_raise)
+    try:
+        with pytest.raises(ReadEvidenceAdmissionCommitOutcomeUnknown) as caught:
+            store.consume(_request())
+
+        assert isinstance(caught.value.__cause__, sqlite3.OperationalError)
+        assert "lost commit acknowledgement" in str(caught.value.__cause__)
+        assert any(
+            "connection close also failed: simulated connection close failure" in note
+            for note in getattr(caught.value, "__notes__", ())
+        )
+        assert gate.poisoned is True
+        monkeypatch.setattr(admission_module.sqlite3, "connect", real_connect)
+        monkeypatch.setattr(admission_module, "_commit_connection", real_commit)
+        with pytest.raises(ReadEvidenceAdmissionError, match="lifecycle is unavailable"):
+            store.consume(_request())
+    finally:
+        monkeypatch.setattr(admission_module.sqlite3, "connect", real_connect)
+        monkeypatch.setattr(admission_module, "_commit_connection", real_commit)
+        for connection in connections:
+            sqlite3.Connection.close(connection)
+
+
+def test_missing_sqlite_serialize_rejects_before_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    real_connect = admission_module.sqlite3.connect
+
+    class NoSerializeConnection(sqlite3.Connection):
+        serialize = None
+
+    def connect_without_serialize(
+        *args: object, **kwargs: object
+    ) -> sqlite3.Connection:
+        kwargs["factory"] = NoSerializeConnection
+        return real_connect(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        admission_module.sqlite3,
+        "connect",
+        connect_without_serialize,
+    )
+
+    with pytest.raises(ReadEvidenceAdmissionError, match="serialization"):
+        store.consume(_request())
+
+    with real_connect(store.path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM read_evidence_admissions"
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("failure_method", "failure_message"),
+    [
+        ("_verify_database_file", "simulated post-close verification failure"),
+        ("_fsync_database", "simulated post-close fsync failure"),
+    ],
+)
+def test_unknown_commit_outcome_survives_post_close_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_method: str,
+    failure_message: str,
+) -> None:
+    store = _store(tmp_path)
+    real_commit = admission_module._commit_connection
+
+    def commit_then_raise(connection: sqlite3.Connection) -> None:
+        real_commit(connection)
+        raise sqlite3.OperationalError("simulated lost commit acknowledgement")
+
+    def fail_post_close(*_args: object, **_kwargs: object) -> None:
+        raise OSError(failure_message)
+
+    monkeypatch.setattr(admission_module, "_commit_connection", commit_then_raise)
+    monkeypatch.setattr(store, failure_method, fail_post_close)
+
+    with pytest.raises(ReadEvidenceAdmissionCommitOutcomeUnknown) as caught:
+        store.consume(_request())
+
+    assert isinstance(caught.value.__cause__, sqlite3.OperationalError)
+    assert "lost commit acknowledgement" in str(caught.value.__cause__)
+    assert any(
+        f"post-close durability verification also failed: {failure_message}" in note
+        for note in getattr(caught.value, "__notes__", ())
+    )
 
 
 def test_post_commit_durability_failure_returns_no_payload_and_recovers(
@@ -845,12 +1818,12 @@ def test_post_commit_durability_failure_returns_no_payload_and_recovers(
     original_fsync = store._fsync_database
     calls = 0
 
-    def fail_once() -> None:
+    def fail_once(*args: object, **kwargs: object) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise OSError("simulated fsync confirmation failure")
-        original_fsync()
+        original_fsync(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(store, "_fsync_database", fail_once)
     with pytest.raises(ReadEvidenceAdmissionError, match="committed"):
@@ -861,6 +1834,181 @@ def test_post_commit_durability_failure_returns_no_payload_and_recovers(
     assert recovered.sequence == 1
 
 
+def test_post_close_path_swap_before_fsync_returns_no_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    committed_path = store.path.with_name("committed-admissions.sqlite3")
+    original_fstat = os.fstat
+    original_lstat = Path.lstat
+    original_open = os.open
+    original_verify = store._verify_database_file
+    durable_metadata: object | None = None
+    replacement_descriptors: set[int] = set()
+    swapped = False
+
+    def verify_then_swap(*args: object, **kwargs: object) -> None:
+        nonlocal durable_metadata, swapped
+        original_verify(*args, **kwargs)  # type: ignore[arg-type]
+        if not swapped:
+            durable_metadata = original_lstat(store.path)
+            swapped = True
+            os.replace(store.path, committed_path)
+            _create_zero_byte_bootstrap(store.path)
+            os.truncate(store.path, durable_metadata.st_size)
+
+    def reused_identity_lstat(path: Path) -> object:
+        metadata = original_lstat(path)
+        if swapped and path == store.path:
+            assert durable_metadata is not None
+            return SimpleNamespace(
+                st_mode=durable_metadata.st_mode,
+                st_dev=durable_metadata.st_dev,
+                st_ino=durable_metadata.st_ino,
+                st_nlink=durable_metadata.st_nlink,
+                st_uid=durable_metadata.st_uid,
+                st_gid=durable_metadata.st_gid,
+                st_size=durable_metadata.st_size,
+                st_mtime_ns=durable_metadata.st_mtime_ns,
+                st_ctime_ns=durable_metadata.st_ctime_ns,
+            )
+        return metadata
+
+    def track_replacement_open(
+        path: object, flags: int, mode: int = 0o777
+    ) -> int:
+        descriptor = original_open(path, flags, mode)
+        if swapped and Path(path) == store.path:
+            replacement_descriptors.add(descriptor)
+        return descriptor
+
+    def reused_identity_fstat(descriptor: int) -> object:
+        metadata = original_fstat(descriptor)
+        if descriptor in replacement_descriptors:
+            assert durable_metadata is not None
+            return SimpleNamespace(
+                st_mode=durable_metadata.st_mode,
+                st_dev=durable_metadata.st_dev,
+                st_ino=durable_metadata.st_ino,
+                st_nlink=durable_metadata.st_nlink,
+                st_uid=durable_metadata.st_uid,
+                st_gid=durable_metadata.st_gid,
+                st_size=durable_metadata.st_size,
+                st_mtime_ns=durable_metadata.st_mtime_ns,
+                st_ctime_ns=durable_metadata.st_ctime_ns,
+            )
+        return metadata
+
+    monkeypatch.setattr(store, "_verify_database_file", verify_then_swap)
+    monkeypatch.setattr(os, "fstat", reused_identity_fstat)
+    monkeypatch.setattr(os, "open", track_replacement_open)
+    monkeypatch.setattr(Path, "lstat", reused_identity_lstat)
+
+    with pytest.raises(ReadEvidenceAdmissionCommitOutcomeUnknown) as caught:
+        store.consume(_request())
+
+    assert swapped is True
+    assert durable_metadata is not None
+    assert isinstance(caught.value.__cause__, ReadEvidenceAdmissionError)
+    assert "content changed" in str(caught.value.__cause__)
+    assert store.path.stat().st_size == durable_metadata.st_size
+    with sqlite3.connect(committed_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM read_evidence_admissions"
+        ).fetchone()[0] == 1
+
+
+def test_durability_close_rejects_reused_inode_with_changed_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path)
+    committed_path = store.path.with_name("committed-reused-inode.sqlite3")
+    original_close = store._close_descriptor
+    original_fstat = os.fstat
+    original_lstat = Path.lstat
+    original_open = os.open
+    durable_metadata: object | None = None
+    replacement_descriptors: set[int] = set()
+    swapped = False
+
+    def close_then_replace(
+        descriptor: int,
+        lease: object,
+        *,
+        label: str,
+    ) -> None:
+        nonlocal durable_metadata, swapped
+        if label == "read evidence admission durability database":
+            durable_metadata = os.fstat(descriptor)
+        original_close(descriptor, lease, label=label)  # type: ignore[arg-type]
+        if label == "read evidence admission durability database" and not swapped:
+            assert durable_metadata is not None
+            os.replace(store.path, committed_path)
+            _create_zero_byte_bootstrap(store.path)
+            os.truncate(store.path, durable_metadata.st_size)
+            swapped = True
+
+    def reused_identity_lstat(path: Path) -> object:
+        metadata = original_lstat(path)
+        if swapped and path == store.path:
+            assert durable_metadata is not None
+            return SimpleNamespace(
+                st_mode=durable_metadata.st_mode,
+                st_dev=durable_metadata.st_dev,
+                st_ino=durable_metadata.st_ino,
+                st_nlink=durable_metadata.st_nlink,
+                st_uid=durable_metadata.st_uid,
+                st_gid=durable_metadata.st_gid,
+                st_size=durable_metadata.st_size,
+                st_mtime_ns=durable_metadata.st_mtime_ns,
+                st_ctime_ns=durable_metadata.st_ctime_ns,
+            )
+        return metadata
+
+    def track_replacement_open(
+        path: object, flags: int, mode: int = 0o777
+    ) -> int:
+        descriptor = original_open(path, flags, mode)
+        if swapped and Path(path) == store.path:
+            replacement_descriptors.add(descriptor)
+        return descriptor
+
+    def reused_identity_fstat(descriptor: int) -> object:
+        metadata = original_fstat(descriptor)
+        if descriptor in replacement_descriptors:
+            assert durable_metadata is not None
+            return SimpleNamespace(
+                st_mode=durable_metadata.st_mode,
+                st_dev=durable_metadata.st_dev,
+                st_ino=durable_metadata.st_ino,
+                st_nlink=durable_metadata.st_nlink,
+                st_uid=durable_metadata.st_uid,
+                st_gid=durable_metadata.st_gid,
+                st_size=durable_metadata.st_size,
+                st_mtime_ns=durable_metadata.st_mtime_ns,
+                st_ctime_ns=durable_metadata.st_ctime_ns,
+            )
+        return metadata
+
+    monkeypatch.setattr(store, "_close_descriptor", close_then_replace)
+    monkeypatch.setattr(os, "fstat", reused_identity_fstat)
+    monkeypatch.setattr(os, "open", track_replacement_open)
+    monkeypatch.setattr(Path, "lstat", reused_identity_lstat)
+
+    with pytest.raises(ReadEvidenceAdmissionCommitOutcomeUnknown) as caught:
+        store.consume(_request())
+
+    assert swapped is True
+    assert durable_metadata is not None
+    assert isinstance(caught.value.__cause__, ReadEvidenceAdmissionError)
+    assert "content changed" in str(caught.value.__cause__)
+    assert store.path.stat().st_size == durable_metadata.st_size
+    with sqlite3.connect(committed_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM read_evidence_admissions"
+        ).fetchone()[0] == 1
+
+
 def test_published_commit_confirmation_failure_recovers_exactly_after_expiry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -869,12 +2017,12 @@ def test_published_commit_confirmation_failure_recovers_exactly_after_expiry(
     original_fsync = store._fsync_database
     calls = 0
 
-    def fail_once() -> None:
+    def fail_once(*args: object, **kwargs: object) -> None:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise OSError("simulated publication fsync confirmation failure")
-        original_fsync()
+        original_fsync(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(store, "_fsync_database", fail_once)
     with pytest.raises(ReadEvidenceAdmissionError, match="committed"):
@@ -1056,7 +2204,7 @@ def test_read_only_rejects_interrupted_bootstrap_without_side_effects(
             for item in tracked
         }
 
-        with pytest.raises(ReadEvidenceAdmissionError, match="schema"):
+        with pytest.raises(ReadEvidenceAdmissionError, match="schema|writer lock"):
             SQLiteReadEvidenceAdmissionStore.open_existing(path)
 
         after = {

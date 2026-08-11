@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
 	mkdtemp,
 	readFile,
@@ -20,6 +21,10 @@ import {
 	collectFinalEvidenceStream,
 	validateFinalEvidenceChildResult,
 } from "../final-evidence.mjs";
+import {
+	BrokerSessionWriteError,
+	writeBrokerSessionHandle,
+} from "../trusted-session.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RESULT_DIGEST = "b".repeat(64);
@@ -87,6 +92,10 @@ function spawnFd4Fixture({
 }) {
 	const script = String.raw`
 const fs = require("node:fs");
+const brokerSessionHandle = fs.readFileSync(3, "utf8");
+if (brokerSessionHandle !== "broker-session-handle") {
+  throw new Error("unexpected broker session handle");
+}
 const evidence = process.argv[2] === ""
   ? Buffer.from(process.argv[1], "base64")
   : Buffer.alloc(Number(process.argv[2]), 0x20);
@@ -106,16 +115,20 @@ process.exitCode = Number(process.argv[4]);
 	], {
 		stdio: ["ignore", "pipe", "pipe", "pipe", "pipe"],
 	});
-	child.stdio[3].end("broker-session-handle", "utf8");
+	const brokerWrite = writeBrokerSessionHandle(
+		child.stdio[3],
+		"broker-session-handle",
+	);
 	const evidenceResult = collectFinalEvidenceStream(child.stdio[4]);
 	const stdoutChunks = [];
 	child.stdout.on("data", (chunk) => {
 		stdoutChunks.push(Buffer.from(chunk));
 	});
-	const exited = new Promise((resolve, reject) => {
+	const childExited = new Promise((resolve, reject) => {
 		child.once("error", reject);
 		child.once("close", (code) => resolve(code));
 	});
+	const exited = Promise.all([childExited, brokerWrite]).then(([code]) => code);
 	return {
 		evidenceResult,
 		exited,
@@ -220,6 +233,75 @@ test("the FD4 collector rejects oversized child output", async () => {
 	await oversized.exited;
 });
 
+test("FD3 write fails closed when the child exits without reading it", {
+	skip: process.platform === "linux" ? false : "requires Linux child-process pipe semantics",
+}, async () => {
+	const child = spawn(process.execPath, [
+		"-e",
+		"process.exitCode = 0;",
+	], {
+		stdio: ["ignore", "ignore", "ignore", "pipe"],
+	});
+	const write = writeBrokerSessionHandle(
+		child.stdio[3],
+		"broker-session-handle",
+	);
+	const writeRejected = assert.rejects(
+		write,
+		(error) => (
+			error instanceof BrokerSessionWriteError
+			&& error.code === "broker_session_write_failed"
+		),
+	);
+	const exitCode = await new Promise((resolve, reject) => {
+		child.once("error", reject);
+		child.once("close", resolve);
+	});
+	assert.equal(exitCode, 0);
+	await writeRejected;
+});
+
+test("FD3 writer preserves an empty legacy value and rejects a late pipe reset", {
+	timeout: 1000,
+}, async () => {
+	class ScriptedStream extends EventEmitter {
+		constructor(events) {
+			super();
+			this.events = events;
+			this.observed = null;
+		}
+
+		end(value, encoding) {
+			this.observed = { encoding, value };
+			queueMicrotask(() => {
+				for (const [event, argument] of this.events) {
+					this.emit(event, argument);
+				}
+			});
+		}
+	}
+
+	const clean = new ScriptedStream([
+		["finish"],
+		["close"],
+	]);
+	await writeBrokerSessionHandle(clean, "");
+	assert.deepEqual(clean.observed, { encoding: "utf8", value: "" });
+
+	const reset = new ScriptedStream([
+		["finish"],
+		["error", Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })],
+		["close"],
+	]);
+	await assert.rejects(
+		writeBrokerSessionHandle(reset, "broker-session-handle"),
+		(error) => (
+			error instanceof BrokerSessionWriteError
+			&& error.code === "broker_session_write_failed"
+		),
+	);
+});
+
 test("self-claimed success without a matching committed receipt is rejected", () => {
 	expectCode(
 		() => validateFinalEvidenceChildResult({
@@ -245,11 +327,13 @@ test("the hardened server gates FD4 then asks the trusted broker to deliver the 
 	assert.match(source, /serializeFinalDeliveredAnswer\(/);
 	assert.match(
 		source,
-		/child\.stdio\[3\]\.end\(brokerEnabled \? brokerSessionHandle : "", "utf8"\)/,
+		/const brokerHandleWriteOutcome = writeBrokerSessionHandle\(\s*child\.stdio\[3\],\s*brokerEnabled \? brokerSessionHandle : "",\s*\)\.then\(/,
 	);
+	assert.match(source, /const brokerWriteOutcome = await brokerHandleWriteOutcome/);
+	assert.match(source, /if \(!brokerWriteOutcome\.ok\) throw brokerWriteOutcome\.error/);
 	assert.doesNotMatch(
 		source,
-		/child\.stdio\[3\]\.end\([^\n]*resultDeliverySessionHandle/,
+		/writeBrokerSessionHandle\([^;]*resultDeliverySessionHandle/s,
 	);
 	assert.match(source, /const PREFLIGHT_TIMEOUT_MS = 5_000/);
 	assert.match(source, /const MAX_PI_CHILD_TIMEOUT_MS = 120_000/);

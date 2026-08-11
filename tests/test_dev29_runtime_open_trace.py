@@ -1405,7 +1405,23 @@ def test_private_trace_staging_accepts_custom_parent(
 
     assert staging.staging_parent == tmp_path
     assert staging.directory.parent == tmp_path
-    assert staging.directory.name.startswith(".target.")
+    assert staging.directory.name == (
+        f"trace-{os.getpid()}-123-"
+        f"{hashlib.sha256(b'target').hexdigest()[:16]}"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process identity")
+def test_private_trace_staging_resolves_default_parent_at_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(trace, "_proc_starttime", lambda _pid: 123)
+    monkeypatch.setattr(trace, "STAGING_PARENT", tmp_path)
+
+    staging = trace.PrivateTraceStaging("target")
+
+    assert staging.staging_parent == tmp_path
+    assert staging.directory.parent == tmp_path
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX device identities")

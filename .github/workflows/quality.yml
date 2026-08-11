@@ -343,13 +343,42 @@ jobs:
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
           skipped = root.findall(".//skipped")
-          if not tests or failures or errors or skipped:
+          expected_counts = {
+              "tests.test_odoo_runner": 51,
+              "tests.test_odoo_runner_linux": 7,
+          }
+          observed_counts = {module: 0 for module in expected_counts}
+          unclassified = []
+          for case in tests:
+              classname = case.get("classname", "")
+              matches = [
+                  module
+                  for module in expected_counts
+                  if classname == module or classname.startswith(f"{module}.")
+              ]
+              if len(matches) != 1:
+                  unclassified.append(classname)
+                  continue
+              observed_counts[matches[0]] += 1
+          if (
+              len(tests) != sum(expected_counts.values())
+              or observed_counts != expected_counts
+              or unclassified
+              or failures
+              or errors
+              or skipped
+          ):
               raise SystemExit(
                   "non-root Linux process gate failed: "
                   f"tests={len(tests)} failures={len(failures)} "
-                  f"errors={len(errors)} skipped={len(skipped)}"
+                  f"errors={len(errors)} skipped={len(skipped)} "
+                  f"observed_counts={observed_counts} "
+                  f"expected_counts={expected_counts} "
+                  f"unclassified={unclassified}"
               )
-          print(f"non_root_linux_process_tests={len(tests)}")
+          print("non_root_linux_process_runner_tests=51")
+          print("non_root_linux_process_runner_linux_tests=7")
+          print("non_root_linux_process_tests=58")
           PY
       - name: Stress Linux UDS capacity and atomic session lifecycle
         run: |
@@ -943,7 +972,38 @@ jobs:
           node --check trusted-session.mjs
           node --check odoo-session-header-resolver.mjs
           node --check extensions/odoo-v3-cli.mjs
-          PI_BRIDGE_RUN_ROOT_INTEGRATION=1 npm test
+          tap_report="$RUNNER_TEMP/pi-bridge-root-integration.tap"
+          PI_BRIDGE_RUN_ROOT_INTEGRATION=1 \
+            npm test -- --test-reporter=tap | tee "$tap_report"
+          /usr/bin/python3 - "$tap_report" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          report = Path(sys.argv[1]).read_text(encoding="utf-8")
+          expected = {
+              "tests": 242,
+              "pass": 242,
+              "fail": 0,
+              "cancelled": 0,
+              "skipped": 0,
+              "todo": 0,
+          }
+          observed = {}
+          for field in expected:
+              matches = re.findall(rf"^# {field} ([0-9]+)$", report, re.MULTILINE)
+              if len(matches) != 1:
+                  raise SystemExit(
+                      "Pi root-integration TAP summary is missing or ambiguous: "
+                      f"field={field!r} matches={matches!r}"
+                  )
+              observed[field] = int(matches[0])
+          if observed != expected:
+              raise SystemExit(
+                  "Pi root-integration gate failed: "
+                  f"observed={observed!r} expected={expected!r}"
+              )
+          PY
       - name: Verify the locked Pi CLI treats caller text literally
         working-directory: pi_bridge
         run: |
@@ -989,11 +1049,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e ".[test]"
-      - name: Verify the Dev265 read-evidence boundary as Linux root
+      - name: Verify the Dev266 read-evidence boundary as Linux root
         shell: bash
         run: |
           set -euo pipefail
-          report="$RUNNER_TEMP/dev265-read-evidence-root.xml"
+          report="$RUNNER_TEMP/dev266-read-evidence-root.xml"
           sudo "$(command -v python)" -m pytest -q -rs -p no:cacheprovider \
             --junitxml="$report" \
             tests/test_read_evidence_admission.py \
@@ -1012,7 +1072,7 @@ jobs:
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
           expected_counts = {
-              "test_read_evidence_admission": 67,
+             "test_read_evidence_admission": 84,
               "test_read_evidence_publication": 50,
               "test_read_evidence_raw_v3": 68,
               "test_read_evidence_v3": 61,
@@ -1054,7 +1114,7 @@ jobs:
                   skipped_node = case.find("skipped")
                   if skipped_node is not None:
                       print(
-                          "dev265_read_evidence_skipped="
+                          "dev266_read_evidence_skipped="
                           f"{case.get('classname', '')}.{case.get('name', '')}:"
                           f"{skipped_node.get('message', '')}",
                           file=sys.stderr,
@@ -1068,20 +1128,20 @@ jobs:
               or errors
           ):
               raise SystemExit(
-                  "Dev265 read-evidence root gate is incomplete: "
+                  "Dev266 read-evidence root gate is incomplete: "
                   f"tests={len(tests)} skipped={len(skipped)} "
                   f"failures={len(failures)} errors={len(errors)} "
                   f"observed_counts={observed_counts} "
                   f"expected_counts={expected_counts} "
                   f"unclassified={unclassified}"
               )
-          print("dev265_read_evidence_admission_root_tests=67")
-          print("dev265_read_evidence_publication_root_tests=50")
-          print("dev265_read_evidence_raw_v3_root_tests=68")
-          print("dev265_read_evidence_v3_root_tests=61")
-          print("dev265_read_evidence_v3_linux_integration_root_tests=1")
-          print("dev265_sshsig_root_tests=16")
-          print("dev265_read_evidence_root_tests=263")
+          print("dev266_read_evidence_admission_root_tests=84")
+          print("dev266_read_evidence_publication_root_tests=50")
+          print("dev266_read_evidence_raw_v3_root_tests=68")
+          print("dev266_read_evidence_v3_root_tests=61")
+          print("dev266_read_evidence_v3_linux_integration_root_tests=1")
+          print("dev266_sshsig_root_tests=16")
+          print("dev266_read_evidence_root_tests=280")
           PY
       - name: Verify the tracked dev8 tool manifest and embedded Python
         run: python deployment/dev8/check_toolchain.py

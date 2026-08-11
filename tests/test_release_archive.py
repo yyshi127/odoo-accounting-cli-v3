@@ -297,6 +297,7 @@ DEV263_READ_EVIDENCE_V3_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/cli.py",
         "src/odoo_accounting_cli_v3/read_evidence_admission.py",
         "src/odoo_accounting_cli_v3/read_evidence_v3.py",
+        "src/odoo_accounting_cli_v3/sqlite_process_lifecycle.py",
         "tests/TEST.md",
         "tests/test_cli_evidence.py",
         "tests/test_cli_evidence_v3_dispatch.py",
@@ -371,6 +372,31 @@ DEV265_REFUND_POST_RELEASE_MEMBERS = frozenset(
         "tests/test_write_registry_contracts.py",
         "tests/test_write_semantics.py",
         "tests/test_write_service.py",
+    }
+)
+DEV266_CI_REMEDIATION_RELEASE_MEMBERS = frozenset(
+    {
+        ".github/workflows/quality.yml",
+        "README.md",
+        "VERSION",
+        "deployment/dev29/runtime_open_trace.py",
+        "docs/DEPLOYMENT.md",
+        "docs/READ_EVIDENCE_INDEX.md",
+        "docs/RUNTIME_CONFIGURATION.md",
+        "pi_bridge/server.mjs",
+        "pi_bridge/tests/server-final-evidence.test.mjs",
+        "pi_bridge/trusted-session.mjs",
+        "src/odoo_accounting_cli_v3/monotonic_deadline.py",
+        "src/odoo_accounting_cli_v3/read_evidence_admission.py",
+        "src/odoo_accounting_cli_v3/sqlite_process_lifecycle.py",
+        "tests/TEST.md",
+        "tests/test_dev29_runtime_open_trace.py",
+        "tests/test_odoo_runner.py",
+        "tests/test_odoo_runner_linux.py",
+        "tests/test_pi_bridge_source.py",
+        "tests/test_read_evidence_admission.py",
+        "tests/test_read_evidence_v3_linux_integration.py",
+        "tests/test_release_archive.py",
     }
 )
 EFFECT_FINALIZER_RELEASE_MEMBERS = frozenset(
@@ -561,6 +587,7 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
     | DEV263_READ_EVIDENCE_V3_RELEASE_MEMBERS
     | DEV264_READ_EVIDENCE_FOUNDATION_RELEASE_MEMBERS
     | DEV265_REFUND_POST_RELEASE_MEMBERS
+    | DEV266_CI_REMEDIATION_RELEASE_MEMBERS
     | EFFECT_FINALIZER_RELEASE_MEMBERS
     | DEV9_SECURITY_RELEASE_MEMBERS
     | PI_SCENARIO_ACCEPTANCE_RELEASE_MEMBERS
@@ -569,22 +596,27 @@ REQUIRED_WRITE_RELEASE_MEMBERS = (
 
 
 class ReleaseArchiveTest(unittest.TestCase):
-    def test_dev265_refund_post_release_is_complete_and_versioned(self) -> None:
+    def test_dev266_ci_remediation_release_is_complete_and_versioned(self) -> None:
         self.assertEqual(
             (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip(),
-            "0.1.0.dev265",
+            "0.1.0.dev266",
         )
         missing_sources = {
             name
-            for name in DEV265_REFUND_POST_RELEASE_MEMBERS
+            for name in DEV266_CI_REMEDIATION_RELEASE_MEMBERS
             if not (PROJECT_ROOT / name).is_file()
         }
         self.assertFalse(missing_sources, sorted(missing_sources))
         self.assertTrue(
-            DEV265_REFUND_POST_RELEASE_MEMBERS.issubset(
+            DEV266_CI_REMEDIATION_RELEASE_MEMBERS.issubset(
                 REQUIRED_WRITE_RELEASE_MEMBERS
             )
         )
+
+    def test_dev265_refund_post_release_remains_in_the_release(self) -> None:
+        for name in DEV265_REFUND_POST_RELEASE_MEMBERS:
+            self.assertTrue((PROJECT_ROOT / name).is_file(), name)
+            self.assertIn(name, REQUIRED_WRITE_RELEASE_MEMBERS)
 
     def test_dev264_read_evidence_foundations_are_in_the_release(self) -> None:
         for name in DEV264_READ_EVIDENCE_FOUNDATION_RELEASE_MEMBERS:
