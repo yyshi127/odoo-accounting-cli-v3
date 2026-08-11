@@ -2004,7 +2004,6 @@ def test_real_runtime_trace_gate_binds_odoo_and_postgres_child_homes(
     release_root = releases / release
     private_root = tmp_path / "private"
     sidecar = private_root / "evidence" / "runtime-open"
-    staging_parent = tmp_path / "staging"
     assert not release_root.exists()
     process_paths: list[Path] = []
     try:
@@ -2033,12 +2032,11 @@ def test_real_runtime_trace_gate_binds_odoo_and_postgres_child_homes(
         process_paths.extend((runtime, direct, odoo_script, postgres_script))
         for path in process_paths:
             path.chmod(0o555)
-        staging_parent.mkdir(mode=0o700)
         sidecar.mkdir(parents=True, mode=0o700)
+        (sidecar / ".trace-staging").mkdir(mode=0o700)
         private_root.chmod(0o700)
         (private_root / "evidence").chmod(0o700)
         sidecar.chmod(0o700)
-        monkeypatch.setattr(trace, "STAGING_PARENT", staging_parent)
         monkeypatch.setattr(trace, "PRIVATE_EVIDENCE_PARENT", private_root)
         monkeypatch.setattr(trace, "_validate_root_chain", lambda _path: None)
         monkeypatch.chdir(release_root)

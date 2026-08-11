@@ -167,15 +167,46 @@ def _test_pi_recomputation_key_loader_for_non_root_posix(
         or os_module.geteuid() == 0
     ):
         return
+    real_reader = cli_module._read_trusted_file
 
-    def load_test_keys(gate, path):
-        return gate.load_attestation_keys(gate.load_json_document(path))
+    def read_test_file(
+        path,
+        label,
+        *,
+        maximum,
+        require_root_owner,
+        executable=False,
+    ):
+        return real_reader(
+            path,
+            label,
+            maximum=maximum,
+            require_root_owner=(
+                False
+                if label == "Pi recomputation attestation keys"
+                else require_root_owner
+            ),
+            executable=executable,
+        )
 
     monkeypatch.setattr(
         cli_module,
-        "_load_root_managed_pi_attestation_keys",
-        load_test_keys,
+        "_read_trusted_file",
+        read_test_file,
     )
+
+
+@pytest.fixture
+def _require_root_managed_write_runtime() -> None:
+    os_module = __import__("os")
+    if (
+        os_module.name == "posix"
+        and (
+            not hasattr(os_module, "geteuid")
+            or os_module.geteuid() != 0
+        )
+    ):
+        pytest.skip("root-managed write runtime fixture requires POSIX root")
 
 
 def _ready_read_capabilities_report(
@@ -2356,6 +2387,7 @@ def test_evidence_verify_sandbox_write_requires_exactly_one_input(tmp_path: Path
 
 def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
     tmp_path: Path,
+    _require_root_managed_write_runtime: None,
 ):
     runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
     evidence_root = tmp_path / "evidence-root"
@@ -2455,6 +2487,7 @@ def test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime(
 
 def test_evidence_sandbox_write_preflight_rejects_unready_onboarding_receipt(
     tmp_path: Path,
+    _require_root_managed_write_runtime: None,
 ):
     runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
     evidence_root = tmp_path / "evidence-root"
@@ -2504,6 +2537,7 @@ def test_evidence_sandbox_write_preflight_rejects_unready_onboarding_receipt(
 
 def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
     tmp_path: Path,
+    _require_root_managed_write_runtime: None,
 ):
     runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
     evidence_root = tmp_path / "evidence-root"
@@ -2590,6 +2624,7 @@ def test_evidence_sandbox_write_environment_audit_reports_ready_preconditions(
 
 def test_evidence_sandbox_write_environment_audit_summary_omits_capability_details(
     tmp_path: Path,
+    _require_root_managed_write_runtime: None,
 ):
     runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
     evidence_root = tmp_path / "evidence-root"
@@ -6312,10 +6347,14 @@ def test_pi_recomputation_attestation_keys_reject_hardlinks(
     key_path = tmp_path / "attestation-keys.json"
     raw = _pi_recomputation_key_document()
     key_path.write_bytes(raw)
+    if os_module.name == "posix":
+        key_path.chmod(0o600)
+        assert __import__("stat").S_IMODE(key_path.stat().st_mode) == 0o600
     try:
         os_module.link(key_path, tmp_path / "attestation-keys-alias.json")
     except OSError as exc:
         pytest.skip(f"hardlinks are unavailable: {exc}")
+    assert key_path.stat().st_nlink == 2
     gate = cli_module._load_pi_scenario_gate()
 
     with patch.object(
@@ -6337,6 +6376,9 @@ def test_pi_recomputation_attestation_keys_reject_nonprivate_modes(
     raw = _pi_recomputation_key_document()
     key_path.write_bytes(raw)
     key_path.chmod(mode)
+    metadata = key_path.stat()
+    assert __import__("stat").S_IMODE(metadata.st_mode) == mode
+    assert metadata.st_nlink == 1
     gate = cli_module._load_pi_scenario_gate()
 
     with patch.object(
@@ -8817,6 +8859,7 @@ def test_evidence_goal_readiness_reports_tampered_sandbox_authorization(
 
 def test_evidence_sandbox_write_preflight_rejects_demo_database_name(
     tmp_path: Path,
+    _require_root_managed_write_runtime: None,
 ):
     runtime_path, _document, base = make_write_runtime(tmp_path / "runtime")
     base["database_name"] = "codex_cn_m31_demo_01"
@@ -8900,6 +8943,7 @@ def test_evidence_sandbox_write_preflight_rejects_non_write_capability(
 
 def test_evidence_sandbox_write_preflight_rejects_release_internal_evidence_root(
     tmp_path: Path,
+    _require_root_managed_write_runtime: None,
 ):
     runtime_path, _document, _base = make_write_runtime(tmp_path / "runtime")
     release_root = Path(_base["release_root"])

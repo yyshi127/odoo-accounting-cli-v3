@@ -37,6 +37,39 @@ jobs:
       - name: Run the Python test suite
         id: python_tests
         run: python -m pytest --junitxml="$RUNNER_TEMP/pytest.xml"
+      - name: Verify the root-managed sandbox write fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          python_bin="$(command -v python)"
+          test "$(id -u)" -ne 0
+          test "$(sudo "$python_bin" -c 'import os; print(os.geteuid())')" = 0
+          report="$RUNNER_TEMP/root-managed-sandbox-write.xml"
+          sudo "$python_bin" -m pytest -q -p no:cacheprovider \
+            --junitxml="$report" \
+            tests/test_cli_evidence.py::test_evidence_sandbox_write_preflight_accepts_staged_sandbox_runtime \
+            tests/test_cli_evidence.py::test_evidence_sandbox_write_preflight_rejects_unready_onboarding_receipt \
+            tests/test_cli_evidence.py::test_evidence_sandbox_write_environment_audit_reports_ready_preconditions \
+            tests/test_cli_evidence.py::test_evidence_sandbox_write_environment_audit_summary_omits_capability_details \
+            tests/test_cli_evidence.py::test_evidence_sandbox_write_preflight_rejects_demo_database_name \
+            tests/test_cli_evidence.py::test_evidence_sandbox_write_preflight_rejects_release_internal_evidence_root
+          sudo "$python_bin" - "$report" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          tests = root.findall(".//testcase")
+          failures = root.findall(".//failure")
+          errors = root.findall(".//error")
+          skipped = root.findall(".//skipped")
+          if len(tests) != 6 or failures or errors or skipped:
+              raise SystemExit(
+                  "Root-managed sandbox write gate is incomplete: "
+                  f"tests={len(tests)} failures={len(failures)} "
+                  f"errors={len(errors)} skipped={len(skipped)}"
+              )
+          print("root_managed_sandbox_write_tests=6")
+          PY
       - name: Prove the production installer verifier drops to nobody
         shell: bash
         run: |
@@ -1054,6 +1087,7 @@ jobs:
         run: |
           set -euo pipefail
           report="$RUNNER_TEMP/dev266-read-evidence-root.xml"
+          pytest_status=0
           sudo "$(command -v python)" -m pytest -q -rs -p no:cacheprovider \
             --junitxml="$report" \
             tests/test_read_evidence_admission.py \
@@ -1061,18 +1095,74 @@ jobs:
             tests/test_read_evidence_raw_v3.py \
             tests/test_read_evidence_v3.py \
             tests/test_read_evidence_v3_linux_integration.py \
-            tests/test_sshsig.py
-          sudo "$(command -v python)" - "$report" <<'PY'
+            tests/test_sshsig.py || pytest_status=$?
+
+          parser_status=0
+          sudo "$(command -v python)" - "$report" <<'PY' || parser_status=$?
           import sys
           import xml.etree.ElementTree as ET
 
-          root = ET.parse(sys.argv[1]).getroot()
+          def escape(value: str, *, property_value: bool = False) -> str:
+              value = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              if property_value:
+                  value = value.replace(":", "%3A").replace(",", "%2C")
+              return value
+
+          def emit_error(title: str, detail: str, case=None) -> None:
+              properties = [f"title={escape(title[:240], property_value=True)}"]
+              if case is not None:
+                  path = case.get("file")
+                  if path:
+                      properties.append(f"file={escape(path, property_value=True)}")
+                      raw_line = case.get("line")
+                      if raw_line is not None:
+                          try:
+                              line = int(raw_line) + 1
+                          except ValueError:
+                              pass
+                          else:
+                              if line > 0:
+                                  properties.append(f"line={line}")
+              print(f"::error {','.join(properties)}::{escape(detail)}")
+
+          try:
+              root = ET.parse(sys.argv[1]).getroot()
+          except (OSError, ET.ParseError) as exc:
+              emit_error(
+                  "Dev266 root JUnit report",
+                  "The JUnit report is unavailable or malformed "
+                  f"({type(exc).__name__}).",
+              )
+              raise SystemExit(
+                  "Dev266 root JUnit report is unavailable or malformed"
+              ) from None
+
           tests = root.findall(".//testcase")
           skipped = root.findall(".//skipped")
           failures = root.findall(".//failure")
           errors = root.findall(".//error")
+          for case in tests:
+              classname = case.get("classname", "")
+              name = case.get("name", "")
+              nodeid = "::".join(
+                  part for part in (classname, name) if part
+              ) or "<unknown testcase>"
+              for kind in ("failure", "error", "skipped"):
+                  for problem in case.findall(kind):
+                      detail = (
+                          problem.get("message")
+                          or problem.text
+                          or f"JUnit classified this testcase as {kind}."
+                      ).strip()
+                      if len(detail) > 2000:
+                          detail = f"{detail[:1997]}..."
+                      emit_error(
+                          f"Dev266 root {kind}: {nodeid}",
+                          detail,
+                          case,
+                      )
           expected_counts = {
-             "test_read_evidence_admission": 84,
+              "test_read_evidence_admission": 84,
               "test_read_evidence_publication": 50,
               "test_read_evidence_raw_v3": 68,
               "test_read_evidence_v3": 61,
@@ -1109,31 +1199,35 @@ jobs:
               for case in tests
               if exact_module(case.get("classname", "")) is None
           ]
-          if skipped:
-              for case in tests:
-                  skipped_node = case.find("skipped")
-                  if skipped_node is not None:
-                      print(
-                          "dev266_read_evidence_skipped="
-                          f"{case.get('classname', '')}.{case.get('name', '')}:"
-                          f"{skipped_node.get('message', '')}",
-                          file=sys.stderr,
-                      )
-          if (
+          gate_failed = (
               len(tests) != sum(expected_counts.values())
               or observed_counts != expected_counts
               or unclassified
               or skipped
               or failures
               or errors
-          ):
+          )
+          if gate_failed:
+              unclassified_preview = [
+                  value[:160] for value in unclassified[:10]
+              ]
+              emit_error(
+                  "Dev266 root exact-count gate",
+                  "Exact-count validation failed: "
+                  f"tests={len(tests)}; skipped={len(skipped)}; "
+                  f"failures={len(failures)}; errors={len(errors)}; "
+                  f"observed_counts={observed_counts}; "
+                  f"expected_counts={expected_counts}; "
+                  f"unclassified={len(unclassified)}; "
+                  f"unclassified_preview={unclassified_preview}.",
+              )
               raise SystemExit(
                   "Dev266 read-evidence root gate is incomplete: "
                   f"tests={len(tests)} skipped={len(skipped)} "
                   f"failures={len(failures)} errors={len(errors)} "
                   f"observed_counts={observed_counts} "
                   f"expected_counts={expected_counts} "
-                  f"unclassified={unclassified}"
+                  f"unclassified={len(unclassified)}"
               )
           print("dev266_read_evidence_admission_root_tests=84")
           print("dev266_read_evidence_publication_root_tests=50")
@@ -1143,6 +1237,12 @@ jobs:
           print("dev266_sshsig_root_tests=16")
           print("dev266_read_evidence_root_tests=280")
           PY
+          if (( pytest_status != 0 )); then
+            printf '%s\n' \
+              "::error title=Dev266 root pytest process::pytest exited with status $pytest_status"
+            exit "$pytest_status"
+          fi
+          exit "$parser_status"
       - name: Verify the tracked dev8 tool manifest and embedded Python
         run: python deployment/dev8/check_toolchain.py
       - name: Verify the exact dev15 toolchain manifest

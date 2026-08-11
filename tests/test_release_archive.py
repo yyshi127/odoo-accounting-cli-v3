@@ -390,6 +390,7 @@ DEV266_CI_REMEDIATION_RELEASE_MEMBERS = frozenset(
         "src/odoo_accounting_cli_v3/read_evidence_admission.py",
         "src/odoo_accounting_cli_v3/sqlite_process_lifecycle.py",
         "tests/TEST.md",
+        "tests/test_cli_evidence.py",
         "tests/test_dev29_runtime_open_trace.py",
         "tests/test_odoo_runner.py",
         "tests/test_odoo_runner_linux.py",
