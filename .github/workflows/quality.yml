@@ -1086,6 +1086,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -d /opt
+          test ! -L /opt
+          test "$(stat -c '%u:%g' /opt)" = "0:0"
+          original_opt_mode="$(stat -c '%a' /opt)"
+          restore_opt_mode() {
+            status=$?
+            trap - EXIT
+            sudo chmod "$original_opt_mode" /opt || status=$?
+            exit "$status"
+          }
+          trap restore_opt_mode EXIT
+          sudo chmod go-w /opt
+          hardened_opt_mode="$(stat -c '%a' /opt)"
+          test "$((8#$hardened_opt_mode & 8#22))" -eq 0
           report="$RUNNER_TEMP/dev266-read-evidence-root.xml"
           pytest_status=0
           sudo "$(command -v python)" -m pytest -q -rs -p no:cacheprovider \

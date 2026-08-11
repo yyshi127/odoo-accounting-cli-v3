@@ -758,7 +758,7 @@ def test_real_linux_root_active_closure_publication_and_tamper_rejection() -> No
         layout.create_unique_root(layout.evidence_root)
         run_id = f"run-{token}"
         run_root = layout.evidence_root / "runs" / run_id
-        run_root.mkdir(parents=True, mode=0o755)
+        layout.ensure_directory(run_root)
         database_uuid = "11111111-2222-4333-8444-555555555555"
         now = datetime.now(timezone.utc).replace(microsecond=0)
         not_before = now - timedelta(minutes=1)
